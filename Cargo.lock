@@ -1409,6 +1409,7 @@ dependencies = [
  "mago-php-version",
  "mago-prelude",
  "mago-reporting",
+ "mago-structure",
  "mago-syntax",
  "mago-syntax-core",
  "mago-text-edit",
@@ -1749,6 +1750,7 @@ dependencies = [
  "mago-php-version",
  "mago-reporting",
  "mago-semantics",
+ "mago-structure",
  "mago-syntax",
  "mago-word",
  "rayon",
@@ -1837,6 +1839,22 @@ version = "1.53.0"
 dependencies = [
  "mago-database",
  "serde",
+]
+
+[[package]]
+name = "mago-structure"
+version = "1.53.0"
+dependencies = [
+ "foldhash",
+ "mago-allocator",
+ "mago-database",
+ "mago-names",
+ "mago-reporting",
+ "mago-span",
+ "mago-syntax",
+ "serde",
+ "serde_json",
+ "walkdir",
 ]
 
 [[package]]

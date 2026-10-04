@@ -1,0 +1,27 @@
+[package]
+name = "mago-structure"
+description = "Emits a PHP project's declarations, imports and name references as a Lean module, and proves its architecture rules over it with Lean."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+foldhash = { workspace = true }
+mago-database = { workspace = true }
+mago-names = { workspace = true }
+mago-reporting = { workspace = true }
+mago-span = { workspace = true }
+mago-syntax = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+mago-allocator = { workspace = true }

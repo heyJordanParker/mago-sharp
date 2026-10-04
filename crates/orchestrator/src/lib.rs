@@ -59,6 +59,7 @@ use crate::service::format::FormatService;
 use crate::service::guard::GuardService;
 use crate::service::incremental_analysis::IncrementalAnalysisService;
 use crate::service::lint::LintService;
+use crate::service::structure::StructureService;
 
 pub use config::OrchestratorConfiguration;
 pub use error::OrchestratorError;
@@ -329,6 +330,11 @@ impl<'cfg> Orchestrator<'cfg> {
             self.config.parser_settings,
             self.config.use_progress_bars,
         )
+    }
+
+    /// Creates a service that collects the host files' declarations, imports and name references.
+    pub fn get_structure_service(&self, database: ReadDatabase) -> StructureService {
+        StructureService::new(database, self.config.parser_settings, self.config.use_progress_bars)
     }
 
     /// Creates a static analysis service with the current configuration.

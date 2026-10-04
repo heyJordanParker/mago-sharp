@@ -28,6 +28,7 @@ mago-codex = { workspace = true }
 mago-collector = { workspace = true }
 mago-analyzer = { workspace = true }
 mago-guard = { workspace = true }
+mago-structure = { workspace = true }
 foldhash = { workspace = true }
 tracing = { workspace = true }
 indicatif = { workspace = true }

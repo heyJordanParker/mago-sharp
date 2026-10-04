@@ -31,6 +31,7 @@
 //! - **`analyze`** ([`AnalyzeCommand`]): Perform static analysis
 //! - **`format`** ([`FormatCommand`]): Format PHP code
 //! - **`guard`** ([`GuardCommand`]): Enforce architectural rules
+//! - **`structure`** ([`StructureCommand`]): Prove architecture rules written in Lean
 //! - **`inspect-baseline`** ([`InspectBaselineCommand`]): Visualize a baseline file
 //! - **`cst`** ([`CstCommand`]): Display the concrete syntax tree
 //! - **`self-update`** ([`SelfUpdateCommand`]): Update Mago to the latest version
@@ -70,6 +71,7 @@ use crate::commands::inspect_baseline::InspectBaselineCommand;
 use crate::commands::lint::LintCommand;
 use crate::commands::list_files::ListFilesCommand;
 use crate::commands::self_update::SelfUpdateCommand;
+use crate::commands::structure::StructureCommand;
 use crate::error::Error;
 
 mod args;
@@ -89,6 +91,7 @@ pub mod list_files;
 mod outcome;
 pub mod self_update;
 pub mod stdin_input;
+pub mod structure;
 
 /// ANSI color styling configuration for Mago's CLI output.
 ///
@@ -218,6 +221,16 @@ pub enum MagoCommand {
     /// **Usage**: `mago guard [OPTIONS]`
     #[command(name = "guard")]
     Guard(GuardCommand),
+
+    /// Prove the project's architecture rules over its declarations, imports and name references.
+    ///
+    /// Writes the Lean package `.mago/structure`, then proves every rules file `X.lean` that
+    /// sits beside a folder `X/` and reports each broken rule on the PHP code that breaks it.
+    /// `--print` prints the generated module instead.
+    ///
+    /// **Usage**: `mago structure [PATHS...] [--print]`
+    #[command(name = "structure")]
+    Structure(StructureCommand),
 
     /// Inspect and visualize a baseline file.
     ///

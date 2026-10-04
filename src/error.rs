@@ -41,6 +41,7 @@ use mago_orchestrator::OrchestratorError;
 use mago_php_version::PHPVersion;
 use mago_php_version::error::ParsingError;
 use mago_reporting::error::ReportingError;
+use mago_structure::error::StructureError;
 
 use crate::version_check::VersionPinParseError;
 
@@ -211,6 +212,9 @@ pub enum Error {
     /// errors, disk full, or I/O failures.
     CreatingBaselineFile(std::io::Error),
 
+    /// Failed to write, compile, or prove the Lean package in `.mago/structure`.
+    Structure(StructureError),
+
     /// Failed to parse the `composer.json` file.
     ///
     /// This error occurs when `composer.json` contains invalid JSON syntax or unexpected
@@ -349,6 +353,7 @@ impl std::fmt::Display for Error {
             Self::ParsingComposerJson(error) => write!(f, "Failed to parse the `composer.json` file: {error}"),
             Self::ReadingBaselineFile(error) => write!(f, "Failed to read the baseline file: {error}"),
             Self::CreatingBaselineFile(error) => write!(f, "Failed to create the baseline file: {error}"),
+            Self::Structure(error) => write!(f, "Failed to check the structure rules: {error}"),
             Self::Analysis(error) => write!(f, "Failed to analyze the source code: {error}"),
             Self::ThreadPoolBuildError(error) => {
                 write!(f, "Failed to build the thread pool: {error}")
@@ -423,6 +428,7 @@ impl std::error::Error for Error {
             Self::ParsingComposerJson(error) => Some(error),
             Self::ReadingBaselineFile(error) => Some(error),
             Self::CreatingBaselineFile(error) => Some(error),
+            Self::Structure(error) => Some(error),
             Self::Analysis(error) => Some(error),
             Self::ThreadPoolBuildError(error) => Some(error),
             Self::Orchestrator(error) => Some(error),
@@ -449,6 +455,12 @@ impl From<DatabaseError> for Error {
 impl From<ReportingError> for Error {
     fn from(error: ReportingError) -> Self {
         Self::Reporting(error)
+    }
+}
+
+impl From<StructureError> for Error {
+    fn from(error: StructureError) -> Self {
+        Self::Structure(error)
     }
 }
 

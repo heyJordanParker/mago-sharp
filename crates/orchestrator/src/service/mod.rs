@@ -10,6 +10,7 @@
 //! - [`format::FormatService`]: Code formatting to ensure consistent style
 //! - [`guard::GuardService`]: Architectural rule enforcement
 //! - [`lint::LintService`]: Linting for code quality and best practices
+//! - [`structure::StructureService`]: Declarations, imports and references as a Lean module
 //!
 //! # Architecture
 //!
@@ -36,3 +37,4 @@ pub mod format;
 pub mod guard;
 pub mod incremental_analysis;
 pub mod lint;
+pub mod structure;

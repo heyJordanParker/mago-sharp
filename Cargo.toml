@@ -185,6 +185,7 @@ mago-semantics = { path = "crates/semantics", version = "1.53.0" }
 mago-collector = { path = "crates/collector", version = "1.53.0" }
 mago-database = { path = "crates/database", version = "1.53.0" }
 mago-guard = { path = "crates/guard", version = "1.53.0" }
+mago-structure = { path = "crates/structure", version = "1.53.0" }
 mago-orchestrator = { path = "crates/orchestrator", version = "1.53.0" }
 mago-extension = { path = "crates/extension", version = "1.53.0" }
 tracing = { version = "0.1.40" }
@@ -269,6 +270,7 @@ mago-analyzer = { workspace = true }
 mago-algebra = { workspace = true }
 mago-codex = { workspace = true }
 mago-guard = { workspace = true, features = ["serde"] }
+mago-structure = { workspace = true }
 mago-orchestrator = { workspace = true }
 mago-extension = { workspace = true }
 serde = { workspace = true }
