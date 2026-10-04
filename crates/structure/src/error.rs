@@ -12,6 +12,7 @@ pub enum StructureError {
     LeanFailed { file: PathBuf, output: String },
     Runner(WorkerError),
     Protocol(String),
+    NoNamespace(PathBuf),
 }
 
 impl fmt::Display for StructureError {
@@ -24,6 +25,11 @@ impl fmt::Display for StructureError {
             Self::LeanFailed { file, output } => write!(f, "Lean failed on `{}`:\n{output}", file.display()),
             Self::Runner(error) => write!(f, "`sharp-rules` failed: {error}"),
             Self::Protocol(message) => write!(f, "`sharp-rules` broke the structure protocol: {message}"),
+            Self::NoNamespace(file) => write!(
+                f,
+                "The rules file `{}` sits beside a folder in no PSR-4 directory of composer.json, so it names no PHP namespace.",
+                file.display()
+            ),
         }
     }
 }
@@ -33,7 +39,7 @@ impl std::error::Error for StructureError {
         match self {
             Self::IoError(error) | Self::MissingLean(error) => Some(error),
             Self::Runner(error) => Some(error),
-            Self::LeanFailed { .. } | Self::Protocol(_) => None,
+            Self::LeanFailed { .. } | Self::Protocol(_) | Self::NoNamespace(_) => None,
         }
     }
 }

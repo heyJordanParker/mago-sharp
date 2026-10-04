@@ -343,6 +343,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         fs::create_dir_all(workspace.path().join("src/App")).unwrap();
         fs::write(workspace.path().join("src/App.lean"), RULES).unwrap();
+        fs::write(workspace.path().join("composer.json"), r#"{"autoload": {"psr-4": {"App\\": "src/App/"}}}"#).unwrap();
         let (rules, issues) = Rules::compile(workspace.path(), &["src".to_owned()]).unwrap();
         assert!(issues.is_empty(), "{issues:?}");
 

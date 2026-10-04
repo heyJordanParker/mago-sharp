@@ -22,7 +22,9 @@ fn run(workspace: &Path, arguments: &[&str]) -> Output {
 
 fn copy_fixture() -> tempfile::TempDir {
     let workspace = tempfile::tempdir().unwrap();
-    for file in ["mago.toml", "src/App/Shared.lean", "src/App/Shared/Money.php", "src/App/Tenant/Store.php"] {
+    for file in
+        ["mago.toml", "composer.json", "src/App/Shared.lean", "src/App/Shared/Money.php", "src/App/Tenant/Store.php"]
+    {
         let target = workspace.path().join(file);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::copy(fixture().join(file), target).unwrap();
@@ -190,6 +192,35 @@ fn checks_the_rule_form_the_specification_writes() {
     assert!(stdout.contains("imports App.Shared.Money"), "{stdout}");
     assert!(!stdout.contains("Refunds.php:6"), "{stdout}");
     assert!(!stdout.contains("Refunds.php:7"), "{stdout}");
+}
+
+#[test]
+fn names_a_rules_module_after_the_psr_4_namespace_of_its_folder() {
+    let workspace = tempfile::tempdir().unwrap();
+    let files = [
+        ("mago.toml", "[source]\npaths = [\"app\"]\n"),
+        ("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}\n"),
+        (
+            "app/Tenant/Store.lean",
+            "import Sharp.Facts\nopen Sharp\n\nnamespace App.Tenant.Store\n\n@[rule] def requires : Rule :=\n  Sharp.importsOf \"App.Tenant.Store\" ⊆ [\"App.Tenant.Community\"]\n\nend App.Tenant.Store\n",
+        ),
+        (
+            "app/Tenant/Store/Refunds.php",
+            "<?php\n\nnamespace App\\Tenant\\Store;\n\nuse App\\Shared\\Money;\n\nfinal class Refunds {}\n",
+        ),
+    ];
+    for (file, contents) in files {
+        let target = workspace.path().join(file);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, contents).unwrap();
+    }
+
+    let output = run(workspace.path(), &["--reporting-format", "rich"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("app/Tenant/Store/Refunds.php:5:5"), "{stdout}");
+    assert!(stdout.contains("The rule is stated in `app/Tenant/Store.lean`."), "{stdout}");
+    assert!(workspace.path().join(".mago/structure/.lake/build/lib/lean/App/Tenant/Store.olean").is_file());
 }
 
 #[test]

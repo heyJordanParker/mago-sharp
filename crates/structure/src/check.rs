@@ -4,8 +4,12 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 
 use foldhash::HashMap;
+use mago_composer::AutoloadPsr4value;
+use mago_composer::ComposerPackage;
+use mago_composer::ComposerPackageAutoloadDevPsr4value;
 use mago_database::DatabaseReader;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -18,6 +22,7 @@ use crate::Runner;
 use crate::Structure;
 use crate::Violation;
 use crate::error::StructureError;
+use crate::lean_name;
 use crate::runner::LIBRARY;
 use crate::runner::TOOLCHAIN;
 use crate::runner::build_package;
@@ -102,19 +107,25 @@ impl Rules {
     /// Builds every rules file `X.lean` beside a folder `X/` under the source paths with Lake, as
     /// the library `Rules` of a package Mago writes to `.mago/structure/`, so unchanged files are
     /// skipped and a rules file builds after the rules files it imports. Each file is the module
-    /// named by its path under its source path: `src/Illuminate/Support.lean` is
-    /// `Illuminate.Support`. Returns the rules that built, and one issue per Lean error in a file
-    /// that did not; a file importing a file that did not build is left out.
+    /// named by the PHP namespace of its folder under `composer.json`'s PSR-4 map: with
+    /// `"App\\": "app/"`, `app/Tenant/Store.lean` is `App.Tenant.Store` on every file system.
+    /// Returns the rules that built, and one issue per Lean error in a file that did not; a file
+    /// importing a file that did not build is left out.
     ///
     /// # Errors
     ///
-    /// Returns [`StructureError`] when `sharp-rules` cannot be built, or `lake` or `lean` cannot run.
+    /// Returns [`StructureError`] when `composer.json` cannot be read, a rules file's folder is in no
+    /// PSR-4 directory, `sharp-rules` cannot be built, or `lake` or `lean` cannot run.
     pub fn compile(workspace: &Path, source_paths: &[String]) -> Result<(Self, IssueCollection), StructureError> {
         let mut rules = Self { package: build_package()?, output: workspace.join(OUTPUT), modules: Vec::new() };
-        let found: Vec<(String, PathBuf)> = find_rules(workspace, source_paths, &rules.output)?
+        let psr4 = psr4(workspace)?;
+        let found = find_rules(workspace, source_paths, &rules.output)?
             .into_iter()
-            .map(|(root, file)| (module_name(&root, &file), file))
-            .collect();
+            .map(|file| match module_name(&psr4, &file) {
+                Some(module) => Ok((module, file)),
+                None => Err(StructureError::NoNamespace(file)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut issues = IssueCollection::new();
         if found.is_empty() {
@@ -250,11 +261,7 @@ impl Rules {
     }
 }
 
-fn find_rules(
-    workspace: &Path,
-    source_paths: &[String],
-    output: &Path,
-) -> Result<Vec<(PathBuf, PathBuf)>, StructureError> {
+fn find_rules(workspace: &Path, source_paths: &[String], output: &Path) -> Result<Vec<PathBuf>, StructureError> {
     let roots = if source_paths.is_empty() {
         vec![workspace.to_path_buf()]
     } else {
@@ -266,7 +273,7 @@ fn find_rules(
         for entry in WalkDir::new(root).sort_by_file_name().into_iter().filter_entry(|entry| entry.path() != output) {
             let path = entry.map_err(io::Error::from)?.into_path();
             if path.extension().is_some_and(|extension| extension == "lean") && path.with_extension("").is_dir() {
-                rules.push((root.clone(), path));
+                rules.push(path);
             }
         }
     }
@@ -277,10 +284,56 @@ fn find_rules(
     Ok(rules)
 }
 
-fn module_name(root: &Path, file: &Path) -> String {
-    let relative = file.strip_prefix(root).unwrap_or(file).with_extension("");
+/// Every PSR-4 directory of the workspace's `composer.json`, in `autoload` and `autoload-dev`, with
+/// the dot-separated namespace it holds, read as `mago init` reads them. No `composer.json`, no
+/// directories.
+fn psr4(workspace: &Path) -> Result<Vec<(String, PathBuf)>, StructureError> {
+    let json = match fs::read_to_string(workspace.join("composer.json")) {
+        Ok(json) => json,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
 
-    relative.components().map(|component| component.as_os_str().to_string_lossy()).collect::<Vec<_>>().join(".")
+    let composer = ComposerPackage::from_str(&json).map_err(io::Error::from)?;
+    let mut prefixes: Vec<(&String, Vec<String>)> = Vec::new();
+    if let Some(autoload) = &composer.autoload {
+        prefixes.extend(autoload.psr_4.iter().map(|(prefix, directories)| match directories {
+            AutoloadPsr4value::Array(directories) => (prefix, directories.clone()),
+            AutoloadPsr4value::String(directory) => (prefix, vec![directory.clone()]),
+        }));
+    }
+
+    if let Some(autoload_dev) = &composer.autoload_dev {
+        prefixes.extend(autoload_dev.psr_4.iter().map(|(prefix, directories)| match directories {
+            ComposerPackageAutoloadDevPsr4value::Array(directories) => (prefix, directories.clone()),
+            ComposerPackageAutoloadDevPsr4value::String(directory) => (prefix, vec![directory.clone()]),
+        }));
+    }
+
+    Ok(prefixes
+        .into_iter()
+        .flat_map(|(prefix, directories)| {
+            let namespace = lean_name(prefix.as_bytes()).trim_end_matches('.').to_owned();
+            directories.into_iter().map(move |directory| (namespace.clone(), workspace.join(directory)))
+        })
+        .collect())
+}
+
+/// The module of a rules file: the PHP namespace of the folder beside it, under the PSR-4 directory
+/// that holds that folder most closely. `None` when no PSR-4 directory holds it.
+fn module_name(psr4: &[(String, PathBuf)], file: &Path) -> Option<String> {
+    let folder = file.with_extension("");
+    let (namespace, relative) = psr4
+        .iter()
+        .filter_map(|(namespace, directory)| Some((namespace, folder.strip_prefix(directory).ok()?)))
+        .min_by_key(|(_, relative)| relative.components().count())?;
+
+    let segments: Vec<String> = std::iter::once(namespace.clone())
+        .filter(|namespace| !namespace.is_empty())
+        .chain(relative.components().map(|component| component.as_os_str().to_string_lossy().into_owned()))
+        .collect();
+
+    (!segments.is_empty()).then(|| segments.join("."))
 }
 
 /// The modules a rules file's header imports.
@@ -407,8 +460,20 @@ mod tests {
     }
 
     #[test]
-    fn names_modules_after_their_path_under_the_source_root() {
-        assert_eq!(module_name(Path::new("/w/src"), Path::new("/w/src/Illuminate/Support.lean")), "Illuminate.Support");
-        assert_eq!(module_name(Path::new("/w"), Path::new("/w/App.lean")), "App");
+    fn names_modules_after_the_psr_4_namespace_of_their_folder() {
+        let psr4 = [
+            ("App".to_owned(), PathBuf::from("/w/app/")),
+            ("App.Tenant.Billing".to_owned(), PathBuf::from("/w/modules/billing")),
+            (String::new(), PathBuf::from("/w/lib")),
+        ];
+
+        assert_eq!(module_name(&psr4, Path::new("/w/app.lean")).as_deref(), Some("App"));
+        assert_eq!(module_name(&psr4, Path::new("/w/app/Tenant/Store.lean")).as_deref(), Some("App.Tenant.Store"));
+        assert_eq!(
+            module_name(&psr4, Path::new("/w/modules/billing/Invoices.lean")).as_deref(),
+            Some("App.Tenant.Billing.Invoices")
+        );
+        assert_eq!(module_name(&psr4, Path::new("/w/lib/Vendor.lean")).as_deref(), Some("Vendor"));
+        assert_eq!(module_name(&psr4, Path::new("/w/other/Thing.lean")), None);
     }
 }

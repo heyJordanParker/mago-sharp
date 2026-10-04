@@ -1848,6 +1848,7 @@ dependencies = [
  "foldhash",
  "libc",
  "mago-allocator",
+ "mago-composer",
  "mago-database",
  "mago-extension",
  "mago-names",
