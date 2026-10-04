@@ -261,9 +261,10 @@ fn decode_response(payload: &[u8]) -> Result<Option<Answer>, StructureError> {
     Ok(files)
 }
 
-/// Writes the Lean package of `sharp-rules` to a directory named after its sources and builds it
-/// with Lake, once per set of sources. Builds in one process take turns, builds in different
-/// processes run in their own directories, and the first one renamed into place wins.
+/// Writes the Lean package of `sharp-rules` to `structure/<key>` in Mago's cache folder, the key a
+/// hash of its sources, and builds it with Lake once per key. Builds in one process take turns,
+/// builds in different processes run in their own directories, and the first one renamed into place
+/// wins. A new key deletes every older one.
 pub(crate) fn build_package() -> Result<PathBuf, StructureError> {
     static BUILD: Mutex<()> = Mutex::new(());
 
@@ -273,7 +274,8 @@ pub(crate) fn build_package() -> Result<PathBuf, StructureError> {
         key.update(source.as_bytes());
     }
 
-    let package = std::env::temp_dir().join(format!("mago-structure-{:016x}", key.digest()));
+    let packages = cache_root()?.join("structure");
+    let package = packages.join(format!("{:016x}", key.digest()));
     let _build = BUILD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if package.join(EXECUTABLE).is_file() {
         return Ok(package);
@@ -302,7 +304,27 @@ pub(crate) fn build_package() -> Result<PathBuf, StructureError> {
         fs::remove_dir_all(&staging)?;
     }
 
+    for entry in fs::read_dir(&packages)? {
+        let old = entry?.path();
+        let built = old.extension().is_none() && old.is_dir();
+        if built && old != package {
+            fs::remove_dir_all(old)?;
+        }
+    }
+
     Ok(package)
+}
+
+/// Mago's cache folder, as the warm analysis server's: `$XDG_CACHE_HOME/mago`, else
+/// `~/Library/Caches/mago` on macOS and `~/.cache/mago` elsewhere.
+fn cache_root() -> Result<PathBuf, StructureError> {
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME").filter(|cache| !cache.is_empty()) {
+        return Ok(PathBuf::from(cache).join("mago"));
+    }
+
+    let home = std::env::home_dir().ok_or_else(|| io::Error::other("Mago's cache folder needs a home folder"))?;
+
+    Ok(if cfg!(target_os = "macos") { home.join("Library/Caches/mago") } else { home.join(".cache/mago") })
 }
 
 #[cfg(test)]

@@ -6,14 +6,18 @@ fn fixture() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/structure"))
 }
 
-fn run(workspace: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mago"))
+fn command(workspace: &Path, arguments: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mago"));
+    command
         .args(["--no-version-check", "--colors", "never", "structure"])
         .args(arguments)
         .env("MAGO_LOG", "off")
-        .current_dir(workspace)
-        .output()
-        .unwrap()
+        .current_dir(workspace);
+    command
+}
+
+fn run(workspace: &Path, arguments: &[&str]) -> Output {
+    command(workspace, arguments).output().unwrap()
 }
 
 fn copy_fixture() -> tempfile::TempDir {
@@ -40,6 +44,30 @@ fn passes_when_every_rule_holds() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert!(workspace.path().join(".mago/structure/App/Shared.olean").is_file());
+}
+
+#[test]
+fn builds_sharp_rules_in_the_mago_cache_folder_and_deletes_old_keys() {
+    let workspace = copy_fixture();
+    let cache = tempfile::tempdir().unwrap();
+    let packages = cache.path().join("mago/structure");
+    std::fs::create_dir_all(packages.join("0123456789abcdef")).unwrap();
+
+    let output = command(workspace.path(), &["--reporting-format", "rich"])
+        .env("XDG_CACHE_HOME", cache.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let keys: Vec<_> = std::fs::read_dir(&packages).unwrap().map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert_ne!(keys[0], packages.join("0123456789abcdef"));
+    assert!(keys[0].join(".lake/build/bin/sharp-rules").is_file(), "{keys:?}");
 }
 
 #[test]
