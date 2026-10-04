@@ -43,7 +43,66 @@ fn passes_when_every_rule_holds() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(workspace.path().join(".mago/structure/App/Shared.olean").is_file());
+    assert!(workspace.path().join(".mago/structure/.lake/build/lib/lean/App/Shared.olean").is_file());
+}
+
+#[test]
+fn builds_a_rules_file_after_the_rules_file_it_imports() {
+    let workspace = copy_fixture();
+    std::fs::write(
+        workspace.path().join("src/App/Tenant.lean"),
+        "import Sharp.Facts\n\nnamespace App.Tenant\n\ndef name : String := \"App.Tenant\"\n\nend App.Tenant\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.path().join("src/App/Shared.lean"),
+        "import App.Tenant\nopen Sharp\n\nnamespace App.Shared\n\n@[rule] def neverImportsTenant : Rule := .neverImports \"App.Shared\" App.Tenant.name\n\nend App.Shared\n",
+    )
+    .unwrap();
+    let money = workspace.path().join("src/App/Shared/Money.php");
+    let code = std::fs::read_to_string(&money).unwrap();
+    std::fs::write(
+        &money,
+        code.replace("namespace App\\Shared;\n", "namespace App\\Shared;\n\nuse App\\Tenant\\Store;\n"),
+    )
+    .unwrap();
+
+    let output = run(workspace.path(), &["--reporting-format", "rich"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("src/App/Shared/Money.php:5:5"), "{stdout}");
+    assert!(stdout.contains("App.Shared.neverImportsTenant"), "{stdout}");
+    assert!(!stdout.contains("unproven-rule"), "{stdout}");
+}
+
+#[test]
+fn leaves_out_a_rules_file_that_imports_one_lean_rejects() {
+    let workspace = copy_fixture();
+    std::fs::write(workspace.path().join("src/App/Tenant.lean"), "import Sharp.Facts\n\ndef name : String := 1\n")
+        .unwrap();
+    std::fs::write(
+        workspace.path().join("src/App/Shared.lean"),
+        "import App.Tenant\nopen Sharp\n\n@[rule] def neverImportsTenant : Rule := .neverImports \"App.Shared\" \"App.Tenant\"\n",
+    )
+    .unwrap();
+
+    let output = run(workspace.path(), &["--reporting-format", "rich"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Lean rejects `src/App/Tenant.lean` at line 3"), "{stdout}");
+    assert!(!stdout.contains("src/App/Shared.lean"), "{stdout}");
+}
+
+#[test]
+fn builds_nothing_when_no_rules_file_changed() {
+    let workspace = copy_fixture();
+    let olean = workspace.path().join(".mago/structure/.lake/build/lib/lean/App/Shared.olean");
+
+    assert!(run(workspace.path(), &[]).status.success());
+    let built = std::fs::metadata(&olean).unwrap().modified().unwrap();
+    assert!(run(workspace.path(), &[]).status.success());
+
+    assert_eq!(std::fs::metadata(&olean).unwrap().modified().unwrap(), built);
 }
 
 #[test]

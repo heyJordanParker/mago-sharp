@@ -28,12 +28,13 @@ const STALE_RESPONSE: u16 = 3;
 
 const PACKAGE: [(&str, &str); 4] = [
     ("lakefile.toml", include_str!("../lean/lakefile.toml")),
-    ("lean-toolchain", include_str!("../lean/lean-toolchain")),
+    ("lean-toolchain", TOOLCHAIN),
     ("Sharp/Facts.lean", include_str!("../lean/Sharp/Facts.lean")),
     ("Sharp/Runner.lean", include_str!("../lean/Sharp/Runner.lean")),
 ];
 const EXECUTABLE: &str = ".lake/build/bin/sharp-rules";
 pub(crate) const LIBRARY: &str = ".lake/build/lib/lean";
+pub(crate) const TOOLCHAIN: &str = include_str!("../lean/lean-toolchain");
 
 /// A fact that breaks a rule.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

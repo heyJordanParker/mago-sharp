@@ -11,6 +11,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use serde::Deserialize;
+use serde::Serialize;
 use walkdir::WalkDir;
 
 use crate::Runner;
@@ -18,9 +19,34 @@ use crate::Structure;
 use crate::Violation;
 use crate::error::StructureError;
 use crate::runner::LIBRARY;
+use crate::runner::TOOLCHAIN;
 use crate::runner::build_package;
 
 const OUTPUT: &str = ".mago/structure";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Lakefile<'rules> {
+    name: &'rules str,
+    default_targets: [&'rules str; 1],
+    require: [Require<'rules>; 1],
+    #[serde(rename = "lean_lib")]
+    lean_lib: [LeanLib<'rules>; 1],
+}
+
+#[derive(Serialize)]
+struct Require<'rules> {
+    name: &'rules str,
+    path: &'rules Path,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LeanLib<'rules> {
+    name: &'rules str,
+    src_dir: &'rules str,
+    roots: Vec<&'rules str>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,32 +99,121 @@ pub fn check(
 }
 
 impl Rules {
-    /// Compiles every rules file `X.lean` beside a folder `X/` under the source paths into
-    /// `.mago/structure/`, as the module named by its path under its source path:
-    /// `src/Illuminate/Support.lean` is `Illuminate.Support`. Returns the rules that compiled, and
-    /// one issue per Lean error in the rest.
+    /// Builds every rules file `X.lean` beside a folder `X/` under the source paths with Lake, as
+    /// the library `Rules` of a package Mago writes to `.mago/structure/`, so unchanged files are
+    /// skipped and a rules file builds after the rules files it imports. Each file is the module
+    /// named by its path under its source path: `src/Illuminate/Support.lean` is
+    /// `Illuminate.Support`. Returns the rules that built, and one issue per Lean error in a file
+    /// that did not; a file importing a file that did not build is left out.
     ///
     /// # Errors
     ///
-    /// Returns [`StructureError`] when `sharp-rules` cannot be built or `lean` cannot run.
+    /// Returns [`StructureError`] when `sharp-rules` cannot be built, or `lake` or `lean` cannot run.
     pub fn compile(workspace: &Path, source_paths: &[String]) -> Result<(Self, IssueCollection), StructureError> {
         let mut rules = Self { package: build_package()?, output: workspace.join(OUTPUT), modules: Vec::new() };
-        let mut issues = IssueCollection::new();
-        for (root, file) in find_rules(workspace, source_paths, &rules.output)? {
-            let module = module_name(&root, &file);
-            let olean = rules.output.join(module.replace('.', "/")).with_extension("olean");
-            fs::create_dir_all(olean.parent().unwrap_or(&rules.output))?;
+        let found: Vec<(String, PathBuf)> = find_rules(workspace, source_paths, &rules.output)?
+            .into_iter()
+            .map(|(root, file)| (module_name(&root, &file), file))
+            .collect();
 
-            let relative = file.strip_prefix(workspace).map(Path::to_path_buf).unwrap_or_else(|_| file.clone());
-            let errors = compile(&rules, &root, &file, &olean, workspace)?;
-            if errors.is_empty() {
-                rules.modules.push((module, relative));
-            } else {
-                issues.extend(errors.into_iter().map(Message::into_issue));
+        let mut issues = IssueCollection::new();
+        if found.is_empty() {
+            return Ok((rules, issues));
+        }
+
+        rules.write_package(&found)?;
+        let mut broken = rules.build()?;
+        for (module, file) in &found {
+            if broken.contains(module) {
+                issues.extend(errors(&rules, file, workspace)?.into_iter().map(Message::into_issue));
             }
         }
 
+        while let Some((module, _)) = found.iter().find(|(module, file)| {
+            !broken.contains(module) && imports(file).iter().any(|import| broken.contains(import))
+        }) {
+            broken.push(module.clone());
+        }
+
+        rules.modules = found
+            .into_iter()
+            .filter(|(module, _)| !broken.contains(module))
+            .map(|(module, file)| {
+                let relative = file.strip_prefix(workspace).map(Path::to_path_buf).unwrap_or(file);
+                (module, relative)
+            })
+            .collect();
+
         Ok((rules, issues))
+    }
+
+    /// Writes the package that builds the rules files: its `lakefile.toml`, its Lean version, and
+    /// `src/` with a link at each module's path to its rules file. A changed `lakefile.toml` drops
+    /// Lake's manifest, so Lake resolves `sharp-rules`' package again.
+    fn write_package(&self, found: &[(String, PathBuf)]) -> Result<(), StructureError> {
+        let lakefile = toml::to_string(&Lakefile {
+            name: "rules",
+            default_targets: ["Rules"],
+            require: [Require { name: "sharp", path: &self.package }],
+            lean_lib: [LeanLib {
+                name: "Rules",
+                src_dir: "src",
+                roots: found.iter().map(|(module, _)| module.as_str()).collect(),
+            }],
+        })
+        .map_err(io::Error::other)?;
+
+        fs::create_dir_all(&self.output)?;
+        if fs::read_to_string(self.output.join("lakefile.toml")).ok().as_deref() != Some(lakefile.as_str()) {
+            fs::write(self.output.join("lakefile.toml"), lakefile)?;
+            match fs::remove_file(self.output.join("lake-manifest.json")) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+                _ => {}
+            }
+        }
+
+        fs::write(self.output.join("lean-toolchain"), TOOLCHAIN)?;
+
+        let sources = self.output.join("src");
+        if sources.exists() {
+            fs::remove_dir_all(&sources)?;
+        }
+
+        for (module, file) in found {
+            let link = sources.join(module.replace('.', "/")).with_extension("lean");
+            fs::create_dir_all(link.parent().unwrap_or(&sources))?;
+            symlink(file, &link)?;
+        }
+
+        Ok(())
+    }
+
+    /// Runs `lake build` and returns the modules Lake reports as failed.
+    fn build(&self) -> Result<Vec<String>, StructureError> {
+        let result =
+            Command::new("lake").arg("build").current_dir(&self.output).output().map_err(|error| {
+                match error.kind() {
+                    io::ErrorKind::NotFound => StructureError::MissingLean(error),
+                    _ => StructureError::IoError(error),
+                }
+            })?;
+        if result.status.success() {
+            return Ok(Vec::new());
+        }
+
+        let output = format!("{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        let failed: Vec<String> = output
+            .lines()
+            .skip_while(|line| *line != "Some required targets logged failures:")
+            .skip(1)
+            .map_while(|line| line.strip_prefix("- "))
+            .map(str::to_owned)
+            .collect();
+        if failed.is_empty() {
+            return Err(StructureError::LeanFailed { file: self.output.join("lakefile.toml"), output });
+        }
+
+        Ok(failed)
     }
 
     /// The module names of the rules files that compiled.
@@ -111,7 +226,7 @@ impl Rules {
     }
 
     pub(crate) fn lean_path(&self) -> Result<OsString, StructureError> {
-        std::env::join_paths([self.package.join(LIBRARY), self.output.clone()])
+        std::env::join_paths([self.package.join(LIBRARY), self.output.join(LIBRARY)])
             .map_err(|error| StructureError::IoError(io::Error::other(error)))
     }
 
@@ -168,21 +283,37 @@ fn module_name(root: &Path, file: &Path) -> String {
     relative.components().map(|component| component.as_os_str().to_string_lossy()).collect::<Vec<_>>().join(".")
 }
 
-/// Compiles one rules file and returns its Lean errors.
-fn compile(
-    rules: &Rules,
-    root: &Path,
-    file: &Path,
-    olean: &Path,
-    workspace: &Path,
-) -> Result<Vec<Message>, StructureError> {
+/// The modules a rules file's header imports.
+fn imports(file: &Path) -> Vec<String> {
+    let header = fs::read_to_string(file).unwrap_or_default();
+    let mut words = header.split_whitespace();
+    let mut imports = Vec::new();
+    while let Some(word) = words.next() {
+        if word == "import"
+            && let Some(module) = words.next()
+        {
+            imports.push(module.to_owned());
+        }
+    }
+
+    imports
+}
+
+#[cfg(unix)]
+fn symlink(file: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(file, link)
+}
+
+#[cfg(windows)]
+fn symlink(file: &Path, link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_file(file, link)
+}
+
+/// Elaborates one rules file Lake failed to build and returns its Lean errors.
+fn errors(rules: &Rules, file: &Path, workspace: &Path) -> Result<Vec<Message>, StructureError> {
     let result = Command::new("lean")
         .env("LEAN_PATH", rules.lean_path()?)
         .arg("--json")
-        .arg("-R")
-        .arg(root)
-        .arg("-o")
-        .arg(olean)
         .arg(file.strip_prefix(workspace).unwrap_or(file))
         .current_dir(workspace)
         .output()
