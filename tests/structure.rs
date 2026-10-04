@@ -67,6 +67,25 @@ fn passes_when_every_rule_holds() {
 }
 
 #[test]
+fn proves_a_rule_over_thousands_of_imports() {
+    let workspace = copy_fixture();
+    let imports: String = (0..4072).map(|index| format!("use Vendor\\Package\\Class{index};\n")).collect();
+    std::fs::write(
+        workspace.path().join("src/App/Shared/Imports.php"),
+        format!("<?php\n\nnamespace App\\Shared;\n\n{imports}"),
+    )
+    .unwrap();
+
+    let output = run(workspace.path(), &["--reporting-format", "rich"]);
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn fails_on_the_php_line_that_breaks_a_rule() {
     let workspace = copy_fixture();
     let money = workspace.path().join("src/App/Shared/Money.php");

@@ -144,6 +144,14 @@ private def diagnostics [Located α] (theoremName : String) (xs : List α) (hold
     let l := Located.location x
     s!"{l.file}:{l.startLine}.{l.startColumn}-{l.endLine}.{l.endColumn}: {Located.describe x} breaks {theoremName}"
 
+/-- Decides `∀ x ∈ xs, p x` by `List.all`, in place of core's `List.decidableBAll`. That instance
+matches on the decision for the tail, so the kernel nests about four reductions per fact and fails
+past `16 * maxRecDepth` of them: from 4,073 imports at the default `maxRecDepth` of 1000.
+`List.all` returns the tail's value as it is, so the kernel's depth does not grow with the list:
+59,410 imports check with `maxRecDepth` at 100. -/
+instance {xs : List α} {p : α → Prop} [DecidablePred p] : Decidable (∀ x ∈ xs, p x) :=
+  decidable_of_iff (xs.all (p ·)) (by simp only [List.all_eq_true, decide_eq_true_eq])
+
 open Lean Meta Elab Tactic
 
 private unsafe def evalStringsUnsafe (e : Expr) : MetaM (List String) :=
