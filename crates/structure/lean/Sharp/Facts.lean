@@ -160,6 +160,14 @@ under `forbidden`. -/
 def Rule.neverImports (ns forbidden : String) : Rule :=
   .imports fun i => under i.namespace_ ns && under i.name forbidden
 
+/-- `Sharp.importsOf ns ⊆ allowed`, the rule form of the PHP# specification: code in namespace `ns`,
+or in a namespace inside it, imports only from `ns` itself and from the namespaces in `allowed`.
+Every other `⊆` keeps its meaning, `HasSubset.Subset`. -/
+macro_rules
+  | `(Sharp.importsOf $ns ⊆ $allowed) =>
+    `(Sharp.Rule.imports fun i => Sharp.under i.namespace_ $ns && !Sharp.under i.name $ns &&
+        !(($allowed : List String).any (Sharp.under i.name ·)))
+
 /-- Breaks every import whose edge lies on a cycle of the namespace import graph. -/
 def Rule.noImportCycles : Rule :=
   .importsIn Graph.onCycle

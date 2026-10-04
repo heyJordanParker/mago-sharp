@@ -81,6 +81,31 @@ fn fails_on_the_php_line_that_breaks_a_rule() {
 }
 
 #[test]
+fn checks_the_rule_form_the_specification_writes() {
+    let workspace = copy_fixture();
+    std::fs::create_dir_all(workspace.path().join("src/App/Tenant/Store")).unwrap();
+    std::fs::write(
+        workspace.path().join("src/App/Tenant/Store.lean"),
+        "import Sharp.Facts\nopen Sharp\n\nnamespace App.Tenant.Store\n\n@[rule] def requires : Rule :=\n  Sharp.importsOf \"App.Tenant.Store\" ⊆ [\"App.Tenant.Community\", \"App.Shared.Schema\"]\n\nend App.Tenant.Store\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.path().join("src/App/Tenant/Store/Refunds.php"),
+        "<?php\n\nnamespace App\\Tenant\\Store;\n\nuse App\\Shared\\Money;\nuse App\\Tenant\\Community\\Member;\nuse App\\Tenant\\Store\\Receipt;\n\nfinal class Refunds {}\n",
+    )
+    .unwrap();
+
+    let output = run(workspace.path(), &["--reporting-format", "rich"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("src/App/Tenant/Store/Refunds.php:5:5"), "{stdout}");
+    assert!(stdout.contains("App.Tenant.Store.requires"), "{stdout}");
+    assert!(stdout.contains("imports App.Shared.Money"), "{stdout}");
+    assert!(!stdout.contains("Refunds.php:6"), "{stdout}");
+    assert!(!stdout.contains("Refunds.php:7"), "{stdout}");
+}
+
+#[test]
 fn reports_a_rules_file_lean_rejects() {
     let workspace = copy_fixture();
     std::fs::write(
