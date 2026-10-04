@@ -10,7 +10,7 @@
 //! - [`format::FormatService`]: Code formatting to ensure consistent style
 //! - [`guard::GuardService`]: Architectural rule enforcement
 //! - [`lint::LintService`]: Linting for code quality and best practices
-//! - [`structure::StructureService`]: Declarations, imports and references as a Lean module
+//! - [`structure::StructureService`]: Declarations, imports and references of each file
 //!
 //! # Architecture
 //!

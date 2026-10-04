@@ -1,0 +1,13 @@
+name = "sharp"
+defaultTargets = ["sharp-rules"]
+
+[[lean_lib]]
+name = "Sharp"
+roots = ["Sharp.Facts"]
+
+# Interprets the rules modules it imports, so it exports its own symbols to Lean's interpreter,
+# which then runs `Sharp.Facts` as native code.
+[[lean_exe]]
+name = "sharp-rules"
+root = "Sharp.Runner"
+supportInterpreter = true

@@ -31,7 +31,7 @@
 //! - **`analyze`** ([`AnalyzeCommand`]): Perform static analysis
 //! - **`format`** ([`FormatCommand`]): Format PHP code
 //! - **`guard`** ([`GuardCommand`]): Enforce architectural rules
-//! - **`structure`** ([`StructureCommand`]): Prove architecture rules written in Lean
+//! - **`structure`** ([`StructureCommand`]): Check architecture rules written in Lean
 //! - **`inspect-baseline`** ([`InspectBaselineCommand`]): Visualize a baseline file
 //! - **`cst`** ([`CstCommand`]): Display the concrete syntax tree
 //! - **`self-update`** ([`SelfUpdateCommand`]): Update Mago to the latest version

@@ -65,7 +65,12 @@ impl<'input, 'arena> StructureContext<'input, 'arena> {
             })
             .collect();
 
-        Structure { declarations: self.declarations, imports: self.imports, references }
+        Structure {
+            file: String::from_utf8_lossy(&self.file.name).into_owned(),
+            declarations: self.declarations,
+            imports: self.imports,
+            references,
+        }
     }
 
     fn namespace_at(&self, offset: u32) -> String {

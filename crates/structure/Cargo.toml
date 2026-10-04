@@ -1,6 +1,6 @@
 [package]
 name = "mago-structure"
-description = "Emits a PHP project's declarations, imports and name references as a Lean module, and proves its architecture rules over it with Lean."
+description = "Collects a PHP project's declarations, imports and name references per file, and checks its architecture rules written in Lean over them."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 foldhash = { workspace = true }
 mago-database = { workspace = true }
+mago-extension = { workspace = true }
 mago-names = { workspace = true }
 mago-reporting = { workspace = true }
 mago-span = { workspace = true }
@@ -22,6 +23,9 @@ mago-syntax = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+libc = { workspace = true }
 mago-allocator = { workspace = true }
+tempfile = { workspace = true }

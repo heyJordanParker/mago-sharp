@@ -1846,15 +1846,19 @@ name = "mago-structure"
 version = "1.53.0"
 dependencies = [
  "foldhash",
+ "libc",
  "mago-allocator",
  "mago-database",
+ "mago-extension",
  "mago-names",
  "mago-reporting",
  "mago-span",
  "mago-syntax",
  "serde",
  "serde_json",
+ "tempfile",
  "walkdir",
+ "xxhash-rust",
 ]
 
 [[package]]

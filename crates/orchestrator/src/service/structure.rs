@@ -25,7 +25,7 @@ impl StructureService {
     ///
     /// Returns [`OrchestratorError::General`] naming the file and its first parse error when a host file
     /// does not parse, because facts from a partial syntax tree would let a rule pass over code it never saw.
-    pub fn run(self) -> Result<Structure, OrchestratorError> {
+    pub fn run(self) -> Result<Vec<Structure>, OrchestratorError> {
         const STRUCTURE_PROGRESS_PREFIX: &str = "🧱 Structuring";
 
         let pipeline = StatelessParallelPipeline::new(
@@ -55,8 +55,8 @@ impl StructureService {
 #[derive(Debug, Clone)]
 struct StructureReducer;
 
-impl StatelessReducer<Structure, Structure> for StructureReducer {
-    fn reduce(&self, results: Vec<Structure>) -> Result<Structure, OrchestratorError> {
-        Ok(results.into_iter().collect())
+impl StatelessReducer<Structure, Vec<Structure>> for StructureReducer {
+    fn reduce(&self, results: Vec<Structure>) -> Result<Vec<Structure>, OrchestratorError> {
+        Ok(results)
     }
 }

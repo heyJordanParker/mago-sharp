@@ -8,14 +8,21 @@ use mago_syntax::walker::MutWalker;
 use crate::walker::StructureContext;
 use crate::walker::StructureWalker;
 
+pub use crate::check::Rules;
+pub use crate::check::check;
+pub use crate::runner::Runner;
+pub use crate::runner::Violation;
+
 pub mod error;
 
 mod check;
-mod lean;
+mod runner;
 mod walker;
 
+/// The facts of one PHP file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Structure {
+    pub file: String,
     pub declarations: Vec<Declaration>,
     pub imports: Vec<Import>,
     pub references: Vec<Reference>,
@@ -62,7 +69,6 @@ pub enum SymbolKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Location {
-    pub file: String,
     pub start_line: u32,
     pub start_column: u32,
     pub end_line: u32,
@@ -89,28 +95,11 @@ impl Structure {
     }
 }
 
-impl FromIterator<Structure> for Structure {
-    fn from_iter<I>(structures: I) -> Self
-    where
-        I: IntoIterator<Item = Structure>,
-    {
-        let mut merged = Structure::default();
-        for structure in structures {
-            merged.declarations.extend(structure.declarations);
-            merged.imports.extend(structure.imports);
-            merged.references.extend(structure.references);
-        }
-
-        merged.sorted()
-    }
-}
-
 impl Location {
     pub(crate) fn new(file: &File, start: u32, end: u32) -> Self {
         let last = end - 1;
 
         Self {
-            file: String::from_utf8_lossy(&file.name).into_owned(),
             start_line: file.line_number(start) + 1,
             start_column: file.column_number(start) + 1,
             end_line: file.line_number(last) + 1,
@@ -152,7 +141,7 @@ mod tests {
     }
 
     fn location(start_line: u32, start_column: u32, end_line: u32, end_column: u32) -> Location {
-        Location { file: "src/test.php".to_owned(), start_line, start_column, end_line, end_column }
+        Location { start_line, start_column, end_line, end_column }
     }
 
     #[test]
@@ -249,19 +238,11 @@ mod tests {
     }
 
     #[test]
-    fn merges_facts_sorted_by_file_line_and_column() {
-        let b = Reference { namespace: String::new(), name: "B".to_owned(), location: location(2, 1, 2, 1) };
-        let a = Reference { namespace: String::new(), name: "A".to_owned(), location: location(1, 9, 1, 9) };
-        let mut other = a.clone();
-        other.location.file = "src/other.php".to_owned();
+    fn collects_the_facts_of_one_file_under_its_path() {
+        let structure = structure("<?php\nnamespace App;\nuse Lib\\B;\nuse Lib\\A;\n");
 
-        let merged: Structure = [
-            Structure { references: vec![b.clone()], ..Structure::default() },
-            Structure { references: vec![a.clone(), other.clone()], ..Structure::default() },
-        ]
-        .into_iter()
-        .collect();
-
-        assert_eq!(merged.references, [other, a, b]);
+        assert_eq!(structure.file, "src/test.php");
+        let imported: Vec<_> = structure.imports.iter().map(|i| (i.name.as_str(), i.location.start_line)).collect();
+        assert_eq!(imported, [("Lib.B", 3), ("Lib.A", 4)]);
     }
 }

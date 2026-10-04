@@ -1,4 +1,8 @@
-import Sharp
+import Sharp.Facts
+open Sharp
+
 namespace App.Shared
-theorem neverImportsTenant : ∀ i ∈ Sharp.imports, Sharp.under i.namespace_ "App.Shared" → ¬ Sharp.under i.name "App.Tenant" := by sharp_decide
+
+@[rule] def neverImportsTenant : Rule := .neverImports "App.Shared" "App.Tenant"
+
 end App.Shared
