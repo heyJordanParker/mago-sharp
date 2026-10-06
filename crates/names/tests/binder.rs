@@ -417,6 +417,102 @@ fn a_local_written_after_its_declaration_is_recorded_as_written() {
     assert!(!names.is_written(&declared(CODE, "kept", 0, LocalKind::Let)));
 }
 
+/// Spec section 6.1: an accessor body uses `field` for the property's storage and, in `set`, `value` for the incoming
+/// value. The `set` accessor declares `value` as its parameter, and the property declares `field`. Outside an
+/// accessor body both are bare names like any other.
+#[test]
+fn value_and_field_bind_inside_accessor_bodies_and_not_outside_them() {
+    const CODE: &str = "class Report\n{\n    public string name { get => field + value; set { const trimmed = value; field = trimmed; } }\n\n    public int count { get; set => field = (() => field + value)(); }\n\n    public string run()\n    {\n        return value + field;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+    let value = Binding::Local(Local { declaration: span(CODE, "set", 0), kind: LocalKind::Parameter });
+
+    assert_eq!(binding(&names, CODE, "field", 0), Some(Binding::Field));
+    assert_eq!(binding(&names, CODE, "value", 0), Some(Binding::Constant));
+    assert_eq!(binding(&names, CODE, "value", 1), Some(value));
+    assert_eq!(binding(&names, CODE, "field", 1), Some(Binding::Field));
+    assert_eq!(binding(&names, CODE, "field", 2), Some(Binding::Field));
+    assert_eq!(binding(&names, CODE, "field", 3), Some(Binding::Field));
+    assert_eq!(
+        binding(&names, CODE, "value", 2),
+        Some(Binding::Local(Local { declaration: span(CODE, "set", 1), kind: LocalKind::Parameter }))
+    );
+    assert_eq!(
+        names.captures(&span(CODE, "() => field + value", 0)),
+        [(&b"value"[..], Local { declaration: span(CODE, "set", 1), kind: LocalKind::Parameter })]
+    );
+    assert_eq!(binding(&names, CODE, "value", 3), Some(Binding::Constant));
+    assert_eq!(binding(&names, CODE, "field", 4), Some(Binding::Constant));
+    assert_eq!(names.binding_errors(), []);
+}
+
+/// An accessor body declares `value` and `field`, so a local of either name redeclares it.
+#[test]
+fn a_local_named_value_or_field_in_an_accessor_body_is_redeclared() {
+    const CODE: &str = "class Report\n{\n    public int count { get; set { let value = 1; let field = value; } }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(
+        names.binding_errors(),
+        [
+            BindingError::Redeclared {
+                name: span(CODE, "value", 0),
+                earlier: Local { declaration: span(CODE, "set", 0), kind: LocalKind::Parameter }
+            },
+            BindingError::Redeclared {
+                name: span(CODE, "field", 0),
+                earlier: Local {
+                    declaration: span(CODE, "{ get; set { let value = 1; let field = value; } }", 0),
+                    kind: LocalKind::Parameter
+                }
+            },
+        ]
+    );
+}
+
+/// `field` outside an accessor body is an ordinary name, so a method may declare a local named `field`.
+#[test]
+fn a_local_named_field_outside_an_accessor_body_is_an_ordinary_local() {
+    const CODE: &str = "class Report\n{\n    public int count { get => field; }\n\n    public int run()\n    {\n        let field = 1;\n        return field;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(binding(&names, CODE, "field", 0), Some(Binding::Field));
+    assert_eq!(binding(&names, CODE, "field", 2), Some(local(CODE, "field", 1, LocalKind::Let)));
+    assert_eq!(names.binding_errors(), []);
+}
+
+/// `field` in the accessor of a property a constructor parameter declares is the property's storage, not the
+/// parameter, so writing `field` leaves the parameter unwritten and a lambda in the constructor captures it by value.
+#[test]
+fn field_in_a_promoted_property_accessor_is_not_the_constructor_parameter() {
+    const CODE: &str = "class Report\n{\n    public Report(public int count { get => field; set => field = value; })\n    {\n        const read = () => count;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(binding(&names, CODE, "field", 1), Some(Binding::Field));
+    assert!(!names.is_written(&declared(CODE, "count", 0, LocalKind::Parameter)));
+}
+
+/// A property uses `field` when an accessor body names it outside a lambda, as php-src finds `$this->name` in a hook
+/// outside a closure, including in a nested block. `field` in a lambda is a separate function's, which PHP reads by
+/// calling the accessor again, so it does not count.
+#[test]
+fn a_property_uses_field_when_a_body_names_it_outside_a_lambda() {
+    const CODE: &str = "class Report\n{\n    public int a { get; }\n    public int b { get => 1; }\n    public int c { get { if (true) { return field; } return 0; } }\n    public int d { get { const read = () => field; return read(); } }\n    public int e { get => 1; set { const write = () => { field = value; }; write(); } }\n}\n";
+    let arena = LocalArena::new();
+    let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve(program);
+    let uses_field = Node::Program(program).filter_map(|node| match node {
+        Node::PropertyHookList(accessors) => Some(names.uses_field(accessors)),
+        _ => None,
+    });
+
+    assert_eq!(uses_field, [false, false, true, false, false]);
+}
+
 #[test]
 fn php_variable_name_adds_a_dollar_only_to_a_bare_name() {
     assert_eq!(php_variable_name(b"total").as_bytes(), b"$total");
@@ -432,4 +528,111 @@ fn php_names_are_not_bound() {
 
     assert_eq!(names.binding(&Position::new(11)), None);
     assert_eq!(names.get(&Position::new(11)), b"PHP_EOL");
+}
+
+/// The span of `name` where it starts `at`, the first occurrence of `at` in `code`.
+fn name_at(code: &str, at: &str, name: &str) -> Span {
+    assert!(at.starts_with(name), "`{at}` starts with `{name}`");
+    let start = Position::new(offset(code, at, 0));
+
+    Span::new(FileId::new(FILE_NAME), start, Position::new(start.offset + u32::try_from(name.len()).expect("fits")))
+}
+
+/// The pattern variable `name` declared where `at` starts, by `test`, the `is` or the arm's pattern written in `code`.
+fn pattern_variable(code: &str, at: &str, name: &str, test: &str, negated: bool) -> Local {
+    Local {
+        declaration: name_at(code, at, name),
+        kind: LocalKind::Pattern { test: name_at(code, test, test), negated },
+    }
+}
+
+fn bound_at(names: &ResolvedNames<'_>, code: &str, at: &str, name: &str) -> Option<Binding> {
+    names.binding(&name_at(code, at, name).start)
+}
+
+#[test]
+fn an_is_variable_is_in_scope_where_the_test_holds() {
+    const CODE: &str = "class Report\n{\n    public int run(Shape shape)\n    {\n        if (shape is Circle circle && circle.radius > 1) {\n            return circle.radius;\n        }\n        const ok = shape is Square square ? square.side : 0;\n        return circle.size;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    let circle = Some(Binding::Local(pattern_variable(CODE, "circle &&", "circle", "shape is Circle circle", false)));
+    assert_eq!(bound_at(&names, CODE, "circle.radius >", "circle"), circle);
+    assert_eq!(bound_at(&names, CODE, "circle.radius;", "circle"), circle);
+    let square = Some(Binding::Local(pattern_variable(CODE, "square ?", "square", "shape is Square square", false)));
+    assert_eq!(bound_at(&names, CODE, "square.side", "square"), square);
+    assert_eq!(
+        names.binding_errors(),
+        [BindingError::OutOfScope {
+            name: name_at(CODE, "circle.size", "circle"),
+            local: pattern_variable(CODE, "circle &&", "circle", "shape is Circle circle", false),
+        }]
+    );
+}
+
+#[test]
+fn an_is_not_variable_is_in_scope_where_the_test_fails_and_after_an_if_that_always_exits() {
+    const CODE: &str = "class Report\n{\n    public int run(int? first, int? second)\n    {\n        if (first is not int a) {\n            return 0;\n        } else {\n            a;\n        }\n        if (second is not int b || b < 0) {\n            throw new Failure();\n        }\n        return a + b;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    let a = Some(Binding::Local(pattern_variable(CODE, "a) {", "a", "first is not int a", true)));
+    assert_eq!(bound_at(&names, CODE, "a;", "a"), a);
+    assert_eq!(bound_at(&names, CODE, "a + b", "a"), a);
+    let b = Some(Binding::Local(pattern_variable(CODE, "b ||", "b", "second is not int b", true)));
+    assert_eq!(bound_at(&names, CODE, "b < 0", "b"), b);
+    assert_eq!(bound_at(&names, CODE, "b;", "b"), b);
+    assert_eq!(names.binding_errors(), []);
+}
+
+#[test]
+fn an_is_not_variable_ends_with_an_if_that_does_not_always_exit() {
+    const CODE: &str = "class Report\n{\n    public int run(int? first)\n    {\n        if (first is not int a) {\n            first = 0;\n        }\n        return a;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(
+        names.binding_errors(),
+        [BindingError::OutOfScope {
+            name: name_at(CODE, "a;", "a"),
+            local: pattern_variable(CODE, "a) {", "a", "first is not int a", true)
+        }]
+    );
+}
+
+#[test]
+fn a_match_arm_sees_its_pattern_variables_in_its_condition_and_body() {
+    const CODE: &str = "class Report\n{\n    public int run(int? count)\n    {\n        return match (count) {\n            int n when n > 100 => n,\n            int m => m + 1,\n            default => m,\n        };\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    let n = Some(Binding::Local(pattern_variable(CODE, "n when", "n", "int n", false)));
+    assert_eq!(bound_at(&names, CODE, "n > 100", "n"), n);
+    assert_eq!(bound_at(&names, CODE, "n,", "n"), n);
+    assert_eq!(
+        bound_at(&names, CODE, "m + 1", "m"),
+        Some(Binding::Local(pattern_variable(CODE, "m =>", "m", "int m", false)))
+    );
+    assert_eq!(
+        names.binding_errors(),
+        [BindingError::OutOfScope {
+            name: name_at(CODE, "m,\n        }", "m"),
+            local: pattern_variable(CODE, "m =>", "m", "int m", false)
+        }]
+    );
+}
+
+#[test]
+fn a_pattern_variable_that_an_open_block_declares_is_redeclared() {
+    const CODE: &str = "class Report\n{\n    public int run(int? count)\n    {\n        let n = 0;\n        if (count is int n) {\n            return n;\n        }\n        return n;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(
+        names.binding_errors(),
+        [BindingError::Redeclared {
+            name: name_at(CODE, "n) {", "n"),
+            earlier: Local { declaration: name_at(CODE, "n = 0", "n"), kind: LocalKind::Let }
+        }]
+    );
 }

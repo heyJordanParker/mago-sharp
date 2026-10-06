@@ -22,9 +22,11 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::get_arraykey;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_empty_keyed_array;
 use mago_codex::ttype::get_int;
 use mago_codex::ttype::get_iterable_parameters;
+use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_literal_int;
 use mago_codex::ttype::get_literal_string;
 use mago_codex::ttype::get_mixed;
@@ -181,6 +183,11 @@ where
                             get_literal_int(f.trunc() as i64)
                         } else if item_key_type.is_float() {
                             get_int()
+                        } else if context.dialect.is_sharp()
+                            && get_backing_key_type(item_key_type, context.codebase).is_always_array_key(true)
+                        {
+                            // A PHP# literal keys a `Map` by a backed enum, which runs as its backing value.
+                            item_key_type.clone()
                         } else if !item_key_type.is_always_array_key(true) {
                             let item_key_type_id = item_key_type.get_id();
 
@@ -514,9 +521,104 @@ where
         }))])
     };
 
+    if context.dialect.is_sharp() {
+        report_sharp_literal_spreads(context, artifacts, elements);
+    }
+
     artifacts.set_expression_type(&expression_span, array_type);
 
     Ok(())
+}
+
+/// Reports a PHP# literal whose spreads do not make one collection. A `List` spread appends, so `List` values and
+/// spreads make a `List`. A `Map` spread keeps its keys, which needs the literal's type when it runs, so it waits for
+/// typed compilation. A literal never holds a `List`'s values and a `Map`'s entries together.
+fn report_sharp_literal_spreads<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    elements: &[ArrayElement<'_>],
+) where
+    A: Arena,
+{
+    if !elements.iter().any(|element| matches!(element, ArrayElement::Variadic(_))) {
+        return;
+    }
+
+    let mut list_part: Option<Span> = None;
+    let mut map_part: Option<Span> = None;
+    let mut map_spread: Option<Span> = None;
+    for element in elements {
+        let is_map = match element {
+            ArrayElement::Value(_) => false,
+            ArrayElement::KeyValue(_) => true,
+            ArrayElement::Variadic(spread) => {
+                let Some(spread_type) = artifacts.get_expression_type(&spread.value) else {
+                    continue;
+                };
+
+                if spread_type.types.iter().all(|atomic| atomic.is_list() || atomic.is_never()) {
+                    false
+                } else if spread_type
+                    .types
+                    .iter()
+                    .all(|atomic| matches!(atomic, TAtomic::Array(_)) || atomic.is_never())
+                {
+                    map_spread.get_or_insert(element.span());
+                    true
+                } else {
+                    // A value that may not be iterable already has PHP's own error.
+                    if let Some(atomic) = spread_type.types.iter().find(|atomic| {
+                        !matches!(atomic, TAtomic::Array(_))
+                            && get_iterable_value_parameter(atomic, context.codebase).is_some()
+                    }) {
+                        let type_str = atomic.get_id();
+                        context.collector.report_with_code(
+                            IssueCode::InvalidArrayElement,
+                            Issue::error(format!(
+                                "Cannot spread a value of type `{type_str}`: PHP# spreads a `List` or a `Map`."
+                            ))
+                            .with_annotation(
+                                Annotation::primary(element.span())
+                                    .with_message(format!("Type `{type_str}` is neither a `List` nor a `Map`")),
+                            )
+                            .with_help("Spread a `List`, such as a `list<int>` from plain PHP."),
+                        );
+                    }
+
+                    continue;
+                }
+            }
+            ArrayElement::Missing(_) => continue,
+        };
+
+        let (own_part, other_part) = if is_map { (&mut map_part, list_part) } else { (&mut list_part, map_part) };
+        if let Some(other_part) = other_part {
+            let (part, other) = if is_map { ("`Map`", "`List`") } else { ("`List`", "`Map`") };
+            context.collector.report_with_code(
+                IssueCode::InvalidArrayElement,
+                Issue::error("A literal cannot hold a `List`'s values and a `Map`'s entries together.")
+                    .with_annotation(Annotation::primary(element.span()).with_message(format!("A {part}'s part.")))
+                    .with_annotation(Annotation::secondary(other_part).with_message(format!("A {other}'s part.")))
+                    .with_help("Build the `List` and the `Map` in literals of their own."),
+            );
+
+            return;
+        }
+
+        own_part.get_or_insert(element.span());
+    }
+
+    if let Some(map_spread) = map_spread {
+        context.collector.report_with_code(
+            IssueCode::NotSupportedYet,
+            Issue::error("Spreading a `Map` into a literal is not supported yet in PHP#.")
+                .with_annotation(Annotation::primary(map_spread).with_message("Spreads a `Map`."))
+                .with_note(
+                    "A `Map` spread keeps its keys, and the engine can keep them only once it knows the literal is a `Map`.",
+                )
+                .with_help("Copy the `Map` and set its keys, as in `let merged = defaults; merged[key] = value;`."),
+        );
+    }
 }
 
 fn handle_variadic_array_element<'arena, A>(

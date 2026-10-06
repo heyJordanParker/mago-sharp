@@ -1396,6 +1396,28 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
     None
 }
 
+/// Returns the key type plain PHP sees for `key_type`.
+///
+/// A PHP# `Map` keyed by a backed enum holds each case's backing value at runtime, as spec section 12 writes it, so
+/// plain PHP sees an enum key as the enum's backing type.
+#[must_use]
+pub fn get_backing_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMetadata) -> Cow<'key, TUnion> {
+    let backing_type = |atomic: &TAtomic| match atomic {
+        TAtomic::Object(TObject::Enum(enum_object)) => {
+            codebase.get_class_like(enum_object.name.as_bytes())?.enum_type.clone()
+        }
+        _ => None,
+    };
+
+    if !key_type.types.iter().any(|atomic| backing_type(atomic).is_some()) {
+        return Cow::Borrowed(key_type);
+    }
+
+    Cow::Owned(TUnion::from_vec(
+        key_type.types.iter().map(|atomic| backing_type(atomic).unwrap_or_else(|| atomic.clone())).collect(),
+    ))
+}
+
 #[must_use]
 pub fn get_array_parameters(array_type: &TArray, codebase: &CodebaseMetadata) -> (TUnion, TUnion) {
     match array_type {

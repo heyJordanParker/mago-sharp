@@ -29,6 +29,7 @@ use crate::cst::cst::clone::Clone;
 use crate::cst::cst::conditional::Conditional;
 use crate::cst::cst::construct::Construct;
 use crate::cst::cst::control_flow::r#match::Match;
+use crate::cst::cst::control_flow::pattern_match::PatternMatch;
 use crate::cst::cst::function_like::arrow_function::ArrowFunction;
 use crate::cst::cst::function_like::closure::Closure;
 use crate::cst::cst::identifier::Identifier;
@@ -37,6 +38,8 @@ use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::literal::Literal;
 use crate::cst::cst::magic_constant::MagicConstant;
 use crate::cst::cst::partial_application::PartialApplication;
+use crate::cst::cst::pattern::As;
+use crate::cst::cst::pattern::Is;
 use crate::cst::cst::pipe::Pipe;
 use crate::cst::cst::string::CompositeString;
 use crate::cst::cst::string::StringPart;
@@ -94,6 +97,9 @@ pub enum Expression<'arena> {
     Instantiation(Instantiation<'arena>),
     MagicConstant(MagicConstant<'arena>),
     Pipe(Pipe<'arena>),
+    Is(Is<'arena>),
+    As(As<'arena>),
+    PatternMatch(PatternMatch<'arena>),
     TypeOf(TypeOf<'arena>),
     Error(Span),
 }
@@ -351,7 +357,7 @@ impl<'arena> Expression<'arena> {
     pub const fn evaluates_to_boolean(&self) -> bool {
         match self {
             Expression::Parenthesized(expression) => expression.expression.evaluates_to_boolean(),
-            Expression::Literal(Literal::True(_) | Literal::False(_)) => true,
+            Expression::Literal(Literal::True(_) | Literal::False(_)) | Expression::Is(_) => true,
             Expression::Binary(Binary { operator, .. })
                 if operator.is_comparison() || operator.is_logical() || operator.is_instanceof() =>
             {
@@ -453,6 +459,9 @@ impl<'arena> Expression<'arena> {
             Expression::Static(_) => NodeKind::Keyword,
             Expression::Self_(_) => NodeKind::Keyword,
             Expression::Pipe(_) => NodeKind::Pipe,
+            Expression::Is(_) => NodeKind::Is,
+            Expression::As(_) => NodeKind::As,
+            Expression::PatternMatch(_) => NodeKind::PatternMatch,
             Expression::TypeOf(_) => NodeKind::TypeOf,
             Expression::Error(_) => NodeKind::Error,
         }
@@ -501,6 +510,9 @@ impl HasSpan for Expression<'_> {
             Expression::Instantiation(expression) => expression.span(),
             Expression::MagicConstant(expression) => expression.span(),
             Expression::Pipe(expression) => expression.span(),
+            Expression::Is(expression) => expression.span(),
+            Expression::As(expression) => expression.span(),
+            Expression::PatternMatch(expression) => expression.span(),
             Expression::TypeOf(expression) => expression.span(),
             Expression::Error(span) => *span,
         })

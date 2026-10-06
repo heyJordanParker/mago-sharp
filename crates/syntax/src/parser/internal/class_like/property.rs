@@ -5,6 +5,7 @@ use crate::cst::cst::DirectVariable;
 use crate::cst::cst::Hint;
 use crate::cst::cst::HookedProperty;
 use crate::cst::cst::Keyword;
+use crate::cst::cst::LocalIdentifier;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::PlainProperty;
 use crate::cst::cst::Property;
@@ -113,6 +114,34 @@ where
 
                 TokenSeparatedSequence::new(items, commas)
             },
+            terminator: self.parse_terminator()?,
+        }))
+    }
+
+    /// Parses the rest of a PHP# field written without its type, whose name the caller parsed as a type.
+    pub(crate) fn parse_untyped_field(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+        name: LocalIdentifier<'arena>,
+    ) -> Result<Property<'arena>, ParseError> {
+        let variable = DirectVariable { span: name.span, name: name.value };
+        let item = if self.stream.is_at(T!["="])? {
+            PropertyItem::Concrete(PropertyConcreteItem {
+                variable,
+                equals: self.stream.eat_span(T!["="])?,
+                value: self.parse_expression()?,
+            })
+        } else {
+            PropertyItem::Abstract(PropertyAbstractItem { variable })
+        };
+
+        Ok(Property::Plain(PlainProperty {
+            attribute_lists: attributes,
+            modifiers,
+            var: None,
+            hint: None,
+            items: TokenSeparatedSequence::new(self.new_vec_of(item), self.new_vec()),
             terminator: self.parse_terminator()?,
         }))
     }

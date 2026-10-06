@@ -19,6 +19,7 @@ use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
@@ -36,6 +37,7 @@ use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::get_signature_of_function_like_metadata;
 use mago_codex::ttype::get_arraykey;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_keyed_array;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
@@ -431,31 +433,13 @@ where
         // A conditional return type whose branches are all `void`/`never` erases to `void`, which
         // the check above cannot see through since it only sees the unexpanded conditional.
         if !expanded_type.is_void() {
-            let expected_return_type_id = expanded_type.get_id();
-
-            let help_message = if expanded_type.is_nullable() {
-                "Ensure all code paths end with a `return` statement. You may need to add `return null;` to the paths that currently don't return a value.".to_string()
-            } else {
-                format!(
-                    "Add a `return` statement that provides a value of type '{expected_return_type_id}' to all paths, or change the function's return type to '{expected_return_type_id}|null' and return `null` explicitly."
-                )
-            };
-
-            context.collector.report_with_code(
-                IssueCode::MissingReturnStatement,
-                Issue::error(format!("Missing return statement in function `{}`", function_metadata.name))
-                    .with_annotation(
-                        Annotation::primary(function_metadata.name_span.unwrap_or(function_metadata.span))
-                            .with_message(format!(
-                                "This function is declared to return '{expected_return_type_id}'..."
-                            )),
-                    )
-                    .with_annotation(
-                        Annotation::secondary(body.span())
-                            .with_message("...but this path can exit without returning a value."),
-                    )
-                    .with_note("A function that does not explicitly return a value will implicitly return `null`.")
-                    .with_help(help_message),
+            report_missing_return(
+                context,
+                "function",
+                function_metadata.name,
+                function_metadata.name_span.unwrap_or(function_metadata.span),
+                body.span(),
+                &expanded_type,
             );
         }
     }
@@ -722,7 +706,7 @@ where
         if parameter_node.is_promoted_property()
             && let Some(hook_list) = &parameter_node.hooks
         {
-            let property_name = word(parameter_node.variable.name);
+            let property_name = php_variable_name(parameter_node.variable.name);
             for hook in &hook_list.hooks {
                 analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
             }
@@ -730,6 +714,43 @@ where
     }
 
     Ok(())
+}
+
+/// Reports a body that can end without returning a value, though the `kind` named `name`, declared at `declaration`,
+/// returns `expected_type`: a function, or a PHP# `get` accessor, which returns its property's type.
+pub(crate) fn report_missing_return<A>(
+    context: &mut Context<'_, '_, A>,
+    kind: &str,
+    name: Word,
+    declaration: Span,
+    body: Span,
+    expected_type: &TUnion,
+) where
+    A: Arena,
+{
+    let expected_return_type_id = expected_type.get_id();
+
+    let help_message = if expected_type.is_nullable() {
+        "Ensure all code paths end with a `return` statement. You may need to add `return null;` to the paths that currently don't return a value.".to_string()
+    } else {
+        format!(
+            "Add a `return` statement that provides a value of type '{expected_return_type_id}' to all paths, or change the {kind}'s return type to '{expected_return_type_id}|null' and return `null` explicitly."
+        )
+    };
+
+    context.collector.report_with_code(
+        IssueCode::MissingReturnStatement,
+        Issue::error(format!("Missing return statement in {kind} `{name}`"))
+            .with_annotation(
+                Annotation::primary(declaration)
+                    .with_message(format!("This {kind} is declared to return '{expected_return_type_id}'...")),
+            )
+            .with_annotation(
+                Annotation::secondary(body).with_message("...but this path can exit without returning a value."),
+            )
+            .with_note(format!("A {kind} that does not explicitly return a value will implicitly return `null`."))
+            .with_help(help_message),
+    );
 }
 
 /// Checks if a type is a single unresolved template parameter with a mixed bound.
@@ -1661,6 +1682,8 @@ where
         return;
     }
 
+    report_map_keys_without_backing_value(context, &type_metadata.type_union, type_metadata.span);
+
     let codebase = context.codebase;
     for type_ref in type_metadata.type_union.get_all_child_nodes() {
         let TypeRef::Atomic(TAtomic::Object(TObject::Named(named))) = type_ref else {
@@ -1750,5 +1773,39 @@ where
                 .with_help(format!("Supply a type contained by `{constraint_id}`.")),
             );
         }
+    }
+}
+
+/// Reports each PHP# `Map` written in `type_union` whose key type is a class or an enum without a backing value.
+/// Spec section 12 keys a `Map` by an `int`, a `string` or a type with an `int` or `string` backing value, which
+/// runs as its backing value.
+pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    for type_ref in type_union.get_all_child_nodes() {
+        let TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) = type_ref else {
+            continue;
+        };
+        let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
+            continue;
+        };
+        if get_backing_key_type(key_type, context.codebase).is_always_array_key(true) {
+            continue;
+        }
+
+        let key_id = key_type.get_id();
+        context.collector.report_with_code(
+            IssueCode::TemplateConstraintViolation,
+            Issue::error(format!(
+                "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` has none."
+            ))
+            .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
+            .with_help("Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status: string`."),
+        );
     }
 }

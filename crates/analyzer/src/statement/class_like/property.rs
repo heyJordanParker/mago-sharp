@@ -27,6 +27,7 @@ use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookConcreteExpressionBody;
 use mago_syntax::cst::PropertyItem;
 use mago_word::Word;
+use mago_word::concat_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -40,6 +41,7 @@ use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::add_properties_to_context;
 use crate::statement::function_like::get_this_type;
+use crate::statement::function_like::report_missing_return;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::r#return::handle_return_value;
 
@@ -216,7 +218,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for HookedProperty<'arena> {
             analyze_default_value(self.item.variable().name, initial_value.value, context, block_context, artifacts)?;
         }
 
-        let property_name = word(self.item.variable().name);
+        let property_name = php_variable_name(self.item.variable().name);
         for hook in &self.hook_list.hooks {
             analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
         }
@@ -268,6 +270,25 @@ where
     match body {
         PropertyHookConcreteBody::Block(block) => {
             analyze_statements(block.statements.as_slice(), context, &mut hook_block_context, artifacts)?;
+
+            // A PHP# `get` block returns its property's type on every path, as php-src types the hook.
+            if context.dialect.is_sharp()
+                && hook.name.value == b"get"
+                && !hook_block_context.flags.has_returned()
+                && let Some(class_like) = parent_block_context.scope.get_class_like()
+                && let Some(property_type) =
+                    class_like.properties.get(&property_name).and_then(|property| property.type_metadata.as_ref())
+            {
+                let accessor = concat_word!(class_like.original_name, "::", property_name, "::get");
+                report_missing_return(
+                    context,
+                    "property hook",
+                    accessor,
+                    hook.name.span,
+                    block.span(),
+                    &property_type.type_union,
+                );
+            }
         }
         PropertyHookConcreteBody::Expression(expr_body) => {
             analyze_hook_expression(hook.name.value, expr_body, context, &mut hook_block_context, artifacts)?;

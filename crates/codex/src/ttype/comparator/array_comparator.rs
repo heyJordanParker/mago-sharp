@@ -9,6 +9,7 @@ use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::atomic::scalar::int::TInteger;
 use crate::ttype::comparator::ComparisonResult;
 use crate::ttype::comparator::union_comparator;
+use crate::ttype::get_backing_key_type;
 use crate::ttype::get_never;
 use crate::ttype::union::TUnion;
 use crate::ttype::wrap_atomic;
@@ -172,8 +173,27 @@ pub(crate) fn is_array_contained_by_array(
         }
     }
 
-    if let (Some(input_key_type), Some(container_key_type)) = (input_key_type, container_key_type)
-        && !union_comparator::is_contained_by(
+    if let (Some(input_key_type), Some(container_key_type)) = (input_key_type, container_key_type) {
+        // A PHP# `Map` keyed by a backed enum is also an array of the backing values, which plain PHP receives.
+        let backing_key_type = match get_backing_key_type(&input_key_type, codebase) {
+            Cow::Owned(backing_key_type)
+                if !union_comparator::is_contained_by(
+                    codebase,
+                    &input_key_type,
+                    &container_key_type,
+                    false,
+                    input_key_type.ignore_falsable_issues(),
+                    inside_assertion,
+                    &mut ComparisonResult::new(),
+                ) =>
+            {
+                Some(backing_key_type)
+            }
+            _ => None,
+        };
+        let input_key_type = backing_key_type.map_or(input_key_type, Cow::Owned);
+
+        if !union_comparator::is_contained_by(
             codebase,
             &input_key_type,
             &container_key_type,
@@ -181,9 +201,9 @@ pub(crate) fn is_array_contained_by_array(
             input_key_type.ignore_falsable_issues(),
             inside_assertion,
             atomic_comparison_result,
-        )
-    {
-        return false;
+        ) {
+            return false;
+        }
     }
 
     input_value_type.is_never()

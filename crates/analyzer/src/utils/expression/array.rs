@@ -25,6 +25,7 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::get_arraykey;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_int;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_mixed_maybe_from_loop;
@@ -929,7 +930,16 @@ where
     }
 
     let key_parameter = if in_assignment || block_context.flags.inside_isset() {
-        Cow::Owned(get_arraykey())
+        // A PHP# `Map` keyed by a backed enum takes the enum alone, which runs as its backing value, and an empty
+        // literal takes the enum its first key gives it.
+        let is_backed_enum_key = |key_type: &TUnion| matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(backing) if backing.is_always_array_key(true));
+        match keyed_array.get_generic_parameters() {
+            Some(parameters) if context.dialect.is_sharp() && is_backed_enum_key(parameters.0) => {
+                Cow::Owned(parameters.0.clone())
+            }
+            None if context.dialect.is_sharp() && is_backed_enum_key(index_type) => Cow::Owned(index_type.clone()),
+            _ => Cow::Owned(get_arraykey()),
+        }
     } else {
         let mut key_union = None;
         if let Some(known_items) = keyed_array.get_known_items()

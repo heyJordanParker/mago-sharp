@@ -73,6 +73,7 @@ use crate::formula::negate_or_synthesize;
 use crate::reconciler::reconcile_keyed_types;
 use crate::statement::r#loop::assignment_map_visitor::get_assignment_map;
 use crate::statement::r#loop::cleaner::clean_nodes;
+use crate::utils::expression::get_block_expression_id;
 
 mod assignment_map_visitor;
 mod cleaner;
@@ -1543,8 +1544,16 @@ where
                 let (mut k, v) = get_array_parameters(array, context.codebase);
 
                 // Spec section 12 reads a PHP# `List`'s indexes from `entries()`, so `[k, v]` reads a `Map`. PHP stores
-                // an all-digit string key as an `int`, so a `Map`'s `string` key reads back as `int|string`.
-                if context.dialect.is_sharp() {
+                // an all-digit string key as an `int`, so a `Map`'s `string` key reads back as `int|string`, unless the
+                // loop writes the key's type as `string`, which the bridge lowers to `(string)` at the loop's start.
+                let key_is_written_string = foreach.target.key().is_some_and(|key| {
+                    get_block_expression_id(key, context, block_context)
+                        .and_then(|key_id| block_context.local_types.get(&key_id))
+                        .is_some_and(|(written_type, _)| {
+                            matches!(written_type.types.as_ref(), [TAtomic::Scalar(TScalar::String(_))])
+                        })
+                });
+                if context.dialect.is_sharp() && !key_is_written_string {
                     if let TArray::List(_) = array
                         && let Some(key) = foreach.target.key()
                     {

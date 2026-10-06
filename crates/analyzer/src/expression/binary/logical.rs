@@ -97,7 +97,7 @@ where
 
     let lhs_type = match artifacts.get_rc_expression_type(&binary.lhs).cloned() {
         Some(lhs_type) => {
-            check_logical_operand(context, binary.lhs, &lhs_type, "Left", "&&");
+            check_logical_operand(context, binary.lhs, &lhs_type, "Left", &operator_name(binary));
 
             lhs_type
         }
@@ -211,7 +211,7 @@ where
         binary.rhs.analyze(context, &mut right_block_context, artifacts)?;
         let rhs_type = match artifacts.get_rc_expression_type(&binary.rhs).cloned() {
             Some(rhs_type) => {
-                check_logical_operand(context, binary.rhs, &rhs_type, "Right", "&&");
+                check_logical_operand(context, binary.rhs, &rhs_type, "Right", &operator_name(binary));
 
                 rhs_type
             }
@@ -388,7 +388,7 @@ where
 
     let lhs_type = match artifacts.get_rc_expression_type(&binary.lhs).cloned() {
         Some(lhs_type) => {
-            check_logical_operand(context, binary.lhs, &lhs_type, "Left", "||");
+            check_logical_operand(context, binary.lhs, &lhs_type, "Left", &operator_name(binary));
 
             lhs_type
         }
@@ -490,7 +490,7 @@ where
 
         let rhs_type = match artifacts.get_rc_expression_type(&binary.rhs).cloned() {
             Some(rhs_type) => {
-                check_logical_operand(context, binary.rhs, &rhs_type, "Right", "||");
+                check_logical_operand(context, binary.rhs, &rhs_type, "Right", &operator_name(binary));
 
                 rhs_type
             }
@@ -700,6 +700,12 @@ where
     Ok(())
 }
 
+/// The operator as its source writes it: `and` for PHP's `and`, and `when` for the `when` of a PHP# `match` arm, which
+/// runs as PHP's `and`.
+fn operator_name(binary: &Binary<'_>) -> String {
+    String::from_utf8_lossy(binary.operator.as_bytes()).into_owned()
+}
+
 /// Checks a single operand of a logical operation (like AND, OR, XOR) for problematic types.
 /// Reports errors for `mixed` and warnings for types that PHP coerces to boolean
 /// (e.g., `null`, `array`, `resource`, `object`). A PHP# operand must be `bool`, so no coercion applies.
@@ -708,7 +714,7 @@ fn check_logical_operand<'arena, A>(
     operand: &Expression<'arena>,
     operand_type: &TUnion,
     side: &'static str,
-    operator_name: &'static str,
+    operator_name: &str,
 ) where
     A: Arena,
 {

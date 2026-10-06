@@ -101,6 +101,14 @@ where
         if let Some(required) = modifiers.iter().find(|modifier| matches!(modifier, Modifier::Required(_))) {
             self.errors.push(ParseError::NotSupportedYetInSharp("`required`", required.span()));
         }
+        // A bare name before `=` or `;` is a field written without its type: it is the name.
+        if let Hint::Identifier(Identifier::Local(name)) = hint
+            && matches!(self.stream.peek_kind(0)?, Some(T!["="] | T![";"]))
+        {
+            self.errors.push(ParseError::UntypedFieldInSharp(name.span));
+
+            return Ok(ClassLikeMember::Property(self.parse_untyped_field(attributes, modifiers, name)?));
+        }
         if !matches!(self.stream.peek_kind(1)?, Some(T!["("])) {
             return Ok(ClassLikeMember::Property(self.parse_property_with_hint(
                 attributes,

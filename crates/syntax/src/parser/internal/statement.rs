@@ -128,6 +128,9 @@ where
             T![";"] => Statement::Noop(self.stream.consume_span()?),
             T!["const"] => Statement::Constant(self.parse_constant_with_attributes(Sequence::empty())?),
             T!["if"] => Statement::If(self.parse_if()?),
+            T!["match"] if self.dialect.is_sharp() && self.stream.peek_kind(1)? == Some(T!["("]) => {
+                Statement::PatternMatch(self.parse_pattern_match()?)
+            }
             T!["switch"] => Statement::Switch(self.parse_switch()?),
             T!["foreach"] => Statement::Foreach(self.parse_foreach()?),
             T!["for"] => self.parse_for()?,

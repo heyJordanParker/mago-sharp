@@ -29,6 +29,7 @@ pub(crate) mod magic_constant;
 pub(crate) mod modifier;
 pub(crate) mod namespace;
 pub(crate) mod operation;
+pub(crate) mod pattern;
 pub(crate) mod r#return;
 pub(crate) mod sequence;
 pub(crate) mod statement;

@@ -1,7 +1,10 @@
 use mago_allocator::prelude::*;
 
 use crate::T;
+use crate::cst::cst::Hint;
+use crate::cst::cst::Keyword;
 use crate::cst::cst::LocalDeclaration;
+use crate::cst::cst::LocalIdentifier;
 use crate::error::ParseError;
 use crate::parser::Parser;
 
@@ -39,11 +42,22 @@ where
         let is_let = keyword.as_ref().is_some_and(|keyword| keyword.value == b"let");
         let hint =
             if !is_let && self.is_at_typed_local()? { Some(&*self.arena.alloc(self.parse_type_hint()?)) } else { None };
+        let name = self.parse_local_identifier()?;
 
+        self.parse_local_declaration_value(keyword, hint, name)
+    }
+
+    /// Parses what follows a PHP# local's name: `=`, its value and the terminator.
+    pub(crate) fn parse_local_declaration_value(
+        &mut self,
+        keyword: Option<Keyword<'arena>>,
+        hint: Option<&'arena Hint<'arena>>,
+        name: LocalIdentifier<'arena>,
+    ) -> Result<LocalDeclaration<'arena>, ParseError> {
         Ok(LocalDeclaration {
             keyword,
             hint,
-            name: self.parse_local_identifier()?,
+            name,
             equals: self.stream.eat_span(T!["="])?,
             value: self.parse_expression()?,
             terminator: self.parse_terminator()?,

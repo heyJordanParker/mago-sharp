@@ -1,21 +1,28 @@
+use std::borrow::Cow;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::scanner::get_union_from_hint;
+use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
 use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
 use mago_names::binding::php_variable_name;
@@ -25,20 +32,24 @@ use mago_names::scope::php_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ExpressionStatement;
+use mago_syntax::cst::ForOf;
+use mago_syntax::cst::ForOfKeyValueTarget;
 use mago_syntax::cst::ForOfTarget;
+use mago_syntax::cst::ForOfVariable;
 use mago_syntax::cst::Foreach;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::ForeachKeyValueTarget;
 use mago_syntax::cst::ForeachTarget;
 use mago_syntax::cst::ForeachValueTarget;
 use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::LocalDeclaration;
-use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Statement;
 use mago_syntax_core::stack::ensure_sufficient_stack;
@@ -50,9 +61,11 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
+use crate::statement::function_like::report_map_keys_without_backing_value;
 use crate::utils::docblock::populate_docblock_variables;
 use crate::utils::docblock::populate_docblock_variables_excluding;
 use crate::utils::expression::expression_has_observable_side_effect;
@@ -218,34 +231,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Try(r#try) => r#try.analyze(context, block_context, artifacts),
                 Statement::Foreach(foreach) => foreach.analyze(context, block_context, artifacts),
                 Statement::For(r#for) => r#for.analyze(context, block_context, artifacts),
-                Statement::ForOf(for_of) => {
-                    // A PHP# `for … of` runs as the PHP `foreach` over its collection, into the variables it declares.
-                    let variable = |name: LocalIdentifier<'arena>| -> &'arena Expression<'arena> {
-                        context
-                            .arena
-                            .alloc(Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(name) }))
-                    };
-                    let target = match &for_of.target {
-                        ForOfTarget::Value(value) => {
-                            ForeachTarget::Value(ForeachValueTarget { value: variable(*value) })
-                        }
-                        ForOfTarget::KeyValue(pair) => ForeachTarget::KeyValue(ForeachKeyValueTarget {
-                            key: variable(pair.key),
-                            double_arrow: pair.comma,
-                            value: variable(pair.value),
-                        }),
-                    };
-                    let foreach = context.arena.alloc(Foreach {
-                        foreach: for_of.r#for,
-                        left_parenthesis: for_of.left_parenthesis,
-                        expression: for_of.expression,
-                        r#as: for_of.of,
-                        target,
-                        right_parenthesis: for_of.right_parenthesis,
-                        body: ForeachBody::Statement(for_of.body),
-                    });
-
-                    foreach.analyze(context, block_context, artifacts)
+                Statement::ForOf(for_of) => analyze_for_of(for_of, context, block_context, artifacts),
+                Statement::PatternMatch(_) => {
+                    analyze_php_shape(Node::Statement(self), context, block_context, artifacts)
                 }
                 Statement::While(r#while) => r#while.analyze(context, block_context, artifacts),
                 Statement::DoWhile(do_while) => do_while.analyze(context, block_context, artifacts),
@@ -303,29 +291,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
         // A written type binds every value the local takes, and is its type after the declaration, as a `@var` tag
         // on the PHP assignment would make it.
         let variable_id = php_variable_name(self.name.value);
-        let local_type = self.hint.map(|hint| {
-            let mut local_type =
-                get_union_from_hint(hint, block_context.scope.get_class_like_name(), context.resolved_names);
-            populate_union_type(
-                &mut local_type,
-                &context.codebase.symbols,
-                block_context.scope.get_reference_source().as_ref(),
-                &mut artifacts.symbol_references,
-                true,
-            );
-            expander::expand_union(
-                context.codebase,
-                &mut local_type,
-                &TypeExpansionOptions { self_class: block_context.scope.get_class_like_name(), ..Default::default() },
-            );
-
-            (Rc::new(local_type), hint.span())
-        });
-
-        match &local_type {
-            Some(local_type) => block_context.local_types.insert(variable_id, local_type.clone()),
-            None => block_context.local_types.remove(&variable_id),
-        };
+        let local_type = declare_local_type(context, block_context, artifacts, variable_id, self.hint);
 
         // A PHP# local declaration runs as the PHP assignment of its value to the variable it declares.
         let name =
@@ -364,6 +330,171 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
 
         Ok(())
     }
+}
+
+/// Binds the local `variable_id` to its written type, or unbinds it when none is written, and returns the written type
+/// with its span.
+fn declare_local_type<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &mut BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    variable_id: Word,
+    hint: Option<&Hint<'_>>,
+) -> Option<(Rc<TUnion>, Span)>
+where
+    A: Arena,
+{
+    let Some(hint) = hint else {
+        block_context.local_types.remove(&variable_id);
+
+        return None;
+    };
+
+    let mut local_type = get_union_from_hint(hint, block_context.scope.get_class_like_name(), context.resolved_names);
+    populate_union_type(
+        &mut local_type,
+        &context.codebase.symbols,
+        block_context.scope.get_reference_source().as_ref(),
+        &mut artifacts.symbol_references,
+        true,
+    );
+    expander::expand_union(
+        context.codebase,
+        &mut local_type,
+        &TypeExpansionOptions { self_class: block_context.scope.get_class_like_name(), ..Default::default() },
+    );
+
+    let local_type = (Rc::new(local_type), hint.span());
+    report_map_keys_without_backing_value(context, &local_type.0, local_type.1);
+    block_context.local_types.insert(variable_id, local_type.clone());
+
+    Some(local_type)
+}
+
+/// Analyzes a PHP# `for … of` as the PHP `foreach` over its collection, into the variables it declares. A written type
+/// binds its loop variable as a typed local's does.
+fn analyze_for_of<'ctx, 'arena, A>(
+    for_of: &ForOf<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    for variable in for_of.target.variables() {
+        declare_local_type(context, block_context, artifacts, php_variable_name(variable.name.value), variable.hint);
+    }
+
+    let variable = |variable: &ForOfVariable<'arena>| -> &'arena Expression<'arena> {
+        context.arena.alloc(Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(variable.name) }))
+    };
+    let target = match &for_of.target {
+        ForOfTarget::Value(value) => ForeachTarget::Value(ForeachValueTarget { value: variable(value) }),
+        ForOfTarget::KeyValue(pair) => ForeachTarget::KeyValue(ForeachKeyValueTarget {
+            key: variable(&pair.key),
+            double_arrow: pair.comma,
+            value: variable(&pair.value),
+        }),
+    };
+    let foreach = context.arena.alloc(Foreach {
+        foreach: for_of.r#for,
+        left_parenthesis: for_of.left_parenthesis,
+        expression: for_of.expression,
+        r#as: for_of.of,
+        target,
+        right_parenthesis: for_of.right_parenthesis,
+        body: ForeachBody::Statement(for_of.body),
+    });
+
+    foreach.analyze(context, block_context, artifacts)?;
+
+    if let ForOfTarget::KeyValue(pair) = &for_of.target {
+        report_backed_key_without_its_enum(context, block_context, artifacts, for_of, pair);
+    }
+
+    Ok(())
+}
+
+/// Reports a loop over a `Map` keyed by a backed enum whose key's written type is not the enum's name. The engine
+/// holds each key as its backing value, and reads it back as the case only through the class the loop names. A written
+/// type that cannot hold the case is already refused where the loop assigns the key.
+fn report_backed_key_without_its_enum<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    for_of: &ForOf<'_>,
+    pair: &ForOfKeyValueTarget<'_>,
+) where
+    A: Arena,
+{
+    let Some(collection_type) = artifacts.get_expression_type(for_of.expression) else {
+        return;
+    };
+    let Some((key_type, value_type)) = collection_type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(TArray::Keyed(keyed_array)) => keyed_array
+            .get_generic_parameters()
+            .filter(|(key_type, _)| matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_))),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    let enum_name = match key_type.types.as_ref() {
+        [TAtomic::Object(TObject::Enum(enum_object))] => Some(enum_object.name),
+        _ => None,
+    };
+    if let (Some(Hint::Identifier(identifier)), Some(enum_name)) = (pair.key.hint, enum_name)
+        && context.resolved_names.get(identifier).eq_ignore_ascii_case(enum_name.as_bytes())
+    {
+        return;
+    }
+
+    if let Some((written_type, _)) = block_context.local_types.get(&php_variable_name(pair.key.name.value))
+        && !union_comparator::is_contained_by(
+            context.codebase,
+            key_type,
+            written_type,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::default(),
+        )
+    {
+        return;
+    }
+
+    let source = |span: Span| {
+        context
+            .source_file
+            .contents
+            .get(span.start.offset as usize..span.end.offset as usize)
+            .map(|text| String::from_utf8_lossy(text).into_owned())
+            .unwrap_or_default()
+    };
+    let key_type_name = match enum_name {
+        Some(enum_name) => {
+            String::from_utf8_lossy(enum_name.as_bytes()).rsplit('\\').next().unwrap_or_default().to_owned()
+        }
+        None => key_type.get_id().to_string(),
+    };
+    let value_type_name = pair.value.hint.map_or_else(|| value_type.get_id().to_string(), |hint| source(hint.span()));
+    let rewritten = format!(
+        "for (const [{key_type_name} {}, {value_type_name} {}] of {})",
+        BytesDisplay(pair.key.name.value),
+        BytesDisplay(pair.value.name.value),
+        source(for_of.expression.span()),
+    );
+
+    context.collector.report_with_code(
+        IssueCode::InvalidForeachKey,
+        Issue::error(format!("A `{key_type_name}` key needs its type written: `{rewritten}`."))
+            .with_annotation(
+                Annotation::primary(pair.key.span()).with_message(format!("Written without `{key_type_name}`.")),
+            )
+            .with_note("The engine holds each key as its backing value, and the loop reads it back as the case only through the class it names.")
+            .with_help(format!("Write `{rewritten}`.")),
+    );
 }
 
 /// The type a written type would give a value: every literal and narrowed scalar widened, and every list or map shape

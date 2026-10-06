@@ -39,6 +39,8 @@ pub enum Binding {
     Constant,
     /// A member of the enclosing class, written without `this.`.
     Member,
+    /// `field` in an accessor body: the storage of the property the accessor belongs to.
+    Field,
 }
 
 /// A PHP# scope rule a bare name breaks. The name still has its [`Binding`].
@@ -80,4 +82,10 @@ pub enum LocalKind {
     Let,
     /// Declared with `const`, so it cannot be reassigned.
     Const,
+    /// Declared by a pattern, so it exists only where `test` is true, or false when `negated` (`x is not T name`).
+    Pattern {
+        /// The `is` that declares it, or the pattern of the `match` arm that declares it.
+        test: Span,
+        negated: bool,
+    },
 }

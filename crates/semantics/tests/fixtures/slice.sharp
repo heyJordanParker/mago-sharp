@@ -29,6 +29,9 @@ public class Report
     public int? limit { get; } = null;
     private Map<string, int> sizes = [:];
     public List<Calc> lines { get; private set; } = [];
+    public string title { get => field; set => field = trim(value); } = "";
+    public int stock { get; private set { if (value < 0) { return; } field = value; } } = 0;
+    public int half { get { return this.stock / 2; } }
 
     [Entity(true)]
     public Report(int start, private Calc helper, [Field(-1.5)] public int total { get; private set; })

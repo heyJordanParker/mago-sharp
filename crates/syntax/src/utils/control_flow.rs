@@ -23,6 +23,10 @@ use crate::cst::Literal;
 use crate::cst::LiteralInteger;
 use crate::cst::MatchArm;
 use crate::cst::PartialApplication;
+use crate::cst::PatternMatch;
+use crate::cst::PatternMatchArm;
+use crate::cst::PatternMatchArmBody;
+use crate::cst::PatternMatchPatternArm;
 use crate::cst::Return;
 use crate::cst::Statement;
 use crate::cst::StringPart;
@@ -286,8 +290,26 @@ fn statement_control_flows<'arena>(statement: &'arena Statement<'arena>, control
                 expression_control_flows(value, controls);
             }
         }
+        Statement::PatternMatch(pattern_match) => pattern_match_control_flows(pattern_match, controls),
         _ => {}
     });
+}
+
+fn pattern_match_control_flows<'arena>(
+    pattern_match: &'arena PatternMatch<'arena>,
+    controls: &mut Vec<ControlFlow<'arena>>,
+) {
+    expression_control_flows(pattern_match.expression, controls);
+    for arm in &pattern_match.arms {
+        if let PatternMatchArm::Pattern(PatternMatchPatternArm { guard: Some(guard), .. }) = arm {
+            expression_control_flows(guard.condition, controls);
+        }
+
+        match arm.body() {
+            PatternMatchArmBody::Expression(expression) => expression_control_flows(expression, controls),
+            PatternMatchArmBody::Block(block) => block_control_flows(block, controls),
+        }
+    }
 }
 
 fn expression_control_flows<'arena>(expression: &'arena Expression<'arena>, controls: &mut Vec<ControlFlow<'arena>>) {
@@ -384,6 +406,9 @@ fn expression_control_flows<'arena>(expression: &'arena Expression<'arena>, cont
                 }
             }
         }
+        Expression::PatternMatch(pattern_match) => pattern_match_control_flows(pattern_match, controls),
+        Expression::Is(is) => expression_control_flows(is.value, controls),
+        Expression::As(r#as) => expression_control_flows(r#as.value, controls),
         Expression::Yield(r#yield) => match r#yield {
             Yield::Value(yield_value) => {
                 if let Some(value) = &yield_value.value {

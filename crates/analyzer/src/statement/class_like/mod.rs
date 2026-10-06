@@ -35,6 +35,7 @@ use mago_codex::ttype::template::definition_type_replacer::DefinitionReplacement
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
+use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -1067,7 +1068,7 @@ where
     if has_complete_hierarchy {
         check_unused_template_parameters(context, class_like_metadata);
     }
-    check_class_like_properties(context, class_like_metadata);
+    check_class_like_properties(context, class_like_metadata, members);
     check_docblock_declared_members(context, class_like_metadata, declaration_span);
 
     let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));
@@ -1117,10 +1118,13 @@ where
                 let prop_meta = first_property_name.and_then(|name| class_like_metadata.properties.get(&name));
                 missing_type_hints::check_imprecise_property_type_hint(context, property, prop_meta);
 
+                // A PHP# field's name has no `$`, and the codebase keys every property by its PHP name.
                 let property_names: Vec<Word> = match property {
-                    Property::Plain(plain) => plain.items.iter().map(|item| word(item.variable().name)).collect(),
+                    Property::Plain(plain) => {
+                        plain.items.iter().map(|item| php_variable_name(item.variable().name)).collect()
+                    }
                     Property::Hooked(_) | Property::Computed(_) => {
-                        vec![word(property.first_variable().name)]
+                        vec![php_variable_name(property.first_variable().name)]
                     }
                 };
 
@@ -3168,10 +3172,30 @@ fn check_docblock_declared_members<A>(
     }
 }
 
+/// Whether the PHP# member named `property`, with its `$`, declares accessors, which make it a property, as a
+/// constructor parameter's can. A member without them is a field.
+fn has_accessors(members: &[ClassLikeMember<'_>], property: Word) -> bool {
+    members.iter().any(|member| match member {
+        ClassLikeMember::Property(Property::Hooked(hooked)) => {
+            php_variable_name(hooked.item.variable().name) == property
+        }
+        ClassLikeMember::Property(Property::Computed(computed)) => {
+            php_variable_name(computed.variable.name) == property
+        }
+        ClassLikeMember::Method(method) => method
+            .parameter_list
+            .parameters
+            .iter()
+            .any(|parameter| parameter.hooks.is_some() && php_variable_name(parameter.variable.name) == property),
+        _ => false,
+    })
+}
+
 #[allow(clippy::similar_names)]
 fn check_class_like_properties<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
+    members: &[ClassLikeMember<'_>],
 ) where
     A: Arena,
 {
@@ -3359,6 +3383,24 @@ fn check_class_like_properties<'ctx, A>(
                         .with_note("The access level of an overridden property must not be more restrictive than the parent property.")
                         .with_help("Adjust the access level of the property in the child class to match or be less restrictive than the parent class."),
                     );
+            } else if context.dialect.is_sharp() && property_metadata.read_visibility < parent_property.read_visibility
+            {
+                let (visibility, parent_visibility) =
+                    (property_metadata.read_visibility, parent_property.read_visibility);
+
+                context.collector.report_with_code(
+                    IssueCode::IncompatiblePropertyAccess,
+                    Issue::error(format!(
+                        "The override `{declaring_class_name}::{property_name}` is `{visibility}`, but `{parent_class_name}::{property_name}` is `{parent_visibility}`."
+                    ))
+                    .with_annotation(Annotation::primary(property_span).with_message(format!("Declared `{visibility}` here.")))
+                    .with_annotation(
+                        Annotation::secondary(parent_property_span)
+                            .with_message(format!("Declared `{parent_visibility}` here.")),
+                    )
+                    .with_note("An override keeps the access level of the property it replaces, as spec section 6.1 says.")
+                    .with_help(format!("Declare the override `{parent_visibility}`.")),
+                );
             }
 
             if (property_metadata.write_visibility != property_metadata.read_visibility
@@ -3491,19 +3533,54 @@ fn check_class_like_properties<'ctx, A>(
                     let property_name = property_metadata.name.0;
                     let class_name = class_like_metadata.original_name;
 
-                    // Every PHP# field has a type, so it cannot replace an untyped PHP property yet.
+                    // A PHP# field over an untyped PHP property writes a type the engine drops when the class links, so
+                    // it fits the parent's `@var` type, or any type without one, spec section 6.1. A property keeps its
+                    // written type, which PHP refuses there, so it cannot replace an untyped PHP property yet.
                     if context.dialect.is_sharp() {
-                        context.collector.report_with_code(
-                            IssueCode::NotSupportedYet,
-                            Issue::error(format!(
-                                "A field that replaces the untyped PHP property `{parent_class_name}::{property_name}` is not supported yet."
-                            ))
-                            .with_annotation(
-                                Annotation::primary(declaring_type.span)
-                                    .with_message("PHP refuses a type the parent property does not have."),
-                            )
-                            .with_help("Rename the field, or give the PHP property a type."),
-                        );
+                        if has_accessors(members, property_name) {
+                            context.collector.report_with_code(
+                                IssueCode::NotSupportedYet,
+                                Issue::error(format!(
+                                    "A property that replaces the untyped PHP property `{parent_class_name}::{property_name}` is not supported yet."
+                                ))
+                                .with_annotation(
+                                    Annotation::primary(declaring_type.span)
+                                        .with_message("PHP refuses a type the parent property does not have."),
+                                )
+                                .with_help("Rename the property, or give the PHP property a type."),
+                            );
+                        } else if let Some(parent_type) =
+                            parent_property.type_metadata.as_ref().filter(|t| t.from_docblock)
+                        {
+                            let parent_type_union = localize_parent_type(
+                                context.codebase,
+                                class_like_metadata,
+                                parent_metadata.name,
+                                &parent_type.type_union,
+                            );
+
+                            if !is_type_compatible(context.codebase, &declaring_type.type_union, &parent_type_union) {
+                                let declaring_type_id = declaring_type.type_union.get_id();
+                                let parent_type_id = parent_type_union.get_id();
+
+                                context.collector.report_with_code(
+                                    IssueCode::IncompatiblePropertyType,
+                                    Issue::error(format!(
+                                        "The override `{class_name}::{property_name}` has type `{declaring_type_id}`, which does not fit `{parent_type_id}`, the type of `{parent_class_name}::{property_name}`."
+                                    ))
+                                    .with_annotation(
+                                        Annotation::primary(declaring_type.span)
+                                            .with_message(format!("`{declaring_type_id}` is written here.")),
+                                    )
+                                    .with_annotation(
+                                        Annotation::secondary(parent_type.span)
+                                            .with_message(format!("`{parent_type_id}` is the parent's `@var` type.")),
+                                    )
+                                    .with_note("PHP does not check this property's type, so the override's type must fit the one the parent's code relies on.")
+                                    .with_help(format!("Write a type that fits `{parent_type_id}`.")),
+                                );
+                            }
+                        }
 
                         continue;
                     }

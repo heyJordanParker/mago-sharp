@@ -6,6 +6,7 @@ use mago_reporting::Issue;
 use mago_span::Span;
 use mago_word::Word;
 use mago_word::WordSet;
+use mago_word::concat_word;
 use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
@@ -85,9 +86,23 @@ pub(crate) fn check_property_write<A>(
         return;
     };
 
-    let Some(function_like) = block_context.scope.get_function_like() else {
+    // A PHP# accessor body writes another property as a method of its class does, and writes its own property's
+    // storage through `field`, which its get-only property allows.
+    let function_like = block_context.scope.get_function_like();
+    let accessor = match (function_like, block_context.scope.get_property_hook()) {
+        (None, Some((accessor_property, hook))) if context.dialect.is_sharp() => {
+            if accessor_property == property_name {
+                return;
+            }
+
+            Some(concat_word!(accessor_property.as_bytes(), b"::", hook.name.as_bytes()))
+        }
+        _ => None,
+    };
+    let Some(current_method) = function_like.map(|function_like| function_like.name).or(accessor) else {
         return;
     };
+    let method_metadata = function_like.and_then(|function_like| function_like.method_metadata.as_ref());
 
     let property_can_be_null =
         property_metadata.type_declaration_metadata.as_ref().is_none_or(|metadata| metadata.type_union.can_be_null());
@@ -96,16 +111,16 @@ pub(crate) fn check_property_write<A>(
     let guard_proves_uninitialized = !property_can_be_null
         && property_access_id.is_some_and(|id| block_context.definitely_uninitialized_property_ids.contains(&id));
 
-    let is_constructor = function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor);
-    let is_clone_reinitialization = function_like.method_metadata.is_some()
+    let is_constructor = method_metadata.is_some_and(|method| method.is_constructor);
+    let is_clone_reinitialization = method_metadata.is_some()
         && context.settings.version.is_supported(Feature::ReadonlyPropertyReinitializationInClone)
-        && function_like.name.as_bytes().eq_ignore_ascii_case(b"__clone");
+        && current_method.as_bytes().eq_ignore_ascii_case(b"__clone");
 
-    let is_class_initializer = function_like.method_metadata.is_some()
+    let is_class_initializer = method_metadata.is_some()
         && context
             .codebase
             .get_class_like(current_class.as_bytes())
-            .is_some_and(|metadata| context.is_class_initializer_for(metadata, function_like.name));
+            .is_some_and(|metadata| context.is_class_initializer_for(metadata, current_method));
 
     let mut local_state = if guard_proves_uninitialized {
         LocalInitializationState::Uninitialized
@@ -170,7 +185,7 @@ pub(crate) fn check_property_write<A>(
 
     artifacts.pending_readonly_property_writes.push(PendingReadonlyPropertyWrite {
         current_class,
-        current_method: function_like.name,
+        current_method,
         declaring_class,
         property_name,
         access_span,

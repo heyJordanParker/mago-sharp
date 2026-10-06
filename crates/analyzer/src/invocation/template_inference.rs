@@ -35,6 +35,7 @@ use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_array_value_parameter;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::TemplateResult;
@@ -344,11 +345,12 @@ fn infer_templates_from_input_and_container_types<A>(
                                         }
                                     }
 
+                                    // A PHP# `Map` keyed by a backed enum reaches plain PHP as its backing values.
                                     if let Some(input_key_type) = input_key_type {
                                         infer_templates_from_input_and_container_types(
                                             context,
                                             &container_parameter.0,
-                                            &input_key_type,
+                                            &get_backing_key_type(&input_key_type, context.codebase),
                                             template_result,
                                             options,
                                             violations,
@@ -555,7 +557,7 @@ fn infer_templates_from_input_and_container_types<A>(
                     infer_templates_from_input_and_container_types(
                         context,
                         container_iterable.get_key_type(),
-                        &input_params.0,
+                        &get_backing_key_type(&input_params.0, context.codebase),
                         template_result,
                         options,
                         violations,

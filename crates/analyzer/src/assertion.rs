@@ -25,6 +25,7 @@ use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_numeric_string;
 use mago_codex::ttype::get_true;
 use mago_codex::ttype::union::TUnion;
+use mago_names::ResolvedNames;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -37,8 +38,10 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::Node;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -70,6 +73,14 @@ where
     A: Arena,
 {
     expression = unwrap_expression(expression);
+
+    // A PHP# `is` asserts what the PHP it runs as asserts.
+    if let Expression::Is(_) = expression
+        && let Some(PhpShape { php: Node::Expression(php), .. }) =
+            assertion_context.php_shape(Node::Expression(expression))
+    {
+        return scrape_assertions(php, artifacts, assertion_context);
+    }
 
     let mut if_types = WordMap::default();
 
@@ -777,7 +788,8 @@ where
         return get_empty_array_equality_assertions(left, is_identity, right, assertion_context, empty_array_position);
     }
 
-    if let Some(enum_case_position) = has_enum_case_comparison(left, right, artifacts) {
+    if let Some(enum_case_position) = has_enum_case_comparison(left, right, artifacts, assertion_context.resolved_names)
+    {
         return get_enum_case_equality_assertions(left, right, assertion_context, artifacts, enum_case_position);
     }
 
@@ -869,7 +881,8 @@ where
         return get_empty_array_inequality_assertions(left, operator, right, assertion_context, empty_array_position);
     }
 
-    if let Some(enum_case_position) = has_enum_case_comparison(left, right, artifacts) {
+    if let Some(enum_case_position) = has_enum_case_comparison(left, right, artifacts, assertion_context.resolved_names)
+    {
         return get_enum_case_inequality_assertions(left, right, assertion_context, artifacts, enum_case_position);
     }
 
@@ -2205,24 +2218,27 @@ pub fn has_enum_case_comparison(
     left: &Expression,
     right: &Expression,
     artifacts: &AnalysisArtifacts,
+    resolved_names: &ResolvedNames<'_>,
 ) -> Option<OtherValuePosition> {
-    if let Expression::Access(Access::ClassConstant(class_constant_access)) = unwrap_expression(right)
-        && artifacts
-            .get_expression_type(class_constant_access)
-            .is_some_and(mago_codex::ttype::union::TUnion::is_single_enum_case)
-    {
-        return Some(OtherValuePosition::Right);
-    }
+    let is_enum_case = |expression: &Expression<'_>| {
+        let expression = unwrap_expression(expression);
+        let is_class_constant = match expression {
+            Expression::Access(Access::ClassConstant(_)) => true,
+            // A PHP# `Class.y` read, which runs as `Class::y`.
+            Expression::Access(Access::Property(access)) => resolved_names.static_property_class(access).is_some(),
+            _ => false,
+        };
 
-    if let Expression::Access(Access::ClassConstant(class_constant_access)) = unwrap_expression(left)
-        && artifacts
-            .get_expression_type(class_constant_access)
-            .is_some_and(mago_codex::ttype::union::TUnion::is_single_enum_case)
-    {
-        return Some(OtherValuePosition::Left);
-    }
+        is_class_constant && artifacts.get_expression_type(expression).is_some_and(TUnion::is_single_enum_case)
+    };
 
-    None
+    if is_enum_case(right) {
+        Some(OtherValuePosition::Right)
+    } else if is_enum_case(left) {
+        Some(OtherValuePosition::Left)
+    } else {
+        None
+    }
 }
 
 fn has_literal_operand(

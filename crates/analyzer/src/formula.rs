@@ -13,6 +13,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::*;
+use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -165,6 +166,22 @@ where
 {
     ensure_sufficient_stack(|| {
         let expression = unwrap_expression(conditional);
+
+        // A PHP# `is` narrows as the PHP it runs as, whose `!`, `&&` and `||` the formula takes apart.
+        if let Expression::Is(_) = expression
+            && let Some(PhpShape { php: Node::Expression(php), .. }) =
+                assertion_context.php_shape(Node::Expression(expression))
+        {
+            return get_base_formula(
+                conditional_object_id,
+                creating_object_id,
+                php,
+                assertion_context,
+                artifacts,
+                algebra_thresholds,
+                formula_size_threshold,
+            );
+        }
 
         if let Expression::Binary(binary) = expression {
             if matches!(binary.operator, BinaryOperator::And(_) | BinaryOperator::LowAnd(_)) {

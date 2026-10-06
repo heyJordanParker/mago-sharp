@@ -64,7 +64,7 @@ where
 
     let is_sharp = context.program.dialect.is_sharp();
     if parameter.modifiers.contains_readonly()
-        || (is_sharp && parameter.hooks.as_ref().is_some_and(PropertyHookList::is_get_only))
+        || (is_sharp && parameter.hooks.as_ref().is_some_and(|accessors| is_sharp_get_only(accessors, context)))
     {
         flags |= MetadataFlags::READONLY;
     }
@@ -107,20 +107,8 @@ where
         parameter.hint.as_ref().map(|hint| get_type_metadata_from_hint(hint, Some(class_like_metadata.name), context)),
     );
 
-    // A PHP# accessor list declares an auto-property, which is plain storage with a set visibility.
-    if let Some(hook_list) = &parameter.hooks
-        && !is_sharp
-    {
-        for hook in &hook_list.hooks {
-            let mut hook_metadata =
-                scan_property_hook(hook, &property_metadata, context, scope, Some(class_like_metadata.original_name));
-            class_like_metadata.issues.extend(hook_metadata.take_issues());
-            property_metadata.hooks.insert(hook_metadata.name, hook_metadata);
-        }
-
-        let name_bytes = name.0.as_bytes();
-        let prop_name = name_bytes.strip_prefix(b"$").unwrap_or(name_bytes);
-        property_metadata.set_is_virtual(!hooks_reference_backing_store(&hook_list.hooks, prop_name));
+    if let Some(hook_list) = &parameter.hooks {
+        scan_hooks(hook_list, &mut property_metadata, class_like_metadata, context, scope);
     }
 
     let mut used_parameter_type_from_docblock = false;
@@ -327,7 +315,7 @@ where
                 flags |= MetadataFlags::HAS_DEFAULT;
             }
 
-            if is_sharp && hooked_property.hook_list.is_get_only() {
+            if is_sharp && is_sharp_get_only(&hooked_property.hook_list, context) {
                 flags |= MetadataFlags::READONLY;
             }
 
@@ -369,19 +357,7 @@ where
                 );
             }
 
-            // A PHP# accessor list declares an auto-property, which is plain storage with a set visibility.
-            if !is_sharp {
-                for hook in &hooked_property.hook_list.hooks {
-                    let mut hook_metadata =
-                        scan_property_hook(hook, &metadata, context, scope, Some(class_like_metadata.original_name));
-                    class_like_metadata.issues.extend(hook_metadata.take_issues());
-                    metadata.hooks.insert(hook_metadata.name, hook_metadata);
-                }
-
-                let name_bytes = name.0.as_bytes();
-                let prop_name = name_bytes.strip_prefix(b"$").unwrap_or(name_bytes);
-                metadata.set_is_virtual(!hooks_reference_backing_store(&hooked_property.hook_list.hooks, prop_name));
-            }
+            scan_hooks(&hooked_property.hook_list, &mut metadata, class_like_metadata, context, scope);
 
             if matches!(verdict.type_override, Some(TypeOverride::Untyped)) {
                 metadata.type_declaration_metadata = None;
@@ -453,8 +429,9 @@ where
     }
 }
 
-/// The write visibility of a PHP# auto-property: its `set` accessor's access modifier, or the property's own for a
-/// bare `set;`. A get-only property runs as `readonly`, which PHP writes as `protected(set)` at most.
+/// The write visibility of a PHP# property: its `set` accessor's access modifier, or the property's own for a `set`
+/// without one. A get-only property runs as `readonly`, or as `protected(set)` when its `get` has a body, so it is
+/// written at `protected` at most.
 fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibility) -> Visibility {
     match accessors.hooks.iter().find(|accessor| accessor.name.value == b"set") {
         Some(set) => {
@@ -463,6 +440,50 @@ fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibil
         None if read_visibility == Visibility::Public => Visibility::Protected,
         None => read_visibility,
     }
+}
+
+/// Scans a property's hooks and whether it is virtual. A PHP# accessor without a body is storage, as an
+/// auto-property's is, so only its bodies are hooks. A PHP# property is virtual when no accessor is auto and no body
+/// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`.
+fn scan_hooks<'arena, A>(
+    hook_list: &'arena PropertyHookList<'arena>,
+    property: &mut PropertyMetadata,
+    class_like_metadata: &mut ClassLikeMetadata,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) where
+    A: Arena,
+{
+    let is_sharp = context.program.dialect.is_sharp();
+    for hook in &hook_list.hooks {
+        if is_sharp && matches!(hook.body, PropertyHookBody::Abstract(_)) {
+            continue;
+        }
+
+        let mut hook_metadata =
+            scan_property_hook(hook, property, context, scope, Some(class_like_metadata.original_name));
+        class_like_metadata.issues.extend(hook_metadata.take_issues());
+        property.hooks.insert(hook_metadata.name, hook_metadata);
+    }
+
+    let is_virtual = if is_sharp {
+        !context.resolved_names.has_storage(hook_list)
+    } else {
+        let name_bytes = property.name.0.as_bytes();
+        let prop_name = name_bytes.strip_prefix(b"$").unwrap_or(name_bytes);
+
+        !hooks_reference_backing_store(&hook_list.hooks, prop_name)
+    };
+    property.set_is_virtual(is_virtual);
+}
+
+/// Whether a PHP# property is get-only with storage, which is set once, in the constructor, as `readonly` is. A
+/// get-only property without storage is computed on each read.
+fn is_sharp_get_only<A>(accessors: &PropertyHookList<'_>, context: &Context<'_, '_, A>) -> bool
+where
+    A: Arena,
+{
+    accessors.is_get_only() && context.resolved_names.has_storage(accessors)
 }
 
 /// The default of a PHP# field or auto-property with `set` of a nullable type written without an initial value: it

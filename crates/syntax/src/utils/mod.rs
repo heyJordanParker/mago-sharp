@@ -25,6 +25,7 @@ pub mod assignment;
 pub mod condition;
 pub mod control_flow;
 pub mod definition;
+pub mod pattern;
 pub mod reference;
 
 #[inline]

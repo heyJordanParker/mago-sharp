@@ -1,11 +1,16 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use foldhash::HashMap;
 
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -13,6 +18,7 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -291,6 +297,12 @@ pub fn verify_argument_type<'arena, A>(
         }
     }
 
+    // Spec section 11 checks a value from plain PHP where it enters PHP#, so a plain PHP caller passes the backing
+    // values where PHP# takes a `Map` keyed by a backed enum.
+    let backing_parameter_type =
+        if context.dialect.is_sharp() { None } else { get_backing_array_type(parameter_type, context.codebase) };
+    let parameter_type = backing_parameter_type.as_ref().unwrap_or(parameter_type);
+
     let mut union_comparison_result = ComparisonResult::new();
     let type_match_found =
         is_contained_by(context.codebase, input_type, parameter_type, true, true, false, &mut union_comparison_result);
@@ -443,6 +455,32 @@ pub fn verify_argument_type<'arena, A>(
 
         context.collector.report_with_code(kind, issue);
     }
+}
+
+/// Returns `parameter_type` with each `Map` keyed by a backed enum keyed by the backing type instead, or `None` when
+/// it has no such `Map`.
+fn get_backing_array_type(parameter_type: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
+    let backing_atomic = |atomic: &TAtomic| {
+        let TAtomic::Array(TArray::Keyed(keyed_array)) = atomic else {
+            return None;
+        };
+        let (key_type, value_type) = keyed_array.parameters.as_ref()?;
+        let Cow::Owned(backing_key_type) = get_backing_key_type(key_type, codebase) else {
+            return None;
+        };
+
+        let mut backing_array = keyed_array.clone();
+        backing_array.parameters = Some((Arc::new(backing_key_type), Arc::clone(value_type)));
+        Some(TAtomic::Array(TArray::Keyed(backing_array)))
+    };
+
+    if !parameter_type.types.iter().any(|atomic| backing_atomic(atomic).is_some()) {
+        return None;
+    }
+
+    Some(TUnion::from_vec(
+        parameter_type.types.iter().map(|atomic| backing_atomic(atomic).unwrap_or_else(|| atomic.clone())).collect(),
+    ))
 }
 
 /// Gets the element type when unpacking an argument with the spread operator. In PHP# a type that may not be iterable

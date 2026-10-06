@@ -8,7 +8,14 @@ use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::DirectVariable;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::Variable;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -34,6 +41,15 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
         if let Some(variable_id) = get_bare_name_variable_id(&self.name, context.resolved_names) {
             let resulting_type = read_variable(context, block_context, artifacts, variable_id.as_bytes(), self.span());
             artifacts.set_rc_expression_type(self, resulting_type);
+
+            return Ok(());
+        }
+
+        if context.resolved_names.binding(&self.name) == Some(Binding::Field) {
+            match field_storage(self, context, block_context) {
+                Some(storage) => storage.analyze(context, block_context, artifacts)?,
+                None => artifacts.set_expression_type(self, get_mixed()),
+            }
 
             return Ok(());
         }
@@ -124,4 +140,27 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
 
         Ok(())
     }
+}
+
+/// The property access that `field` runs as in its accessor: `$this->name`, which PHP reads and writes as the storage
+/// inside the property's own hook. It has the span of `field`, so its type is the type of `field`. Returns `None`
+/// outside an accessor, where the semantic checks report `field`.
+pub(crate) fn field_storage<'arena, A>(
+    field: &ConstantAccess<'arena>,
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+) -> Option<&'arena Expression<'arena>>
+where
+    A: Arena,
+{
+    let (property, _) = block_context.scope.get_property_hook()?;
+    let name = context.arena.alloc_slice_copy(property.as_bytes().strip_prefix(b"$")?);
+    let span = field.span();
+    let this = context.arena.alloc(Expression::Variable(Variable::Direct(DirectVariable { span, name: b"$this" })));
+
+    Some(context.arena.alloc(Expression::Access(Access::Property(PropertyAccess {
+        object: this,
+        arrow: span,
+        property: ClassLikeMemberSelector::Identifier(LocalIdentifier { span, value: name }),
+    }))))
 }

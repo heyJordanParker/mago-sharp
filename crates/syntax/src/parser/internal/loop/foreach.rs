@@ -8,6 +8,7 @@ use crate::cst::cst::ForeachValueTarget;
 use crate::cst::sequence::Sequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
+use crate::token::Precedence;
 use mago_allocator::prelude::*;
 
 impl<'arena, A> Parser<'_, 'arena, A>
@@ -18,7 +19,12 @@ where
         Ok(Foreach {
             foreach: self.expect_php_keyword(T!["foreach"])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
-            expression: self.arena.alloc(self.parse_expression()?),
+            // PHP#'s `as` operator binds as tightly as `<`, so the collection stops before it.
+            expression: self.arena.alloc(self.parse_expression_with_precedence(if self.dialect.is_sharp() {
+                Precedence::Comparison
+            } else {
+                Precedence::Lowest
+            })?),
             r#as: self.expect_keyword(T!["as"])?,
             target: self.parse_foreach_target()?,
             right_parenthesis: self.stream.eat_span(T![")"])?,

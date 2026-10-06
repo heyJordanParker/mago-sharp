@@ -26,6 +26,7 @@ use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
+use mago_names::binding::Binding;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -44,6 +45,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::constant_access::field_storage;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::localize_property_type;
@@ -1135,18 +1137,26 @@ where
 }
 
 /// The collection type the place a PHP# collection method is called on is declared with: a typed local, a parameter,
-/// or a property. The method takes values of that type, as `$list[] = $x` is checked against the declared property,
-/// so a value the analyzer saw assigned last, such as `[]` or a list of one implementation, narrows nothing.
-fn get_declared_collection<A>(
-    context: &Context<'_, '_, A>,
+/// a property, or `field`, the storage of the property whose accessor is running. The method takes values of that
+/// type, as `$list[] = $x` is checked against the declared property, so a value the analyzer saw assigned last, such
+/// as `[]` or a list of one implementation, narrows nothing.
+fn get_declared_collection<'arena, A>(
+    context: &Context<'_, 'arena, A>,
     block_context: &BlockContext<'_>,
     artifacts: &AnalysisArtifacts,
-    object: &Expression<'_>,
+    object: &Expression<'arena>,
 ) -> Option<TArray>
 where
     A: Arena,
 {
-    let declared = match object.unparenthesized() {
+    let object = match object.unparenthesized() {
+        Expression::ConstantAccess(access) if context.resolved_names.binding(&access.name) == Some(Binding::Field) => {
+            field_storage(access, context, block_context)?
+        }
+        object => object,
+    };
+
+    let declared = match object {
         Expression::ConstantAccess(access) => {
             let variable_id = get_bare_name_variable_id(&access.name, context.resolved_names)?;
 

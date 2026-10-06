@@ -665,6 +665,11 @@ fn apply_property_inheritance_work(codebase: &mut CodebaseMetadata, inheritance_
         };
 
         let Some(child_metadata) = codebase.class_likes.get(&class_name) else { continue };
+        // A PHP# field always writes its type, and the analyzer checks it against the parent's `@var` type.
+        if child_metadata.flags.is_sharp() {
+            continue;
+        }
+
         let parent_template_params =
             child_metadata.template_extended_parameters.get(&parent_class).cloned().unwrap_or_default();
 

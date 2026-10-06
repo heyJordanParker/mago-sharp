@@ -38,6 +38,7 @@ use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAliasAdaptation;
 use mago_syntax::cst::Try;
 use mago_syntax::cst::TryCatchClause;
+use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -217,6 +218,11 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
     #[inline]
     fn walk_in_for_of(&self, for_of: &'ast ForOf<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
         checker::sharp::check_for_of(for_of, context);
+    }
+
+    #[inline]
+    fn walk_in_type_pattern(&self, type_pattern: &'ast TypePattern<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
+        checker::sharp::check_type_pattern(type_pattern, context);
     }
 
     #[inline]

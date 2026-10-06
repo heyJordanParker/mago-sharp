@@ -699,6 +699,20 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
 }
 
 #[test]
+fn an_interface_property_is_not_supported_yet_with_or_without_accessor_bodies() {
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    public string name { get; }\n    public string label { get => \"label\"; }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:31 Interface virtual property `Named::label` must be abstract.",
+            "5:5 This class member is not supported yet in PHP#.",
+            "6:5 This class member is not supported yet in PHP#."
+        ]
+    );
+}
+
+#[test]
 fn a_constant_or_an_enum_case_is_read_in_a_default_a_constant_value_and_an_initial_value() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = Calc.MAX + 1;\n    private Order sort = Order.Ascending;\n\n    [Field(Mode.Write)]\n    public int run(Order extra = Order.Descending)\n    {\n        return 1;\n    }\n}\n";
 
@@ -1045,7 +1059,7 @@ fn a_promoted_member_follows_the_rules_of_the_same_declaration_in_the_class_body
         [
             "5:30 A PHP# property needs a `get` accessor.",
             "5:63 The `set` accessor of a PHP# property must be narrower than the property.",
-            "5:94 This accessor is not supported yet in PHP#.",
+            "5:90 The property `c` has no storage for the constructor to set: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
         ]
     );
 }
@@ -1113,6 +1127,57 @@ fn a_public_field_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int count = 0;\n}\n";
 
     assert_eq!(issues(code), ["5:5 A PHP# field cannot be `public`: a field is `private` or `protected`."]);
+}
+
+/// A field written `override` replaces a plain PHP parent's property, spec section 6.1, with the parent's access
+/// level, `public` included. The analyzer checks it against the parent.
+#[test]
+fn a_field_may_override_a_parent_property_with_its_access_level_and_a_constant_value() {
+    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> fillable = [\"number\", \"total\"];\n    public override bool timestamps = false;\n    protected override string table = \"orders\";\n    protected static override int count = 1 + 2;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// An override replaces the default of the parent's property, so it writes one: without it, the engine would give the
+/// property PHP's default for an untyped one, `null`, which its written type may not hold.
+#[test]
+fn an_override_without_an_initial_value_is_an_error() {
+    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> hidden;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["7:37 An override needs an initial value: it replaces the default of the parent's property."]
+    );
+}
+
+/// The parent's constructor may read an overridden property before this class's code runs, so an override's initial
+/// value is constant, which PHP stores as the default.
+#[test]
+fn an_override_whose_initial_value_is_not_constant_is_an_error() {
+    let code = "namespace App.Store;\n\nimport Lib.Calc;\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override List<string> fillable = this.columns();\n    protected override int perPage = Calc.make();\n\n    public List<string> columns() => [\"number\"];\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "8:48 The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
+            "9:38 The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
+        ]
+    );
+}
+
+/// `override` takes a field, the one member that replaces a plain PHP parent's property. A PHP# parent's property is
+/// overridden as a property, spec section 6.1, which is not supported yet.
+#[test]
+fn an_overriding_property_is_not_supported_yet() {
+    let code = "namespace App.Store;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override int views { get; set; } = 0;\n    public override string slug => \"order\";\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:25 Overriding a property is not supported yet in PHP#.",
+            "8:28 Overriding a property is not supported yet in PHP#.",
+        ]
+    );
 }
 
 #[test]
@@ -1344,21 +1409,144 @@ fn a_static_computed_property_or_one_without_an_access_modifier_is_not_supported
 
 #[test]
 fn properties_outside_the_slice_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int a { get; set; }\n    public static int b { get; }\n    public int c { private get; set; }\n    public int d { get => 1; }\n    public int e { get; set { } }\n    public int f { get; init; }\n    public int g = 0 { get; }\n    public int h { get; set(int value); }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int a { get; set; }\n    public static int b { get; }\n    public int c { private get; set; }\n    public abstract int d { get; }\n    public override int e { get => 1; }\n    public int f { get; init; }\n    public int g = 0 { get; }\n    public int h { get; set(int value); }\n}\n";
 
     assert_eq!(
         issues(code),
         [
+            "8:12 Property `Report::d` cannot be declared abstract",
             "5:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
             "6:23 A get-only static property is not supported yet in PHP#.",
             "7:20 This accessor is not supported yet in PHP#.",
-            "8:20 This accessor is not supported yet in PHP#.",
-            "9:25 This accessor is not supported yet in PHP#.",
+            "8:12 This modifier is not supported yet in PHP#.",
+            "9:25 Overriding a property is not supported yet in PHP#.",
             "10:25 This accessor is not supported yet in PHP#.",
             "11:16 An initial value before the accessors is not supported yet in PHP#.",
             "12:25 This accessor is not supported yet in PHP#.",
         ]
     );
+}
+
+/// Spec section 6.1: `get` and `set` take a body, written `=> expr;` or as a block, which uses `field` for the
+/// property's storage and `value` for the incoming value. Each accessor keeps its own access level, and a
+/// constructor parameter declares the same property.
+#[test]
+fn accessor_bodies_are_in_the_slice() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string name { get => field; set => field = trim(value); }\n    public int count { get; private set { if (value < 0) { throw new Negative(value); } field = value; } }\n    public int total { get { return this.count + 1; } }\n    public string label { get => this.name; set => this.rename(value); }\n    public List<string> tags { get => field; set { field = value; } } = [];\n    public Map<string, int> hits { get => field; set { field = value; field[\"all\"] = 1; field.set(\"one\", 1); } } = [:];\n    public int seen { get => field; set { field += value; field++; } } = 0;\n\n    public Report(public string title { get => field; set => field = value; })\n    {\n    }\n\n    public void rename(string text)\n    {\n        this.name = text;\n        this.tags.add(text);\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 24 puts `?` on a property as on a parameter, so a property with accessor bodies takes a nullable type.
+/// A property without storage is computed by its accessors, so it starts as nothing and needs no initial value even
+/// when get-only, and one whose body uses `field` starts as null as an auto-property with `set` does.
+#[test]
+fn nullable_properties_with_accessor_bodies_are_in_the_slice() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; }\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A lambda is a function of its own, so PHP would call the accessor again where it reads `$this->count`.
+#[test]
+fn field_inside_a_lambda_in_an_accessor_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int count { get { const read = () => field; const twice = () => () => field; return read(); } set; }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:49 `field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage.",
+            "5:82 `field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage.",
+        ]
+    );
+}
+
+/// PHP reads and writes the storage where a property's own accessor names it, while C# calls the accessor again, so
+/// the accessor writes `field`. A lambda calls the accessor again in both.
+#[test]
+fn the_property_read_through_this_inside_its_own_accessor_is_an_error_that_names_field() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int count { get => this.count + 1; set => this.count = value; }\n    public int other { get { const read = () => this.other; return read(); } }\n    public int size { get => (this).size + (this?.size ?? 0); }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:31 Write `field` instead of `this.count` inside `count`'s own accessor.",
+            "5:54 Write `field` instead of `this.count` inside `count`'s own accessor.",
+            "7:30 Write `field` instead of `this.size` inside `size`'s own accessor.",
+            "7:45 Write `field` instead of `this.size` inside `size`'s own accessor.",
+        ]
+    );
+}
+
+/// PHP gives a `get` hook the property's type and a `set` hook `void`, so `get` returns a value and `set` returns
+/// none. A lambda in an accessor returns for itself.
+#[test]
+fn a_get_returns_a_value_and_a_set_returns_none_as_php_hooks_do() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { return; } }\n    public int b { get => field; set { return value; } }\n    public int c { get => field; set { const run = () => { return 1; }; return; } }\n    public int d { get { const run = () => { return; }; return 1; } }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["5:26 A `get` accessor must return a value.", "6:47 A `set` accessor must not return a value.",]
+    );
+}
+
+/// A property uses `field` where an accessor body names it outside a lambda, in a nested block too, as php-src finds
+/// `$this->name` in a hook. `field` only in a lambda leaves the property without storage.
+#[test]
+fn field_in_a_nested_block_gives_storage_and_field_only_in_a_lambda_does_not() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { if (true) { return field; } return 0; } } = 1;\n    public int b { get { const read = () => field; return read(); } } = 2;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:45 `field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage.",
+            "6:73 The property `b` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
+        ]
+    );
+}
+
+/// Overriding a parent's property, a plain PHP one included, is outside the slice, with or without accessor bodies.
+#[test]
+fn a_property_with_accessor_bodies_that_overrides_a_parent_property_is_not_supported_yet() {
+    let code = "namespace App.Store;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public override string status { get => field; set => field = value; }\n}\n";
+
+    assert_eq!(issues(code), ["7:28 Overriding a property is not supported yet in PHP#."]);
+}
+
+/// A property whose accessors all have bodies and never use `field` has no storage, as PHP's virtual property, so
+/// neither an initial value nor a constructor can set it.
+#[test]
+fn an_initial_value_or_a_constructor_parameter_needs_storage() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get => 1; } = 2;\n    public int b { get => field; } = 3;\n    public int c { get; set => this.save(value); } = 4;\n\n    public Report(public int d { get => 1; set => this.save(value); }, public int e { get => field; })\n    {\n    }\n\n    public void save(int value)\n    {\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:34 The property `a` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
+            "9:30 The property `d` has no storage for the constructor to set: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
+        ]
+    );
+}
+
+/// A constant initial value is the property's default, but any other would run the `set` body in the constructor.
+#[test]
+fn an_initial_value_that_is_not_constant_on_a_property_whose_set_has_a_body_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#."
+        ]
+    );
+}
+
+#[test]
+fn a_static_property_with_an_accessor_body_is_not_supported_yet() {
+    let code =
+        "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n}\n";
+
+    assert_eq!(issues(code), ["5:12 A static property with an accessor body is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -1600,6 +1788,21 @@ fn a_typed_for_counter_takes_the_types_of_the_slice_but_not_void() {
 }
 
 #[test]
+fn a_typed_loop_variable_takes_the_types_of_the_slice_but_not_void() {
+    let code = leak(method(
+        "        for (const [Status status, int n] of Store.counts()) {\n        }\n        for (const Map<string, List<int>> group of Store.groups()) {\n        }\n        for (const void step of Store.values()) {\n        }\n        for (const iterable items of Store.values()) {\n        }\n        return 1;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "11:20 A local cannot be `void`: `void` is only a return type.",
+            "13:20 This type is not supported yet in PHP#.",
+        ]
+    );
+}
+
+#[test]
 fn a_nullable_void_reports_only_the_php_error() {
     let code = "class Report\n{\n    public void? run()\n    {\n    }\n}\n";
 
@@ -1669,7 +1872,10 @@ fn list_and_map_types_literals_and_indexes_are_in_the_slice() {
 fn an_interface_method_takes_and_returns_list_and_map_types() {
     let code = "interface Grouped\n{\n    List<int> sizes(Map<string, List<int>> groups);\n\n    Map<float, int> rounded();\n}\n";
 
-    assert_eq!(issues(code), ["5:9 A `Map`'s keys are `int` or `string`, as a PHP array's keys are."]);
+    assert_eq!(
+        issues(code),
+        ["5:9 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value."]
+    );
 }
 
 #[test]
@@ -1712,17 +1918,17 @@ fn a_type_with_type_arguments_other_than_list_or_map_is_not_supported_yet() {
     );
 }
 
+/// A named key type may have a backing value, which only the analyzer knows, so it passes here.
 #[test]
-fn a_map_key_that_is_not_int_or_string_is_an_error() {
+fn a_map_key_that_is_not_int_string_or_a_named_type_is_an_error() {
     let code = "class Report\n{\n    public Map<float, int> run(Map<Line, int> a, Map<int?, int> b, Map<string, Map<bool, int>> c)\n    {\n        return [:];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:16 A `Map`'s keys are `int` or `string`, as a PHP array's keys are.",
-            "3:36 A `Map`'s keys are `int` or `string`, as a PHP array's keys are.",
-            "3:54 A `Map`'s keys are `int` or `string`, as a PHP array's keys are.",
-            "3:84 A `Map`'s keys are `int` or `string`, as a PHP array's keys are.",
+            "3:16 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "3:54 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "3:84 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
         ]
     );
 }
@@ -1730,18 +1936,25 @@ fn a_map_key_that_is_not_int_or_string_is_an_error() {
 #[test]
 fn a_literal_element_outside_the_slice_is_not_supported_yet() {
     let code = leak(method(
-        "        const spread = [...extra];\n        const reference = [&extra];\n        const missing = [, extra];\n        let list = [1];\n        list[] = 2;\n        return 1;\n",
+        "        const reference = [&extra];\n        const missing = [, extra];\n        let list = [1];\n        list[] = 2;\n        return 1;\n",
     ));
 
     assert_eq!(
         issues(code),
         [
-            "7:25 This construct is not supported yet in PHP#.",
-            "8:28 This operator is not supported yet in PHP#.",
-            "9:26 This construct is not supported yet in PHP#.",
-            "11:9 This write target is not supported yet in PHP#.",
+            "7:28 This operator is not supported yet in PHP#.",
+            "8:26 This construct is not supported yet in PHP#.",
+            "10:9 This write target is not supported yet in PHP#.",
         ]
     );
+}
+
+/// The analyzer decides whether a spread is a `List`'s or a `Map`'s, since the spread value's type does.
+#[test]
+fn a_spread_in_a_literal_is_in_the_slice() {
+    let code = "class Report\n{\n    private List<int> all = [...Defaults.SMALL, 3, ...Defaults.LARGE];\n\n    public List<int> run(List<int> extra)\n    {\n        const all = [...extra, 1, ...this.all];\n        return all;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
@@ -2078,6 +2291,106 @@ fn an_enum_method_takes_collection_and_function_types_and_holds_lambdas_as_a_cla
     let code = "namespace App.Tenant;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public static Map<string, Status> byValue(List<Status> all)\n    {\n        const Function<string(Status)> key = s => s.value;\n        return all.associateBy(key);\n    }\n\n    public List<Function<bool()>> checks(List<Status> all)\n    {\n        List<Function<bool()>> checks = [];\n        for (let other of all) {\n            other = Status.Active;\n            checks.add(() => other === this);\n        }\n        return checks;\n    }\n}\n";
 
     assert_eq!(issues(code), ["18:30 This capture of a loop variable that changes is not supported yet in PHP#."]);
+}
+
+#[test]
+fn is_as_and_match_with_their_patterns_are_in_the_slice() {
+    let code = leak(method(
+        "        if (extra is int count && count > 0) {\n            return count;\n        }\n        const small = extra is >= 1 and < 10 or 100 ? 1 : 0;\n        const report = this as Report;\n        const counted = this is { count: int total } && total > 0;\n        match (extra) {\n            0 => {\n                return 0;\n            },\n            int n when n < 0 => this.run(n),\n            default => {},\n        }\n        return match (extra) {\n            < 0 => -1,\n            not (0 or 1) => 2,\n            default => small,\n        };\n",
+    ));
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+#[test]
+fn a_match_without_a_default_arm_is_an_error() {
+    let code =
+        leak(method("        match (extra) {\n            0 => this.run(1),\n        }\n        return extra;\n"));
+
+    assert_eq!(issues(code), ["7:9 A `match` needs a `default` arm."]);
+}
+
+#[test]
+fn a_match_whose_arms_name_class_values_leaves_its_default_to_the_analyzer() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Status;\n\nclass Report\n{\n    public string label(Status? status)\n    {\n        match (status) {\n            Status.Open when status !== null => {},\n            Status.Closed or null => {},\n        }\n        return match (status) {\n            Status.Open => \"open\",\n            0 => \"zero\",\n        };\n    }\n}\n";
+
+    assert_eq!(issues(code), ["13:16 A `match` needs a `default` arm."]);
+}
+
+#[test]
+fn a_second_default_arm_or_a_block_arm_in_a_match_that_gives_a_value_is_an_error() {
+    let code = leak(method(
+        "        const a = match (extra) {\n            default => 1,\n            default => 2,\n        };\n        return match (extra) {\n            0 => { return 1; },\n            default => 2,\n        };\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "9:13 A `match` has one `default` arm.",
+            "12:18 A block arm is only in a `match` statement: a `match` that gives a value gives an expression in each arm.",
+        ]
+    );
+}
+
+#[test]
+fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
+    let code =
+        leak(method("        const a = extra is int? n;\n        const b = extra as int?;\n        return extra;\n"));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:28 A type pattern is never nullable: null never matches a type.",
+            "8:28 `as` converts to a type that is not nullable or `void`.",
+        ]
+    );
+}
+
+#[test]
+fn a_nullable_type_pattern_names_the_null_check_to_write() {
+    let code = leak(method("        const a = extra is int? n;\n        return extra;\n"));
+
+    let help: Vec<_> = check("src/Report.sharp", code).into_iter().filter_map(|issue| issue.help).collect();
+    assert_eq!(help, ["Test for null with `x == null`, or join both with `or`, as in `x is int or null`."]);
+}
+
+#[test]
+fn a_pattern_variable_under_or_or_not_is_an_error_but_under_the_not_that_starts_is() {
+    let code = leak(method(
+        "        const a = extra is int x or string y;\n        const b = extra is not (int z and > 0);\n        const c = match (extra) {\n            not int w => 1,\n            default => 0,\n        };\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:32 `x` is declared under `or` or `not`, where the pattern can match without a value for it.",
+            "7:44 `y` is declared under `or` or `not`, where the pattern can match without a value for it.",
+            "10:21 `w` is declared under `or` or `not`, where the pattern can match without a value for it.",
+        ]
+    );
+}
+
+#[test]
+fn a_pattern_variable_used_where_its_test_does_not_hold_names_its_test() {
+    let code = leak(method(
+        "        if (extra is int count) {\n        }\n        if (extra is not int other) {\n            return other;\n        }\n        const a = match (extra) {\n            int n => n,\n            default => n,\n        };\n        return count;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "10:20 `other` exists only where `extra is not int other` is false.",
+            "14:24 `n` exists only where `int n` is true.",
+            "16:16 `count` exists only where `extra is int count` is true.",
+        ]
+    );
+}
+
+#[test]
+fn a_pattern_variable_named_this_is_an_error() {
+    let code = leak(method("        if (extra is int this) {\n        }\n        return extra;\n"));
+
+    assert_eq!(issues(code), ["7:26 Cannot name a pattern variable `this`: `this` is the object the method runs on."]);
 }
 
 #[test]

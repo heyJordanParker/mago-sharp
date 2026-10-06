@@ -800,6 +800,11 @@ where
     }
 
     fn report_unreachable_default_arm(&mut self, arm: &MatchDefaultArm) {
+        // A PHP# `match` needs `default` until enums with data and sealed interfaces make one exhaustive without it.
+        if self.context.dialect.is_sharp() {
+            return;
+        }
+
         self.context.collector.report_with_code(
             IssueCode::UnreachableMatchDefaultArm,
             Issue::warning("This default arm is unreachable.")

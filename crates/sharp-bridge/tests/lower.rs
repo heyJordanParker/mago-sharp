@@ -676,6 +676,610 @@ fn a_computed_property_is_a_property_with_a_short_get_hook() {
     );
 }
 
+/// The `PROP_GROUP` of each property a class declares, rendered.
+fn property_groups(lowered: &Lowered) -> Vec<String> {
+    lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_PROP_GROUP)
+        .map(|(index, _)| lowered.render(index as u32))
+        .collect()
+}
+
+/// ```php
+/// public string $name { get => $this->name; set { $this->name = $value; } }
+/// public private(set) int $count { set { $this->count = $value + 1; } }
+/// public int $total { get { return $this->count; } }
+/// public int $size { get => $this->size; set { $this->resize($value); } }
+/// public protected(set) int $kept = 3 { get => $this->kept * 2; }
+/// protected int $guarded { get => $this->guarded; }
+/// ```
+///
+/// Each accessor body is a hook: `get => expr;` keeps PHP's short body, and a block or `set => expr;` is a statement
+/// list, because PHP stores the result of a short `set` body. `field` is `$this->name` and `value` is `$value`. An auto
+/// accessor beside a body that uses `field` is PHP's backing store, so it lowers to nothing, and otherwise it is the
+/// hook over the storage, so the property stays backed. A public get-only property whose body uses `field` takes
+/// `protected(set)`, the set visibility of `readonly`, which PHP refuses on a hooked property. A protected one takes
+/// none, because PHP drops a set visibility equal to the property's own: `[4097]` is
+/// `ZEND_ACC_PUBLIC | ZEND_ACC_PRIVATE_SET`, `[2049]` is `ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED_SET` and `[2]` is
+/// `ZEND_ACC_PROTECTED`.
+#[test]
+fn accessor_bodies_are_property_hooks() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n\n    public void resize(int to)\n    {\n    }\n}\n",
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @3-3
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "name"
+                          null
+                          null
+                        PROPERTY_HOOK "set" @3-3
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "name"
+                              VAR
+                                ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [4097]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "count"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @4-4
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "count"
+                              BINARY_OP [1]
+                                VAR
+                                  ZVAL "value"
+                                ZVAL 1
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "total"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @5-5
+                          null
+                          null
+                          STMT_LIST
+                            RETURN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "count"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "size"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @6-6
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "size"
+                          null
+                          null
+                        PROPERTY_HOOK "set" @6-6
+                          null
+                          null
+                          STMT_LIST
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "resize"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [2049]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "kept"
+                      ZVAL 3
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @7-7
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            BINARY_OP [3]
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "kept"
+                              ZVAL 2
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [2]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "guarded"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @8-8
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "guarded"
+                          null
+                          null
+                  null
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// public protected(set) int $a { get { if ($this->ready()) { return $this->a; } return 0; } }
+/// ```
+///
+/// `field` in a nested block keeps a property backed, as php-src finds `$this->a` there, so the get-only property
+/// takes `protected(set)`. `field` only in a lambda leaves a property virtual, and the checker refuses the lambda, so
+/// the file lowers to the error and no nodes.
+#[test]
+fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is_refused() {
+    let nested = Lowered::new(
+        "class Report\n{\n    public int a { get { if (this.ready()) { return field; } return 0; } }\n\n    public bool ready()\n    {\n        return true;\n    }\n}\n",
+    );
+    let lambda =
+        Lowered::new("class Report\n{\n    public int b { get { const read = () => field; return read(); } }\n}\n");
+
+    assert_eq!(
+        property_groups(&nested),
+        [indoc! {r#"
+            PROP_GROUP [2049]
+              ZVAL [1] "int"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "a"
+                  null
+                  null
+                  STMT_LIST
+                    PROPERTY_HOOK "get" @3-3
+                      null
+                      null
+                      STMT_LIST
+                        IF
+                          IF_ELEM
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "ready"
+                              ARG_LIST
+                            STMT_LIST
+                              RETURN
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "a"
+                        RETURN
+                          ZVAL 0
+                      null
+                      null
+              null
+        "#}]
+    );
+    assert_eq!(
+        lambda.diagnostics(),
+        [
+            "3:45 compile error: `field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage."
+        ]
+    );
+    assert_eq!(lambda.unit().node_count, 0);
+}
+
+/// ```php
+/// public int $size { get => $this->size; set { $this->size = $value; } }
+/// ```
+///
+/// An auto accessor beside a body that does not use `field` is the hook over the storage, so PHP sees a backed
+/// property, as C# does.
+#[test]
+fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public int size { get => this.read(); set; }\n\n    public int read()\n    {\n        return 1;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [indoc! {r#"
+            PROP_GROUP [1]
+              ZVAL [1] "int"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "size"
+                  null
+                  null
+                  STMT_LIST
+                    PROPERTY_HOOK "get" @3-3
+                      null
+                      null
+                      PROPERTY_HOOK_SHORT_BODY
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "read"
+                          ARG_LIST
+                      null
+                      null
+                    PROPERTY_HOOK "set" @3-3
+                      null
+                      null
+                      STMT_LIST
+                        ASSIGN
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "size"
+                          VAR
+                            ZVAL "value"
+                      null
+                      null
+              null
+        "#}]
+    );
+}
+
+/// ```php
+/// public function __construct(
+///     public string $title { get => $this->title; set { $this->title = \trim($value); } },
+///     public protected(set) int $id { get => $this->id; },
+/// ) {}
+/// ```
+///
+/// A property declared on a constructor parameter carries its hooks as the parameter's last child.
+#[test]
+fn a_promoted_property_with_accessor_bodies_is_a_promoted_parameter_with_hooks() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public Report(public string title { get => field; set => field = trim(value); }, public int id { get => field; })\n    {\n    }\n}\n",
+    );
+    let parameters: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_PARAM)
+        .map(|(index, _)| lowered.render(index as u32))
+        .collect();
+
+    assert_eq!(
+        parameters,
+        [
+            indoc! {r#"
+                PARAM [1]
+                  ZVAL [1] "string"
+                  ZVAL "title"
+                  null
+                  null
+                  null
+                  STMT_LIST
+                    PROPERTY_HOOK "get" @3-3
+                      null
+                      null
+                      PROPERTY_HOOK_SHORT_BODY
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "title"
+                      null
+                      null
+                    PROPERTY_HOOK "set" @3-3
+                      null
+                      null
+                      STMT_LIST
+                        ASSIGN
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "title"
+                          CALL
+                            ZVAL "trim"
+                            ARG_LIST
+                              VAR
+                                ZVAL "value"
+                      null
+                      null
+            "#},
+            indoc! {r#"
+                PARAM [2049]
+                  ZVAL [1] "int"
+                  ZVAL "id"
+                  null
+                  null
+                  null
+                  STMT_LIST
+                    PROPERTY_HOOK "get" @3-3
+                      null
+                      null
+                      PROPERTY_HOOK_SHORT_BODY
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "id"
+                      null
+                      null
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// public int $price = 0 { set { if ($value < 0) { throw new \InvalidArgumentException("negative"); } $this->price = $value; } }
+/// public Address $shipping { get => $this->getAttribute("shipping"); set { $this->setAttribute("shipping", $value); } }
+/// ```
+///
+/// A `set` block that validates `value` and writes `field` is PHP's `set` hook over the storage, beside which `get;`
+/// is the backing store. Accessors over a plain PHP parent's methods never use `field`, so the property is virtual.
+#[test]
+fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() {
+    let lowered = Lowered::new(
+        "import Lib.Model;\nimport InvalidArgumentException;\n\nclass Order : Model\n{\n    public int price { get; set { if (value < 0) { throw new InvalidArgumentException(\"negative\"); } field = value; } } = 0;\n    public Address shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n}\n\nclass Address\n{\n}\n",
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "price"
+                      ZVAL 0
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @6-6
+                          null
+                          null
+                          STMT_LIST
+                            IF
+                              IF_ELEM
+                                BINARY_OP [20]
+                                  VAR
+                                    ZVAL "value"
+                                  ZVAL 0
+                                STMT_LIST
+                                  THROW
+                                    NEW
+                                      ZVAL "InvalidArgumentException"
+                                      ARG_LIST
+                                        ZVAL "negative"
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "price"
+                              VAR
+                                ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL "Address"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "shipping"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @7-7
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "getAttribute"
+                              ARG_LIST
+                                ZVAL "shipping"
+                          null
+                          null
+                        PROPERTY_HOOK "set" @7-7
+                          null
+                          null
+                          STMT_LIST
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "setAttribute"
+                              ARG_LIST
+                                ZVAL "shipping"
+                                VAR
+                                  ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+        ]
+    );
+}
+
+/// The PHP twin:
+///
+/// ```php
+/// public ?Address $shipping { get => $this->getAttribute("shipping"); set { $this->setAttribute("shipping", $value); } }
+/// public ?string $note = null { get => $this->note; set { $this->note = $value; } }
+/// public ?string $summary { get => $this->note; }
+/// ```
+///
+/// A nullable property with accessor bodies takes the nullable type any `T?` lowers to. One whose body uses `field`
+/// starts as null, so it takes the default `null`, as a settable auto-property does. One without storage is virtual,
+/// and PHP refuses a default on a virtual property, so it takes none, get-only or not. `[256]` is `ZEND_TYPE_NULLABLE`
+/// on a class name, and `[257]` is `ZEND_NAME_NOT_FQ | ZEND_TYPE_NULLABLE`.
+#[test]
+fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
+    let lowered = Lowered::new(
+        "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; }\n    public string? summary { get => this.note; }\n}\n\nclass Address\n{\n}\n",
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [256] "Address"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "shipping"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @5-5
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "getAttribute"
+                              ARG_LIST
+                                ZVAL "shipping"
+                          null
+                          null
+                        PROPERTY_HOOK "set" @5-5
+                          null
+                          null
+                          STMT_LIST
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "setAttribute"
+                              ARG_LIST
+                                ZVAL "shipping"
+                                VAR
+                                  ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [257] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "note"
+                      ZVAL null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @6-6
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "note"
+                          null
+                          null
+                        PROPERTY_HOOK "set" @6-6
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "note"
+                              VAR
+                                ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [257] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "summary"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @7-7
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "note"
+                          null
+                          null
+                  null
+            "#},
+        ]
+    );
+}
+
 /// ```php
 /// public function __construct(private int $count, public readonly int $id, protected string $name, int $extra) {}
 /// ```
@@ -1126,6 +1730,52 @@ fn a_list_or_map_type_is_the_array_type() {
 }
 
 /// ```php
+/// $counts = [\Lib\Calc::Active => 1];
+/// $counts[\Lib\Calc::Closed] = 2;
+/// return $counts[\Lib\Calc::Active] ?? 0;
+/// ```
+///
+/// A `Map` keyed by a backed enum lowers as any `Map` does. The engine stores each case as its backing value, because
+/// `ext/sharp` marks every PHP# index and literal.
+#[test]
+fn a_map_keyed_by_a_backed_enum_lowers_as_any_map() {
+    assert_eq!(
+        body(
+            "        Map<Calc, int> counts = [Calc.Active: 1];\n        counts[Calc.Closed] = 2;\n        return counts[Calc.Active] ?? 0;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "counts"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL 1
+                    CLASS_CONST [32768]
+                      ZVAL "Lib\\Calc"
+                      ZVAL "Active"
+              ASSIGN
+                DIM
+                  VAR
+                    ZVAL "counts"
+                  CLASS_CONST [32768]
+                    ZVAL "Lib\\Calc"
+                    ZVAL "Closed"
+                ZVAL 2
+              RETURN
+                COALESCE
+                  DIM
+                    VAR
+                      ZVAL "counts"
+                    CLASS_CONST [32768]
+                      ZVAL "Lib\\Calc"
+                      ZVAL "Active"
+                  ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
 /// public function apply(\Closure $step, ?\Closure $other = null): \Closure { return $step; }
 /// ```
 ///
@@ -1564,6 +2214,39 @@ fn a_lambda_takes_union_and_variadic_parameters_and_a_spread_call() {
 }
 
 /// ```php
+/// $all = [...$extra, 1, ...\Lib\Calc::make()];
+/// ```
+///
+/// A spread in a literal is an `UNPACK` of its value among the literal's elements, as php-src's grammar builds
+/// `[...$extra]`.
+#[test]
+fn a_spread_in_a_literal_is_an_unpack_among_its_elements() {
+    assert_eq!(
+        body("        const all = [...extra, 1, ...Calc.make()];\n        return 1;\n"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "all"
+                ARRAY [3]
+                  UNPACK
+                    VAR
+                      ZVAL "extra"
+                  ARRAY_ELEM
+                    ZVAL 1
+                    null
+                  UNPACK
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "make"
+                      ARG_LIST
+              RETURN
+                ZVAL 1
+        "#}
+    );
+}
+
+/// ```php
 /// \Lib\Calc::sum(...$extra);
 /// $this->run(1, ...$extra);
 /// $made = new \Lib\Calc(...$extra);
@@ -1830,6 +2513,56 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
                           null
                 null
                 null
+        "#}
+    );
+}
+
+/// ```php
+/// #[\Override] protected string $table = 'orders';   // runs as `protected $table` when Model's $table has no type
+/// #[\Override] public bool $timestamps = false;
+/// ```
+///
+/// An override is a field with `#[\Override]`, so PHP checks at link time that the parent has the property, and with
+/// php-sharp's `ZEND_ACC_TYPE_FOLLOWS_PARENT`, `1 << 13`. One file cannot tell whether the parent's property has a
+/// type, so the engine drops the written type when the class links if it has none. `[8194]` is
+/// `ZEND_ACC_PROTECTED | ZEND_ACC_TYPE_FOLLOWS_PARENT`, and `[8193]` is `ZEND_ACC_PUBLIC | ZEND_ACC_TYPE_FOLLOWS_PARENT`.
+#[test]
+fn an_override_is_a_field_marked_to_follow_the_parent_type() {
+    let lowered = Lowered::new(
+        "class Order : Model\n{\n    protected override string table = \"orders\";\n    public override bool timestamps = false;\n}\n",
+    );
+    let class = lowered.child(lowered.unit().root, 1);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [8194]
+                ZVAL [1] "string"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "table"
+                    ZVAL "orders"
+                    null
+                    null
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Override"
+                      null
+              PROP_GROUP [8193]
+                ZVAL [1] "bool"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "timestamps"
+                    ZVAL false
+                    null
+                    null
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Override"
+                      null
         "#}
     );
 }
@@ -3076,6 +3809,85 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 }
 
 /// ```php
+/// foreach ($extra as $status => $n) {
+///     $status = \Lib\Calc::from($status);
+///     {
+///         $extra += $n;
+///     }
+/// }
+/// foreach ($extra as $sku => $n) {
+///     $sku = (string) $sku;
+///     {
+///     }
+/// }
+/// foreach ($extra as $key => $n) {
+/// }
+/// ```
+///
+/// A `Map` keyed by a backed enum holds each key as its backing value, so a loop whose key names a class reads the key
+/// back as that class's case, through `from` on the class as it runs. PHP stores an all-digit `string` key as an
+/// `int`, so a key written `string` reads back through `(string)`. An `int` key type changes nothing.
+#[test]
+fn a_loop_key_written_as_a_class_or_string_reads_back_through_from_or_a_cast() {
+    assert_eq!(
+        body(
+            "        for (const [Calc status, int n] of extra) {\n            extra += n;\n        }\n        for (const [string sku, n] of extra) {\n        }\n        for (const [int key, n] of extra) {\n        }\n        return 1;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              FOREACH
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "n"
+                VAR
+                  ZVAL "status"
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "status"
+                    STATIC_CALL
+                      ZVAL "Lib\\Calc"
+                      ZVAL "from"
+                      ARG_LIST
+                        VAR
+                          ZVAL "status"
+                  STMT_LIST
+                    ASSIGN_OP [1]
+                      VAR
+                        ZVAL "extra"
+                      VAR
+                        ZVAL "n"
+              FOREACH
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "n"
+                VAR
+                  ZVAL "sku"
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "sku"
+                    CAST [6]
+                      VAR
+                        ZVAL "sku"
+                  STMT_LIST
+              FOREACH
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "n"
+                VAR
+                  ZVAL "key"
+                STMT_LIST
+              RETURN
+                ZVAL 1
+        "#}
+    );
+}
+
+/// ```php
 /// throw new \App\Tenant\Failure($extra);
 /// return $extra ?? throw new \App\Tenant\Failure(0);
 /// ```
@@ -3608,6 +4420,392 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
               null
         "#}
     );
+}
+
+/// ```php
+/// $a = $extra instanceof \Lib\Calc; $b = \is_int($extra); $c = \is_string($extra);
+/// $d = (${'match#1'} = $this->total()) instanceof \Lib\Calc;
+/// ```
+///
+/// A class is tested with `instanceof` on its full name, and a built-in type with the global `is_` function the
+/// engine compiles to `TYPE_CHECK`. A value that is not a local or a parameter is tested through a variable PHP#
+/// cannot name, so the analyzer never narrows a property.
+#[test]
+fn is_without_a_name_is_instanceof_or_a_type_check() {
+    assert_eq!(
+        body(
+            "        const a = extra is Calc;\n        const b = extra is int;\n        const c = extra is string;\n        const d = this.total() is Calc;\n        return extra;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                INSTANCEOF
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Lib\\Calc"
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                CALL
+                  ZVAL "is_int"
+                  ARG_LIST
+                    VAR
+                      ZVAL "extra"
+              ASSIGN
+                VAR
+                  ZVAL "c"
+                CALL
+                  ZVAL "is_string"
+                  ARG_LIST
+                    VAR
+                      ZVAL "extra"
+              ASSIGN
+                VAR
+                  ZVAL "d"
+                INSTANCEOF
+                  ASSIGN
+                    VAR
+                      ZVAL "match#1"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "total"
+                      ARG_LIST
+                  ZVAL "Lib\\Calc"
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
+/// if (($calc = $extra) instanceof \Lib\Calc) { return 1; }
+/// if (!\is_int($count = $extra)) { return 0; }
+/// return $count;
+/// ```
+///
+/// A pattern's variable is assigned the tested value before the test. The binder lets code read it only where the
+/// test holds, so the assignment is never seen where it fails.
+#[test]
+fn is_with_a_name_assigns_the_name_before_the_test() {
+    assert_eq!(
+        body(
+            "        if (extra is Calc calc) {\n            return 1;\n        }\n        if (extra is not int count) {\n            return 0;\n        }\n        return count;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  INSTANCEOF
+                    ASSIGN
+                      VAR
+                        ZVAL "calc"
+                      VAR
+                        ZVAL "extra"
+                    ZVAL "Lib\\Calc"
+                  STMT_LIST
+                    RETURN
+                      ZVAL 1
+              IF
+                IF_ELEM
+                  UNARY_OP [14]
+                    CALL
+                      ZVAL "is_int"
+                      ARG_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "count"
+                          VAR
+                            ZVAL "extra"
+                  STMT_LIST
+                    RETURN
+                      ZVAL 0
+              RETURN
+                VAR
+                  ZVAL "count"
+        "#}
+    );
+}
+
+/// ```php
+/// $calc = $extra instanceof \Lib\Calc ? $extra : null;
+/// $made = (${'as#1'} = \Lib\Calc::make()) instanceof \Lib\Calc ? ${'as#1'} : null;
+/// ```
+///
+/// `as` reads a local or a parameter twice. Any other value is assigned to a variable PHP# cannot name, so it runs
+/// once.
+#[test]
+fn as_is_a_conditional_that_gives_the_value_or_null() {
+    assert_eq!(
+        body("        const calc = extra as Calc;\n        const made = Calc.make() as Calc;\n        return extra;\n"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "calc"
+                CONDITIONAL
+                  INSTANCEOF
+                    VAR
+                      ZVAL "extra"
+                    ZVAL "Lib\\Calc"
+                  VAR
+                    ZVAL "extra"
+                  ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "made"
+                CONDITIONAL
+                  INSTANCEOF
+                    ASSIGN
+                      VAR
+                        ZVAL "as#1"
+                      STATIC_CALL
+                        ZVAL "Lib\\Calc"
+                        ZVAL "make"
+                        ARG_LIST
+                    ZVAL "Lib\\Calc"
+                  VAR
+                    ZVAL "as#1"
+                  ZVAL null
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
+/// $limit = 10;
+/// $a = $extra === 200;
+/// $b = $extra >= 1 && $extra < $limit || !($extra === -1);
+/// $c = $extra === $limit;
+/// $d = \is_object($extra) && (${'match#1'} = $extra->count) > 0 && \is_string($label = $extra->name);
+/// ```
+///
+/// A value is compared with `===`, a comparison keeps its operator, and `and`, `or` and `not` are `&&`, `||` and
+/// `!`. A bare name is the local's value when a local of that name is in scope. A properties pattern tests that the
+/// value is an object, then reads each property once.
+#[test]
+fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
+    assert_eq!(
+        body(
+            "        let limit = 10;\n        const a = extra is 200;\n        const b = extra is >= 1 and < limit or not -1;\n        const c = extra is limit;\n        const d = extra is { count: > 0, name: string label };\n        return extra;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "limit"
+                ZVAL 10
+              ASSIGN
+                VAR
+                  ZVAL "a"
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "extra"
+                  ZVAL 200
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                OR
+                  AND
+                    GREATER_EQUAL
+                      VAR
+                        ZVAL "extra"
+                      ZVAL 1
+                    BINARY_OP [20]
+                      VAR
+                        ZVAL "extra"
+                      VAR
+                        ZVAL "limit"
+                  UNARY_OP [14]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "extra"
+                      UNARY_MINUS
+                        ZVAL 1
+              ASSIGN
+                VAR
+                  ZVAL "c"
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "extra"
+                  VAR
+                    ZVAL "limit"
+              ASSIGN
+                VAR
+                  ZVAL "d"
+                AND
+                  AND
+                    CALL
+                      ZVAL "is_object"
+                      ARG_LIST
+                        VAR
+                          ZVAL "extra"
+                    GREATER
+                      ASSIGN
+                        VAR
+                          ZVAL "match#1"
+                        PROP
+                          VAR
+                            ZVAL "extra"
+                          ZVAL "count"
+                      ZVAL 0
+                  CALL
+                    ZVAL "is_string"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "label"
+                        PROP
+                          VAR
+                            ZVAL "extra"
+                          ZVAL "name"
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
+/// return match (true) {
+///     (${'match#1'} = $this->total()) === 0 => 1,
+///     \is_int($n = ${'match#1'}) && $n > 9 => $n,
+///     default => 2,
+/// };
+/// ```
+///
+/// A `match` that gives a value is PHP's `match (true)` with one condition per arm: its pattern's test, `&&` its
+/// `when` condition. The first test assigns the hidden variable.
+#[test]
+fn a_match_that_gives_a_value_is_a_match_of_true() {
+    assert_eq!(
+        body(
+            "        return match (this.total()) {\n            0 => 1,\n            int n when n > 9 => n,\n            default => 2,\n        };\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                MATCH
+                  ZVAL true
+                  MATCH_ARM_LIST
+                    MATCH_ARM
+                      EXPR_LIST
+                        BINARY_OP [16]
+                          ASSIGN
+                            VAR
+                              ZVAL "match#1"
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "total"
+                              ARG_LIST
+                          ZVAL 0
+                      ZVAL 1
+                    MATCH_ARM
+                      EXPR_LIST
+                        AND
+                          CALL
+                            ZVAL "is_int"
+                            ARG_LIST
+                              ASSIGN
+                                VAR
+                                  ZVAL "n"
+                                VAR
+                                  ZVAL "match#1"
+                          GREATER
+                            VAR
+                              ZVAL "n"
+                            ZVAL 9
+                      VAR
+                        ZVAL "n"
+                    MATCH_ARM
+                      null
+                      ZVAL 2
+        "#}
+    );
+}
+
+/// ```php
+/// if ($extra === 0) {
+///     return 1;
+/// } else if (\is_int($n = $extra) && $n > 9) $this->run($n); else {
+/// }
+/// ```
+///
+/// A `match` that starts a statement is `if`, `else if` per arm, and `else` for `default`. An arm that is an
+/// expression is its expression statement.
+#[test]
+fn a_match_that_starts_a_statement_is_an_if_list() {
+    assert_eq!(
+        body(
+            "        match (extra) {\n            0 => {\n                return 1;\n            },\n            int n when n > 9 => this.run(n),\n            default => {},\n        }\n        return extra;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "extra"
+                    ZVAL 0
+                  STMT_LIST
+                    RETURN
+                      ZVAL 1
+                IF_ELEM
+                  null
+                  IF
+                    IF_ELEM
+                      AND
+                        CALL
+                          ZVAL "is_int"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "n"
+                              VAR
+                                ZVAL "extra"
+                        GREATER
+                          VAR
+                            ZVAL "n"
+                          ZVAL 9
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "run"
+                        ARG_LIST
+                          VAR
+                            ZVAL "n"
+                    IF_ELEM
+                      null
+                      STMT_LIST
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// php-src gives the jump after a branch the line of its `IF_ELEM`, so each arm's `if` is on its pattern's line, as
+/// its PHP twin's is, and coverage never counts the line of the arm before it.
+#[test]
+fn each_arm_of_a_match_that_starts_a_statement_is_on_its_pattern_line() {
+    let lowered = Lowered::new(&method(
+        "        match (extra) {\n            0 => {},\n            1 => {},\n            default => {},\n        }\n        return extra;\n",
+    ));
+    let mut lines: Vec<u32> = lowered
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == sharp_kind::SHARP_AST_IF_ELEM)
+        .map(|node| node.line)
+        .collect();
+    lines.sort_unstable();
+
+    assert_eq!(lines, [10, 11, 11, 12]);
 }
 
 /// ```php
@@ -4171,7 +5369,6 @@ fn an_enum_method_lowers_a_list_literal_a_function_type_and_a_lambda_as_a_class_
     );
 }
 
-/// The child count `zend_ast_get_num_children` gives a fixed-size kind, or 5 for a declaration. `None` for a list.
 /// ```php
 /// enum Status: string
 /// {
@@ -4241,6 +5438,7 @@ fn an_enum_returns_self_and_holds_a_union_typed_constant() {
     );
 }
 
+/// The child count `zend_ast_get_num_children` gives a fixed-size kind, or 5 for a declaration. `None` for a list.
 fn fixed_child_count(kind: sharp_kind) -> Option<u32> {
     const IS_LIST: u32 = 1 << 7;
     const NUM_CHILDREN_SHIFT: u32 = 8;

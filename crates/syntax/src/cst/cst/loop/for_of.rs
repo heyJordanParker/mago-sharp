@@ -7,6 +7,7 @@ use crate::cst::cst::expression::Expression;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::statement::Statement;
+use crate::cst::cst::type_hint::Hint;
 
 /// Represents a PHP# `for … of` loop over a collection, whose loop variable `let` or `const` declares.
 ///
@@ -30,7 +31,7 @@ pub struct ForOf<'arena> {
 #[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum ForOfTarget<'arena> {
     /// Each value, as in `const line`.
-    Value(LocalIdentifier<'arena>),
+    Value(ForOfVariable<'arena>),
     /// Each key and value, as in `const [key, plan]`.
     KeyValue(ForOfKeyValueTarget<'arena>),
 }
@@ -40,10 +41,18 @@ pub enum ForOfTarget<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ForOfKeyValueTarget<'arena> {
     pub left_bracket: Span,
-    pub key: LocalIdentifier<'arena>,
+    pub key: ForOfVariable<'arena>,
     pub comma: Span,
-    pub value: LocalIdentifier<'arena>,
+    pub value: ForOfVariable<'arena>,
     pub right_bracket: Span,
+}
+
+/// Represents one loop variable of a PHP# `for … of` loop and its type when it is written, as in `Status status`.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct ForOfVariable<'arena> {
+    pub hint: Option<&'arena Hint<'arena>>,
+    pub name: LocalIdentifier<'arena>,
 }
 
 impl ForOf<'_> {
@@ -56,13 +65,19 @@ impl ForOf<'_> {
 }
 
 impl<'arena> ForOfTarget<'arena> {
-    /// The names the loop declares, the key first.
+    /// The variables the loop declares, the key first.
     #[must_use]
-    pub fn names(&self) -> Vec<&LocalIdentifier<'arena>> {
+    pub fn variables(&self) -> Vec<&ForOfVariable<'arena>> {
         match self {
             ForOfTarget::Value(value) => vec![value],
             ForOfTarget::KeyValue(key_value) => vec![&key_value.key, &key_value.value],
         }
+    }
+
+    /// The names the loop declares, the key first.
+    #[must_use]
+    pub fn names(&self) -> Vec<&LocalIdentifier<'arena>> {
+        self.variables().into_iter().map(|variable| &variable.name).collect()
     }
 }
 
@@ -75,7 +90,7 @@ impl HasSpan for ForOf<'_> {
 impl HasSpan for ForOfTarget<'_> {
     fn span(&self) -> Span {
         match self {
-            ForOfTarget::Value(value) => value.span,
+            ForOfTarget::Value(value) => value.span(),
             ForOfTarget::KeyValue(key_value) => key_value.span(),
         }
     }
@@ -84,5 +99,11 @@ impl HasSpan for ForOfTarget<'_> {
 impl HasSpan for ForOfKeyValueTarget<'_> {
     fn span(&self) -> Span {
         self.left_bracket.join(self.right_bracket)
+    }
+}
+
+impl HasSpan for ForOfVariable<'_> {
+    fn span(&self) -> Span {
+        self.hint.map_or(self.name.span, |hint| hint.span().join(self.name.span))
     }
 }

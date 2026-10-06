@@ -51,6 +51,7 @@ use crate::context::block::ReferenceConstraintSource;
 use crate::context::scope::var_has_root;
 use crate::context::scope::var_references_dynamic;
 use crate::error::AnalysisError;
+use crate::expression::constant_access::field_storage;
 use crate::expression::find_expression_logic_issues;
 use crate::formula::get_formula;
 use crate::resolver::static_property::StaticProperty;
@@ -375,6 +376,14 @@ where
     if let Some(target_expression_id) = target_expression_id {
         artifacts.record_loop_assignment_target(target_expression_id);
     }
+
+    // `field` is written as the property's storage, `$this->name`, which its accessor writes without calling `set`.
+    let target_expression = match target_expression {
+        Expression::ConstantAccess(field) if context.resolved_names.binding(&field.name) == Some(Binding::Field) => {
+            field_storage(field, context, block_context).unwrap_or(target_expression)
+        }
+        _ => target_expression,
+    };
 
     if let Some(source_expression) = source_expression {
         if source_expression.is_reference() != source_type.by_reference() {

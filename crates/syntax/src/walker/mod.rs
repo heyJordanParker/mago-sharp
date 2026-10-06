@@ -13,12 +13,14 @@ use crate::cst::cst::ArrayAccess;
 use crate::cst::cst::ArrayAppend;
 use crate::cst::cst::ArrayElement;
 use crate::cst::cst::ArrowFunction;
+use crate::cst::cst::As;
 use crate::cst::cst::Assignment;
 use crate::cst::cst::AssignmentOperator;
 use crate::cst::cst::Attribute;
 use crate::cst::cst::AttributeList;
 use crate::cst::cst::Binary;
 use crate::cst::cst::BinaryOperator;
+use crate::cst::cst::BinaryPattern;
 use crate::cst::cst::Block;
 use crate::cst::cst::BracedExpressionStringPart;
 use crate::cst::cst::Break;
@@ -36,6 +38,7 @@ use crate::cst::cst::ClosingTag;
 use crate::cst::cst::Closure;
 use crate::cst::cst::ClosureUseClause;
 use crate::cst::cst::ClosureUseClauseVariable;
+use crate::cst::cst::ComparisonPattern;
 use crate::cst::cst::CompositeString;
 use crate::cst::cst::ComputedProperty;
 use crate::cst::cst::Conditional;
@@ -73,6 +76,7 @@ use crate::cst::cst::ForColonDelimitedBody;
 use crate::cst::cst::ForOf;
 use crate::cst::cst::ForOfKeyValueTarget;
 use crate::cst::cst::ForOfTarget;
+use crate::cst::cst::ForOfVariable;
 use crate::cst::cst::Foreach;
 use crate::cst::cst::ForeachBody;
 use crate::cst::cst::ForeachColonDelimitedBody;
@@ -114,6 +118,7 @@ use crate::cst::cst::Instantiation;
 use crate::cst::cst::Interface;
 use crate::cst::cst::InterpolatedString;
 use crate::cst::cst::IntersectionHint;
+use crate::cst::cst::Is;
 use crate::cst::cst::IssetConstruct;
 use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
@@ -132,6 +137,7 @@ use crate::cst::cst::Match;
 use crate::cst::cst::MatchArm;
 use crate::cst::cst::MatchDefaultArm;
 use crate::cst::cst::MatchExpressionArm;
+use crate::cst::cst::MatchGuard;
 use crate::cst::cst::MaybeTypedUseItem;
 use crate::cst::cst::Method;
 use crate::cst::cst::MethodAbstractBody;
@@ -148,20 +154,29 @@ use crate::cst::cst::Namespace;
 use crate::cst::cst::NamespaceBody;
 use crate::cst::cst::NamespaceImplicitBody;
 use crate::cst::cst::NestedVariable;
+use crate::cst::cst::NotPattern;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
 use crate::cst::cst::OpeningTag;
 use crate::cst::cst::Parenthesized;
 use crate::cst::cst::ParenthesizedHint;
+use crate::cst::cst::ParenthesizedPattern;
 use crate::cst::cst::PartialApplication;
 use crate::cst::cst::PartialArgument;
 use crate::cst::cst::PartialArgumentList;
+use crate::cst::cst::Pattern;
+use crate::cst::cst::PatternMatch;
+use crate::cst::cst::PatternMatchArm;
+use crate::cst::cst::PatternMatchArmBody;
+use crate::cst::cst::PatternMatchDefaultArm;
+use crate::cst::cst::PatternMatchPatternArm;
 use crate::cst::cst::Pipe;
 use crate::cst::cst::PlaceholderArgument;
 use crate::cst::cst::PlainProperty;
 use crate::cst::cst::PositionalArgument;
 use crate::cst::cst::PrintConstruct;
+use crate::cst::cst::PropertiesPattern;
 use crate::cst::cst::Property;
 use crate::cst::cst::PropertyAbstractItem;
 use crate::cst::cst::PropertyAccess;
@@ -173,6 +188,7 @@ use crate::cst::cst::PropertyHookConcreteBody;
 use crate::cst::cst::PropertyHookConcreteExpressionBody;
 use crate::cst::cst::PropertyHookList;
 use crate::cst::cst::PropertyItem;
+use crate::cst::cst::PropertyPattern;
 use crate::cst::cst::QualifiedIdentifier;
 use crate::cst::cst::RequireConstruct;
 use crate::cst::cst::RequireOnceConstruct;
@@ -212,6 +228,7 @@ use crate::cst::cst::Try;
 use crate::cst::cst::TryCatchClause;
 use crate::cst::cst::TryFinallyClause;
 use crate::cst::cst::TypeOf;
+use crate::cst::cst::TypePattern;
 use crate::cst::cst::TypedUseItemList;
 use crate::cst::cst::TypedUseItemSequence;
 use crate::cst::cst::UnaryPostfix;
@@ -444,6 +461,7 @@ generate_ast_walker! {
             Statement::HaltCompiler(halt_compiler) => walker.walk_halt_compiler(halt_compiler, context),
             Statement::Unset(unset) => walker.walk_unset(unset, context),
             Statement::LocalDeclaration(local_declaration) => walker.walk_local_declaration(local_declaration, context),
+            Statement::PatternMatch(pattern_match) => walker.walk_pattern_match(pattern_match, context),
             Statement::Noop(_) => {
                 // Do nothing by default
             },
@@ -1431,14 +1449,22 @@ generate_ast_walker! {
 
     'arena ForOfTarget as for_of_target => {
         match for_of_target {
-            ForOfTarget::Value(value) => walker.walk_local_identifier(value, context),
+            ForOfTarget::Value(value) => walker.walk_for_of_variable(value, context),
             ForOfTarget::KeyValue(key_value) => walker.walk_for_of_key_value_target(key_value, context),
         }
     }
 
     'arena ForOfKeyValueTarget as for_of_key_value_target => {
-        walker.walk_local_identifier(&for_of_key_value_target.key, context);
-        walker.walk_local_identifier(&for_of_key_value_target.value, context);
+        walker.walk_for_of_variable(&for_of_key_value_target.key, context);
+        walker.walk_for_of_variable(&for_of_key_value_target.value, context);
+    }
+
+    'arena ForOfVariable as for_of_variable => {
+        if let Some(hint) = for_of_variable.hint {
+            walker.walk_hint(hint, context);
+        }
+
+        walker.walk_local_identifier(&for_of_variable.name, context);
     }
 
     'arena While as r#while => {
@@ -1774,6 +1800,9 @@ generate_ast_walker! {
             Expression::Instantiation(instantiation) => walker.walk_instantiation(instantiation, context),
             Expression::MagicConstant(magic_constant) => walker.walk_magic_constant(magic_constant, context),
             Expression::Pipe(pipe) => walker.walk_pipe(pipe, context),
+            Expression::Is(is) => walker.walk_is(is, context),
+            Expression::As(r#as) => walker.walk_as(r#as, context),
+            Expression::PatternMatch(pattern_match) => walker.walk_pattern_match(pattern_match, context),
             Expression::TypeOf(type_of) => walker.walk_type_of(type_of, context),
             Expression::Error(_) => {
                 // Nothing to walk for error expressions
@@ -2149,6 +2178,111 @@ generate_ast_walker! {
     'arena MatchDefaultArm as match_default_arm => {
         walker.walk_keyword(&match_default_arm.r#default, context);
         walker.walk_expression(match_default_arm.expression, context);
+    }
+
+    'arena Is as is => {
+        walker.walk_expression(is.value, context);
+        walker.walk_keyword(&is.is, context);
+        walker.walk_pattern(is.pattern, context);
+    }
+
+    'arena As as r#as => {
+        walker.walk_expression(r#as.value, context);
+        walker.walk_keyword(&r#as.r#as, context);
+        walker.walk_hint(r#as.hint, context);
+    }
+
+    'arena Pattern as pattern => {
+        ensure_sufficient_stack(|| match pattern {
+            Pattern::Type(type_pattern) => walker.walk_type_pattern(type_pattern, context),
+            Pattern::Value(value) => walker.walk_expression(value, context),
+            Pattern::Comparison(comparison_pattern) => walker.walk_comparison_pattern(comparison_pattern, context),
+            Pattern::Not(not_pattern) => walker.walk_not_pattern(not_pattern, context),
+            Pattern::Binary(binary_pattern) => walker.walk_binary_pattern(binary_pattern, context),
+            Pattern::Parenthesized(parenthesized_pattern) => {
+                walker.walk_parenthesized_pattern(parenthesized_pattern, context);
+            }
+            Pattern::Properties(properties_pattern) => walker.walk_properties_pattern(properties_pattern, context),
+        });
+    }
+
+    'arena TypePattern as type_pattern => {
+        walker.walk_hint(&type_pattern.hint, context);
+        if let Some(variable) = &type_pattern.variable {
+            walker.walk_local_identifier(variable, context);
+        }
+    }
+
+    'arena ComparisonPattern as comparison_pattern => {
+        walker.walk_binary_operator(&comparison_pattern.operator, context);
+        walker.walk_expression(comparison_pattern.value, context);
+    }
+
+    'arena NotPattern as not_pattern => {
+        walker.walk_keyword(&not_pattern.not, context);
+        walker.walk_pattern(not_pattern.pattern, context);
+    }
+
+    'arena BinaryPattern as binary_pattern => {
+        walker.walk_pattern(binary_pattern.left, context);
+        walker.walk_keyword(&binary_pattern.operator, context);
+        walker.walk_pattern(binary_pattern.right, context);
+    }
+
+    'arena ParenthesizedPattern as parenthesized_pattern => {
+        walker.walk_pattern(parenthesized_pattern.pattern, context);
+    }
+
+    'arena PropertiesPattern as properties_pattern => {
+        for property_pattern in &properties_pattern.properties {
+            walker.walk_property_pattern(property_pattern, context);
+        }
+    }
+
+    'arena PropertyPattern as property_pattern => {
+        walker.walk_local_identifier(&property_pattern.name, context);
+        walker.walk_pattern(property_pattern.pattern, context);
+    }
+
+    'arena PatternMatch as pattern_match => {
+        walker.walk_keyword(&pattern_match.r#match, context);
+        walker.walk_expression(pattern_match.expression, context);
+        for arm in &pattern_match.arms {
+            walker.walk_pattern_match_arm(arm, context);
+        }
+    }
+
+    'arena PatternMatchArm as pattern_match_arm => {
+        match pattern_match_arm {
+            PatternMatchArm::Pattern(pattern_arm) => walker.walk_pattern_match_pattern_arm(pattern_arm, context),
+            PatternMatchArm::Default(default_arm) => walker.walk_pattern_match_default_arm(default_arm, context),
+        }
+    }
+
+    'arena PatternMatchPatternArm as pattern_match_pattern_arm => {
+        walker.walk_pattern(pattern_match_pattern_arm.pattern, context);
+        if let Some(guard) = &pattern_match_pattern_arm.guard {
+            walker.walk_match_guard(guard, context);
+        }
+
+        walker.walk_pattern_match_arm_body(&pattern_match_pattern_arm.body, context);
+    }
+
+    'arena PatternMatchDefaultArm as pattern_match_default_arm => {
+        walker.walk_keyword(&pattern_match_default_arm.default, context);
+        walker.walk_pattern_match_arm_body(&pattern_match_default_arm.body, context);
+    }
+
+    'arena MatchGuard as match_guard => {
+        walker.walk_keyword(&match_guard.when, context);
+        walker.walk_expression(match_guard.condition, context);
+    }
+
+    'arena PatternMatchArmBody as pattern_match_arm_body => {
+        match pattern_match_arm_body {
+            PatternMatchArmBody::Expression(expression) => walker.walk_expression(expression, context),
+            PatternMatchArmBody::Block(block) => walker.walk_block(block, context),
+        }
     }
 
     'arena Yield as r#yield => {

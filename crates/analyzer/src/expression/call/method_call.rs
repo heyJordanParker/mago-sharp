@@ -435,8 +435,9 @@ where
 }
 
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the
-/// collection is a place the caller can write: a local or a parameter, or a property whose `set` the caller reaches,
-/// which the property write check decides as it does for an index write.
+/// collection is a place the caller can write: a local or a parameter, `field`, which its accessor writes as the
+/// storage, or a property whose `set` the caller reaches, which the property write check decides as it does for an
+/// index write.
 fn check_changed_collection<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -448,7 +449,7 @@ where
 {
     match collection.unparenthesized() {
         Expression::ConstantAccess(name)
-            if matches!(context.resolved_names.binding(&name.name), Some(Binding::Local(_))) =>
+            if matches!(context.resolved_names.binding(&name.name), Some(Binding::Local(_) | Binding::Field)) =>
         {
             Ok(())
         }

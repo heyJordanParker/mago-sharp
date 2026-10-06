@@ -1,6 +1,8 @@
 use mago_allocator::Arena;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_names::binding::php_method_name;
+use mago_names::binding::php_variable_name;
 use mago_php_version::PHPVersion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -9,7 +11,9 @@ use mago_syntax::cst::Attribute;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::Property;
 use mago_text_edit::TextEdit;
+use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 
 use crate::code::IssueCode;
@@ -32,6 +36,10 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
     let is_sharp = context.dialect.is_sharp();
     if !is_sharp && !context.settings.check_missing_override {
         return;
+    }
+
+    if is_sharp {
+        check_override_modifier_on_fields(metadata, members, context);
     }
 
     // PHP# writes `#[\Override]` as the `override` modifier, so its messages name the modifier and propose no edit.
@@ -186,6 +194,86 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             edits.push(TextEdit::insert(method.start_offset(), format!("#[\\Override]\n{indent}")));
         });
     }
+}
+
+/// Checks PHP#'s `override` on fields. Spec section 6.1 requires it on a field that replaces a plain PHP parent's
+/// property, and a PHP# parent's property is overridden as a property, which is not supported yet.
+fn check_override_modifier_on_fields<'ctx, 'arena, A>(
+    metadata: &'ctx ClassLikeMetadata,
+    members: &[ClassLikeMember<'arena>],
+    context: &mut Context<'ctx, 'arena, A>,
+) where
+    A: Arena,
+{
+    let class_name = metadata.original_name;
+    for member in members {
+        let ClassLikeMember::Property(property @ Property::Plain(field)) = member else {
+            continue;
+        };
+
+        let variable = property.first_variable();
+        let name = php_variable_name(variable.name);
+        let override_modifier = field.modifiers.iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
+
+        match (overridden_property_class(metadata, name, context.codebase), override_modifier) {
+            (None, Some(override_modifier)) if !metadata.has_incomplete_hierarchy() => {
+                context.collector.report(
+                    Issue::error(format!("Invalid `override` modifier on `{class_name}::{name}`."))
+                        .with_code(IssueCode::InvalidOverrideAttribute)
+                        .with_annotation(
+                            Annotation::primary(override_modifier.span())
+                                .with_message("This field doesn't override any parent property."),
+                        )
+                        .with_help(format!("Remove the `override` modifier from `{name}` or verify inheritance.")),
+                );
+            }
+            (Some(parent), Some(override_modifier)) if parent.flags.is_sharp() => {
+                let parent_name = parent.original_name;
+
+                context.collector.report(
+                    Issue::error(format!("Overriding the PHP# property `{parent_name}::{name}` is not supported yet."))
+                        .with_code(IssueCode::NotSupportedYet)
+                        .with_annotation(
+                            Annotation::primary(override_modifier.span()).with_message("Not supported yet."),
+                        )
+                        .with_note("A PHP# parent's property is overridden as a property, as spec section 6.1 says."),
+                );
+            }
+            (Some(parent), None) if !parent.flags.is_sharp() => {
+                let parent_name = parent.original_name;
+
+                context.collector.report(
+                    Issue::error(format!("Missing `override` modifier on overriding field `{class_name}::{name}`."))
+                        .with_code(IssueCode::MissingOverrideAttribute)
+                        .with_annotation(
+                            Annotation::primary(variable.span)
+                                .with_message(format!("This field overrides `{parent_name}::{name}`.")),
+                        )
+                        .with_help("Add the `override` modifier to the field declaration."),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The nearest parent class that declares a property named `name` its children inherit, a private one excluded.
+fn overridden_property_class<'ctx>(
+    metadata: &ClassLikeMetadata,
+    name: Word,
+    codebase: &'ctx CodebaseMetadata,
+) -> Option<&'ctx ClassLikeMetadata> {
+    let mut parent_name = metadata.direct_parent_class;
+    while let Some(name_of_parent) = parent_name {
+        let parent = codebase.get_class_like(name_of_parent.as_bytes())?;
+        if let Some(property) = parent.properties.get(&name) {
+            return (!property.read_visibility.is_private()).then_some(parent);
+        }
+
+        parent_name = parent.direct_parent_class;
+    }
+
+    None
 }
 
 /// Reports `issue` about a stray override marker, with the edit that deletes a PHP `#[Override]` attribute.

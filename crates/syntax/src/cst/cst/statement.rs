@@ -10,6 +10,7 @@ use crate::cst::cst::class_like::Interface;
 use crate::cst::cst::class_like::Trait;
 use crate::cst::cst::constant::Constant;
 use crate::cst::cst::control_flow::r#if::If;
+use crate::cst::cst::control_flow::pattern_match::PatternMatch;
 use crate::cst::cst::control_flow::switch::Switch;
 use crate::cst::cst::declare::Declare;
 use crate::cst::cst::echo::Echo;
@@ -93,6 +94,7 @@ pub enum Statement<'arena> {
     HaltCompiler(HaltCompiler<'arena>),
     Unset(Unset<'arena>),
     LocalDeclaration(LocalDeclaration<'arena>),
+    PatternMatch(PatternMatch<'arena>),
     Noop(Span),
 }
 
@@ -167,6 +169,7 @@ impl Statement<'_> {
             self,
             Statement::If(_)
                 | Statement::Switch(_)
+                | Statement::PatternMatch(_)
                 | Statement::Try(_)
                 | Statement::Continue(_)
                 | Statement::Break(_)
@@ -239,6 +242,7 @@ impl HasSpan for Statement<'_> {
             Statement::Static(statement) => statement.span(),
             Statement::Unset(statement) => statement.span(),
             Statement::LocalDeclaration(statement) => statement.span(),
+            Statement::PatternMatch(statement) => statement.span(),
             Statement::HaltCompiler(statement) => statement.span(),
             Statement::Noop(span) => *span,
         }

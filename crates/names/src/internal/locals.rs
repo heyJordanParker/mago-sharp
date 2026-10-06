@@ -63,6 +63,18 @@ impl<'arena> LocalScopes<'arena> {
         earlier
     }
 
+    /// Declares a local that is not in scope where it is declared, such as a pattern's variable, which comes into
+    /// scope only where its test holds.
+    ///
+    /// Returns the local an open block already declares under the same name, if any.
+    pub fn declare_out_of_scope(&mut self, name: &'arena [u8], local: Local) -> Option<Local> {
+        let earlier = self.lookup(name);
+        self.frame();
+        self.closed.push((name, local));
+
+        earlier
+    }
+
     /// Returns the local an open block declares under `name`, innermost first.
     pub fn lookup(&self, name: &[u8]) -> Option<Local> {
         let frame = self.frames.last()?;

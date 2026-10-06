@@ -18,6 +18,7 @@ use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Call;
@@ -50,6 +51,7 @@ use mago_syntax::cst::InterpolatedString;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralStringPart;
 use mago_syntax::cst::LocalDeclaration;
+use mago_syntax::cst::MatchArm;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodCall;
@@ -63,6 +65,9 @@ use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::PartialArgumentList;
 use mago_syntax::cst::PositionalArgument;
 use mago_syntax::cst::Property;
+use mago_syntax::cst::PropertyHook;
+use mago_syntax::cst::PropertyHookBody;
+use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookConcreteExpressionBody;
 use mago_syntax::cst::PropertyHookList;
 use mago_syntax::cst::Sequence;
@@ -72,10 +77,13 @@ use mago_syntax::cst::Try;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::UnaryPostfixOperator;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Variable;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file_with_dialect;
 use mago_syntax::settings::ParserSettings;
+use mago_syntax::utils::pattern::PhpShape;
+use mago_syntax::utils::pattern::php_shape;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_syntax_core::utils::parse_literal_integer_as_float;
 
@@ -127,6 +135,10 @@ use crate::sharp_kind::SHARP_AST_GREATER;
 use crate::sharp_kind::SHARP_AST_GREATER_EQUAL;
 use crate::sharp_kind::SHARP_AST_IF;
 use crate::sharp_kind::SHARP_AST_IF_ELEM;
+use crate::sharp_kind::SHARP_AST_INSTANCEOF;
+use crate::sharp_kind::SHARP_AST_MATCH;
+use crate::sharp_kind::SHARP_AST_MATCH_ARM;
+use crate::sharp_kind::SHARP_AST_MATCH_ARM_LIST;
 use crate::sharp_kind::SHARP_AST_METHOD;
 use crate::sharp_kind::SHARP_AST_METHOD_CALL;
 use crate::sharp_kind::SHARP_AST_NAME_LIST;
@@ -215,6 +227,9 @@ const ZEND_IS_SMALLER_OR_EQUAL: u32 = 21;
 const ZEND_FETCH_CLASS_MEMBER_SYNTAX: u32 = 1 << 15;
 /// php-sharp's own class flag from `zend_compile.h`: the class's parent, if any, is in its interface list.
 const ZEND_ACC_PARENT_IN_INTERFACES: u32 = 1 << 31;
+/// php-sharp's own property flag from `zend_compile.h`: the property loses its type when the class links if the
+/// property it overrides has none.
+const ZEND_ACC_TYPE_FOLLOWS_PARENT: u32 = 1 << 13;
 
 /// A null child.
 const NULL: u32 = u32::MAX;
@@ -299,12 +314,16 @@ struct Lowering<'lowering, 'arena> {
     nodes: Vec<sharp_node>,
     children: Vec<u32>,
     texts: LocalArena,
+    /// How many hidden variables the pattern forms being lowered hold.
+    temporaries: u32,
     /// The declaration offsets of the locals a lambda captures by reference: those code writes.
     by_reference: HashSet<u32>,
     /// How many loop bodies hold the statement being lowered, inside the innermost method or lambda.
     loop_depth: u32,
     /// Whether the lowering is inside a constant expression, which PHP evaluates without opcodes.
     in_constant_expression: bool,
+    /// The name of the property whose accessor body is being lowered, which `field` reads and writes.
+    property: Vec<u8>,
 }
 
 impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
@@ -315,9 +334,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             nodes: Vec::new(),
             children: Vec::new(),
             texts: LocalArena::new(),
+            temporaries: 0,
             by_reference: HashSet::default(),
             loop_depth: 0,
             in_constant_expression: false,
+            property: Vec::new(),
         }
     }
 
@@ -599,29 +620,45 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .default_value
             .as_ref()
             .map_or(NULL, |default| self.constant_expression(|lowering| lowering.expression(default.value)));
-        let accessor_flags =
-            parameter.hooks.as_ref().map_or(0, |accessors| accessor_flags(&parameter.modifiers, accessors));
+        let (accessor_flags, hooks) = match &parameter.hooks {
+            Some(accessors) => (
+                accessor_flags(&parameter.modifiers, accessors, self.names),
+                self.hooks(parameter.variable.name, accessors),
+            ),
+            None => (0, NULL),
+        };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
         let flags = modifier_flags(&parameter.modifiers) | accessor_flags | variadic_flag;
         let attributes = self.attributes(&parameter.attribute_lists, None);
 
-        self.node(SHARP_AST_PARAM, flags, self.line(parameter), &[hint, name, default, attributes, NULL, NULL])
+        self.node(SHARP_AST_PARAM, flags, self.line(parameter), &[hint, name, default, attributes, NULL, hooks])
     }
 
-    /// A field, an auto-property or a computed property is a property group of one property, as php-src's grammar
-    /// builds `private int $count = 0;`, `public private(set) int $views = 0;`, `public readonly int $id;` and
-    /// `public string $slug { get => expr; }`. A constant initial value is its default, unless the property is
-    /// `readonly`. A member that starts as null without an initial value takes the default `null` on the line of its
-    /// name, as php-src builds `private ?int $total = null;`.
+    /// A field, a property with accessors or a computed property is a property group of one property, as php-src's
+    /// grammar builds `private int $count = 0;`, `public private(set) int $views = 0;`, `public readonly int $id;`,
+    /// `public string $name { get => $this->name; }` and `public string $slug { get => expr; }`. A constant initial
+    /// value is its default, unless the property is `readonly`. A member that starts as null without an initial value
+    /// takes the default `null` on the line of its name, as php-src builds `private ?int $total = null;`. An override is
+    /// a field with `#[\Override]` whose type follows the parent's property: PHP refuses a type on a property whose
+    /// parent has none, and only the engine knows the parent when the class links.
     fn property(&mut self, property: &Property) -> u32 {
         let (accessor_flags, attribute_lists, hooks) = match property {
             Property::Plain(field) => (0, &field.attribute_lists, NULL),
-            Property::Hooked(auto_property) => (
-                accessor_flags(&auto_property.modifiers, &auto_property.hook_list),
-                &auto_property.attribute_lists,
-                NULL,
+            Property::Hooked(hooked) => (
+                accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
+                &hooked.attribute_lists,
+                self.hooks(hooked.item.variable().name, &hooked.hook_list),
             ),
-            Property::Computed(computed) => (0, &computed.attribute_lists, self.get_hook(&computed.body)),
+            Property::Computed(computed) => {
+                let body = self.short_body(b"get", &computed.body);
+                let hook = self.hook(b"get", computed.body.arrow, &computed.body, body);
+
+                (
+                    0,
+                    &computed.attribute_lists,
+                    self.node(SHARP_AST_STMT_LIST, 0, self.line(computed.body.arrow), &[hook]),
+                )
+            }
         };
         let Some(hint) = property.hint() else {
             unreachable!("the PHP# parser gives every field and property its type");
@@ -634,38 +671,89 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some(value) if is_default(property, value) => {
                 self.constant_expression(|lowering| lowering.expression(value))
             }
-            None if is_null_by_default(property) => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
+            None if is_null_by_default(property, self.names) => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
             _ => NULL,
         };
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, default, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let flags = modifier_flags(property.modifiers()) | accessor_flags;
-        let attributes = self.attributes(attribute_lists, None);
+        let r#override = property.modifiers().iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
+        let follows_parent = if r#override.is_some() { ZEND_ACC_TYPE_FOLLOWS_PARENT } else { 0 };
+        let flags = modifier_flags(property.modifiers()) | accessor_flags | follows_parent;
+        let attributes = self.attributes(attribute_lists, r#override);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
     }
 
-    /// A computed property's `=> expr;` is a hook list of one `get` hook whose body is the short body php-src's
-    /// grammar builds for `get => expr;`, on the arrow's lines.
-    fn get_hook(&mut self, body: &PropertyHookConcreteExpressionBody) -> u32 {
+    /// A property's hook list, or null when no accessor has a body: an auto-property is plain storage. Each body is a
+    /// hook. An auto accessor beside a body that uses `field` is PHP's backing store, so it is no hook, and beside
+    /// bodies that never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does.
+    fn hooks(&mut self, property: &[u8], accessors: &PropertyHookList) -> u32 {
+        if !accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_))) {
+            return NULL;
+        }
+
+        let uses_field = self.names.uses_field(accessors);
+        self.property = property.to_vec();
+        let mut hooks = Vec::new();
+        for accessor in &accessors.hooks {
+            let body = match &accessor.body {
+                PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)) => self.block(block),
+                PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)) => {
+                    self.short_body(accessor.name.value, body)
+                }
+                PropertyHookBody::Abstract(_) if uses_field => continue,
+                PropertyHookBody::Abstract(_) => self.storage_body(accessor),
+            };
+            hooks.push(self.hook(accessor.name.value, accessor.name, accessor, body));
+        }
+        self.property.clear();
+
+        self.node(SHARP_AST_STMT_LIST, 0, self.line(accessors), &hooks)
+    }
+
+    /// A hook named `get` or `set` with its body, as php-src's grammar declares every hook.
+    fn hook(&mut self, name: &[u8], start: impl HasSpan, end: impl HasSpan, body: u32) -> u32 {
+        self.declaration(SHARP_AST_PROPERTY_HOOK, 0, start, end, name, &[NULL, NULL, body, NULL, NULL])
+    }
+
+    /// The body of `get => expr;`, the short body php-src's grammar builds, on the arrow's line. A `set` with an
+    /// expression body is the statement list `set { expr; }`, because PHP stores the result of `set => expr;`.
+    fn short_body(&mut self, accessor: &[u8], body: &PropertyHookConcreteExpressionBody) -> u32 {
         let line = self.line(body.arrow);
         let expression = self.expression(body.expression);
-        let short_body = self.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[expression]);
-        let hook = self.declaration(
-            SHARP_AST_PROPERTY_HOOK,
-            0,
-            body.arrow,
-            body,
-            b"get",
-            &[NULL, NULL, short_body, NULL, NULL],
-        );
+        let kind = if accessor == b"get" { SHARP_AST_PROPERTY_HOOK_SHORT_BODY } else { SHARP_AST_STMT_LIST };
 
-        self.node(SHARP_AST_STMT_LIST, 0, line, &[hook])
+        self.node(kind, 0, line, &[expression])
+    }
+
+    /// An auto accessor's body over the storage: `get => $this->name;` or `set { $this->name = $value; }`.
+    fn storage_body(&mut self, accessor: &PropertyHook) -> u32 {
+        let line = self.line(accessor);
+        let storage = self.storage(line);
+        if accessor.name.value == b"get" {
+            self.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[storage])
+        } else {
+            let value = self.variable(accessor.name.span, b"value");
+            let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[storage, value]);
+
+            self.node(SHARP_AST_STMT_LIST, 0, line, &[assignment])
+        }
+    }
+
+    /// `field`: `$this->name` of the property whose accessor body is being lowered, which PHP reads and writes as the
+    /// storage inside the property's own hook.
+    fn storage(&mut self, line: u32) -> u32 {
+        let this = self.string(0, line, b"this");
+        let this = self.node(SHARP_AST_VAR, 0, line, &[this]);
+        let name = store_text(&self.texts, &self.property);
+        let name = self.zval(line, sharp_value::SHARP_STRING, |node| node.text = name);
+
+        self.node(SHARP_AST_PROP, 0, line, &[this, name])
     }
 
     /// A declaration's attributes are one `ATTRIBUTE_LIST` with an `ATTRIBUTE_GROUP` per `[...]`, as php-src's grammar
-    /// builds `#[...]`, or null without attributes. Each attribute names its class by its full name. A method's
-    /// `override` adds a last group of `#[\Override]`.
+    /// builds `#[...]`, or null without attributes. Each attribute names its class by its full name. A method's or a
+    /// field's `override` adds a last group of `#[\Override]`.
     fn attributes(&mut self, lists: &Sequence<AttributeList>, r#override: Option<&Modifier>) -> u32 {
         let line = match (lists.first(), r#override) {
             (Some(first), _) => self.line(first),
@@ -797,12 +885,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::ForOf(for_of) => {
                 let collection = self.expression(for_of.expression);
                 let (key, value) = match &for_of.target {
-                    ForOfTarget::Value(value) => (NULL, self.variable(value.span, value.value)),
-                    ForOfTarget::KeyValue(pair) => {
-                        (self.variable(pair.key.span, pair.key.value), self.variable(pair.value.span, pair.value.value))
-                    }
+                    ForOfTarget::Value(value) => (NULL, self.variable(value.name.span, value.name.value)),
+                    ForOfTarget::KeyValue(pair) => (
+                        self.variable(pair.key.name.span, pair.key.name.value),
+                        self.variable(pair.value.name.span, pair.value.name.value),
+                    ),
                 };
-                let body = self.loop_body(for_of.body);
+                let mut body = self.loop_body(for_of.body);
+
+                // A `Map` keyed by a backed enum holds each key as its backing value, and the analyzer requires a loop
+                // over one to name the enum as its key's type, so a key that names a class reads back as its case.
+                // PHP stores an all-digit `string` key as an `int`, so a key written `string` reads back through
+                // `(string)`, as spec section 12 reads a `Map<string, V>` key.
+                if let ForOfTarget::KeyValue(pair) = &for_of.target
+                    && let Some(hint @ (Hint::Identifier(_) | Hint::String(_))) = pair.key.hint
+                {
+                    let line = self.line(&pair.key);
+                    let stored_key = self.variable(pair.key.name.span, pair.key.name.value);
+                    let read_back = match hint {
+                        Hint::Identifier(class) => {
+                            let class = self.string(ZEND_NAME_FQ, line, self.names.get(class));
+                            let from = self.string(0, line, b"from");
+                            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[stored_key]);
+
+                            self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, from, arguments])
+                        }
+                        _ => self.node(SHARP_AST_CAST, IS_STRING, line, &[stored_key]),
+                    };
+                    let key = self.variable(pair.key.name.span, pair.key.name.value);
+                    let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[key, read_back]);
+
+                    body = self.node(SHARP_AST_STMT_LIST, 0, line, &[assignment, body]);
+                }
 
                 self.node(SHARP_AST_FOREACH, 0, self.line(for_of), &[collection, value, key, body])
             }
@@ -822,6 +936,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_DO_WHILE, 0, self.line(do_while), &[body, condition])
             }
             Statement::Try(r#try) => self.r#try(r#try),
+            Statement::PatternMatch(_) => self.pattern(Node::Statement(statement)),
             Statement::Break(r#break) => self.node(SHARP_AST_BREAK, 0, self.line(r#break), &[NULL]),
             Statement::Continue(r#continue) => self.node(SHARP_AST_CONTINUE, 0, self.line(r#continue), &[NULL]),
             _ => unreachable!("check_slice refuses the statement `{statement}`"),
@@ -965,6 +1080,44 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_CONDITIONAL, 0, line, &[condition, then, r#else])
             }
             Expression::ConstantAccess(name) => self.name(name),
+            Expression::Is(_) | Expression::As(_) | Expression::PatternMatch(_) => {
+                self.pattern(Node::Expression(expression))
+            }
+            // Only the PHP of a pattern form has a `$` variable: a pattern's name, or a variable PHP# cannot name.
+            Expression::Variable(Variable::Direct(variable)) => {
+                self.variable(variable.span, variable.name.strip_prefix(b"$").unwrap_or(variable.name))
+            }
+            Expression::Binary(Binary {
+                lhs,
+                operator: BinaryOperator::Instanceof(_),
+                rhs: Expression::Identifier(class),
+            }) => {
+                let value = self.expression(lhs);
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+
+                self.node(SHARP_AST_INSTANCEOF, 0, line, &[value, class])
+            }
+            Expression::Match(r#match) => {
+                let subject = self.expression(r#match.expression);
+                let mut arms = Vec::new();
+                for arm in r#match.arms.iter() {
+                    let (conditions, value) = match arm {
+                        MatchArm::Expression(arm) => {
+                            let conditions: Vec<u32> =
+                                arm.conditions.iter().map(|condition| self.expression(condition)).collect();
+
+                            (self.expression_list(&conditions), arm.expression)
+                        }
+                        MatchArm::Default(arm) => (NULL, arm.expression),
+                    };
+                    let value = self.expression(value);
+                    arms.push(self.node(SHARP_AST_MATCH_ARM, 0, self.line(arm), &[conditions, value]));
+                }
+
+                let arms = self.node(SHARP_AST_MATCH_ARM_LIST, 0, self.line(r#match.left_brace), &arms);
+
+                self.node(SHARP_AST_MATCH, 0, line, &[subject, arms])
+            }
             Expression::Binary(binary) => {
                 let (kind, attr) = binary_kind(binary.operator);
                 let lhs = self.expression(binary.lhs);
@@ -1180,19 +1333,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A list or map literal is an `ARRAY` with `ZEND_ARRAY_SYNTAX_SHORT`, as php-src's grammar builds `[…]`. Each
-    /// element is an `ARRAY_ELEM` of its value and its key or null.
+    /// element is an `ARRAY_ELEM` of its value and its key or null, and a spread is an `UNPACK` of its value.
     fn array(&mut self, array: &Array) -> u32 {
         let mut elements = Vec::new();
         for element in &array.elements {
-            let value_and_key = match element {
-                ArrayElement::Value(element) => [self.expression(element.value), NULL],
-                ArrayElement::KeyValue(element) => [self.expression(element.value), self.expression(element.key)],
-                ArrayElement::Variadic(_) | ArrayElement::Missing(_) => {
-                    unreachable!("check_slice refuses a spread or missing literal element")
+            let (kind, value_and_key) = match element {
+                ArrayElement::Value(element) => (SHARP_AST_ARRAY_ELEM, vec![self.expression(element.value), NULL]),
+                ArrayElement::KeyValue(element) => {
+                    (SHARP_AST_ARRAY_ELEM, vec![self.expression(element.value), self.expression(element.key)])
                 }
+                ArrayElement::Variadic(element) => (SHARP_AST_UNPACK, vec![self.expression(element.value)]),
+                ArrayElement::Missing(_) => unreachable!("check_slice refuses a missing literal element"),
             };
 
-            elements.push(self.node(SHARP_AST_ARRAY_ELEM, 0, self.line(element), &value_and_key));
+            elements.push(self.node(kind, 0, self.line(element), &value_and_key));
         }
 
         self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, self.line(array), &elements)
@@ -1237,9 +1391,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// as php-src's `variable` rule takes them.
     fn target(&mut self, target: &Expression) -> u32 {
         match target {
-            Expression::ConstantAccess(name) if matches!(self.names.binding(&name.name), Some(Binding::Local(_))) => {
-                self.variable(name.span(), name.name.value())
+            Expression::ConstantAccess(name)
+                if matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::Field)) =>
+            {
+                self.name(name)
             }
+            // The hidden variable of an `is`, `as` or `match`, which `php_shape` writes.
+            Expression::Variable(Variable::Direct(_)) => self.expression(target),
             Expression::Access(Access::Property(access)) => match self.names.static_property_class(access) {
                 Some(class) => {
                     let line = self.line(target);
@@ -1260,13 +1418,36 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
     }
 
-    /// A local, a parameter or `this` is a PHP variable of the same name. Any other bare name outside a call is a
-    /// constant, which the engine looks up in the namespace, then globally, as PHP does for an unqualified name.
+    /// An `is`, `as` or `match` is the PHP it runs as, which the analyzer analyzes too. Its hidden variables are
+    /// numbered after those of the forms around it, which may still hold their values.
+    fn pattern(&mut self, node: Node<'_, '_>) -> u32 {
+        let arena = LocalArena::new();
+        let names = self.names;
+        let is_local = |span: Span| matches!(names.binding(&span), Some(Binding::Local(_)));
+        let Some(PhpShape { php, temporaries, .. }) = php_shape(&arena, node, self.temporaries, &is_local) else {
+            unreachable!("check_slice refuses the pattern forms that have no PHP");
+        };
+
+        self.temporaries += temporaries;
+        let index = match php {
+            Node::Expression(expression) => self.expression(expression),
+            Node::Statement(statement) => self.statement(statement),
+            _ => unreachable!("`php_shape` builds an expression or a statement"),
+        };
+        self.temporaries -= temporaries;
+
+        index
+    }
+
+    /// A local, a parameter or `this` is a PHP variable of the same name, and `field` is the storage. Any other bare
+    /// name outside a call is a constant, which the engine looks up in the namespace, then globally, as PHP does for
+    /// an unqualified name.
     fn name(&mut self, name: &ConstantAccess) -> u32 {
         let line = self.line(name);
 
         match self.names.binding(&name.name) {
             Some(Binding::Local(_) | Binding::This) => self.variable(name.span(), name.name.value()),
+            Some(Binding::Field) => self.storage(line),
             Some(Binding::Constant) => {
                 let constant = self.string(ZEND_NAME_NOT_FQ, line, name.name.value());
 
@@ -1520,39 +1701,57 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
 /// Whether PHP takes an initial value as the property's default: a constant expression without `new`, on a property
 /// that is not `readonly`, which takes no default.
 fn is_default(property: &Property, value: &Expression) -> bool {
-    !matches!(property, Property::Hooked(auto_property) if auto_property.hook_list.is_get_only())
+    !matches!(property, Property::Hooked(hooked) if is_readonly(&hooked.hook_list))
         && value.is_constant(&PHPVersion::PHP85, false)
 }
 
-/// Whether a member without an initial value starts as null, as in C# and Swift: a field or an auto-property with
-/// `set` of a nullable type. A get-only property is `readonly`, which takes no default, so the checker refuses one of a
-/// nullable type without an initial value.
-fn is_null_by_default(property: &Property) -> bool {
+/// Whether a property runs as `readonly`: a get-only auto-property, which spec section 6.1 sets in the constructor.
+/// PHP refuses hooks on a `readonly` property.
+fn is_readonly(accessors: &PropertyHookList) -> bool {
+    accessors.is_get_only()
+        && !accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
+}
+
+/// Whether a member without an initial value starts as null, as in C# and Swift: a field, or a property with storage
+/// and `set`, of a nullable type. A get-only property with storage is set only where `readonly` allows, and
+/// `readonly` takes no default, so the checker refuses one of a nullable type without an initial value. A property
+/// without storage is virtual, and PHP refuses a default on a virtual property.
+fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
     matches!(property.hint(), Some(Hint::Nullable(_)))
         && match property {
             Property::Plain(_) => true,
-            Property::Hooked(auto_property) => !auto_property.hook_list.is_get_only(),
+            Property::Hooked(hooked) => !hooked.hook_list.is_get_only() && names.has_storage(&hooked.hook_list),
             Property::Computed(_) => false,
         }
 }
 
-/// The flags an auto-property's accessors add: `readonly` for a get-only property, which spec section 6.1 sets in
-/// the constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` accessor's
-/// access modifier. A private property needs no set visibility.
-fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList) -> u32 {
-    if accessors.is_get_only() {
+/// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the
+/// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` accessor's
+/// access modifier. A get-only property whose body uses `field` takes `protected(set)`, the set visibility of
+/// `readonly`, and one without storage takes none, because PHP refuses a set visibility on a read-only virtual
+/// property. PHP drops a set visibility equal to the property's own, so a private property, or a protected one with
+/// `protected(set)`, takes none, and the flags carry only what the engine keeps.
+fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
+    if is_readonly(accessors) {
         return ZEND_ACC_READONLY;
     }
 
-    let set = accessors.hooks.iter().find(|accessor| accessor.name.value == b"set");
-    let flags = match set.and_then(|set| set.modifiers.first()) {
+    let flags = match accessors.hooks.iter().find(|accessor| accessor.name.value == b"set") {
+        None if names.uses_field(accessors) => ZEND_ACC_PROTECTED_SET,
         None => 0,
-        Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED_SET,
-        Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE_SET,
-        Some(modifier) => unreachable!("check_slice refuses the accessor modifier `{modifier}`"),
+        Some(set) => match set.modifiers.first() {
+            None => 0,
+            Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED_SET,
+            Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE_SET,
+            Some(modifier) => unreachable!("check_slice refuses the accessor modifier `{modifier}`"),
+        },
     };
 
-    if modifiers.contains_private() { 0 } else { flags }
+    if modifiers.contains_private() || (modifiers.contains_protected() && flags == ZEND_ACC_PROTECTED_SET) {
+        0
+    } else {
+        flags
+    }
 }
 
 /// The binary operators of the slice, as php-src's grammar builds them. Every operator is named, so a new one does
@@ -1573,7 +1772,8 @@ fn binary_kind(operator: BinaryOperator) -> (sharp_kind, u32) {
         BinaryOperator::LessThanOrEqual(_) => (SHARP_AST_BINARY_OP, ZEND_IS_SMALLER_OR_EQUAL),
         BinaryOperator::GreaterThan(_) => (SHARP_AST_GREATER, 0),
         BinaryOperator::GreaterThanOrEqual(_) => (SHARP_AST_GREATER_EQUAL, 0),
-        BinaryOperator::And(_) => (SHARP_AST_AND, 0),
+        // check_slice refuses `and`, so only the `when` of a `match` arm runs as it.
+        BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => (SHARP_AST_AND, 0),
         BinaryOperator::Or(_) => (SHARP_AST_OR, 0),
         BinaryOperator::NullCoalesce(_) => (SHARP_AST_COALESCE, 0),
         BinaryOperator::BitwiseAnd(_)
@@ -1585,7 +1785,6 @@ fn binary_kind(operator: BinaryOperator) -> (sharp_kind, u32) {
         | BinaryOperator::Spaceship(_)
         | BinaryOperator::StringConcat(_)
         | BinaryOperator::Instanceof(_)
-        | BinaryOperator::LowAnd(_)
         | BinaryOperator::LowOr(_)
         | BinaryOperator::LowXor(_) => unreachable!("check_slice refuses the operator `{operator}`"),
     }

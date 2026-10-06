@@ -164,6 +164,15 @@ where
                 break;
             }
 
+            if self.is_at_is_or_as()? {
+                if Precedence::Comparison <= precedence {
+                    break;
+                }
+
+                left = self.parse_is_or_as(left)?;
+                continue;
+            }
+
             // Don't allow function calls on error expressions.
             // This prevents `if(...)` from being parsed as a function call when `if` is an unexpected token.
             if matches!(left, Expression::Error(_)) && matches!(kind, T!["("]) {
@@ -294,6 +303,9 @@ where
                 expression: self.parse_expression_with_precedence(Precedence::Lowest)?,
                 right_parenthesis: self.stream.eat_span(T![")"])?,
             }),
+            (T!["match"], Some(T!["("])) if self.dialect.is_sharp() => {
+                Expression::PatternMatch(self.parse_pattern_match()?)
+            }
             (T!["match"], Some(T!["("])) => Expression::Match(self.parse_match()?),
             (T!["array"], Some(T!["("])) => Expression::LegacyArray(self.parse_legacy_array()?),
             (T!["["], _) => Expression::Array(self.parse_array()?),

@@ -363,6 +363,7 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
             "class Report\n{\n    public int run(extra) { return 1; }\n}\n",
             "A PHP# parameter needs a type, as in `int extra`.",
         ),
+        ("class Report\n{\n    private count = 0;\n}\n", "A PHP# field needs a type, as in `private int count = 0;`."),
         (
             "class Report\n{\n    public required int count { get; set; }\n}\n",
             "`required` is not supported yet in PHP#.",
@@ -396,6 +397,32 @@ fn a_parameter_without_a_type_is_a_parse_error_that_names_the_rule() {
         };
         assert_eq!(error.to_string(), "A PHP# parameter needs a type, as in `int extra`.", "{parameters}");
         assert_eq!(source(code, error), "extra", "{parameters}");
+    }
+}
+
+/// A field always has a type, an override of a plain PHP parent's property too, spec section 6.1. A bare name before
+/// `=` or `;` is the field's name, and the class keeps parsing.
+#[test]
+fn a_field_without_a_type_is_a_parse_error_that_names_the_rule() {
+    for (field, name) in [("protected override table = \"orders\";", "table"), ("private count;", "count")] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Order\n{{\n    {field}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{field}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), "A PHP# field needs a type, as in `private int count = 0;`.", "{field}");
+        assert_eq!(source(code, error), name, "{field}");
+        let [ClassLikeMember::Property(Property::Plain(untyped)), ClassLikeMember::Method(run)] =
+            class_members(program).as_slice()
+        else {
+            panic!("expected a field and a method for `{field}`, got {:#?}", class_members(program));
+        };
+        assert!(untyped.hint.is_none(), "{field}");
+        assert_eq!(run.name.value, b"run", "{field}");
     }
 }
 
@@ -984,7 +1011,8 @@ fn for_of_declares_its_loop_variable_or_key_and_value() {
     let ForOfTarget::Value(line) = &values.target else {
         panic!("expected one loop variable, got {:#?}", values.target);
     };
-    assert_eq!(line.value, b"line");
+    assert_eq!(line.name.value, b"line");
+    assert!(line.hint.is_none());
     assert_eq!(bare_name(values.expression), b"lines");
     assert_eq!(source(CODE, &values.of), "of");
     assert_eq!(source(CODE, values), "for (const line of lines) {\n        }");
@@ -993,9 +1021,68 @@ fn for_of_declares_its_loop_variable_or_key_and_value() {
     let ForOfTarget::KeyValue(pair) = &entries.target else {
         panic!("expected a key and a value, got {:#?}", entries.target);
     };
-    assert_eq!((pair.key.value, pair.value.value), (&b"key"[..], &b"plan"[..]));
+    assert_eq!((pair.key.name.value, pair.value.name.value), (&b"key"[..], &b"plan"[..]));
     assert_eq!(source(CODE, &entries.target), "[key, plan]");
     assert!(matches!(entries.expression, Expression::Call(Call::Method(_))));
+}
+
+#[test]
+fn a_const_loop_variable_can_have_its_type_written() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (const [Status status, int n] of counts) {\n        }\n        for (const [Status status, n] of counts) {\n        }\n        for (const Map<string, List<int>> group of groups) {\n        }\n        for (const (int|string)? id of ids) {\n        }\n        for (const List<int> counter = []; ; ) {\n        }\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [
+        Statement::ForOf(typed),
+        Statement::ForOf(key_typed),
+        Statement::ForOf(group),
+        Statement::ForOf(id),
+        Statement::For(counted),
+    ] = method_body(program)
+    else {
+        panic!("expected four for … of loops and a for loop, got {:#?}", method_body(program));
+    };
+
+    let ForOfTarget::KeyValue(pair) = &typed.target else {
+        panic!("expected a key and a value, got {:#?}", typed.target);
+    };
+    assert_eq!(source(CODE, pair.key.hint.expect("a key type")), "Status");
+    assert_eq!(source(CODE, &pair.key), "Status status");
+    assert_eq!(source(CODE, pair.value.hint.expect("a value type")), "int");
+    assert_eq!(pair.value.name.value, b"n");
+    assert_eq!(source(CODE, &typed.target), "[Status status, int n]");
+
+    let ForOfTarget::KeyValue(pair) = &key_typed.target else {
+        panic!("expected a key and a value, got {:#?}", key_typed.target);
+    };
+    assert_eq!(source(CODE, pair.key.hint.expect("a key type")), "Status");
+    assert!(pair.value.hint.is_none());
+
+    let ForOfTarget::Value(group) = &group.target else {
+        panic!("expected one loop variable, got {:#?}", group.target);
+    };
+    assert_eq!(source(CODE, group.hint.expect("a type")), "Map<string, List<int>>");
+    assert_eq!(group.name.value, b"group");
+
+    let ForOfTarget::Value(id) = &id.target else {
+        panic!("expected one loop variable, got {:#?}", id.target);
+    };
+    assert_eq!(source(CODE, id.hint.expect("a type")), "(int|string)?");
+
+    let declaration = counted.declaration.as_ref().expect("a declaration");
+    assert_eq!(source(CODE, declaration.hint.expect("a type")), "List<int>");
+}
+
+/// A typed local never takes `let`, so neither does a typed loop variable.
+#[test]
+fn a_let_loop_variable_with_its_type_written_is_a_parse_error() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (let [Status status, int n] of counts) {\n        }\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    let first = program.errors.first().expect("a parse error");
+    assert_eq!(source(CODE, first), "status");
 }
 
 #[test]
@@ -2012,4 +2099,175 @@ fn php_file_starts_in_inline_text() {
 
     assert_eq!(program.dialect, Dialect::Php);
     assert!(matches!(program.statements.first(), Some(Statement::Inline(_))), "{:#?}", program.statements);
+}
+
+#[test]
+fn is_tests_a_value_against_a_pattern_as_tightly_as_a_comparison() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        entity is HasDesign && entity is not int count;\n        result as Paid ?? other;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::Binary(and) = expression(&method_body(program)[0]) else {
+        panic!("expected `&&`, got {:#?}", method_body(program)[0]);
+    };
+    let (Expression::Is(design), Expression::Is(count)) = (and.lhs, and.rhs) else {
+        panic!("expected two `is`, got {and:#?}");
+    };
+    assert_eq!(source(CODE, design), "entity is HasDesign");
+    assert!(matches!(design.pattern, Pattern::Type(TypePattern { variable: None, .. })), "{design:#?}");
+    let Pattern::Not(not) = count.pattern else {
+        panic!("expected `not`, got {count:#?}");
+    };
+    let Pattern::Type(int) = not.pattern else {
+        panic!("expected a type pattern, got {not:#?}");
+    };
+    assert_eq!(source(CODE, &int.hint), "int");
+    assert_eq!(int.variable.map(|variable| variable.value), Some(&b"count"[..]));
+
+    let Expression::Binary(coalesce) = expression(&method_body(program)[1]) else {
+        panic!("expected `??`, got {:#?}", method_body(program)[1]);
+    };
+    let Expression::As(r#as) = coalesce.lhs else {
+        panic!("expected `as` before `??`, got {coalesce:#?}");
+    };
+    assert_eq!(source(CODE, r#as), "result as Paid");
+}
+
+#[test]
+fn patterns_join_with_and_or_and_not_as_in_csharp() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        total is >= 1000 and < 10000 or 0 or not (int or null);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::Is(is) = expression(&method_body(program)[0]) else {
+        panic!("expected `is`, got {:#?}", method_body(program)[0]);
+    };
+    let Pattern::Binary(or) = is.pattern else {
+        panic!("expected `or`, got {is:#?}");
+    };
+    assert!(!or.is_and());
+    assert_eq!(source(CODE, or.left), ">= 1000 and < 10000 or 0");
+    assert!(matches!(or.right, Pattern::Not(NotPattern { pattern: Pattern::Parenthesized(_), .. })), "{or:#?}");
+    let Pattern::Binary(first) = or.left else {
+        panic!("expected `or`, got {or:#?}");
+    };
+    let Pattern::Binary(range) = first.left else {
+        panic!("expected `and`, got {first:#?}");
+    };
+    assert!(range.is_and());
+    assert!(matches!(range.left, Pattern::Comparison(_)), "{range:#?}");
+    assert!(matches!(first.right, Pattern::Value(Expression::Literal(_))), "{first:#?}");
+}
+
+#[test]
+fn equals_before_a_constant_is_a_comparison_pattern() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        status is == LIMIT;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::Is(Is { pattern: Pattern::Comparison(comparison), .. }) = expression(&method_body(program)[0])
+    else {
+        panic!("expected a comparison pattern, got {:#?}", method_body(program)[0]);
+    };
+    assert!(matches!(comparison.operator, BinaryOperator::Equal(_)), "{comparison:#?}");
+    assert_eq!(source(CODE, comparison.value), "LIMIT");
+}
+
+#[test]
+fn a_properties_pattern_tests_each_property_against_a_pattern() {
+    const CODE: &str =
+        "class Report\n{\n    void run()\n    {\n        response is { status: 200, body: string body };\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::Is(Is { pattern: Pattern::Properties(properties), .. }) = expression(&method_body(program)[0])
+    else {
+        panic!("expected a properties pattern, got {:#?}", method_body(program)[0]);
+    };
+    let written: Vec<&str> = properties.properties.iter().map(|property| source(CODE, property)).collect();
+    assert_eq!(written, ["status: 200", "body: string body"]);
+}
+
+#[test]
+fn list_and_enum_case_patterns_are_not_supported_yet() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        lines is [Line first, ...List<Line> rest];\n        result is PaymentResult.Paid(string id);\n        result is PaymentResult.Declined declined;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        errors,
+        [
+            ("A list pattern is not supported yet in PHP#.".to_owned(), "[Line first, ...List<Line> rest]"),
+            ("An enum case pattern is not supported yet in PHP#.".to_owned(), "PaymentResult.Paid(string id)"),
+            ("An enum case pattern is not supported yet in PHP#.".to_owned(), "PaymentResult.Declined declined"),
+        ]
+    );
+}
+
+#[test]
+fn a_case_without_fields_or_a_name_is_a_value_pattern() {
+    const CODE: &str =
+        "class Report\n{\n    void run()\n    {\n        status is Status.Open or Status.Closed;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::Is(Is { pattern: Pattern::Binary(or), .. }) = expression(&method_body(program)[0]) else {
+        panic!("expected an `or` pattern, got {:#?}", method_body(program)[0]);
+    };
+    let (Pattern::Value(open), Pattern::Value(closed)) = (or.left, or.right) else {
+        panic!("expected two value patterns, got {or:#?}");
+    };
+    assert!(matches!(open, Expression::Access(Access::Property(_))), "{open:#?}");
+    assert_eq!([source(CODE, *open), source(CODE, *closed)], ["Status.Open", "Status.Closed"]);
+}
+
+#[test]
+fn match_takes_patterns_when_conditions_and_a_default_arm() {
+    const CODE: &str = "class Report\n{\n    string run()\n    {\n        return match (count) {\n            0 => \"none\",\n            int n when n > 100 => \"many\",\n            default => \"some\",\n        };\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::PatternMatch(r#match) = expression(&method_body(program)[0]) else {
+        panic!("expected a match, got {:#?}", method_body(program)[0]);
+    };
+    let arms: Vec<&str> = r#match.arms.iter().map(|arm| source(CODE, arm)).collect();
+    assert_eq!(arms, ["0 => \"none\"", "int n when n > 100 => \"many\"", "default => \"some\""]);
+    let Some(PatternMatchArm::Pattern(many)) = r#match.arms.get(1) else {
+        panic!("expected a pattern arm, got {:#?}", r#match.arms);
+    };
+    assert_eq!(source(CODE, many.guard.as_ref().expect("a when condition")), "when n > 100");
+    assert!(r#match.arms.get(2).is_some_and(PatternMatchArm::is_default));
+}
+
+#[test]
+fn a_match_that_starts_a_statement_takes_block_arms_and_no_semicolon() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        match (shape) {\n            Circle circle => {\n                draw(circle);\n            },\n            default => {},\n        }\n        done();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::PatternMatch(r#match), Statement::Expression(_)] = method_body(program) else {
+        panic!("expected a match statement and a call, got {:#?}", method_body(program));
+    };
+    assert!(r#match.arms.iter().all(|arm| matches!(arm.body(), PatternMatchArmBody::Block(_))), "{:#?}", r#match.arms);
+}
+
+#[test]
+fn php_keeps_its_match_of_conditions() {
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.php", "<?php match ($a) { 1 => 2, default => 3 };");
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Expression(statement)) = program.statements.get(1) else {
+        panic!("expected an expression statement, got {:#?}", program.statements);
+    };
+    assert!(matches!(statement.expression, Expression::Match(_)), "{statement:#?}");
 }

@@ -2,20 +2,36 @@ use indexmap::IndexMap;
 
 use mago_algebra::clause::Clause;
 use mago_algebra::find_satisfying_assignments;
+use mago_algebra::saturate_clauses;
 use mago_allocator::Arena;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::get_literal_string;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_reporting::Level;
 use mago_span::HasPosition;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Parenthesized;
+use mago_syntax::cst::PatternMatch;
+use mago_syntax::cst::PatternMatchArm;
+use mago_syntax::cst::PropertiesPattern;
+use mago_syntax::cst::Statement;
+use mago_syntax::utils::pattern::PhpShape;
+use mago_syntax::walker::Walker;
 use mago_syntax_core::stack::ensure_sufficient_stack;
+use mago_word::Word;
 use mago_word::WordSet;
 use mago_word::word;
 
@@ -28,6 +44,7 @@ use crate::context::scope::var_has_root;
 use crate::error::AnalysisError;
 use crate::expression::instantiation::analyze_anonymous_class_constructor;
 use crate::formula::get_formula;
+use crate::formula::negate_or_synthesize;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::reconciler::reconcile_keyed_types;
@@ -187,6 +204,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 Expression::Instantiation(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::MagicConstant(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Pipe(expr) => expr.analyze(context, block_context, artifacts),
+                Expression::Is(_) | Expression::As(_) | Expression::PatternMatch(_) => {
+                    analyze_php_shape(Node::Expression(self), context, block_context, artifacts)
+                }
                 Expression::TypeOf(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::List(list_expr) => {
                     context.collector.report_with_code(
@@ -276,6 +296,282 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
 
             Ok(())
         })
+    }
+}
+
+/// Analyzes a PHP# `is`, `as` or `match` as the PHP it runs as, which the engine's bridge lowers too, so the analyzer
+/// narrows on the code that runs. An expression's type is its PHP's. A form the slice refuses has no PHP, and its
+/// error is the semantic check's.
+pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
+    node: Node<'_, 'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let Some(PhpShape { php, temporaries, tests }) =
+        context.get_assertion_context_from_block(block_context).php_shape(node)
+    else {
+        if let Node::Expression(expression) = node {
+            artifacts.set_expression_type(expression, get_mixed());
+        }
+
+        return Ok(());
+    };
+
+    context.temporaries += temporaries;
+    let (result, issues) = context.record(|context| match php {
+        Node::Expression(expression) => expression.analyze(context, block_context, artifacts),
+        Node::Statement(statement) => statement.analyze(context, block_context, artifacts),
+        _ => Ok(()),
+    });
+    context.temporaries -= temporaries;
+
+    // A properties pattern's `is_object` is its null check, which a value that cannot be null makes redundant. C#
+    // reports nothing there, and no source the user wrote can drop the check.
+    let mut object_checks = Vec::new();
+    match node {
+        Node::Expression(expression) => ObjectChecks.walk_expression(expression, &mut object_checks),
+        Node::Statement(statement) => ObjectChecks.walk_statement(statement, &mut object_checks),
+        _ => {}
+    }
+    // The last arm of a `match` without `default` takes every value the arms before it leave, as `default` does, so its
+    // test is always true and not redundant. An arm before it that is always true leaves nothing for the arms after it.
+    let last_arm_test: Option<Span> = match node {
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match))
+            if !pattern_match.arms.iter().any(PatternMatchArm::is_default) =>
+        {
+            pattern_match.arms.last().and_then(|arm| match arm {
+                PatternMatchArm::Pattern(arm) => {
+                    tests.iter().find(|(pattern, _)| *pattern == arm.pattern.span()).map(|(_, test)| test.span())
+                }
+                PatternMatchArm::Default(_) => None,
+            })
+        }
+        _ => None,
+    };
+    let is_code = |issue: &Issue, code: IssueCode| issue.code.as_deref() == Some(code.as_str());
+    let issues: Vec<Issue> = issues
+        .into_iter()
+        .filter(|issue| {
+            let span = issue.primary_span();
+            let redundant = is_code(issue, IssueCode::RedundantTypeComparison)
+                || is_code(issue, IssueCode::RedundantLogicalOperation);
+            let always_true = redundant
+                || is_code(issue, IssueCode::RedundantComparison)
+                || is_code(issue, IssueCode::RedundantCondition);
+
+            // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
+            !is_code(issue, IssueCode::MatchNotExhaustive)
+                && (!redundant || span.is_none_or(|span| !object_checks.contains(&span.start.offset)))
+                && (!always_true
+                    || span.is_none_or(|span| !last_arm_test.is_some_and(|test| test.contains(&span.start))))
+        })
+        .collect();
+
+    if let Node::Expression(Expression::PatternMatch(pattern_match))
+    | Node::Statement(Statement::PatternMatch(pattern_match)) = node
+        && !pattern_match.arms.iter().any(PatternMatchArm::is_default)
+    {
+        // A `when` condition may be false for any value, so only the tests of arms without one handle a case.
+        let handled: Vec<&Expression<'_>> = pattern_match
+            .arms
+            .iter()
+            .filter_map(|arm| match arm {
+                PatternMatchArm::Pattern(arm) if arm.guard.is_none() => {
+                    tests.iter().find(|(pattern, _)| *pattern == arm.pattern.span()).map(|(_, test)| *test)
+                }
+                _ => None,
+            })
+            .collect();
+
+        report_unhandled(pattern_match, &handled, context, block_context, artifacts);
+    }
+
+    // Reading (g) of spec section 21: a pattern that can never match is an error, as C#'s CS8121 is. Its test is then
+    // `false`, unless an error at the pattern already says so.
+    for (pattern, test) in tests {
+        let reported = issues.iter().any(|issue| {
+            issue.level == Level::Error
+                && is_code(issue, IssueCode::ImpossibleTypeComparison)
+                && issue.primary_span().is_some_and(|span| pattern.contains(&span.start))
+        });
+        if reported || !artifacts.get_rc_expression_type(test).is_some_and(|test_type| test_type.is_false()) {
+            continue;
+        }
+
+        context.collector.report_with_code(
+            IssueCode::ImpossibleTypeComparison,
+            Issue::error("This pattern never matches the value it tests.")
+                .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
+                .with_note("Spec section 21 makes a pattern that can never match an error, as C# does (CS8121).")
+                .with_help("Remove the pattern, or test a value that can match it."),
+        );
+    }
+    context.collector.extend(issues);
+    result?;
+
+    if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
+        && let Some(php_type) = artifacts.get_rc_expression_type(php).cloned()
+    {
+        artifacts.set_rc_expression_type(expression, php_type);
+    }
+
+    Ok(())
+}
+
+/// Reports what a PHP# `match` without `default` leaves unhandled. Spec section 21 gives `default` to every `match` on
+/// a value that is not an enum, and section 20 makes a `match` on an enum handle each of its cases. The value left is
+/// the value once every `handled` test is false, which Mago's reconciler narrows as it narrows the arms of PHP's
+/// `match`.
+fn report_unhandled<'ctx, 'arena, A>(
+    pattern_match: &PatternMatch<'arena>,
+    handled: &[&Expression<'arena>],
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+) where
+    A: Arena,
+{
+    // Each arm reads a local in its own test, never where `match` writes it, so a local's type is the variable's, and
+    // any other value's is its own, as `MatchAnalyzer` reads a subject.
+    let value_type = context
+        .get_assertion_context_from_block(block_context)
+        .get_expression_id(pattern_match.expression)
+        .and_then(|id| block_context.locals.get(&id).map(|value| (**value).clone()))
+        .or_else(|| artifacts.get_expression_type(pattern_match.expression).cloned())
+        .unwrap_or_else(get_mixed);
+    let is_enum = value_type
+        .types
+        .iter()
+        .all(|atomic| matches!(atomic, TAtomic::Null) || enum_value(atomic, context.codebase).is_some());
+
+    let missing = if is_enum {
+        missing_cases(pattern_match.span(), &value_type, handled, context, block_context, artifacts)
+    } else {
+        vec![]
+    };
+    let message = match missing.as_slice() {
+        _ if !is_enum => "A `match` needs a `default` arm.".to_owned(),
+        [] => return,
+        [only] => format!("This `match` misses `{only}`."),
+        [rest @ .., last] => {
+            let rest: Vec<String> = rest.iter().map(|case| format!("`{case}`")).collect();
+
+            format!("This `match` misses {} and `{last}`.", rest.join(", "))
+        }
+    };
+
+    context.collector.report_with_code(
+        IssueCode::MatchNotExhaustive,
+        Issue::error(message)
+            .with_annotation(
+                Annotation::primary(pattern_match.r#match.span).with_message("This `match` has no `default`."),
+            )
+            .with_note(
+                "Spec section 21: only a `match` on an enum may leave out `default`, when its arms cover every case.",
+            )
+            .with_help("Add an arm for each value it misses, or add `default => …` as the last arm."),
+    );
+}
+
+/// The cases of the enum `value_type` that no `handled` test of the `match` at `span` matches, as PHP# writes them,
+/// `Status.Open`, in the order the enum declares them, and `null` last.
+fn missing_cases<'ctx, 'arena, A>(
+    span: Span,
+    value_type: &TUnion,
+    handled: &[&Expression<'arena>],
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+) -> Vec<String>
+where
+    A: Arena,
+{
+    let thresholds = context.settings.algebra_thresholds();
+    let size_threshold = context.settings.formula_size_threshold;
+    let assertion_context = context.get_assertion_context_from_block(block_context);
+    let mut clauses = Vec::new();
+    for test in handled {
+        let formula =
+            get_formula(test.span(), test.span(), test, assertion_context, artifacts, &thresholds, size_threshold)
+                .unwrap_or_default();
+        clauses.extend(negate_or_synthesize(formula, test, assertion_context, artifacts, &thresholds, size_threshold));
+    }
+    let (assertions, _) =
+        find_satisfying_assignments(&saturate_clauses(clauses.iter(), &thresholds), None, &mut WordSet::default());
+
+    let left = if assertions.is_empty() {
+        vec![value_type.clone()]
+    } else {
+        let mut unhandled_context = block_context.clone();
+        reconcile_keyed_types(
+            context,
+            &assertions,
+            IndexMap::new(),
+            &mut unhandled_context,
+            &mut WordSet::default(),
+            &WordSet::default(),
+            &span,
+            false,
+            false,
+        );
+
+        assertions.keys().filter_map(|id| unhandled_context.locals.get(id)).map(|left| (**left).clone()).collect()
+    };
+
+    let atomics = || left.iter().flat_map(|left| left.types.iter());
+    let cases: Vec<(Word, Option<Word>)> =
+        atomics().filter_map(|atomic| enum_value(atomic, context.codebase)).collect();
+
+    let mut missing = Vec::new();
+    let mut enums: Vec<Word> = Vec::new();
+    for (name, _) in &cases {
+        if !enums.contains(name) {
+            enums.push(*name);
+        }
+    }
+    for name in enums {
+        let Some(metadata) = context.codebase.get_enum(name.as_bytes()) else {
+            continue;
+        };
+        let short_name = metadata.original_name.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default();
+        let mut declared: Vec<_> = metadata.enum_cases.values().collect();
+        declared.sort_by_key(|case| case.span.start.offset);
+        for case in declared {
+            if cases.iter().any(|(enum_name, left)| *enum_name == name && left.is_none_or(|left| left == case.name)) {
+                missing.push(format!("{}.{}", String::from_utf8_lossy(short_name), case.name));
+            }
+        }
+    }
+    if atomics().any(|atomic| matches!(atomic, TAtomic::Null)) {
+        missing.push("null".to_owned());
+    }
+
+    missing
+}
+
+/// The enum and the case a type holds: one case, or every case of the enum when the case is `None`. `None` for a type
+/// that is not an enum.
+fn enum_value(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<(Word, Option<Word>)> {
+    match atomic {
+        TAtomic::Object(TObject::Enum(TEnum { name, case })) => Some((*name, *case)),
+        TAtomic::Object(TObject::Named(named)) if codebase.get_enum(named.name.as_bytes()).is_some() => {
+            Some((named.name, None))
+        }
+        _ => None,
+    }
+}
+
+/// Collects the offset of each properties pattern's `{`, where its PHP's `is_object` check starts.
+struct ObjectChecks;
+
+impl<'ast, 'arena> Walker<'ast, 'arena, Vec<u32>> for ObjectChecks {
+    fn walk_in_properties_pattern(&self, properties: &'ast PropertiesPattern<'arena>, offsets: &mut Vec<u32>) {
+        offsets.push(properties.left_brace.start.offset);
     }
 }
 

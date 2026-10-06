@@ -5,10 +5,16 @@ use mago_span::Span;
 
 use mago_span::HasPosition;
 use mago_span::Position;
+use mago_syntax::cst::ArrowFunction;
+use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::PropertyHookBody;
+use mago_syntax::cst::PropertyHookList;
+use mago_syntax::walker::MutWalker;
+use mago_syntax::walker::walk_property_hook_list_mut;
 
 use crate::binding::Binding;
 use crate::binding::BindingError;
@@ -178,6 +184,29 @@ impl<'arena> ResolvedNames<'arena> {
         self.class_object(access.object)
     }
 
+    /// Returns whether an accessor body of a PHP# property names `field` outside a lambda, as php-src finds
+    /// `$this->name` in a hook outside a closure, nested blocks included. A lambda is a function of its own, where PHP
+    /// calls the accessor again. Returns `false` for every property in a PHP file.
+    ///
+    /// The checker, the analyzer and the engine all read this, so they never disagree on a backed property.
+    #[must_use]
+    pub fn uses_field(&self, accessors: &PropertyHookList<'_>) -> bool {
+        let mut field_use = FieldUse { names: self, lambdas: 0, found: false };
+        walk_property_hook_list_mut(&mut field_use, accessors, &mut ());
+
+        field_use.found
+    }
+
+    /// Returns whether a PHP# property has storage: an auto accessor, `get;` or `set;`, or a body that
+    /// [uses `field`](Self::uses_field). A property without storage runs as PHP's virtual property.
+    ///
+    /// The checker and the analyzer both read this, so they never disagree on a virtual property.
+    #[must_use]
+    pub fn has_storage(&self, accessors: &PropertyHookList<'_>) -> bool {
+        accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Abstract(_)))
+            || self.uses_field(accessors)
+    }
+
     fn class_object<'ast>(&self, object: &'ast Expression<'ast>) -> Option<&'ast ConstantAccess<'ast>> {
         match object {
             Expression::ConstantAccess(access) if self.binding(&access.name) == Some(Binding::Class) => Some(access),
@@ -241,6 +270,36 @@ impl<'arena> ResolvedNames<'arena> {
     #[must_use]
     pub fn all(&self) -> HashSet<(&u32, &(&'arena [u8], bool))> {
         self.names.iter().map(|(k, (_, inner))| (k, inner)).collect()
+    }
+}
+
+/// Finds `field` in accessor bodies outside the lambdas they hold, for [`ResolvedNames::uses_field`].
+struct FieldUse<'names, 'arena> {
+    names: &'names ResolvedNames<'arena>,
+    /// How many lambdas hold the node being walked.
+    lambdas: u32,
+    found: bool,
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for FieldUse<'_, '_> {
+    fn walk_in_arrow_function(&mut self, _arrow_function: &'ast ArrowFunction<'arena>, _context: &mut ()) {
+        self.lambdas += 1;
+    }
+
+    fn walk_out_arrow_function(&mut self, _arrow_function: &'ast ArrowFunction<'arena>, _context: &mut ()) {
+        self.lambdas -= 1;
+    }
+
+    fn walk_in_closure(&mut self, _closure: &'ast Closure<'arena>, _context: &mut ()) {
+        self.lambdas += 1;
+    }
+
+    fn walk_out_closure(&mut self, _closure: &'ast Closure<'arena>, _context: &mut ()) {
+        self.lambdas -= 1;
+    }
+
+    fn walk_in_constant_access(&mut self, constant_access: &'ast ConstantAccess<'arena>, _context: &mut ()) {
+        self.found |= self.lambdas == 0 && self.names.binding(&constant_access.name) == Some(Binding::Field);
     }
 }
 
