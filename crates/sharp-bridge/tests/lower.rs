@@ -8812,6 +8812,29 @@ fn as_is_a_conditional_that_gives_the_value_or_null() {
     );
 }
 
+/// `as` to a collection type checks every element, which the engine has no test for yet, and `Any`, a function type
+/// and a union have none either. The checker refuses each, and a `match` without arms, before the lowering meets a
+/// form it has no PHP for.
+#[test]
+fn is_as_and_match_without_a_php_test_are_refused_before_lowering() {
+    let lowered = Lowered::new(&method_with(
+        "void run(Any? extra)",
+        "        const listed = extra as List<string>;\n        const any = extra as Any;\n        const call = extra as Function<int(int)>;\n        const either = extra as int|string;\n        const present = extra is Any;\n        match (extra) {}\n",
+    ));
+
+    assert_eq!(
+        lowered.diagnostics(),
+        [
+            "9:33 compile error: This type is not supported yet in PHP#.",
+            "10:30 compile error: This type is not supported yet in PHP#.",
+            "11:31 compile error: This type is not supported yet in PHP#.",
+            "12:33 compile error: This type is not supported yet in PHP#.",
+            "13:34 compile error: This type is not supported yet in PHP#.",
+            "14:9 compile error: A `match` needs a `default` arm.",
+        ]
+    );
+}
+
 /// ```php
 /// if (\is_int($count = $counts[$key] ?? null)) { return $count; }
 /// $price = \is_int(${'as#1'} = $counts[$key] ?? null) ? ${'as#1'} : null;

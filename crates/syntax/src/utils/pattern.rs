@@ -131,6 +131,15 @@ pub fn called_function(node: Node<'_, '_>) -> Option<LocalIdentifier<'static>> {
     }
 }
 
+/// Whether a type pattern or an `as` has PHP that tests a value against `hint`.
+///
+/// A scalar type has `is_int`, `is_float`, `is_string` or `is_bool`, and a class has `instanceof`. `php_shape` builds no
+/// PHP for a form that tests any other type, so the semantic check refuses it.
+#[must_use]
+pub fn has_type_test(hint: &Hint<'_>) -> bool {
+    scalar_test(hint).is_some() || matches!(hint, Hint::Identifier(_))
+}
+
 /// The function that tests a value against a scalar type, at the type's span.
 fn scalar_test(hint: &Hint<'_>) -> Option<LocalIdentifier<'static>> {
     let value: &'static [u8] = match hint {
