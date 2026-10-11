@@ -165,8 +165,15 @@ fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -
     } else if member.is_empty() {
         class_name(class)
     } else {
-        display_sharp_member(class_name(class), member)
+        let mut text = display_sharp_member(class_name(class), member);
+        text.reserve(spare(member));
+        text
     }
+}
+
+/// The bytes a message may append after a member.
+fn spare(member: Word) -> usize {
+    member.len()
 }
 
 /// What a body does: an effect, or a change of a root.
