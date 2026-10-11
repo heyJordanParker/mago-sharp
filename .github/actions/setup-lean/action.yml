@@ -10,7 +10,7 @@ runs:
     - name: Install elan and Lean
       shell: bash
       run: |
-        toolchain=leanprover/lean4:v0.0.0
+        toolchain=$(cat crates/sharp-lean/lean/lean-toolchain)
         export PATH="$HOME/.elan/bin:$PATH"
         echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
         for attempt in 1 2 3; do
