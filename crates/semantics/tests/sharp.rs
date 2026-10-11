@@ -323,6 +323,11 @@ fn a_catch_variable_is_out_of_scope_after_its_catch_block() {
     let code = leak(method("        try {\n        } catch (Missing failure) {\n        }\n        throw failure;\n"));
 
     assert_eq!(issues(code), ["10:15 `failure` is used after the block that declares it closes."]);
+
+    // PHP keeps a catch variable for the rest of its function.
+    let php =
+        leak(php_method("        try {\n        } catch (Missing $failure) {\n        }\n        throw $failure;\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -815,6 +820,10 @@ fn a_method_opens_with_virtual_and_replaces_with_override() {
     let code = "namespace App.Tenant;\n\npublic class Image\n{\n    public virtual int size()\n    {\n        return 1;\n    }\n}\n\npublic class Thumbnail : Image\n{\n    public override int size()\n    {\n        return 2;\n    }\n\n    private virtual int cached;\n}\n";
 
     assert_eq!(issues(code), ["18:13 This modifier is not supported yet in PHP#."]);
+
+    // A PHP method is open unless it is `final`, and `#[\Override]` marks a replacement.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Image\n{\n    public function size(): int\n    {\n        return 1;\n    }\n}\n\nclass Thumbnail extends Image\n{\n    #[\\Override]\n    public function size(): int\n    {\n        return 2;\n    }\n\n    private int $cached;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -822,6 +831,9 @@ fn super_calls_the_parent_method() {
     let code = "namespace App.Tenant;\n\npublic class Thumbnail : Image\n{\n    public override int size()\n    {\n        let base = super.count;\n        return super.size() + base;\n    }\n}\n";
 
     assert_eq!(issues(code), ["7:20 This expression is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Thumbnail extends Image\n{\n    #[\\Override]\n    public function size(): int\n    {\n        $base = parent::$count;\n        return parent::size() + $base;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 25's example: `Self` is the class a static method is called on, and `new Self(…)` needs a `required`
@@ -848,6 +860,10 @@ fn self_is_only_a_return_type() {
             "9:44 `Self` is only a return type in PHP#.",
         ]
     );
+
+    // PHP's `self` is a type in every place.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private self $owner;\n    public ?self $next;\n\n    public function __construct(self $other, int|self $either)\n    {\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -870,6 +886,10 @@ fn new_self_needs_a_required_constructor() {
             "Declare the constructor of `Total` `required`, as in `public required Total(…)`.",
         ]
     );
+
+    // PHP writes `new static`, and a `final` constructor keeps it callable on every subclass.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(int $count)\n    {\n    }\n\n    public static function make(): static { return new static(1); }\n}\n\nclass Total\n{\n    public static function make(): static { return new static(); }\n}\n\nclass Entity\n{\n    final public function __construct(int $count)\n    {\n    }\n\n    public static function make(): static { return new static; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// `Self.y` is not ruled yet, as `super.y` is not.
@@ -885,6 +905,9 @@ fn a_member_of_self_read_or_written_is_not_supported_yet() {
             "10:29 This expression is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private static int $count = 0;\n\n    public static function run(): int\n    {\n        self::$count = 1;\n        return self::$count + strlen(self::class);\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// PHP's `self` is removed, spec section 25: a class writes its own name, or `Self` where `Self` goes.
@@ -1828,6 +1851,11 @@ fn a_map_key_is_refused_once() {
             format!("11:13 {key}"),
         ]
     );
+
+    let php = leak(php_method(
+        "        /** @var array<callable, int> $rows */\n        $rows = [];\n        /** @var array<static, int> $others */\n        $others = [];\n        /** @var array<float, int> $prices */\n        $prices = [];\n        /** @var array<callable|null, int> $maybe */\n        $maybe = [];\n        /** @var array<int|null, int> $counts */\n        $counts = [];\n        return 1;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A `public` parameter declares a property only on a constructor. Elsewhere PHP's own error reports it alone.
@@ -2104,6 +2132,9 @@ fn a_promoted_member_follows_the_rules_of_the_same_declaration_in_the_class_body
             "5:90 The property `c` has no storage for the constructor to set: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(public int $a { set => $value; }, private private(set) int $b, public int $c { get => 1; }) {}\n\n    public function reset(): void\n    {\n        $this->a = 1;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2353,6 +2384,9 @@ fn an_override_without_an_initial_value_is_an_error() {
         issues(code),
         ["7:37 An override needs an initial value: it replaces the default of the parent's property."]
     );
+
+    let php = "<?php\n\nnamespace App\\Store;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    /** @var list<string> */\n    protected array $hidden;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// The parent's constructor may read an overridden property before this class's code runs, so an override's initial
@@ -2366,6 +2400,15 @@ fn an_override_whose_initial_value_is_not_constant_is_an_error() {
         [
             "8:48 The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
             "9:38 The initial value of an override must be constant: the parent's constructor may read it before this class's code runs.",
+        ]
+    );
+
+    let php = "<?php\n\nnamespace App\\Store;\n\nuse Lib\\Calc;\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    protected array $fillable = $this->columns();\n    protected int $perPage = Calc::make();\n\n    public function columns(): array { return ['number']; }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "10:33 Property `Order::$fillable` value contains a non-constant expression.",
+            "11:30 Property `Order::$perPage` value contains a non-constant expression.",
         ]
     );
 }
@@ -2383,6 +2426,9 @@ fn an_overriding_property_is_not_supported_yet() {
             "8:28 Overriding a property is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Store;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    public int $views = 0;\n    public string $slug { get => 'order'; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, as its
@@ -2473,6 +2519,9 @@ fn a_get_only_nullable_property_without_an_initial_value_is_not_supported_yet() 
             "6:27 A get-only nullable property without an initial value is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public readonly ?int $total;\n    private readonly int|string|null $key;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2511,6 +2560,12 @@ fn a_get_only_nullable_property_without_an_initial_value_names_the_initial_value
         [[
             "A get-only property runs as PHP's `readonly`, which takes no default, so it cannot start as null: give it an initial value, as in `public int? total { get; } = null;`, or a `set` accessor."
         ]]
+    );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public readonly ?int $total;\n}\n";
+    assert_eq!(
+        check("src/Report.php", php).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
+        Vec::<Vec<String>>::new()
     );
 }
 
@@ -2603,6 +2658,12 @@ fn an_auto_property_breaking_the_accessor_rules_is_an_error() {
             "9:25 A PHP# property declares each accessor once.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public public(set) int $a;\n    private private(set) int $b;\n    protected public(set) int $c;\n    public int $d { set => $value; }\n    public int $e { get => 1; get => 2; }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["11:31 Hook `get` has already been defined for property `Report::$e`."]
+    );
 }
 
 #[test]
@@ -2646,6 +2707,10 @@ fn a_static_computed_property_or_one_without_an_access_modifier_is_not_supported
             "6:9 A property without `public`, `protected` or `private` is not supported yet in PHP#.",
         ]
     );
+
+    // PHP declares a property with a modifier, so the twin is the static one.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public static int $count { get => 1; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:12 Hooked property `Report::$count` cannot be static."]);
 }
 
 #[test]
@@ -2664,6 +2729,16 @@ fn properties_outside_the_slice_are_not_supported_yet() {
             "10:25 This accessor is not supported yet in PHP#.",
             "11:16 An initial value before the accessors is not supported yet in PHP#.",
             "12:25 This accessor is not supported yet in PHP#.",
+        ]
+    );
+
+    // PHP has no `init` accessor and no accessor narrower than `set`, so the twin holds the forms it can write.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public static int $b { get => 1; }\n    abstract public int $d { get; }\n    public int $g = 0 { get => $this->g; }\n    public int $h { get => 1; set(int $value) {} }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "7:12 Hooked property `Report::$b` cannot be static.",
+            "8:5 Property `Report::$d` cannot be declared abstract"
         ]
     );
 }
@@ -2758,6 +2833,9 @@ fn a_property_with_accessor_bodies_that_overrides_a_parent_property_is_not_suppo
     let code = "namespace App.Store;\n\nimport Lib.Model;\n\nclass Order : Model\n{\n    public override string status { get => field; set => field = value; }\n}\n";
 
     assert_eq!(issues(code), ["7:28 Overriding a property is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace App\\Store;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    public string $status {\n        get => $this->status;\n        set => $value;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A property whose accessors all have bodies and never use `field` has no storage, as PHP's virtual property, so
@@ -2789,6 +2867,9 @@ fn an_initial_value_that_is_not_constant_on_a_property_whose_set_has_a_body_is_n
             "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#."
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public int $a = strlen('x') { set => $value; }\n    public int $c = 1 { set => $value; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3201,6 +3282,9 @@ fn a_type_argument_takes_a_question_mark_in_a_field() {
     let code = "class Report\n{\n    private Map<string, Any?> saved = [:];\n    public List<int?> sizes { get; private set; } = [];\n    private Map<string, List<Line?>> lines = [:];\n    private Map<string, mixed> old = [:];\n    private Map<string, Any?>? maybe = null;\n    private Map<string, Function<Any?(Any)>> handlers = [:];\n}\n";
 
     assert_eq!(issues(code), ["6:25 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null."]);
+
+    let php = "<?php\n\nclass Report\n{\n    /** @var array<string, mixed> */\n    private array $saved = [];\n    /** @var list<int|null> */\n    public private(set) array $sizes = [];\n    /** @var array<string, list<Line|null>> */\n    private array $lines = [];\n    /** @var array<string, mixed> */\n    private array $old = [];\n    /** @var array<string, mixed>|null */\n    private ?array $maybe = null;\n    /** @var array<string, \\Closure(mixed): mixed> */\n    private array $handlers = [];\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3218,6 +3302,9 @@ fn an_interface_method_takes_and_returns_list_and_map_types() {
         issues(code),
         ["5:9 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value."]
     );
+
+    let php = "<?php\n\ninterface Grouped\n{\n    /**\n     * @param array<string, list<int>> $groups\n     * @return list<int>\n     */\n    public function sizes(array $groups): array;\n\n    /** @return array<float, int> */\n    public function rounded(): array;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3258,6 +3345,9 @@ fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() 
             "3:80 This type is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nclass Report\n{\n    /**\n     * @param list<int, int> $b\n     * @param array<string> $c\n     * @param Paged<Line> $d\n     * @return list<void>\n     */\n    public function run(array $b, array $c, Paged $d): array\n    {\n        return [];\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// The first `Set` slice holds `int`, `string` and backed enums, which run as the keys of a PHP array. A named type
@@ -3289,6 +3379,9 @@ fn a_map_key_that_is_not_int_string_or_a_named_type_is_an_error() {
             "3:84 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
         ]
     );
+
+    let php = "<?php\n\nclass Report\n{\n    /**\n     * @param array<Line, int> $a\n     * @param array<int|null, int> $b\n     * @param array<string, array<bool, int>> $c\n     * @return array<float, int>\n     */\n    public function run(array $a, array $b, array $c): array\n    {\n        return [];\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3893,6 +3986,9 @@ fn an_enum_method_takes_collection_and_function_types_and_holds_lambdas_as_a_cla
     let code = "namespace App.Tenant;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public static Map<string, Status> byValue(List<Status> all)\n    {\n        const Function<string(Status)> key = s => s.value;\n        return all.associateBy(key);\n    }\n\n    public List<Function<bool()>> checks(List<Status> all)\n    {\n        List<Function<bool()>> checks = [];\n        for (let other of all) {\n            other = Status.Active;\n            checks.add(() => other === this);\n        }\n        return checks;\n    }\n}\n";
 
     assert_eq!(issues(code), ["18:30 This capture of a loop variable that changes is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nenum Status: string\n{\n    case Active = 'a';\n\n    /**\n     * @param list<Status> $all\n     * @return array<string, Status>\n     */\n    public static function byValue(array $all): array\n    {\n        $key = fn (Status $s): string => $s->value;\n        $result = [];\n        foreach ($all as $s) {\n            $result[$key($s)] = $s;\n        }\n        return $result;\n    }\n\n    /**\n     * @param list<Status> $all\n     * @return list<\\Closure(): bool>\n     */\n    public function checks(array $all): array\n    {\n        $checks = [];\n        foreach ($all as $other) {\n            $other = Status::Active;\n            $checks[] = fn (): bool => $other === $this;\n        }\n        return $checks;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3922,6 +4018,10 @@ fn a_match_whose_arms_name_class_values_leaves_its_default_to_the_analyzer() {
     let code = "namespace App.Tenant;\n\nimport Lib.Status;\n\nclass Report\n{\n    public string label(Status? status)\n    {\n        match (status) {\n            Status.Open when status !== null => {},\n            Status.Closed or null => {},\n        }\n        return match (status) {\n            Status.Open => \"open\",\n            0 => \"zero\",\n        };\n    }\n}\n";
 
     assert_eq!(issues(code), ["13:16 A `match` needs a `default` arm."]);
+
+    // PHP's `match` has no `when` guard and no `or` pattern, so the twin is the second `match`.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Status;\n\nclass Report\n{\n    public function label(?Status $status): string\n    {\n        return match ($status) {\n            Status::Open => 'open',\n            0 => 'zero',\n        };\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -4105,6 +4205,9 @@ fn a_void_parameter_of_a_function_type_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Function<int(void)> priceOf;\n}\n";
 
     assert_eq!(issues(code), ["5:13 This type is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    /** @var \\Closure(void): int */\n    private \\Closure $priceOf;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A call `x.priceOf(line)` runs the property's function only when the class has no method `priceOf`, and PHP finds
@@ -4165,6 +4268,9 @@ fn self_in_a_function_type_is_an_error_and_a_list_of_self_is_a_return_type() {
         issues(code),
         ["5:22 `Self` is only a return type in PHP#.", "7:52 `Self` is only a return type in PHP#.",]
     );
+
+    let php = "<?php\n\nnamespace App;\n\nclass Report\n{\n    /** @var \\Closure(): static */\n    private \\Closure $make;\n\n    /**\n     * @param \\Closure(static): int $pick\n     * @return list<static>|static\n     */\n    public static function all(\\Closure $pick): array|static { return []; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// An enum's method returns `Self`, which is the enum, and its constants take union types, as a class's do. An enum
@@ -4174,6 +4280,9 @@ fn an_enum_returns_self_holds_union_constants_and_refuses_new_self() {
     let code = "namespace App;\n\npublic enum Status : string\n{\n    public const int|string Key = 1;\n    public const (int|string)? Code = null;\n\n    case Active = \"a\";\n\n    public static Self first() => Status.Active;\n\n    public static Self? find(string ...codes) => Status.tryFrom(codes[0] ?? \"\");\n\n    public static Self make() => new Self(\"a\");\n}\n";
 
     assert_eq!(issues(code), ["14:34 An enum has no constructor: its cases are its only values."]);
+
+    let php = "<?php\n\nnamespace App;\n\nenum Status: string\n{\n    public const int|string KEY = 1;\n\n    case Active = 'a';\n\n    public static function first(): self { return Status::Active; }\n\n    public static function make(): self { return new self('a'); }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// `List` and `Map` both run as PHP's `array`, and every function type as `\Closure`, so a union of two of either is
@@ -4192,6 +4301,12 @@ fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
             "5:70 Duplicate type `Function<string()>` is redundant."
         ]
     );
+
+    let php = leak(
+        php_method("        return 1;\n")
+            .replace("int $extra", "array|array $items, \\Closure|\\Closure $make, array|string $fine"),
+    );
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -4217,6 +4332,12 @@ fn a_lambda_capturing_a_loop_variable_that_changes_is_not_supported_yet() {
             "12:32 This capture of a loop variable that changes is not supported yet in PHP#.",
         ]
     );
+
+    // A PHP arrow function captures each variable by value where it is created.
+    let php = leak(php_method(
+        "        for ($step = 0; $step < $extra; $step++) {\n            $show = fn () => $step;\n        }\n        foreach (Store::values() as $value) {\n            $value += 1;\n            $read = fn () => $value;\n        }\n        foreach (Store::values() as $item) {\n            $keep = fn () => $item;\n        }\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Every semantic issue in the source, in the dialect its path names, as its message and its annotations' messages.
