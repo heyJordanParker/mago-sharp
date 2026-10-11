@@ -98,6 +98,7 @@ use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::token::GetPrecedence;
 use mago_syntax::token::Precedence;
+use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::internal::consts::RESERVED_CLASS_NAMES;
@@ -1062,6 +1063,17 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
                 None
             }
+            // A type outside the slice, and `Self`, are refused by the walk, as anywhere in a body.
+            hint if !has_type_test(hint) && (is_slice_type(hint) || matches!(hint, Hint::Union(_))) => {
+                report_not_supported(
+                    hint.span(),
+                    "type",
+                    "`as` converts to `int`, `float`, `string`, `bool` or a class.",
+                    context,
+                );
+
+                None
+            }
             _ => Some(Body),
         },
         (
@@ -1083,9 +1095,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::Hint(hint), Place::Pattern) if is_slice_type(hint) && !matches!(hint, Hint::Void(_)) => {
-            Some(Place::Pattern)
-        }
+        (Node::Hint(hint), Place::Pattern) if is_slice_type(hint) && has_type_test(hint) => Some(Place::Pattern),
         (Node::BinaryPattern(binary), Place::Pattern)
             if !binary.is_and() && [binary.left, binary.right].iter().any(|side| matches!(side, Pattern::Not(_))) =>
         {
@@ -2330,12 +2340,14 @@ fn has_braces(statement: &Statement) -> bool {
 /// Checks the arms of a `match`, and returns whether its children can be checked. Spec section 21 needs a `default`
 /// arm on a value that is not an enum, and section 20 lets a `match` on an enum leave it out when its arms cover every
 /// case. Only the analyzer knows the value's type, so a `match` whose arms all name `Class.y` values or `null` may
-/// leave out `default`, and the analyzer reports the cases it misses. A block arm is only in a `match` statement. The
-/// engine takes one `default` arm, as PHP's `match` does.
+/// leave out `default`, and the analyzer reports the cases it misses. A `match` without arms covers no case, so it needs
+/// `default`. A block arm is only in a `match` statement. The engine takes one `default` arm, as PHP's `match` does.
 fn check_pattern_match(pattern_match: &PatternMatch, is_expression: bool, context: &mut Context<'_, '_, '_>) -> bool {
     let mut defaults = pattern_match.arms.iter().filter(|arm| arm.is_default());
     match defaults.next() {
-        None if !pattern_match.arms.iter().all(|arm| names_class_values(arm, context)) => {
+        None if pattern_match.arms.is_empty()
+            || !pattern_match.arms.iter().all(|arm| names_class_values(arm, context)) =>
+        {
             context.report(
                 Issue::error("A `match` needs a `default` arm.")
                     .with_annotation(
@@ -2996,7 +3008,7 @@ const fn supported(place: Place) -> &'static str {
             "A parameter default, an attribute argument, a constant's value or an enum case's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool` or a class with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }
