@@ -34,6 +34,22 @@ mod internal;
 /// writes its local too, which captures it by reference, as harmless.
 pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "delete", "remove", "clear"];
 
+/// The effects a PHP# `uses` takes, spec section 29, by the full names a bare effect name resolves to in a `.sharp`
+/// file: the standard library's ten, then `Events`, the effect of `emit`.
+pub const STANDARD_EFFECTS: [&str; 11] = [
+    "Sharp\\Database",
+    "Sharp\\Http",
+    "Sharp\\Files",
+    "Sharp\\Console",
+    "Sharp\\Process",
+    "Sharp\\Clock",
+    "Sharp\\Random",
+    "Sharp\\Cache",
+    "Sharp\\Mail",
+    "Sharp\\Environment",
+    "Sharp\\Events",
+];
+
 /// The last segment of the full name `name`, as a PHP# import writes it.
 #[must_use]
 pub fn short_name(name: impl AsRef<[u8]>) -> String {

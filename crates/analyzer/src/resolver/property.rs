@@ -52,6 +52,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::external::PropertyAccessKind;
 use crate::invocation::infer_parameter_templates_from_argument;
 use crate::invocation::rename_trait_objects;
@@ -159,6 +160,10 @@ where
         if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
             object_atomics.extend(constraint.types.iter().map(|bound| (bound, written_atomic)));
 
+            continue;
+        }
+
+        if matches!(object_atomic, TAtomic::Error) {
             continue;
         }
 
@@ -1577,7 +1582,7 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
 {
     let is_nullable = object_type.can_be_null() || object_type.possibly_undefined();
     let is_all_null = object_type.is_null() || object_type.is_void();
-    if is_nullable || is_all_null {
+    if is_nullable || is_all_null || is_refused_type(object_type) {
         return;
     }
 
@@ -1734,8 +1739,10 @@ where
 
     let value =
         specialize_member_type(context, receiver, declaring_class, class_id, &TemplateResult::default(), |options| {
+            // The signature's `source` names the class the value is read through, as a call of the method does, so
+            // an `extern` lookup starts there.
             let mut signature = get_signature_of_function_like_metadata(
-                &FunctionLikeIdentifier::Method(class_name, method.get_method_name()),
+                &FunctionLikeIdentifier::Method(class_id, method.get_method_name()),
                 method_metadata,
                 codebase,
                 options,

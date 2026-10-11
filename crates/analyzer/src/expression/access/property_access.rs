@@ -24,6 +24,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::resolver::property::resolve_instance_properties;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_property_access_expression_id;
@@ -182,7 +183,8 @@ where
         return Ok(());
     }
 
-    let mut resulting_type = resulting_expression_type.unwrap_or_else(get_never);
+    let refused_object = artifacts.get_expression_type(object).filter(|object_type| is_refused_type(object_type));
+    let mut resulting_type = refused_object.cloned().or(resulting_expression_type).unwrap_or_else(get_never);
     let object_has_nullsafe_null = artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null());
     if resolution_result.all_properties_non_nullable
         && ((is_null_safe && resolution_result.encountered_null) || object_has_nullsafe_null)

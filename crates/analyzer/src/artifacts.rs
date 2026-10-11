@@ -26,6 +26,7 @@ use crate::context::block::ReferenceConstraintSource;
 use crate::context::scope::case_scope::CaseScope;
 use crate::context::scope::loop_scope::LoopScope;
 use crate::effects::EffectSummary;
+use crate::effects::FunctionValue;
 use crate::readonly::PendingReadonlyPropertyWrite;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +100,9 @@ pub struct AnalysisArtifacts {
     /// type arguments, keyed by the span of the type it writes. Apart from `expression_types`, because the `instanceof`
     /// a test runs as spans that type too when nothing the code writes stands before it.
     pub(crate) tested_types: HashMap<(u32, u32), TUnion>,
+    /// The function values the analysis gave places whose function types list effects, until the body that gives them
+    /// records its summary.
+    pub(crate) function_values: Vec<FunctionValue>,
     pub(crate) variable_definedness: HashMap<(u32, u32), WordMap<VariableDefinedness>>,
     variable_definedness_targets: Option<Arc<[bool; NodeKind::COUNT]>>,
     pub(crate) pending_readonly_property_writes: Vec<PendingReadonlyPropertyWrite>,
@@ -138,6 +142,7 @@ impl AnalysisArtifacts {
             effect_summaries: Vec::new(),
             call_targets: HashMap::default(),
             tested_types: HashMap::default(),
+            function_values: Vec::new(),
             variable_definedness: HashMap::default(),
             variable_definedness_targets: None,
             pending_readonly_property_writes: Vec::new(),

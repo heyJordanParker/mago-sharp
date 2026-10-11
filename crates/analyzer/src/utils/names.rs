@@ -433,7 +433,8 @@ where
 
 /// Returns `union` as PHP# writes the type: `List<int>`, `Map<string, int>`, `int?`, `(int|string)?`, `Any?`, a class
 /// as [`sharp_class_like_name`] names it, a type parameter by its name, an intersection as `A & B`, a function type as
-/// `Function<void(int)>`, `Class<Order>`, `Object`, `Iterable<int>`, and a literal as `1` or `"text"`. A refinement that
+/// `Function<void(int)>` or `Function<Charge(Cart) uses Http>` with each effect named as a class is, `Class<Order>`,
+/// `Object`, `Iterable<int>`, and a literal as `1` or `"text"`. A refinement that
 /// PHP# cannot write is the type that holds it, such as `int` for a `positive-int` and `int|string` for an
 /// `array-key`, and is named once. `numeric`, `scalar` and `never` have no PHP# name and keep Mago's. A PHP docblock's
 /// `non-empty-mixed` has no PHP# name either, and keeps the name its docblock writes, as Mago's `truthy-mixed` speaks
@@ -514,8 +515,22 @@ where
             };
             let parameters: Vec<String> =
                 signature.get_parameters().iter().map(|parameter| written(parameter.get_type_signature())).collect();
+            let effects: Vec<String> = signature
+                .effects
+                .iter()
+                .flatten()
+                .map(|effect| {
+                    sharp_class_like_name(
+                        context.codebase,
+                        &context.imported_names,
+                        &context.short_name_counts,
+                        *effect,
+                    )
+                })
+                .collect();
+            let uses = if effects.is_empty() { String::new() } else { format!(" uses {}", effects.join(", ")) };
 
-            format!("Function<{}({})>", written(signature.get_return_type()), parameters.join(", "))
+            format!("Function<{}({}){uses}>", written(signature.get_return_type()), parameters.join(", "))
         }
         TAtomic::Scalar(TScalar::ClassLikeString(class_string)) => match class_string {
             TClassLikeString::Literal { value } => format!(

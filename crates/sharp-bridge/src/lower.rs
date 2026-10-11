@@ -923,8 +923,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A field, a property with accessors or a computed property is a property group of one property, as php-src's
     /// grammar builds `private int $count = 0;`, `public private(set) int $views = 0;`, `public readonly int $id;`,
-    /// `public string $name { get => $this->name; }` and `public string $slug { get => expr; }`. A constant initial
-    /// value is its default, unless the property is `readonly`. A member that starts as null without an initial value
+    /// `public string $name { get => $this->name; }` and `public string $slug { get => expr; }`. A field with no access
+    /// modifier is `private`, while PHP makes it `public`. A constant initial value is its default, unless the property
+    /// is `readonly`. A member that starts as null without an initial value
     /// takes the default `null` on the line of its name, as php-src builds `private ?int $total = null;`. An override is
     /// a field with `#[\Override]`. PHP refuses a type on a property whose parent's property has none, so an override of
     /// a property of `parent` whose root declaration has no type has none either, down the whole chain (decision 028).
@@ -973,7 +974,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, default, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let flags = modifier_flags(property.modifiers()) | accessor_flags;
+        let access = if property.modifiers().contains_visibility() { 0 } else { ZEND_ACC_PRIVATE };
+        let flags = modifier_flags(property.modifiers()) | access | accessor_flags;
         let attributes = self.attributes(attribute_lists, r#override);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])

@@ -14,8 +14,8 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         ParseError::SyntaxError(SyntaxError::RecursionLimitExceeded(..)) => ErrorKind::RecursionLimitExceeded,
         ParseError::UnexpectedEndOfFile(..) => ErrorKind::UnexpectedEndOfFile,
         // PHP syntax in a PHP# file, such as a `fn` lambda, a PHP# parameter or field without its type, `in` in a PHP#
-        // loop, PHP# syntax not supported yet, an escape a PHP# template refuses, or an operator symbol a class cannot
-        // declare, is a token the PHP# grammar does not expect there.
+        // loop, PHP# syntax not supported yet, an escape a PHP# template refuses, an operator symbol a class cannot
+        // declare, or effects after a function type's `>`, is a token the PHP# grammar does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::PhpSyntaxInSharp(..)
         | ParseError::PhpLambdaInSharp(..)
@@ -27,7 +27,8 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::ForInInSharp(..)
         | ParseError::NotSupportedYetInSharp(..)
         | ParseError::InvalidTemplateEscapeInSharp(..)
-        | ParseError::UndeclarableOperatorInSharp(..) => ErrorKind::UnexpectedToken,
+        | ParseError::UndeclarableOperatorInSharp(..)
+        | ParseError::UsesAfterFunctionTypeInSharp(..) => ErrorKind::UnexpectedToken,
         ParseError::UnclosedLiteralString(..) => ErrorKind::UnclosedLiteralString,
         ParseError::RecursionLimitExceeded(..) | ParseError::NestingTooDeepInSharp(..) => {
             ErrorKind::RecursionLimitExceeded

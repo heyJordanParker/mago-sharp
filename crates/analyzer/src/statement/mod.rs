@@ -780,7 +780,9 @@ where
         let callable = cast_atomic_to_callable(atomic, context.codebase, None)?;
         let identifier = match callable.as_ref() {
             TCallable::Alias(identifier) => *identifier,
-            TCallable::Signature(signature) => signature.get_source()?,
+            TCallable::Signature(signature) => {
+                context.codebase.get_declaring_function_like_identifier(&signature.get_source()?)
+            }
         };
 
         check_target(identifier)

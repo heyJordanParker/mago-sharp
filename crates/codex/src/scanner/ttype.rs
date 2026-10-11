@@ -295,7 +295,8 @@ fn union_from_hint(
                 }
             }
         }
-        // Spec section 14.1: `Function<R(P)>` is PHP's `Closure(P): R`, the only function value PHP# makes.
+        // Spec section 14.1: `Function<R(P)>` is PHP's `Closure(P): R`, the only function value PHP# makes, and spec
+        // section 29 gives it the effects its `uses` lists.
         Hint::Function(function) => {
             let parameters = function
                 .parameters
@@ -303,9 +304,15 @@ fn union_from_hint(
                 .map(|parameter| TCallableParameter::new(Some(Arc::new(convert(parameter))), false, false, false))
                 .collect();
             let return_type = convert(function.return_type);
+            let effects = function
+                .uses
+                .iter()
+                .flat_map(|uses| uses.names.iter())
+                .map(|effect| word(resolved_names.get(effect)))
+                .collect();
 
             wrap_atomic(TAtomic::Callable(TCallable::Signature(TCallableSignature {
-                is_sharp: true,
+                effects: Some(effects),
                 ..TCallableSignature::new(false, true)
                     .with_parameters(parameters)
                     .with_return_type(Some(Arc::new(return_type)))

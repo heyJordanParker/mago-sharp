@@ -49,6 +49,10 @@ pub fn is_contained_by(
         return true;
     }
 
+    if matches!(input_type_part, TAtomic::Error) || matches!(container_type_part, TAtomic::Error) {
+        return true;
+    }
+
     // Handle TAtomic::Alias - expand both input and container
     if let TAtomic::Alias(alias) = container_type_part {
         let Some(container_union) = alias.resolve(codebase) else {

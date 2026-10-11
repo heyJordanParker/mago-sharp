@@ -232,7 +232,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                             block_context.locals.insert(variable_id, variable_type);
                         }
                     }
-                    artifacts.set_expression_type(&self, get_never());
+                    let refused_type =
+                        if context.dialect.is_sharp() { TUnion::from_atomic(TAtomic::Error) } else { get_never() };
+                    artifacts.set_expression_type(&self, refused_type);
 
                     Ok(())
                 }
@@ -696,8 +698,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Parenthesized<'arena> {
 /// is `new` of a type parameter, it tests or converts a value to a type with an
 /// [erased part](mago_syntax::cst::erased_type) in `is`, `as` or a `match` arm, or it reads or calls a member of
 /// a type parameter or of `typeof` of one through any chain of property reads. [`report_untested_generic_classes`]
-/// refuses a test of a generic PHP# class written without its type arguments. Its type is `never`, a variable its `is`
-/// pattern names holds the type written beside it, and it adds no other issue.
+/// refuses a test of a generic PHP# class written without its type arguments. Its type is the error type in PHP# and
+/// `never` in PHP, a variable its `is` pattern names holds the type written beside it, and it adds no other issue.
 pub(crate) fn is_refused<A>(expression: &Expression<'_>, context: &Context<'_, '_, A>) -> bool
 where
     A: Arena,
@@ -728,6 +730,13 @@ where
         Expression::ConstantAccess(access) => resolved_names.is_type_parameter(&access.name),
         _ => false,
     }
+}
+
+/// Whether `union` is the type of a refused PHP# expression: one that failed to parse, or an index read of a container
+/// that gives no value, such as an `int`. A check that judges an operand's kind skips it, and the expression that reads
+/// it gets the same type, because the expression's own error already reports it.
+pub(crate) fn is_refused_type(union: &TUnion) -> bool {
+    union.types.iter().any(|atomic| matches!(atomic, TAtomic::Error))
 }
 
 /// Whether an arm of `pattern_match`, an expression or a statement, tests its value against a type no test can run

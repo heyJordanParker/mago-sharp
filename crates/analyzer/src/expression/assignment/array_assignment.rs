@@ -48,6 +48,7 @@ use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
+use crate::resolver::method::with_declared_kinds;
 use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
@@ -159,31 +160,40 @@ where
         root_array_type
     };
 
-    // A PHP# local, parameter or `field` is the collection it is declared as, so an element written into it must fit
-    // that type's elements, as one written into a property must, and the place keeps its type. Its key is the index
-    // checks' to report.
+    // A PHP# local, parameter or `field` is the collections it is declared as, so an element written into it must fit
+    // the elements of each of them, as one written into a property must, and the place keeps its type. Its key is the
+    // index checks' to report.
     if context.dialect.is_sharp()
         && let Expression::ConstantAccess(access) = root_array_expression.unparenthesized()
         && let Some(declared) = get_declared_collection(context, block_context, artifacts, root_array_expression)
     {
-        let (_, declared_element) = get_array_parameters(&declared, context.codebase);
+        let declared_elements: Vec<TUnion> = declared
+            .types
+            .iter()
+            .filter_map(|atomic| match atomic {
+                TAtomic::Array(collection) => Some(get_array_parameters(collection, context.codebase).1),
+                _ => None,
+            })
+            .collect();
         let fits = root_array_type.types.iter().all(|atomic| {
             let TAtomic::Array(written) = atomic else {
                 return true;
             };
+            let written_element = get_array_parameters(written, context.codebase).1;
 
-            union_comparator::is_contained_by(
-                context.codebase,
-                &get_array_parameters(written, context.codebase).1,
-                &declared_element,
-                false,
-                false,
-                false,
-                &mut ComparisonResult::for_dialect(context.dialect),
-            )
+            declared_elements.iter().all(|declared_element| {
+                union_comparator::is_contained_by(
+                    context.codebase,
+                    &written_element,
+                    declared_element,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::for_dialect(context.dialect),
+                )
+            })
         });
         if !fits {
-            let declared = TUnion::from_atomic(TAtomic::Array(declared));
             let name = String::from_utf8_lossy(access.name.value());
             let declared_str = display_type(context, &declared);
             let written_str = display_value_type(context, &root_array_type, &declared);
@@ -791,9 +801,14 @@ where
             array_expression_type = scoped_type;
         }
 
+        // A PHP# place is written by index as every kind of collection it is declared as, whatever it holds.
+        let declared_type =
+            with_declared_kinds(context, block_context, artifacts, array_target.get_array(), &array_expression_type);
+        let written_type = declared_type.as_ref().unwrap_or(&array_expression_type);
+
         // Spec section 12 keeps a PHP# `List`'s keys without gaps, so it changes by `set` and `add`, never by index.
         if context.dialect.is_sharp()
-            && array_expression_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
         {
             context.collector.report_with_code(
                 IssueCode::InvalidArrayAccess,
@@ -817,7 +832,7 @@ where
             array_target.span(),
             array_target.get_array().span(),
             array_target.get_index().map(mago_span::HasSpan::span),
-            &array_expression_type,
+            written_type,
             &new_index_type,
             true,
             extended_var_id,

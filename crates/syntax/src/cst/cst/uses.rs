@@ -6,12 +6,13 @@ use crate::cst::cst::keyword::Keyword;
 use crate::cst::sequence::TokenSeparatedSequence;
 use crate::cst::sequence::TokenSeparatedSequenceExt;
 
-/// Represents a PHP# `uses` clause, the comma-separated effects an `extern` declaration names.
+/// Represents a PHP# `uses` clause, the comma-separated effects an `extern` declaration or a function type names.
 ///
 /// Example:
 ///
 /// ```csharp
 /// extern Mailer uses Http, Mail;
+/// Function<Charge(Cart) uses Http, Mail>
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

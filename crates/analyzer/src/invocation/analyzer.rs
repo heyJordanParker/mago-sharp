@@ -48,6 +48,7 @@ use crate::artifacts::ClosureBindScope;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::invocation::Invocation;
@@ -684,7 +685,7 @@ where
                 // whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
                 // `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. A
                 // plain PHP method's or closure's parameter takes either literal, whatever its docblock says.
-                if matches!(&invocation.target, InvocationTarget::Callable { signature, .. } if signature.is_sharp)
+                if matches!(&invocation.target, InvocationTarget::Callable { signature, .. } if signature.effects.is_some())
                     || invocation.target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
                     || matches!(
                         invocation.target.get_function_like_identifier(),
@@ -694,14 +695,23 @@ where
                     check_sharp_literal_kind(context, argument_expression, &final_parameter_type);
                 }
 
-                verify_argument_type(
+                if verify_argument_type(
                     context,
                     &argument_value_type,
                     &final_parameter_type,
                     *argument_offset,
                     argument_expression,
                     &invocation.target,
-                );
+                ) {
+                    record_function_values(
+                        context,
+                        artifacts,
+                        &argument_value_type,
+                        &final_parameter_type,
+                        argument_expression.span(),
+                        IssueCode::InvalidArgument,
+                    );
+                }
             }
 
             if let Some(parameter_name) = parameter_ref.get_name() {

@@ -1,5 +1,6 @@
 use mago_bytes::BytesDisplay;
 use mago_names::ResolvedNames;
+use mago_names::STANDARD_EFFECTS;
 use mago_names::binding::Binding;
 use mago_names::binding::BindingError;
 use mago_names::binding::Local;
@@ -7,6 +8,7 @@ use mago_names::binding::LocalKind;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
 use mago_names::scope::php_name;
+use mago_names::short_name;
 use mago_php_version::PHPVersion;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
@@ -92,6 +94,7 @@ use mago_syntax::cst::UnionHint;
 use mago_syntax::cst::Use;
 use mago_syntax::cst::UseItem;
 use mago_syntax::cst::UseItems;
+use mago_syntax::cst::Uses;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
@@ -521,7 +524,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::DottedIdentifier(_)
             | Node::Use(_)
             | Node::Extern(_)
-            | Node::Uses(_)
             | Node::UseItems(UseItems::Sequence(_))
             | Node::UseItemSequence(_)
             | Node::UseItem(_)
@@ -781,6 +783,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // `is_slice_type` refuses for its parameters, and `Self` in it is an error, because `Self` is a method's return
         // type only.
         (Node::FunctionHint(_), FieldOrProperty | Method | Parameter | Body) => Some(Parameter),
+        // The effects an `extern` or a function type lists, spec section 29.
+        (Node::Uses(uses), File | Parameter) => {
+            check_uses(uses, context);
+
+            Some(place)
+        }
         (Node::Method(method), Enum)
             if method.return_type_hint.is_none()
                 && enclosing_class(context.program, method.span())
@@ -1686,6 +1694,38 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
     )
 }
 
+/// Reports each name in a `uses` that is no effect, spec section 29. A name is an effect when it resolves to one of the
+/// [`STANDARD_EFFECTS`], written bare or imported, and names compare as PHP's class names do, ignoring case. An
+/// effect's own name that an import shadows, spec section 23, is refused with the imported class it names instead.
+fn check_uses(uses: &Uses, context: &mut Context<'_, '_, '_>) {
+    for effect in &uses.names {
+        let resolved = context.get_name(effect.span.start);
+        if STANDARD_EFFECTS.iter().any(|standard| standard.as_bytes().eq_ignore_ascii_case(resolved)) {
+            continue;
+        }
+
+        let written = BytesDisplay(effect.value);
+        let message = if context.names.is_imported(&effect.span.start)
+            && STANDARD_EFFECTS.iter().any(|standard| short_name(standard).as_bytes() == effect.value)
+        {
+            let imported = String::from_utf8_lossy(resolved).replace('\\', ".");
+
+            format!(
+                "`{written}` here is the imported `{imported}`, not the effect `{written}`. Import it under another name, as in `import {imported} as System{written};`."
+            )
+        } else {
+            let [rest @ .., last] = &STANDARD_EFFECTS;
+            let rest = rest.iter().map(short_name).collect::<Vec<_>>().join(", ");
+
+            format!("`{written}` is not an effect: `uses` takes {rest} or {}.", short_name(last))
+        };
+
+        context.report(
+            Issue::error(message).with_annotation(Annotation::primary(effect.span).with_message("Written here.")),
+        );
+    }
+}
+
 /// Reports what the engine refuses in a header when it declares the class: a name the header already holds, and in an
 /// enum, `UnitEnum` or `BackedEnum`, which the engine adds to every enum or every backed one. Names compare as PHP's
 /// do, resolved and ignoring case. A generic type counts by its name, and `enter` refuses any type in a header that
@@ -1744,7 +1784,8 @@ fn report_optional_before_required(parameters: &FunctionLikeParameterList, conte
 }
 
 /// Whether the slice has a field or a property, with the refusal when it does not. Spec section 6 makes a field
-/// storage, which is `private` or `protected`, and a property the API, whose accessors `check_accessors` decides.
+/// storage, which is `private` or `protected`, `private` when it has no modifier, and a property the API, whose
+/// accessors `check_accessors` decides.
 ///
 /// A static member takes only a constant initial value, which PHP stores as its default, because any other runs in
 /// the constructor. A static property has `set`, because PHP has no `readonly` static property.
@@ -1833,12 +1874,6 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
                     .with_annotation(Annotation::primary(value.span()).with_message("Not constant."))
                     .with_help("Write a constant value, such as a literal or a list of literals."),
                 ))
-            } else if !field.modifiers.contains_visibility() {
-                Err(Box::new(not_supported(
-                    property.first_variable().span,
-                    "A field without `private` or `protected` is not supported yet in PHP#.",
-                    no_access_modifier,
-                )))
             } else if field.items.len() > 1 {
                 Err(Box::new(not_supported(
                     field.span(),

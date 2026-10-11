@@ -229,7 +229,19 @@ where
     }
 
     if let Some(object_type) = artifacts.get_expression_type(object) {
-        let mut object_atomics = object_type.types.iter().map(|atomic| (atomic, atomic)).collect::<Vec<_>>();
+        // A PHP# collection is called as every collection its place is declared as, whatever it holds, so a method
+        // resolves on each of them, and a collection that lacks it is reported once.
+        let declared = (context.dialect.is_sharp()
+            && object_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))))
+        .then(|| get_declared_collection(context, block_context, artifacts, object))
+        .flatten();
+        let mut object_atomics = object_type
+            .types
+            .iter()
+            .filter(|atomic| declared.is_none() || !matches!(atomic, TAtomic::Array(_)))
+            .chain(declared.iter().flat_map(|declared| declared.types.iter()))
+            .map(|atomic| (atomic, atomic))
+            .collect::<Vec<_>>();
 
         while let Some((object_atomic, written_atomic)) = object_atomics.pop() {
             if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
@@ -237,7 +249,7 @@ where
                 continue;
             }
 
-            if object_atomic.is_never() {
+            if object_atomic.is_never() || matches!(object_atomic, TAtomic::Error) {
                 continue;
             }
 
@@ -275,16 +287,13 @@ where
                     &closure_object
                 }
                 TAtomic::Array(array) if context.dialect.is_sharp() => {
-                    let declared = get_declared_collection(context, block_context, artifacts, object);
-                    let collection = match &declared {
-                        Some(declared) => declared,
-                        // An empty literal with no declared type is neither a List nor a Map, and the semantic checks
-                        // refuse its declaration.
-                        None if array.is_empty() => continue,
-                        None => array,
-                    };
+                    // An empty literal with no declared type is neither a List nor a Map, and the semantic checks
+                    // refuse its declaration.
+                    if array.is_empty() {
+                        continue;
+                    }
 
-                    collection_methods = get_collection_methods(collection, context.codebase);
+                    collection_methods = get_collection_methods(array, context.codebase);
                     &collection_methods
                 }
                 _ => {
@@ -1146,23 +1155,67 @@ where
     true
 }
 
-/// The first collection type the place `object` is declared with, as [`get_declared_type`] finds it. A PHP# collection
-/// is the `List`, `Map` or `Set` its place declares, so its methods, its index reads and its `[k, v]` loops follow that
-/// type. A value the analyzer saw assigned last, such as a list of one implementation, or a `List` literal in a
-/// `Map<int, V>`, narrows neither its kind nor its elements.
+/// The collection type the place `object` is declared with, as [`get_declared_type`] finds it: every `List`, `Map` and
+/// `Set` its type names, without the rest, such as `null`. A PHP# collection is the collection its place declares, so
+/// its methods, its index reads and its `[k, v]` loops follow that type, and a place declared as a union of
+/// collections allows only what each of them allows: the engine runs every collection as a PHP array, so nothing tells
+/// them apart when it runs. A value the analyzer saw assigned last, such as a list of one implementation, or a `List`
+/// literal in a `Map<int, V>`, narrows neither its kind nor its elements.
 pub(crate) fn get_declared_collection<'arena, A>(
     context: &Context<'_, 'arena, A>,
     block_context: &BlockContext<'_>,
     artifacts: &AnalysisArtifacts,
     object: &Expression<'arena>,
-) -> Option<TArray>
+) -> Option<TUnion>
 where
     A: Arena,
 {
-    get_declared_type(context, block_context, artifacts, object)?.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(array) => Some(array.clone()),
-        _ => None,
-    })
+    let collections: Vec<TAtomic> = get_declared_type(context, block_context, artifacts, object)?
+        .types
+        .iter()
+        .filter(|atomic| matches!(atomic, TAtomic::Array(_)))
+        .cloned()
+        .collect();
+
+    (!collections.is_empty()).then(|| TUnion::from_vec(collections))
+}
+
+/// The type an index on the PHP# place `object` is judged by: `value_type`, the value it holds, with every collection
+/// [`get_declared_collection`] finds whose kind, `List`, `Map` or `Set`, the value does not hold. The engine runs every
+/// collection as a PHP array, so a place keeps the kinds it is declared as whatever it holds, and a place that may be a
+/// `Set` or a `Map` has no index while it holds the `Map`. The value's keys and elements still type what it reads.
+/// A method call takes the declared collections whole instead, because `add`, `set` and `delete` write the place's
+/// declared elements. None when nothing is added: a `.php` file, a value that holds no collection, or a place with no
+/// other kind.
+pub(crate) fn with_declared_kinds<'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'arena>,
+    value_type: &TUnion,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !value_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))) {
+        return None;
+    }
+
+    let held = |declared: &TArray| {
+        value_type.types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::Array(array) if std::mem::discriminant(array) == std::mem::discriminant(declared))
+        })
+    };
+    let declared = get_declared_collection(context, block_context, artifacts, object)?;
+    let missing: Vec<TAtomic> = declared
+        .types
+        .iter()
+        .filter(|atomic| matches!(atomic, TAtomic::Array(array) if !held(array)))
+        .cloned()
+        .collect();
+
+    (!missing.is_empty())
+        .then(|| value_type.clone_with_types(value_type.types.iter().cloned().chain(missing).collect()))
 }
 
 /// The type the place `object` is declared with, whole: a typed local, a parameter, a property, or `field`, the
