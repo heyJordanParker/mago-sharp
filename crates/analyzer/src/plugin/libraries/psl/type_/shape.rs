@@ -50,7 +50,7 @@ impl FunctionReturnTypeProvider for ShapeProvider {
         context: &ProviderContext<'_, '_, '_>,
         invocation: &InvocationInfo<'_, '_, '_>,
     ) -> Option<TUnion> {
-        let elements = invocation.get_argument(0, &[b"elements"])?;
+        let elements = invocation.get_argument(0, &[b"elements".as_slice()])?;
         let elements_type = context.get_expression_type(elements)?;
 
         let argument_array = if let Some(argument_array) = elements_type.get_single_array()
