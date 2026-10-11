@@ -90,7 +90,7 @@ impl CompileCommand {
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
         server.analyze()?;
         let lean = Lean::new(&root);
-        let compilations = server.compile(|path| unit::stamp(&root, path), |translations| lean.prove(translations))?;
+        let compilations = server.compile(|path| unit::stamp(&root, path), |translations| lean.check(translations))?;
         let database = server.database();
 
         let mut written = BTreeSet::new();

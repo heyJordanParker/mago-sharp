@@ -611,21 +611,36 @@ fn compile_reports_the_proof_of_a_deleted_law() {
     }
 }
 
+/// A file whose law needs proving, or that a structure rule judges, needs Lean; with no `lake`, each such file is
+/// refused with `missing-lean`, and every other file compiles.
 #[test]
-fn compile_reports_missing_lean_on_a_law_file_whose_compiled_file_is_not_current() {
-    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Order.sharp", ORDER)]);
-    let root = directory.path();
+fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_file_is_not_current() {
+    const MISSING: &str = "error - missing-lean: Laws and structure rules need Lean 4.34.1, and lake was not found. Install elan from https://lean-lang.org/install, then run vendor/bin/mago compile again.";
+    let shared = rules("App.Shared", "@[rule] def neverReachesTenant : Rule := .neverImports \"App.Tenant\"");
+    for (files, refused) in [
+        (
+            vec![("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Order.sharp", ORDER)],
+            vec!["app/Shared/Money.sharp:3:14"],
+        ),
+        (
+            vec![
+                ("app/Shared/Module.lean", shared.as_str()),
+                ("app/Shared/Ledger.sharp", "namespace App.Shared;\n\npublic class Ledger { }\n"),
+                ("app/Order.sharp", ORDER),
+            ],
+            vec!["app/Shared/Ledger.sharp:1:11"],
+        ),
+    ] {
+        let directory = lawful_project(&files);
+        let root = directory.path();
 
-    let output = compile_without_lean(root);
+        let output = compile_without_lean(root);
 
-    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
-    assert!(
-        printed(&output).contains("app/Shared/Money.sharp:3:14:error - missing-lean: Laws and structure rules need Lean 4.34.1, and lake was not found. Install elan from https://lean-lang.org/install, then run vendor/bin/mago compile again."),
-        "{}",
-        printed(&output)
-    );
-    assert!(!compiled(root, "app/Shared/Money.sharp").exists());
-    assert!(compiled(root, "app/Order.sharp").exists());
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        let expected: Vec<String> = refused.iter().map(|place| format!("{place}:{MISSING}")).collect();
+        assert_eq!(issue_lines(&output), expected, "{}", printed(&output));
+        assert!(compiled(root, "app/Order.sharp").exists());
+    }
 }
 
 #[test]
@@ -861,6 +876,358 @@ fn compile_refuses_module_sharp_when_a_plain_php_class_holds_its_name() {
         printed(&output)
     );
     assert!(!compiled(root, "app/Shop/Module.sharp").exists());
+}
+
+/// `app/Shared/Ledger.sharp`, whose line 3 imports a class of `App.Tenant`.
+const LEDGER: &str = "namespace App.Shared;\n\nimport App.Tenant.Store.Receipts;\n\npublic class Ledger\n{\n    public static int refundable(int paid) => Receipts.refundable(paid, 0);\n}\n";
+
+/// `app/Tenant/Store/Receipts.sharp`, which imports nothing.
+const RECEIPTS: &str = "namespace App.Tenant.Store;\n\npublic class Receipts\n{\n    public static int refundable(int paid, int refunded) => paid - refunded;\n}\n";
+
+/// `app/Tenant/Store/StoreService.sharp`, whose line 3 imports `App.Shared.Ledger`.
+const STORE_SERVICE: &str = "namespace App.Tenant.Store;\n\nimport App.Shared.Ledger;\n\npublic class StoreService\n{\n    public int refundable(int paid) => Ledger.refundable(paid);\n}\n";
+
+/// The `Module.lean` of the folder of `namespace`, holding `rules` after the lines every Lean file beside PHP# code
+/// starts with.
+fn rules(namespace: &str, rules: &str) -> String {
+    format!("import Code.{namespace}.Module\nopen Sharp\n\n{rules}\n")
+}
+
+/// The design note's `p3` without `app/Module.lean`: `Ledger.sharp`, `Receipts.sharp` and `StoreService.sharp`, with
+/// "Shared never reaches Tenant" in `app/Shared/Module.lean` and section 28.1's imports-only rule in
+/// `app/Tenant/Store/Module.lean`, and then `files`, which may replace them.
+fn structured(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let shared = rules("App.Shared", "@[rule] def neverReachesTenant : Rule := .neverImports \"App.Tenant\"");
+    let store = rules(
+        "App.Tenant.Store",
+        "@[rule] def importsOnly : Rule := .importsOnly [\"App.Tenant.Community\", \"App.Shared.Schema\"]",
+    );
+    let mut all = vec![
+        ("app/Shared/Ledger.sharp", LEDGER),
+        ("app/Shared/Module.lean", shared.as_str()),
+        ("app/Tenant/Store/Module.lean", store.as_str()),
+        ("app/Tenant/Store/Receipts.sharp", RECEIPTS),
+        ("app/Tenant/Store/StoreService.sharp", STORE_SERVICE),
+    ];
+    all.extend_from_slice(files);
+
+    lawful_project(&all)
+}
+
+/// Each issue line `mago compile` printed, in its order.
+fn issue_lines(output: &Output) -> Vec<String> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains(":error - "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Spec section 28.1: "A failed rule is reported on the code that breaks it, such as the offending `import` line", and
+/// section 27: "A broken structure rule stops the file from running". Each row is a fact a rule judges: an import, an
+/// import on a cycle of the namespace import graph, a name reference and a declaration.
+#[test]
+fn compile_refuses_each_file_that_breaks_a_structure_rule_on_the_code_that_breaks_it() {
+    let cycles = rules("App", "@[rule] def noImportCycles : Rule := .noImportCycles");
+    let references = rules(
+        "App.Shared",
+        "@[rule] def neverCallsTenant : Rule := .each fun _ fact => match fact with\n  | .reference r => under r.name \"App.Tenant\"\n  | _ => false",
+    );
+    let declarations = rules(
+        "App.Tenant.Store",
+        "@[rule] def noServices : Rule := .each fun _ fact => match fact with\n  | .declaration d => d.name.endsWith \"Service\"\n  | _ => false",
+    );
+    let fine = rules("App.Shared", "");
+    let open = rules("App.Tenant.Store", "");
+    for (files, refused, accepted) in [
+        (
+            vec![],
+            vec![
+                "app/Shared/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule neverReachesTenant in app/Shared/Module.lean.",
+                "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.",
+            ],
+            "app/Tenant/Store/Receipts.sharp",
+        ),
+        (
+            vec![
+                ("app/Module.lean", cycles.as_str()),
+                ("app/Shared/Module.lean", fine.as_str()),
+                ("app/Tenant/Store/Module.lean", open.as_str()),
+            ],
+            vec![
+                "app/Shared/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule noImportCycles in app/Module.lean.",
+                "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule noImportCycles in app/Module.lean.",
+            ],
+            "app/Tenant/Store/Receipts.sharp",
+        ),
+        (
+            vec![("app/Shared/Module.lean", references.as_str()), ("app/Tenant/Store/Module.lean", open.as_str())],
+            vec![
+                "app/Shared/Ledger.sharp:7:47:error - broken-rule: This reference to App.Tenant.Store.Receipts breaks the structure rule neverCallsTenant in app/Shared/Module.lean.",
+            ],
+            "app/Tenant/Store/StoreService.sharp",
+        ),
+        (
+            vec![("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/Module.lean", declarations.as_str())],
+            vec![
+                "app/Tenant/Store/StoreService.sharp:5:14:error - broken-rule: This declaration of App.Tenant.Store.StoreService breaks the structure rule noServices in app/Tenant/Store/Module.lean.",
+            ],
+            "app/Shared/Ledger.sharp",
+        ),
+    ] {
+        let directory = structured(&files);
+        let root = directory.path();
+
+        let output = compile_lines(root);
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        assert_eq!(issue_lines(&output), refused, "{}", printed(&output));
+        for line in &refused {
+            let name = line.split(':').next().unwrap();
+            assert!(!compiled(root, name).exists(), "{name}");
+        }
+        assert!(compiled(root, accepted).exists(), "{accepted}");
+    }
+}
+
+/// Spec section 28.1: "A rule lives with the namespace it constrains. A rule about the whole application goes in
+/// `app/Module.lean`." A rule judges only the files under the namespace of its `Module.lean`, which composer.json's
+/// PSR-4 map names, as it names a proof file's module: `src/Cart/Module.lean` is `Shop.Cart.Module`.
+#[test]
+fn a_structure_rule_judges_only_the_files_under_the_namespace_of_its_module_lean() {
+    let shared_only = rules("App.Shared", "@[rule] def importsNothing : Rule := .importsOnly []");
+    let whole = rules("App", "@[rule] def neverImportsShared : Rule := .neverImports \"App.Shared\"");
+    let open = rules("App.Tenant.Store", "");
+    let fine = rules("App.Shared", "");
+    let cart = rules("Shop.Cart", "@[rule] def importsNothing : Rule := .importsOnly []");
+    for (files, refused, accepted) in [
+        (
+            vec![("app/Shared/Module.lean", shared_only.as_str()), ("app/Tenant/Store/Module.lean", open.as_str())],
+            "app/Shared/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule importsNothing in app/Shared/Module.lean.",
+            "app/Tenant/Store/StoreService.sharp",
+        ),
+        (
+            vec![
+                ("app/Module.lean", whole.as_str()),
+                ("app/Shared/Module.lean", fine.as_str()),
+                ("app/Tenant/Store/Module.lean", open.as_str()),
+            ],
+            "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule neverImportsShared in app/Module.lean.",
+            "app/Shared/Ledger.sharp",
+        ),
+        (
+            vec![
+                ("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", \"Shop\\\\\": \"src/\"}}}\n"),
+                ("app/Shared/Module.lean", fine.as_str()),
+                ("app/Tenant/Store/Module.lean", open.as_str()),
+                ("src/Cart/Module.lean", cart.as_str()),
+                (
+                    "src/Cart/Basket.sharp",
+                    "namespace Shop.Cart;\n\nimport App.Shared.Ledger;\n\npublic class Basket { }\n",
+                ),
+            ],
+            "src/Cart/Basket.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsNothing in src/Cart/Module.lean.",
+            "app/Tenant/Store/StoreService.sharp",
+        ),
+    ] {
+        let directory = structured(&files);
+        let root = directory.path();
+        write(
+            root,
+            "mago.toml",
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"src\"]\nincludes = [\"vendor\"]\n",
+        );
+
+        let output = compile_lines(root);
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        assert_eq!(issue_lines(&output), [refused], "{}", printed(&output));
+        assert!(compiled(root, accepted).exists(), "{accepted}");
+    }
+}
+
+/// The design note's ruling: a `Module.lean` that Lean rejects refuses every `.sharp` file of its namespace, and the
+/// issue names the `Module.lean` and Lean's first error. A `Module.lean` that imports a rejected one names it instead,
+/// and a `Module.sharp` beside a rejected `Module.lean` gets Lean's error as the proof file of its laws.
+#[test]
+fn a_module_lean_that_lean_rejects_refuses_every_file_of_its_namespace() {
+    let mistyped = rules("App.Shared", "@[rule] def broken : Nat := 1");
+    let rejected = rules("App.Tenant", "def allowed : List String := 1");
+    let importing = "import Code.App.Shared.Module\nimport App.Tenant.Module\nopen Sharp\n\n@[rule] def neverReachesTenant : Rule := .neverImports \"App.Tenant\"\n";
+    let open = rules("App.Tenant.Store", "");
+    for (files, refused) in [
+        (
+            vec![("app/Module.lean", "this is not Lean at all\n")],
+            vec![
+                "app/Shared/Ledger.sharp:1:11:error - broken-rule: This file is in App, whose structure rules app/Module.lean holds, and Lean rejected app/Module.lean line 1: unexpected identifier; expected command.",
+                "app/Shared/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule neverReachesTenant in app/Shared/Module.lean.",
+                "app/Tenant/Store/Receipts.sharp:1:11:error - broken-rule: This file is in App, whose structure rules app/Module.lean holds, and Lean rejected app/Module.lean line 1: unexpected identifier; expected command.",
+                "app/Tenant/Store/StoreService.sharp:1:11:error - broken-rule: This file is in App, whose structure rules app/Module.lean holds, and Lean rejected app/Module.lean line 1: unexpected identifier; expected command.",
+                "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.",
+            ],
+        ),
+        (
+            vec![("app/Shared/Module.lean", mistyped.as_str()), ("app/Tenant/Store/Module.lean", open.as_str())],
+            vec![
+                "app/Shared/Ledger.sharp:1:11:error - broken-rule: This file is in App.Shared, whose structure rules app/Shared/Module.lean holds, and Lean rejected app/Shared/Module.lean line 4: `@[rule]` needs a definition of type `Sharp.Rule`.",
+            ],
+        ),
+        (
+            vec![
+                ("app/Tenant/Module.lean", rejected.as_str()),
+                ("app/Shared/Module.lean", importing),
+                ("app/Tenant/Store/Module.lean", open.as_str()),
+            ],
+            vec![
+                "app/Shared/Ledger.sharp:1:11:error - broken-rule: This file is in App.Shared, whose structure rules app/Shared/Module.lean holds, and app/Shared/Module.lean imports app/Tenant/Module.lean, which Lean rejected.",
+                "app/Tenant/Store/Receipts.sharp:1:11:error - broken-rule: This file is in App.Tenant, whose structure rules app/Tenant/Module.lean holds, and Lean rejected app/Tenant/Module.lean line 4: failed to synthesize instance of type class.",
+                "app/Tenant/Store/StoreService.sharp:1:11:error - broken-rule: This file is in App.Tenant, whose structure rules app/Tenant/Module.lean holds, and Lean rejected app/Tenant/Module.lean line 4: failed to synthesize instance of type class.",
+            ],
+        ),
+    ] {
+        let directory = structured(&files);
+        let root = directory.path();
+
+        let output = compile_lines(root);
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        assert_eq!(issue_lines(&output), refused, "{}", printed(&output));
+    }
+
+    let directory = store("refunded < paid ? refunded : paid", "refunded < paid ? refunded : paid");
+    let root = directory.path();
+    compile_succeeds(root);
+    let proof = read(root, "app/Tenant/Store/Module.lean");
+    write(root, "app/Tenant/Store/Module.lean", &format!("{proof}\n@[rule] def broken : Nat := 1\n"));
+
+    let output = compile_lines(root);
+
+    assert_eq!(
+        issue_lines(&output),
+        [
+            "app/Tenant/Store/Module.sharp:3:1:error - unproven-law: Lean rejected app/Tenant/Store/Module.lean line 7: `@[rule]` needs a definition of type `Sharp.Rule`",
+            "app/Tenant/Store/Receipts.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and Lean rejected app/Tenant/Store/Module.lean line 7: `@[rule]` needs a definition of type `Sharp.Rule`.",
+            "app/Tenant/Store/Refunds.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and Lean rejected app/Tenant/Store/Module.lean line 7: `@[rule]` needs a definition of type `Sharp.Rule`.",
+        ],
+        "{}",
+        printed(&output)
+    );
+}
+
+/// The design note's decision 3: a rule constrains the namespace of the `Module.lean` that holds it, so a `@[rule]` in
+/// any other Lean file is a Lean error at the attribute, reported as any error of that proof file.
+#[test]
+fn a_structure_rule_outside_a_module_lean_is_refused_at_its_attribute() {
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let root = directory.path();
+    compile_succeeds(root);
+    write(
+        root,
+        "app/Shared/Money.lean",
+        &format!("{MONEY_PROOF}\n@[rule] def neverReachesTenant : Rule := .neverImports \"App.Tenant\"\n"),
+    );
+
+    let output = compile_lines(root);
+
+    assert_eq!(
+        issue_lines(&output),
+        [
+            "app/Shared/Money.sharp:3:14:error - unproven-law: Lean rejected app/Shared/Money.lean line 7: `@[rule]` belongs in a Module.lean: a structure rule constrains the namespace of the Module.lean that holds it",
+        ],
+        "{}",
+        printed(&output)
+    );
+}
+
+/// A `Module.lean` imports another one, as any Lean module does, and Lake builds it after the one it imports.
+#[test]
+fn a_module_lean_builds_after_the_module_lean_it_imports() {
+    let named = rules("App.Tenant", "def tenant : String := \"App.Tenant\"");
+    let importing = "import Code.App.Shared.Module\nimport App.Tenant.Module\nopen Sharp\n\n@[rule] def neverReachesTenant : Rule := .neverImports tenant\n";
+    let open = rules("App.Tenant.Store", "");
+    let directory = structured(&[
+        ("app/Tenant/Module.lean", named.as_str()),
+        ("app/Shared/Module.lean", importing),
+        ("app/Tenant/Store/Module.lean", open.as_str()),
+    ]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert_eq!(
+        issue_lines(&output),
+        [
+            "app/Shared/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule neverReachesTenant in app/Shared/Module.lean.",
+        ],
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Spec section 27: "At deploy, `mago compile` checks every rule exactly." Each `.sharpc` lists the `Module.lean` of
+/// its folder and of each folder above it, so a changed rule makes the files it judges stale, and the compile checks
+/// every rule again. A rule a file keeps does not refuse it.
+#[test]
+fn compile_checks_every_rule_again_when_a_module_lean_changes() {
+    let fine = rules("App.Shared", "");
+    let open = rules("App.Tenant.Store", "");
+    let directory =
+        structured(&[("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/Module.lean", open.as_str())]);
+    let root = directory.path();
+    compile_succeeds(root);
+
+    write(
+        root,
+        "app/Module.lean",
+        &rules("App", "@[rule] def neverImportsShared : Rule := .neverImports \"App.Shared\""),
+    );
+    let output = compile_lines(root);
+
+    assert_eq!(
+        issue_lines(&output),
+        [
+            "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule neverImportsShared in app/Module.lean.",
+        ],
+        "{}",
+        printed(&output)
+    );
+    assert!(compiled(root, "app/Shared/Ledger.sharp").exists());
+    assert!(!compiled(root, "app/Tenant/Store/StoreService.sharp").exists());
+}
+
+/// A compile that finds every `.sharpc` current starts no Lean process, as for laws, so a project with structure rules
+/// compiles again with no `lake` on the `PATH`.
+#[test]
+fn a_second_compile_of_a_project_with_structure_rules_starts_no_lean_process() {
+    let fine = rules("App.Shared", "");
+    let open = rules("App.Tenant.Store", "");
+    let directory =
+        structured(&[("app/Shared/Module.lean", fine.as_str()), ("app/Tenant/Store/Module.lean", open.as_str())]);
+    let root = directory.path();
+    compile_succeeds(root);
+
+    let output = compile_without_lean(root);
+
+    assert!(output.status.success(), "the compile needed lake: {}", printed(&output));
+    assert!(compiled(root, "app/Shared/Ledger.sharp").exists());
+}
+
+/// A broken rule reports every offending line, however many facts the files hold.
+#[test]
+fn compile_checks_a_structure_rule_over_thousands_of_imports() {
+    let imports: String = (0..4072).map(|index| format!("import Vendor.Package.Class{index};\n")).collect();
+    let ledger =
+        LEDGER.replace("import App.Tenant.Store.Receipts;\n", &format!("{imports}import App.Tenant.Store.Receipts;\n"));
+    let directory = structured(&[("app/Shared/Ledger.sharp", ledger.as_str())]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert!(
+        issue_lines(&output).contains(&"app/Shared/Ledger.sharp:4075:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule neverReachesTenant in app/Shared/Module.lean.".to_owned()),
+        "{}",
+        printed(&output)
+    );
 }
 
 #[test]
