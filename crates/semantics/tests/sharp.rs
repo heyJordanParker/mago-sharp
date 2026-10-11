@@ -95,6 +95,29 @@ fn an_extern_uses_only_effects() {
     assert_eq!(issues(class), [format!("6:21 `Order` {NOT_AN_EFFECT}")]);
 }
 
+/// An import of a class named like an effect shadows the effect, spec section 23, so the refusal names the imported
+/// class and the import that frees the name. A class the file declares under that name keeps the plain refusal.
+#[test]
+fn an_effect_name_an_import_shadows_is_refused_with_the_imported_class() {
+    let extern_ = "namespace App.Stubs;\n\nimport Lib.Clock;\n\nextern Clock.now uses Clock;\n";
+    let function_type = "namespace App.Shop;\n\nimport Lib.Http;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Http>? charge = null;\n}\n";
+    let declared = "namespace App.Shop;\n\nclass Clock\n{\n    private Function<int() uses Clock>? tick = null;\n}\n";
+
+    assert_eq!(
+        issues(extern_),
+        [
+            "5:23 `Clock` here is the imported `Lib.Clock`, not the effect `Clock`. Import it under another name, as in `import Lib.Clock as SystemClock;`."
+        ]
+    );
+    assert_eq!(
+        issues(function_type),
+        [
+            "7:40 `Http` here is the imported `Lib.Http`, not the effect `Http`. Import it under another name, as in `import Lib.Http as SystemHttp;`."
+        ]
+    );
+    assert_eq!(issues(declared), [format!("5:33 `Clock` {NOT_AN_EFFECT}")]);
+}
+
 /// Every standard effect passes a `uses`, `Events` too, written bare or through an import of its class.
 #[test]
 fn a_uses_takes_every_standard_effect_bare_or_imported() {
