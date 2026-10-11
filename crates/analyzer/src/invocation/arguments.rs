@@ -424,7 +424,7 @@ pub fn verify_argument_type<'arena, A>(
             .any(|atomic| matches!(atomic, TAtomic::Callable(callable) if callable.is_closure()));
 
         let types_can_be_identical = (!parameter_requires_closure || input_can_be_closure)
-            && can_expression_types_be_identical(context.codebase, input_type, parameter_type, false, false);
+            && can_argument_be_identical(context.codebase, input_type, parameter_type);
 
         if types_can_be_identical && parameter_type.is_callable() && !parameter_requires_closure {
             let all_inputs_are_resolvable_aliases = input_type.types.iter().all(|atomic| {
@@ -489,6 +489,35 @@ pub fn verify_argument_type<'arena, A>(
 
         context.collector.report_with_code(kind, issue);
     }
+}
+
+/// Whether an argument of `input_type` can hold a value of `parameter_type`. A function value whose type lists an
+/// effect a function type does not list never holds a value of that function type, as assigning or returning it
+/// reports.
+fn can_argument_be_identical(codebase: &CodebaseMetadata, input_type: &TUnion, parameter_type: &TUnion) -> bool {
+    input_type.types.iter().any(|input| {
+        let parameter_parts: Vec<TAtomic> = parameter_type
+            .types
+            .iter()
+            .filter(|parameter| {
+                !matches!(
+                    (input, parameter),
+                    (TAtomic::Callable(TCallable::Signature(input)), TAtomic::Callable(TCallable::Signature(parameter)))
+                        if input.has_effect_outside(parameter)
+                )
+            })
+            .cloned()
+            .collect();
+
+        !parameter_parts.is_empty()
+            && can_expression_types_be_identical(
+                codebase,
+                &TUnion::from_atomic(input.clone()),
+                &TUnion::from_vec(parameter_parts),
+                false,
+                false,
+            )
+    })
 }
 
 /// Returns `parameter_type` with each `Map` keyed by a backed enum keyed by the backing type instead, or `None` when

@@ -47,15 +47,7 @@ pub(crate) fn is_contained_by(
         return false;
     }
 
-    // Spec section 29: a PHP# function type holds a function value only when it lists every effect the value's type
-    // lists. A value with a `source` runs a PHP# body, whose effects only the effects solve knows, so the solve holds
-    // it to this type instead. A PHP signature lists no effects, and keeps PHP's rules.
-    if let (Some(allowed), Some(effects)) = (&container_signature.effects, &input_signature.effects)
-        && input_signature.source.is_none()
-        && !effects
-            .iter()
-            .all(|effect| allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())))
-    {
+    if input_signature.has_effect_outside(container_signature) {
         return false;
     }
 

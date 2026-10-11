@@ -5451,9 +5451,27 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
         [
             "9:21 invalid-property-assignment-value Invalid type for property `Pricing.rate`: expected `Function<int(int)>`, but got `Function<int(int) uses Http>`.",
             "10:36 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Function<int(int)>`.",
-            "11:23 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Pricing.apply`: expected `Function<int(int)>`, but possibly received `Function<int(int) uses Http>`.",
+            "11:23 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
             "12:22 invalid-argument Invalid argument type for argument #1 of `Pricing.mail`: expected `Function<int(int) uses Mail>`, but found `Function<int(int) uses Http>`.",
             "19:78 invalid-return-statement Invalid return type for method `Pricing.current`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
+        ]
+    );
+}
+
+/// A nullable function type holds `null` and no function value with an effect it does not list, so only a value that
+/// may be `null` possibly fits it.
+#[test]
+fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "7:110 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>?`, but found `Function<int(int) uses Http>`.",
+            "7:133 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Pricing.apply`: expected `Function<int(int)>?`, but possibly received `Function<int(int) uses Http>?`.",
         ]
     );
 }
