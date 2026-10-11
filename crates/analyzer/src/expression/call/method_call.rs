@@ -572,6 +572,7 @@ where
                     artifacts,
                     static_property,
                     &changed_type,
+                    None,
                     get_block_expression_id(collection, context, block_context),
                 ),
                 None => property_assignment::analyze(
