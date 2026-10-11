@@ -11,6 +11,7 @@ use mago_database::file::FileId;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_sharp_bridge::unit;
+use mago_span::Position;
 use mago_span::Span;
 use rayon::prelude::*;
 
@@ -79,7 +80,17 @@ impl Lean {
         for translation in &translations {
             let proof = proof_file(&translation.name);
             let exists = self.path(&proof).is_file();
-            if !translation.laws.is_empty() || exists {
+            if exists && translation.class.is_none() {
+                // A file that states no class-like and no module any more states none of the laws its proof file
+                // proves.
+                let text = fs::read_to_string(self.path(&proof))?;
+                let file = String::from_utf8_lossy(&proof);
+                let start = Span::new(translation.file, Position::new(0), Position::new(0));
+                for (line, statement) in theorems(&text) {
+                    let issue = issues::deleted_law(start, &file, line, &statement, &source_name(translation));
+                    report(&mut issues, translation, issue);
+                }
+            } else if !translation.laws.is_empty() || exists {
                 candidates.push((translation, proof, exists));
             }
         }
@@ -353,8 +364,7 @@ pub fn proof_file(name: &[u8]) -> Vec<u8> {
 /// as an unknown name at the theorem's type. An error outside every theorem gives its own issue on the class name.
 fn proof_errors(translation: &Translation, proof: &[u8], text: &str, errors: &[package::Message]) -> Vec<Issue> {
     let file = String::from_utf8_lossy(proof).into_owned();
-    let source = translation.name.rsplit(|byte| *byte == b'/').next().unwrap_or(&translation.name);
-    let source = String::from_utf8_lossy(source).into_owned();
+    let source = source_name(translation);
     let theorems = theorems(text);
     let class = translation.class.as_ref().map(|(class, _)| class.as_str());
     let Some(anchor) = anchor(translation) else {
@@ -388,6 +398,13 @@ fn proof_errors(translation: &Translation, proof: &[u8], text: &str, errors: &[p
     }
 
     found
+}
+
+/// The name of `translation`'s `.sharp` file without its folders: `Money.sharp`.
+fn source_name(translation: &Translation) -> String {
+    let name = translation.name.rsplit(|byte| *byte == b'/').next().unwrap_or(&translation.name);
+
+    String::from_utf8_lossy(name).into_owned()
 }
 
 /// Each `theorem` of a proof file, with the line it starts on and its type as written.

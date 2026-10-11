@@ -20,6 +20,8 @@ use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
@@ -612,6 +614,24 @@ impl Fingerprintable for Law<'_> {
 
         if !options.signature_only {
             self.body.expression.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for Module<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "module".hash(hasher);
+
+        for ModuleMember::Law(law) in &self.members {
+            law.fingerprint_with_hasher(hasher, resolved_names, options);
         }
     }
 }

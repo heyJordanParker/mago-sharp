@@ -31,6 +31,7 @@ use crate::cst::cst::r#loop::r#for::For;
 use crate::cst::cst::r#loop::for_of::ForOf;
 use crate::cst::cst::r#loop::foreach::Foreach;
 use crate::cst::cst::r#loop::r#while::While;
+use crate::cst::cst::module::Module;
 use crate::cst::cst::namespace::Namespace;
 use crate::cst::cst::r#return::Return;
 use crate::cst::cst::r#static::Static;
@@ -67,6 +68,7 @@ pub enum Statement<'arena> {
     Namespace(Namespace<'arena>),
     Use(Use<'arena>),
     Extern(Extern<'arena>),
+    Module(Module<'arena>),
     Class(Class<'arena>),
     Interface(Interface<'arena>),
     Trait(Trait<'arena>),
@@ -218,6 +220,7 @@ impl HasSpan for Statement<'_> {
             Statement::Namespace(statement) => statement.span(),
             Statement::Use(statement) => statement.span(),
             Statement::Extern(statement) => statement.span(),
+            Statement::Module(statement) => statement.span(),
             Statement::Class(statement) => statement.span(),
             Statement::Interface(statement) => statement.span(),
             Statement::Trait(statement) => statement.span(),

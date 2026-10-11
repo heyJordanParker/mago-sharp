@@ -28,6 +28,7 @@ pub(crate) mod local_declaration;
 pub(crate) mod r#loop;
 pub(crate) mod magic_constant;
 pub(crate) mod modifier;
+pub(crate) mod module;
 pub(crate) mod namespace;
 pub(crate) mod operation;
 pub(crate) mod pattern;

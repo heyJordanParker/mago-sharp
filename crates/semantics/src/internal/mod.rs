@@ -27,6 +27,7 @@ use mago_syntax::cst::List;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::Match;
+use mago_syntax::cst::Module;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::PartialApplication;
@@ -167,6 +168,11 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
         if context.program.dialect.is_sharp() {
             checker::sharp::check_class_name(&interface.name, context);
         }
+    }
+
+    #[inline]
+    fn walk_in_module(&self, module: &'ast Module<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
+        checker::sharp::check_module(module, context);
     }
 
     #[inline]
