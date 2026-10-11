@@ -24,6 +24,8 @@ use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyHookBody;
@@ -141,7 +143,20 @@ impl Translator<'_, '_> {
                 let full = self.checked.names().get(&interface.name);
                 self.name_module(full, interface.name.span);
             }
+            Statement::Module(module) => self.module(module),
             _ => {}
+        }
+    }
+
+    /// A module's laws, named by its class-like `<Namespace>.Module`, as a class's laws are named by the class.
+    fn module(&mut self, module: &Module) {
+        let full = self.checked.names().get(&module.module);
+        self.name_module(full, module.module.span);
+
+        let lean = names::full_name(full);
+        let short = names::short_name(full);
+        for ModuleMember::Law(law) in &module.members {
+            self.law(full, &lean, &short, law);
         }
     }
 

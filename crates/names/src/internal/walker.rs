@@ -46,6 +46,7 @@ use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
+use mago_syntax::cst::Module;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
@@ -589,6 +590,14 @@ where
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.locals.exit_method();
+    }
+
+    /// A module is the class-like `Module` of its namespace, spec sections 28 and 32, so its keyword holds that full
+    /// name, which names each of its laws.
+    fn walk_in_module(&mut self, module: &'ast Module<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(b"Module");
+
+        self.resolved_names.insert_at(module.module.span, classlike, false);
     }
 
     /// A law binds as a static method does, spec section 28: its parameters are locals of the law alone.

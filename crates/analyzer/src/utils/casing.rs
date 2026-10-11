@@ -33,6 +33,12 @@ where
         return;
     }
 
+    let (used_name, canonical) = if context.dialect.is_sharp() {
+        (used_name.to_string().replace('\\', "."), canonical.to_string().replace('\\', "."))
+    } else {
+        (used_name.to_string(), canonical.to_string())
+    };
+
     // Extract the mismatched part (could be namespace or class name)
     // Compare only the parts that differ
     context.collector.report_with_code(

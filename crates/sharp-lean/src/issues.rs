@@ -156,13 +156,14 @@ pub(crate) fn rejected_file(span: Span, proof: &str, line: u32, message: &str) -
         .with_note(message.to_owned())
 }
 
-/// A proof of a law the `.sharp` file no longer states, on the class's name.
-pub(crate) fn deleted_law(class: Span, proof: &str, line: u32, statement: &str, source: &str) -> Issue {
+/// A proof of a law the `.sharp` file no longer states, on the class's name, or at the start of a file that states no
+/// class-like any more.
+pub(crate) fn deleted_law(span: Span, proof: &str, line: u32, statement: &str, source: &str) -> Issue {
     Issue::error(format!(
         "{proof} line {line} proves {statement}, which {source} no longer states. Delete the proof, or restore the law."
     ))
     .with_code(IssueCode::NonExistentLaw.as_str())
-    .with_annotation(Annotation::primary(class))
+    .with_annotation(Annotation::primary(span))
 }
 
 pub(crate) fn lake_not_found(span: Span) -> Issue {
