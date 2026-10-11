@@ -8,6 +8,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_reporting::Level;
 use mago_span::HasSpan;
 use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::Expression;
@@ -18,6 +19,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::with_declared_kinds;
 use crate::utils::expression::array::get_array_target_type_given_index;
@@ -105,25 +107,41 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
         }
 
         if let Some(container_type) = container_type {
-            let access_type = get_array_target_type_given_index(
-                context,
-                block_context,
-                self.span(),
-                self.array.span(),
-                Some(self.index.span()),
-                &container_type,
-                &index_type,
-                false,
-                extended_var_id,
-                None,
-                container_type.can_be_null() && expression_is_nullsafe(self.array),
-            );
+            let read = |context: &mut Context<'ctx, 'arena, A>| {
+                get_array_target_type_given_index(
+                    context,
+                    block_context,
+                    self.span(),
+                    self.array.span(),
+                    Some(self.index.span()),
+                    &container_type,
+                    &index_type,
+                    false,
+                    extended_var_id,
+                    None,
+                    container_type.can_be_null() && expression_is_nullsafe(self.array),
+                )
+            };
+            // An error of the PHP# index rules means the read never gives a value, as an index of a `Set` or an `int`
+            // never does. Such a read has the error type, so nothing that uses it reports the same mistake again, and it
+            // is judged again each time it runs. A bare `Map` read gives its value when the key is there, so
+            // `check_sharp_map_read` refuses it and keeps its type.
+            let access_type = if context.dialect.is_sharp() {
+                let (access_type, issues) = context.record(read);
+                let refused = issues.iter().any(|issue| issue.level == Level::Error);
+                context.collector.extend(issues);
+
+                if refused { TUnion::from_atomic(TAtomic::Error) } else { access_type }
+            } else {
+                read(context)
+            };
 
             if let Some(keyed_array_var_id) = &keyed_array_var_id {
                 let can_store_result = block_context.flags.inside_assignment() || !container_type.is_mixed();
 
                 if !block_context.flags.inside_isset()
                     && can_store_result
+                    && !is_refused_type(&access_type)
                     && memchr::memmem::find(keyed_array_var_id.as_bytes(), b"[$").is_some()
                     && !block_context.locals.contains_key(keyed_array_var_id)
                 {

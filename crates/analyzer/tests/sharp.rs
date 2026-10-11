@@ -6482,27 +6482,60 @@ fn a_coalescing_write_to_an_index_of_a_scalar_is_refused_as_in_php() {
 }
 
 /// `+=`, `++` and `??=` read an index of a scalar and write it, and the index is refused once, by the read, or by the
-/// write where the read is inside `??`. PHP reports `+=` and `++` twice, from its read and its write.
+/// write where the read is inside `??`. A refused read has no value, so the arithmetic on it reports nothing more. PHP
+/// reports `+=` and `++` twice, from its read and its write, and the arithmetic on the read's `mixed`.
 #[test]
 fn a_compound_write_to_an_index_of_a_scalar_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public void bump(int z)\n    {\n        z[0] += 1;\n        z[1]++;\n        z[2] ??= 1;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function bump(int $z): void\n    {\n        $z[0] += 1;\n        $z[1]++;\n        $z[2] ??= 1;\n    }\n}\n";
-    let refusals = |file| {
-        issues(file, &[]).into_iter().filter(|issue| issue.ends_with(" invalid-array-access")).collect::<Vec<_>>()
-    };
+    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public int bump(int z)\n    {\n        z[0] += 1;\n        z[1]++;\n        z[2] ??= 1;\n        let y = z[3] + 1;\n        return y;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function bump(int $z): int\n    {\n        $z[0] += 1;\n        $z[1]++;\n        $z[2] ??= 1;\n        $y = $z[3] + 1;\n        return $y;\n    }\n}\n";
 
     assert_eq!(
-        refusals(("src/Demo/Scalars.sharp", sharp)),
-        ["7:9 invalid-array-access", "8:9 invalid-array-access", "9:9 invalid-array-access"]
+        issues(("src/Demo/Scalars.sharp", sharp), &[]),
+        [
+            "7:9 invalid-array-access",
+            "8:9 invalid-array-access",
+            "9:9 invalid-array-access",
+            "10:17 invalid-array-access",
+        ]
     );
     assert_eq!(
-        refusals(("src/Demo/Scalars.php", php)),
+        issues(("src/Demo/Scalars.php", php), &[]),
         [
             "9:9 invalid-array-access",
+            "9:9 mixed-operand",
             "9:9 invalid-array-access",
             "10:9 invalid-array-access",
+            "10:9 mixed-operand",
             "10:9 invalid-array-access",
             "11:9 invalid-array-access",
+            "12:14 invalid-array-access",
+            "12:14 mixed-operand",
+            "12:9 mixed-assignment",
+            "13:16 mixed-return-statement",
+        ]
+    );
+}
+
+/// A refused read gives no value to remember, so a second read by the same variable index is refused again. PHP
+/// remembers the first read's `mixed`, so it refuses only the first read and reports what uses the `mixed`.
+#[test]
+fn a_second_read_by_a_variable_index_of_a_scalar_is_refused_again() {
+    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public int twice(int z, int i)\n    {\n        let a = z[i];\n        let b = z[i];\n        return a + b;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function twice(int $z, int $i): int\n    {\n        $a = $z[$i];\n        $b = $z[$i];\n        return $a + $b;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Scalars.sharp", sharp), &[]),
+        ["7:17 invalid-array-access", "8:17 invalid-array-access"]
+    );
+    assert_eq!(
+        issues(("src/Demo/Scalars.php", php), &[]),
+        [
+            "9:14 invalid-array-access",
+            "9:9 mixed-assignment",
+            "10:9 mixed-assignment",
+            "11:16 mixed-operand",
+            "11:21 mixed-operand",
+            "11:16 mixed-return-statement",
         ]
     );
 }

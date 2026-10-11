@@ -824,6 +824,8 @@ where
             TAtomic::Never => {
                 // never type is unreachable, don't produce mixed, just skip.
             }
+            // A refused operand has no value, and its refusal is its only report.
+            TAtomic::Error => possibilities.push(TAtomic::Error),
             TAtomic::Mixed(_) => {
                 context.collector.report_with_code(
                     IssueCode::MixedOperand,
@@ -1061,6 +1063,8 @@ where
             TAtomic::Never => {
                 // never type is unreachable, don't produce mixed, just skip.
             }
+            // A refused operand has no value, and its refusal is its only report.
+            TAtomic::Error => possibilities.push(TAtomic::Error),
             TAtomic::Mixed(_) => {
                 context.collector.report_with_code(
                     IssueCode::MixedOperand,
