@@ -54,6 +54,8 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
@@ -705,6 +707,42 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
             for reported in hook_context.take_issues() {
                 context.collector.report_with_code(reported.code, reported.issue);
             }
+        }
+
+        Ok(())
+    }
+}
+
+/// Spec sections 28 and 32: a module is its namespace's class-like `Module`, and its laws are analyzed as a class's.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        _block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let name = context.resolved_names.get(&self.module);
+        let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
+            tracing::warn!("Module {} not found in codebase", BytesDisplay(name));
+
+            return Ok(());
+        };
+
+        if class_like_metadata.span != self.span() {
+            report_duplicate_definition(context, "Module", "module", name, self.span(), class_like_metadata.span);
+            return Ok(());
+        }
+
+        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));
+        scope.set_class_like(Some(class_like_metadata));
+        scope.set_static(true);
+
+        let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
+        for ModuleMember::Law(law) in &self.members {
+            law.analyze(context, &mut block_context, artifacts)?;
         }
 
         Ok(())
@@ -1376,6 +1414,18 @@ fn check_class_like_extends<'ctx, 'arena, A>(
                             Annotation::secondary(extended_class_span)
                                 .with_message(format!("`{extended_name}` is declared `static` here.")),
                         ),
+                );
+            } else if extended_class_metadata.flags.is_module() {
+                context.collector.report_with_code(
+                    IssueCode::ExtendFinalClass,
+                    Issue::error(format!(
+                        "`{extended_name}` is its namespace's module, not a class: no class can extend it."
+                    ))
+                    .with_annotation(Annotation::primary(extended_type.span()).with_message("Extended here."))
+                    .with_annotation(
+                        Annotation::secondary(extended_class_span)
+                            .with_message(format!("`{extended_name}` is declared here.")),
+                    ),
                 );
             } else if extended_class_metadata.flags.is_final() {
                 context.collector.report_with_code(

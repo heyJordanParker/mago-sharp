@@ -264,6 +264,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
 
                     Ok(())
                 }
+                Statement::Module(module) => module.analyze(context, block_context, artifacts),
                 #[allow(clippy::unreachable)]
                 _ => unreachable!("A statement variant was not handled in analyzer: {self:?}"),
             };

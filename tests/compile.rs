@@ -707,6 +707,64 @@ fn compile_proves_spec_section_28_1_s_state_machine_law_over_an_enum_match() {
     assert!(compiled(root, "app/Shop/Status.sharp").exists());
 }
 
+/// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
+const STORE_MODULE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
+
+/// `Receipts` and `Refunds`, each with the method `STORE_MODULE`'s law reaches, written with `refundable`'s body.
+fn store(refundable: &str, remaining: &str) -> tempfile::TempDir {
+    lawful_project(&[
+        ("app/Tenant/Store/Module.sharp", STORE_MODULE),
+        (
+            "app/Tenant/Store/Receipts.sharp",
+            &format!(
+                "namespace App.Tenant.Store;\n\npublic static class Receipts\n{{\n    public static int refundable(int paid, int refunded) => {refundable};\n}}\n"
+            ),
+        ),
+        (
+            "app/Tenant/Store/Refunds.sharp",
+            &format!(
+                "namespace App.Tenant.Store;\n\npublic static class Refunds\n{{\n    public static int remaining(int paid, int refunded) => {remaining};\n}}\n"
+            ),
+        ),
+    ])
+}
+
+/// Spec section 28.1: `app/Tenant/Store/Module.lean` proves the module law, created with the proof `simp` found.
+#[test]
+fn compile_proves_spec_section_28_s_module_law_with_the_proof_it_creates_in_module_lean() {
+    let directory = store("refunded < paid ? refunded : paid", "refunded < paid ? refunded : paid");
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert_eq!(
+        read(root, "app/Tenant/Store/Module.lean"),
+        "import Code.App.Tenant.Store.Module\nopen Sharp\n\ntheorem receiptMatchesRefunds : App.Tenant.Store.Module.receiptMatchesRefunds := by\n  simp [App.Tenant.Store.Module.receiptMatchesRefunds, App.Tenant.Store.Receipts.refundable, App.Tenant.Store.Refunds.remaining]\n"
+    );
+    assert!(compiled(root, "app/Tenant/Store/Module.sharp").exists());
+}
+
+/// A module law that does not hold refuses `Module.sharp` and names the law, as a class law refuses its class's file,
+/// and the classes it reaches still compile.
+#[test]
+fn compile_refuses_module_sharp_when_its_law_does_not_hold() {
+    let directory = store("refunded < paid ? refunded : paid", "refunded < paid ? paid : refunded");
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("app/Tenant/Store/Module.sharp:5:5:error - unproven-law: Law receiptMatchesRefunds is not proven: app/Tenant/Store/Module.lean line 6 is a gap (sorry). Write the proof there, or change the law."),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Tenant/Store/Module.sharp").exists());
+    assert!(compiled(root, "app/Tenant/Store/Receipts.sharp").exists());
+    assert!(compiled(root, "app/Tenant/Store/Refunds.sharp").exists());
+}
+
 #[test]
 fn compile_proves_a_law_over_locals_an_if_a_nullable_and_strings() {
     let directory = lawful_project(&[(

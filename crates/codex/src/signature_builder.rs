@@ -12,6 +12,7 @@ use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
+use mago_syntax::cst::Module;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Property;
@@ -142,6 +143,16 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for SignatureBuilder<'arena> {
         if let Some(node) = self.class_stack.pop() {
             self.ast_nodes.push(node);
         }
+    }
+
+    /// A PHP# module is the class-like `<Namespace>\Module`, whose laws its hash covers.
+    fn walk_in_module(&mut self, module: &'ast Module<'arena>, _context: &mut ()) {
+        let name = self.resolved_names.get(&module.module);
+        let hash = module.fingerprint(self.resolved_names, &self.fingerprint_options);
+        let signature_hash = module.fingerprint(self.resolved_names, &self.sig_only_options);
+
+        let node = self.create_node(name, false, false, false, hash, signature_hash);
+        self.ast_nodes.push(node);
     }
 
     fn walk_in_function(&mut self, function: &'ast Function<'arena>, _context: &mut ()) {

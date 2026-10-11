@@ -54,6 +54,9 @@ impl MetadataFlags {
     pub const EXTERNAL: MetadataFlags = MetadataFlags(1 << 43);
     /// Declared in a PHP# file.
     pub const SHARP: MetadataFlags = MetadataFlags(1 << 44);
+    /// A PHP# module, spec section 32: the class-like `<Namespace>\Module` its `Module.sharp` declares, which holds only
+    /// laws and never runs.
+    pub const MODULE: MetadataFlags = MetadataFlags(1 << 45);
 }
 
 impl MetadataFlags {
@@ -118,6 +121,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_sharp(self) -> bool {
         self.contains(Self::SHARP)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_module(self) -> bool {
+        self.contains(Self::MODULE)
     }
 
     #[inline]

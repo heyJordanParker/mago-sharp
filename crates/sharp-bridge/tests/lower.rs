@@ -448,17 +448,28 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
     assert_eq!(with.tree(), without.tree());
 }
 
-/// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it.
+/// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it. A module holds only
+/// laws, so its `Module.sharp` lowers to its namespace alone.
 #[test]
-fn a_class_or_an_enum_with_a_law_lowers_to_the_nodes_it_lowers_to_without_it() {
-    let with = Lowered::new(
-        "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n    law amountIsItself(Money a) => a.amount == a.amount;\n}\n\npublic enum Status\n{\n    case Open;\n\n    law openIsOpen(Status s) => Status.Open == Status.Open;\n}\n",
-    );
-    let without = Lowered::new(
-        "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n\n}\n\npublic enum Status\n{\n    case Open;\n\n\n}\n",
-    );
+fn a_class_an_enum_or_a_module_with_a_law_lowers_to_the_nodes_it_lowers_to_without_it() {
+    for (path, with, without) in [
+        (
+            "src/Report.sharp",
+            "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n    law amountIsItself(Money a) => a.amount == a.amount;\n}\n\npublic enum Status\n{\n    case Open;\n\n    law openIsOpen(Status s) => Status.Open == Status.Open;\n}\n",
+            "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n\n}\n\npublic enum Status\n{\n    case Open;\n\n\n}\n",
+        ),
+        (
+            "app/Shared/Module.sharp",
+            "namespace App.Shared;\n\nmodule\n{\n    law sameAmount(int a) => a == a;\n}\n",
+            "namespace App.Shared;\n",
+        ),
+    ] {
+        let with = Lowered::named(path, with);
+        let without = Lowered::named(path, without);
 
-    assert_eq!(with.tree(), without.tree());
+        assert!(with.0.is_ok(), "{path}: {:?}", with.0.err());
+        assert_eq!(with.tree(), without.tree(), "{path}");
+    }
 }
 
 /// ```php

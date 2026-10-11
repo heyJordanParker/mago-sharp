@@ -55,6 +55,13 @@ where
             {
                 Statement::Extern(self.parse_extern()?)
             }
+            T![Identifier]
+                if self.dialect.is_sharp()
+                    && token.value == b"module"
+                    && matches!(self.stream.peek_kind(1)?, Some(T!["{" | ":"])) =>
+            {
+                Statement::Module(self.parse_module()?)
+            }
             T!["const" | Identifier | "list" | "function" | "("] if self.is_at_local_declaration()? => {
                 Statement::LocalDeclaration(self.parse_local_declaration()?)
             }
