@@ -3950,8 +3950,8 @@ fn an_enum_returns_self_holds_union_constants_and_refuses_new_self() {
     assert_eq!(issues(code), ["14:34 An enum has no constructor: its cases are its only values."]);
 }
 
-/// `List` and `Map` both run as PHP's `array`, and every function type as `\Closure`, so a union of two of either is
-/// a type written twice, which the engine refuses.
+/// `List` and `Map` both run as PHP's `array`, and every function type as `\Closure`, so a union of two of either
+/// holds two types the engine can't tell apart.
 #[test]
 fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
     let code = leak(method("        return 1;\n").replace(
@@ -3962,10 +3962,39 @@ fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
     assert_eq!(
         issues(code),
         [
-            "5:30 Duplicate type `Map<string, int>` is redundant.",
+            "5:30 `List<int>` and `Map<string, int>` both run as a PHP array, so a union can't hold both.",
             "5:70 Duplicate type `Function<string()>` is redundant."
         ]
     );
+}
+
+/// Spec section 11: type arguments reach the running program, so a union is refused only where the engine can't tell
+/// two members apart. Two generic classes, or one class with other type arguments, compile. `List`, `Map` and `Set`
+/// share PHP's one array kind, and a collection beside an `Iterable` of its element type adds nothing to it. The PHP
+/// twin keeps PHP's own report.
+#[test]
+fn a_union_refuses_only_members_the_engine_cannot_tell_apart() {
+    let code = leak(method("        return 1;\n").replace(
+        "int extra",
+        "Box<Order>|Pair<Order> a, Box<int>|Box<string> b, Box<Order>|Box<Order> c, List<int>|Map<string, int> d, List<int>|Set<int> e, Iterable<int>|List<int> f, Iterable<int>|Map<string, int> g, Set<int>|Iterable<int> h, Iterable<string>|List<int> i, Iterable<string>|Map<string, int> j, Order|Entity k",
+    ));
+    let php = leak(
+        php_method("        return 1;\n")
+            .replace("int $extra", "Box|Pair $a, Box|Box $c, array|array $d, iterable|array $f"),
+    );
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:81 Duplicate type `Box<Order>` is redundant.",
+            "5:105 `List<int>` and `Map<string, int>` both run as a PHP array, so a union can't hold both.",
+            "5:135 `List<int>` and `Set<int>` both run as a PHP array, so a union can't hold both.",
+            "5:161 `List<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
+            "5:188 `Map<string, int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
+            "5:217 `Set<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
+        ]
+    );
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]

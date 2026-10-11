@@ -2753,8 +2753,8 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
 }
 
 /// Checks a union type. Each member in the slice is decided with the parts inside it as it is outside a union, so a
-/// generic member takes the type arguments it takes alone. A type written twice is compared as the engine compares it:
-/// a class by its full name, ignoring case.
+/// generic member takes the type arguments it takes alone. Two members the engine can't tell apart while the code runs
+/// are refused, as [`overlap`] finds them.
 fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_>) {
     let mut members = Vec::new();
     union_members(union, &mut members);
@@ -2790,17 +2790,89 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
             continue;
         }
         enter_tree(Node::Hint(member), place, context);
-        let Some(first) = members[..index].iter().find(|earlier| is_same_type(earlier, member, context)) else {
+        let Some((first, overlap)) =
+            members[..index].iter().find_map(|earlier| Some((earlier, overlap(earlier, member, context)?)))
+        else {
             continue;
         };
 
-        let written = BytesDisplay(context.get_code_snippet(*member));
-        context.report(
-            Issue::error(format!("Duplicate type `{written}` is redundant."))
+        let written = |hint: &Hint| BytesDisplay(context.get_code_snippet(hint)).to_string();
+        let issue = match overlap {
+            Overlap::Written => Issue::error(format!("Duplicate type `{}` is redundant.", written(member)))
                 .with_annotation(Annotation::primary(member.span()).with_message("Written again here."))
                 .with_annotation(Annotation::secondary(first.span()).with_message("First written here."))
                 .with_help("Remove the second one, as PHP refuses a union that names a type twice."),
-        );
+            Overlap::Array => Issue::error(format!(
+                "`{}` and `{}` both run as a PHP array, so a union can't hold both.",
+                written(first),
+                written(member)
+            ))
+            .with_annotation(Annotation::primary(member.span()).with_message("A PHP array here."))
+            .with_annotation(Annotation::secondary(first.span()).with_message("A PHP array here too."))
+            .with_help("Keep one collection type, as the literal rules need to know which one a place holds."),
+            Overlap::Iterated { collection, iterable } => Issue::error(format!(
+                "`{}` is already an `{}`, so the union is `{}`.",
+                written(collection),
+                written(iterable),
+                written(iterable)
+            ))
+            .with_annotation(Annotation::primary(member.span()).with_message("Written here."))
+            .with_annotation(Annotation::secondary(first.span()).with_message("Holds it already."))
+            .with_help(format!("Write `{}` alone.", written(iterable))),
+        };
+        context.report(issue);
+    }
+}
+
+/// How two members of a union overlap, which the engine can't tell apart while the code runs.
+enum Overlap<'hint, 'arena> {
+    /// One type written twice.
+    Written,
+    /// Two of `List`, `Map` and `Set`, which share PHP's one array kind.
+    Array,
+    /// A collection beside an `Iterable` of its element type, which already holds it.
+    Iterated { collection: &'hint Hint<'arena>, iterable: &'hint Hint<'arena> },
+}
+
+/// How the union members `first` and `second` overlap, if they do. Type arguments reach the running program, so a
+/// generic class with other type arguments is another type, and only the collections share a run-time kind.
+fn overlap<'hint, 'arena>(
+    first: &'hint Hint<'arena>,
+    second: &'hint Hint<'arena>,
+    context: &Context<'_, '_, '_>,
+) -> Option<Overlap<'hint, 'arena>> {
+    if is_same_type(first, second, context) {
+        return Some(Overlap::Written);
+    }
+
+    let (Hint::Generic(first_generic), Hint::Generic(second_generic)) = (first, second) else {
+        return None;
+    };
+    let iterates = |iterable: &GenericHint, element: &Hint| match (
+        iterable.name.value,
+        iterable.type_arguments.arguments.as_slice(),
+    ) {
+        (b"Iterable", [iterated]) => is_same_type(iterated, element, context),
+        _ => false,
+    };
+
+    match (collection_element(first_generic), collection_element(second_generic)) {
+        (Some(_), Some(_)) => Some(Overlap::Array),
+        (Some(element), None) if iterates(second_generic, element) => {
+            Some(Overlap::Iterated { collection: first, iterable: second })
+        }
+        (None, Some(element)) if iterates(first_generic, element) => {
+            Some(Overlap::Iterated { collection: second, iterable: first })
+        }
+        _ => None,
+    }
+}
+
+/// The element type of a `List`, `Set` or `Map`, a map's being its value type, as a loop over it reads them.
+fn collection_element<'hint, 'arena>(generic: &'hint GenericHint<'arena>) -> Option<&'hint Hint<'arena>> {
+    match (generic.name.value, generic.type_arguments.arguments.as_slice()) {
+        (b"List" | b"Set", [element]) | (b"Map", [_, element]) => Some(element),
+        _ => None,
     }
 }
 
@@ -2965,10 +3037,27 @@ fn union_members<'ast, 'arena>(union: &'ast UnionHint<'arena>, members: &mut Vec
     }
 }
 
+/// Whether `first` and `second` write one type, as the engine compares them: a class by its full name, ignoring case,
+/// and a generic type by its name and each type argument.
 fn is_same_type(first: &Hint, second: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match (first, second) {
         (Hint::Identifier(first), Hint::Identifier(second)) => {
             context.names.get(first).eq_ignore_ascii_case(context.names.get(second))
+        }
+        (Hint::Generic(first), Hint::Generic(second)) => {
+            let (first_name, second_name) = (
+                context.names.resolve(&first.name).unwrap_or(first.name.value),
+                context.names.resolve(&second.name).unwrap_or(second.name.value),
+            );
+            let (first_arguments, second_arguments) =
+                (&first.type_arguments.arguments, &second.type_arguments.arguments);
+
+            first_name.eq_ignore_ascii_case(second_name)
+                && first_arguments.len() == second_arguments.len()
+                && first_arguments
+                    .iter()
+                    .zip(second_arguments.iter())
+                    .all(|(first, second)| is_same_type(first, second, context))
         }
         _ => std::mem::discriminant(first) == std::mem::discriminant(second),
     }
