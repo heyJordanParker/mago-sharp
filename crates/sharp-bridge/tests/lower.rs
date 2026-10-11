@@ -1619,6 +1619,115 @@ fn a_class_with_a_non_constant_initial_value_and_no_constructor_gets_one() {
     );
 }
 
+const CALC_CLASS: (&str, &str) =
+    ("src/Lib/Calc.php", "<?php namespace Lib; final class Calc { public function __construct(int $start) {} }");
+
+/// ```php
+/// public function __construct(int $id)
+/// {
+///     $this->calc = new \Lib\Calc(1);
+///     parent::__construct($id);
+///     $this->calc = new \Lib\Calc($id);
+/// }
+/// ```
+///
+/// Spec section 9.1: `: super(…)` runs as `parent::__construct(…)` after the initial values and before the body.
+#[test]
+fn super_runs_as_parent_construct_after_the_initial_values_and_before_the_body() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Entity;\n\nclass Report : Entity\n{\n    private Calc calc = new Calc(1);\n\n    public Report(int id) : super(id)\n    {\n        this.calc = new Calc(id);\n    }\n}\n",
+        &[
+            CALC_CLASS,
+            (
+                "src/Lib/Entity.php",
+                "<?php namespace Lib; class Entity { public function __construct(public readonly int $id) {} }",
+            ),
+        ],
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("__construct"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "calc"
+                NEW
+                  ZVAL "Lib\\Calc"
+                  ARG_LIST
+                    ZVAL 1
+              STATIC_CALL
+                ZVAL [1] "parent"
+                ZVAL "__construct"
+                ARG_LIST
+                  VAR
+                    ZVAL "id"
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "calc"
+                NEW
+                  ZVAL "Lib\\Calc"
+                  ARG_LIST
+                    VAR
+                      ZVAL "id"
+        "#}
+    );
+}
+
+/// ```php
+/// public function __construct()
+/// {
+///     $this->calc = new \Lib\Calc(1);
+///     parent::__construct();
+/// }
+/// ```
+///
+/// The constructor a class gets for its initial values calls its base class's constructor after them.
+#[test]
+fn the_constructor_for_initial_values_calls_the_base_class_constructor() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Entity;\n\nclass Report : Entity\n{\n    private Calc calc = new Calc(1);\n}\n",
+        &[CALC_CLASS, ("src/Lib/Entity.php", "<?php namespace Lib; class Entity { public function __construct() {} }")],
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("__construct"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "calc"
+                NEW
+                  ZVAL "Lib\\Calc"
+                  ARG_LIST
+                    ZVAL 1
+              STATIC_CALL
+                ZVAL [1] "parent"
+                ZVAL "__construct"
+                ARG_LIST
+        "#}
+    );
+}
+
+/// `: super()` with no constructor above the class does nothing, as C#'s `: base()` on `object`.
+#[test]
+fn super_with_no_constructor_above_lowers_to_nothing() {
+    for code in [
+        "namespace App.Tenant;\n\nimport Lib.Entity;\n\nclass Report : Entity\n{\n    public Report() : super() { }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Report() : super() { }\n}\n",
+    ] {
+        let lowered = Lowered::with(code, &[("src/Lib/Entity.php", "<?php namespace Lib; class Entity {}")]);
+
+        assert_eq!(lowered.render(lowered.child(lowered.method_named("__construct"), 2)), "STMT_LIST\n", "{code}");
+    }
+}
+
 /// ```php
 /// public readonly string $code;
 /// public function __construct()

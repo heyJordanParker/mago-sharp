@@ -29,6 +29,7 @@ use mago_syntax::cst::Call as CallExpression;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::FunctionLikeParameterList;
@@ -65,14 +66,15 @@ use crate::utils::names::is_prelude_stub;
 
 /// Records the summary of the method, accessor or initial value `body`, which messages name by `member`, and whose
 /// parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with
-/// the function values the analysis gave places since the last body.
-pub(crate) fn record<'arena, A>(
+/// the function values the analysis gave places since the last body. A constructor's `initializer` runs before `code`.
+pub(crate) fn record<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
     body: Body,
     member: Word,
     parameters: Vec<Span>,
-    code: FunctionLikeBody<'_, 'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
+    code: FunctionLikeBody<'ast, 'arena>,
 ) where
     A: Arena,
 {
@@ -82,7 +84,7 @@ pub(crate) fn record<'arena, A>(
     };
 
     let function_values = std::mem::take(&mut artifacts.function_values);
-    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, code);
+    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
     summary.function_values = function_values;
     artifacts.effect_summaries.push(summary);
     artifacts.effect_summaries.append(&mut lambdas);
@@ -179,14 +181,16 @@ pub(crate) fn record_function_values<A>(
 }
 
 /// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
-fn summarize<'arena, A>(
+#[allow(clippy::too_many_arguments)]
+fn summarize<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &AnalysisArtifacts,
     class: Word,
     body: Body,
     member: Word,
     parameters: Vec<Span>,
-    code: FunctionLikeBody<'_, 'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
+    code: FunctionLikeBody<'ast, 'arena>,
 ) -> (EffectSummary, Vec<EffectSummary>)
 where
     A: Arena,
@@ -223,6 +227,9 @@ where
     loop {
         recorder.grew = false;
         recorder.summary = empty_summary();
+        if let Some(initializer) = initializer {
+            SummaryWalker.walk_constructor_initializer(initializer, &mut recorder);
+        }
         match code {
             FunctionLikeBody::Statements(statements, _) => {
                 for statement in statements {
@@ -575,7 +582,7 @@ where
 
         let parameters = parameters.parameters.iter().map(|parameter| parameter.variable.span).collect();
         let (summary, lambdas) =
-            summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, code);
+            summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, None, code);
         self.lambda_summaries.push(summary);
         for lambda in lambdas {
             if !self.lambda_summaries.iter().any(|summary| summary.body == lambda.body) {
@@ -736,6 +743,24 @@ where
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
+        }
+    }
+
+    /// Records `: super(…)`: the call of the base class's constructor the analysis resolved at its span.
+    fn constructor_initializer(&mut self, initializer: &'ast ConstructorInitializer<'arena>) {
+        let span = initializer.span();
+        let artifacts = self.artifacts;
+        let Some(targets) = artifacts.call_targets.get(&(span.start.offset, span.end.offset)) else {
+            return;
+        };
+
+        for target in targets {
+            if let CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(declaring_class, method), class } =
+                *target
+            {
+                let class = class.unwrap_or(declaring_class);
+                self.method_call(declaring_class, method, class, span, None, &initializer.argument_list);
+            }
         }
     }
 
@@ -955,6 +980,14 @@ where
         recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
     ) {
         recorder.instantiate(instantiation);
+    }
+
+    fn walk_in_constructor_initializer(
+        &self,
+        initializer: &'ast ConstructorInitializer<'arena>,
+        recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
+    ) {
+        recorder.constructor_initializer(initializer);
     }
 
     fn walk_in_property_access(

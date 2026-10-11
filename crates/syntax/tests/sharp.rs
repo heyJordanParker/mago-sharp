@@ -218,6 +218,53 @@ fn a_constructor_is_a_method_named_after_its_class_without_a_return_type() {
     assert_eq!(source(CODE, extra), "int extra");
 }
 
+/// Spec section 9.1: a constructor passes control with `: super(…)` or `: this(…)` between its parameters and its body.
+#[test]
+fn a_constructor_passes_control_with_super_or_this_before_its_body() {
+    for (member, initializer, keyword, body) in [
+        ("public Order(Row row) : super(row) {}", ": super(row)", "super", "{}"),
+        ("public Order(int count) : this(count, 1) {}", ": this(count, 1)", "this", "{}"),
+        ("public Order(int count) : super() => this.count = count;", ": super()", "super", "=> this.count = count;"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(format!("class Order\n{{\n    {member}\n}}\n").into_boxed_str());
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        assert!(program.errors.is_empty(), "{member}: {:#?}", program.errors);
+        let Some(ClassLikeMember::Method(constructor)) = class_members(program).first() else {
+            panic!("expected a constructor for `{member}`, got {:#?}", class_members(program));
+        };
+        let parsed = constructor.initializer.as_ref().expect("an initializer");
+        assert_eq!(source(code, parsed), initializer, "{member}");
+        assert_eq!(source(code, &parsed.keyword), keyword, "{member}");
+        assert_eq!(source(code, &constructor.body), body, "{member}");
+    }
+}
+
+/// Any other word after a constructor's `:` is one error, and the constructor and the class parse on.
+#[test]
+fn any_other_word_after_a_constructor_colon_is_one_error() {
+    for (member, start) in [("public Order(Row row) : base(row) {}", ": base"), ("public Order(Row row) : {}", ":")] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Order\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), "A constructor passes control with `: super(…)` or `: this(…)`.", "{member}");
+        assert_eq!(source(code, error), start, "{member}");
+        let [ClassLikeMember::Method(constructor), ClassLikeMember::Method(run)] = class_members(program).as_slice()
+        else {
+            panic!("expected two methods for `{member}`, got {:#?}", class_members(program));
+        };
+        assert_eq!(source(code, &constructor.body), "{}", "{member}");
+        assert_eq!(source(code, &run.name), "run", "{member}");
+    }
+}
+
 #[test]
 fn a_method_with_a_long_return_type_parses() {
     const CODE: &str = "class Report\n{\n    public static int|string|null total() { return 1; }\n}\n";

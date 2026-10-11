@@ -743,12 +743,28 @@ fn super_calls_the_parent_method() {
     assert_eq!(issues(code), ["7:20 This expression is not supported yet in PHP#."]);
 }
 
+/// Spec section 9.1: the main constructor passes control to its base class with `: super(…)`, whose arguments are a
+/// method body's expressions without `this`. Only a named constructor calls `: this(…)`.
+#[test]
+fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_this() {
+    let code = "namespace App.Tenant;\n\npublic class Order : Entity\n{\n    public Order(Row row, int count) : super(row, count + 1) { }\n}\n\npublic class Copy : Entity\n{\n    public Copy(Row row) : this(row) { }\n}\n\npublic class Early : Entity\n{\n    public Early(Row row) : super(this, this.row) { }\n}\n\npublic class Late : Entity\n{\n    public Late(Row row) : super(super.row) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "10:28 The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.",
+            "15:35 `this` is not available before the constructor runs: pass a parameter instead.",
+            "15:41 `this` is not available before the constructor runs: pass a parameter instead.",
+            "20:34 This expression is not supported yet in PHP#.",
+        ]
+    );
+}
+
 /// Spec section 25's example: `Self` is the class a static method is called on, and `new Self(…)` needs a `required`
-/// constructor. A subclass calls its parent's constructor with `super.__construct(…)`, because `: super(…)` does not
-/// parse yet.
+/// constructor, which a subclass's constructor calls with `: super(…)`.
 #[test]
 fn self_is_a_return_type_creates_with_a_required_constructor_and_calls_static_methods() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Row;\nimport Lib.Clock;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row)\n    {\n        return new Self(row);\n    }\n\n    public static Self? find(Row row) => Self.fromSchema(row);\n\n    public static Self|int counted(Row row) => Self.fromSchema(row);\n\n    public static (Self|int)? either(Row row) => null;\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null)\n    {\n        super.__construct(row);\n    }\n}\n\npublic interface Copyable\n{\n    Self copy();\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Row;\nimport Lib.Clock;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row)\n    {\n        return new Self(row);\n    }\n\n    public static Self? find(Row row) => Self.fromSchema(row);\n\n    public static Self|int counted(Row row) => Self.fromSchema(row);\n\n    public static (Self|int)? either(Row row) => null;\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n}\n\npublic interface Copyable\n{\n    Self copy();\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }

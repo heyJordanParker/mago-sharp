@@ -9,6 +9,7 @@ use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::ClassLikeConstantItem;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ComputedProperty;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCase;
@@ -559,8 +560,24 @@ impl Fingerprintable for Method<'_> {
         self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
 
         if !options.signature_only {
+            self.initializer.fingerprint_with_hasher(hasher, resolved_names, options);
             self.body.fingerprint_with_hasher(hasher, resolved_names, options);
         }
+    }
+}
+
+impl Fingerprintable for ConstructorInitializer<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        self.keyword.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }
 

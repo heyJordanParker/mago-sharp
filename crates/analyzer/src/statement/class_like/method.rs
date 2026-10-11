@@ -13,18 +13,28 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::union::TUnion;
 
 use mago_names::binding::MethodParts;
+use mago_names::binding::php_method_name;
 use mago_names::display_sharp_member;
+use mago_php_version::PHPVersion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::ConstructorInitializer;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Law;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Operator;
+use mago_syntax::cst::Property;
+use mago_syntax::cst::PropertyHookBody;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -34,6 +44,8 @@ use crate::context::block::BlockContext;
 use crate::effects;
 use crate::effects::Body;
 use crate::error::AnalysisError;
+use crate::expression::call::static_method_call::analyze_static_method_call;
+use crate::plugin::hook::StaticCall;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
@@ -41,6 +53,7 @@ use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::check_unused_function_template_parameters;
 use crate::statement::function_like::rejected_nullable_parameter;
 use crate::statement::function_like::unused_parameter;
+use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
 use crate::utils::missing_type_hints;
 use crate::utils::names::display_class_like_name;
 
@@ -54,7 +67,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
     where
         A: Arena,
     {
-        analyze_method(&MethodParts::of_method(self), word(self.name.value), context, block_context, artifacts)
+        let method = MethodParts::of_method(self);
+
+        analyze_method(&method, self.initializer.as_ref(), word(self.name.value), context, block_context, artifacts)
             .map(|_| ())
     }
 }
@@ -77,7 +92,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Operator<'arena> {
         };
 
         let member = concat_word!(b"operator ", self.symbol.as_bytes());
-        if let Some(class) = analyze_method(&method, member, context, block_context, artifacts)?
+        if let Some(class) = analyze_method(&method, None, member, context, block_context, artifacts)?
             && matches!(self.symbol, BinaryOperator::Equal(_))
         {
             check_hash(context, class, self.operator.span);
@@ -88,9 +103,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Operator<'arena> {
 }
 
 /// Analyzes a method, which messages name as `member` of its class, and returns its class when the method was
-/// analyzed.
-fn analyze_method<'ctx, 'arena, A>(
-    method: &MethodParts<'_, 'arena>,
+/// analyzed. A PHP# constructor's `initializer` runs before its body.
+fn analyze_method<'ctx, 'ast, 'arena, A>(
+    method: &MethodParts<'ast, 'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
     member: Word,
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -175,6 +191,7 @@ where
             &mut method_block_context,
             method_metadata,
             method.parameter_list,
+            initializer,
             body,
             None,
         )?;
@@ -188,6 +205,7 @@ where
                 Body::Method(class_like_metadata.name, lowercase_method_name),
                 member,
                 method.parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
+                initializer,
                 body,
             );
         }
@@ -234,12 +252,22 @@ where
         }
 
         if context.settings.find_unused_parameters && !is_overriding {
-            unused_parameter::check_unused_params(
-                method_metadata,
-                method.parameter_list.parameters.as_slice(),
-                body,
-                context,
-            );
+            // A parameter that `: super(…)` passes on is used.
+            let parameters: Vec<FunctionLikeParameter<'arena>> = method
+                .parameter_list
+                .parameters
+                .iter()
+                .filter(|parameter| {
+                    !initializer.is_some_and(|initializer| {
+                        initializer.argument_list.arguments.iter().any(|argument| {
+                            is_variable_used_in_expression(argument.value(), context, parameter.variable.name)
+                        })
+                    })
+                })
+                .cloned()
+                .collect();
+
+            unused_parameter::check_unused_params(method_metadata, &parameters, body, context);
         }
     }
 
@@ -270,6 +298,138 @@ where
     missing_type_hints::check_imprecise_return_type_hint(context, method_metadata, name, method.return_type_hint);
 
     Ok(Some(class_like_metadata))
+}
+
+/// Spec section 9.1: `: super(…)` runs as PHP's `parent::__construct(…)` before the constructor's body, so its
+/// arguments are checked against the base class's constructor, and it counts as the call of that constructor. A base
+/// class without a constructor takes `: super()`, which does nothing, and no arguments, as C#'s `object()` does.
+/// Semantics refuses `: this(…)` on the main constructor.
+pub(crate) fn analyze_constructor_initializer<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    initializer: &ConstructorInitializer<'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let Some(class) = block_context.scope.get_class_like() else {
+        return Ok(());
+    };
+    if !initializer.is_super() || class.has_incomplete_hierarchy() {
+        return Ok(());
+    }
+
+    if base_constructor(context, class).is_some() {
+        let parent = Expression::Parent(initializer.keyword);
+        let method = ClassLikeMemberSelector::Identifier(LocalIdentifier {
+            span: initializer.keyword.span,
+            value: b"__construct",
+        });
+        let call = StaticCall {
+            class: &parent,
+            method: &method,
+            argument_list: &initializer.argument_list,
+            span: initializer.span(),
+        };
+
+        return analyze_static_method_call(context, block_context, artifacts, call);
+    }
+
+    if !initializer.argument_list.arguments.is_empty() {
+        let message = match class.direct_parent_class {
+            Some(base) => {
+                format!(
+                    "`{}` has no constructor to call: remove the arguments.",
+                    display_class_like_name(context, base)
+                )
+            }
+            None => format!(
+                "`{}` has no base class to call: remove the arguments.",
+                display_class_like_name(context, class.original_name)
+            ),
+        };
+
+        context.collector.report_with_code(
+            IssueCode::TooManyArguments,
+            Issue::error(message)
+                .with_annotation(Annotation::primary(initializer.argument_list.span()).with_message("Passed here.")),
+        );
+    }
+
+    initializer.argument_list.analyze(context, block_context, artifacts)
+}
+
+/// Spec section 9.1, with the interim ruling on an implicit `super()`: the constructor of a class whose base class has
+/// one calls it with `: super(…)`. A class without a constructor gets one for its initial values that are not
+/// constant, which calls the base class's constructor without arguments, so that base class's constructor takes none.
+pub(super) fn check_super_call<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    members: &[ClassLikeMember<'_>],
+    name_span: Span,
+) where
+    A: Arena,
+{
+    let Some((base, constructor_of_base)) = base_constructor(context, class) else {
+        return;
+    };
+    let constructor = members.iter().find_map(|member| match member {
+        ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => Some(method),
+        _ => None,
+    });
+    let class_name = display_class_like_name(context, class.original_name);
+    let base_name = display_class_like_name(context, base.original_name);
+
+    match constructor {
+        Some(constructor) if constructor.initializer.is_none() => {
+            context.collector.report_with_code(
+                IssueCode::MissingSuperCall,
+                Issue::error(format!("`{class_name}`'s constructor must call `{base_name}`'s with `: super(…)`."))
+                    .with_annotation(Annotation::primary(constructor.name.span).with_message("Declared here.")),
+            );
+        }
+        None if !constructor_of_base.parameters.is_empty() && members.iter().any(runs_in_constructor) => {
+            context.collector.report_with_code(
+                IssueCode::NotSupportedYet,
+                Issue::error(format!(
+                    "`{class_name}` must declare a constructor that calls `{base_name}`'s with `: super(…)`: `{base_name}`'s takes arguments, and `{class_name}`'s initial values run in its constructor."
+                ))
+                .with_annotation(Annotation::primary(name_span).with_message("Declared here."))
+                .with_note("Passing the arguments on to the base class's constructor is not supported yet."),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// The constructor `class`'s base class declares or inherits, with that base class.
+fn base_constructor<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    class: &ClassLikeMetadata,
+) -> Option<(&'ctx ClassLikeMetadata, &'ctx FunctionLikeMetadata)>
+where
+    A: Arena,
+{
+    let base = context.codebase.get_class_like(class.direct_parent_class?.as_bytes())?;
+    let constructor = base.declaring_method_ids.get(&word("__construct"))?;
+
+    Some((base, context.codebase.get_method_by_id(constructor)?))
+}
+
+/// Whether `member` has an initial value the constructor sets, as the bridge lowers it: one that is not constant, or
+/// one of a get-only property, which `readonly` sets only in the constructor.
+fn runs_in_constructor(member: &ClassLikeMember<'_>) -> bool {
+    let ClassLikeMember::Property(property) = member else {
+        return false;
+    };
+    let Some(value) = property.initial_value() else {
+        return false;
+    };
+
+    matches!(property, Property::Hooked(hooked) if hooked.hook_list.is_get_only()
+        && !hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_))))
+        || !value.is_constant(&PHPVersion::PHP85, false)
 }
 
 /// Reports `class`'s `operator ==`, declared at `operator`, when neither `class` nor a parent declares a
@@ -346,6 +506,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             &mut law_block_context,
             law_metadata,
             &self.parameter_list,
+            None,
             body,
             None,
         )?;
@@ -356,6 +517,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             Body::Method(class_like_metadata.name, lowercase_law_name),
             word(self.name.value),
             self.parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
+            None,
             body,
         );
 

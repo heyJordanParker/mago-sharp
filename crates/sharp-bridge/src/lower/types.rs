@@ -114,6 +114,15 @@ impl<'analysis> Types<'analysis> {
         Declaration { kind, class: metadata.original_name, name: metadata.original_name, public: true }
     }
 
+    /// The constructor `parent::__construct` reaches from the fully qualified class name `class`: the one its base
+    /// class declares or inherits.
+    #[must_use]
+    pub fn parent_constructor(&self, class: &[u8]) -> Option<MethodIdentifier> {
+        let parent = self.codebase.get_class_like(class)?.direct_parent_class?;
+
+        self.codebase.get_class_like(parent.as_bytes())?.declaring_method_ids.get(&word("__construct")).copied()
+    }
+
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,
     /// a constant, a property, then a method, which the read takes as a first-class callable. Only when the class
     /// declares none of them is it a property its `__get` serves. A call is [`Self::call_target`]'s.

@@ -35,6 +35,7 @@ use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
@@ -191,7 +192,10 @@ const ANY: &[u8] = b"Any";
 ///   member: a field when `private` or `protected` without accessors, and a property with accessors, which follow the
 ///   auto-property rules. A `public` parameter without accessors is an error, as spec section 9 says. The constructor
 ///   alone may be `required`, which keeps it callable as `new Self(…)` on every subclass, spec section 25. The parser
-///   reports `required` on any other member as not supported yet.
+///   reports `required` on any other member as not supported yet. The constructor passes control to its base class
+///   with `: super(…)`, whose arguments are a method body's expressions without `this`, because they run before the
+///   object exists, as C#'s CS0027 says. `: this(…)` belongs to a named constructor, so on the main one it is an
+///   error. The analyzer checks the arguments against the base class's constructor.
 /// - A parameter: always a type, a name and an optional default, and never by reference. A default is a constant
 ///   expression: a literal, a constant, `typeof(X)`, a list or map literal of them, or the operators below on them,
 ///   without `++` and `--`. A parameter written `int ...values` is variadic, as spec section 7 writes it, and PHP's
@@ -308,7 +312,8 @@ const ANY: &[u8] = b"Any";
 /// constant, parameter or local. A method name that starts but does not end with `__`, as PHP's magic methods do,
 /// stays not supported yet.
 ///
-/// Nineteen more refusals need inferred types or the codebase, so the analyzer makes them as its part of this contract:
+/// Twenty-two more refusals need inferred types or the codebase, so the analyzer makes them as its part of this
+/// contract:
 /// - `new` on a static class, in `analyze_class_instantiation`, and a class that extends one, in
 ///   `check_class_like_extends`, because the static class may be another file's.
 /// - an `extern` method anywhere but a standard library file whose class is under `Sharp`, in `Method`'s `analyze`,
@@ -344,6 +349,12 @@ const ANY: &[u8] = b"Any";
 /// - an `operator ==` in a class that neither declares nor inherits a `public int hash()`, in `Operator`'s `analyze`,
 ///   because the parent may be another file's.
 /// - an operator a parent already declares, in `check_inherited_operators`, because the parent may be another file's.
+/// - `: super(…)` arguments that do not fit the base class's constructor, or any argument when no constructor exists
+///   above the class, in `analyze_constructor_initializer`, because the base class may be another file's.
+/// - a constructor without `: super(…)` in a class whose base class has a constructor, in `check_super_call`, which
+///   the interim ruling on an implicit `super()` makes an error.
+/// - a class without a constructor whose initial values run in the constructor PHP# gives it, under a base class
+///   whose constructor takes parameters, in `check_super_call`, which is not supported yet.
 #[inline]
 pub fn check_slice(node: Node<'_, '_>, context: &mut Context<'_, '_, '_>) {
     let place = match context.slice_places.last() {
@@ -777,6 +788,22 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::MethodAbstractBody(_),
             Method,
         ) => Some(Method),
+        (Node::ConstructorInitializer(initializer), Method) if !initializer.is_super() => {
+            context.report(
+                Issue::error(
+                    "The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.",
+                )
+                .with_annotation(Annotation::primary(initializer.keyword.span).with_message("Written here.")),
+            );
+
+            None
+        }
+        // `: super(…)`'s arguments are a method body's expressions, without `this`.
+        (Node::ConstructorInitializer(initializer), Method) => {
+            report_this_in_initializer(initializer, context);
+
+            Some(Body)
+        }
         // Outside a constructor, PHP's own check reports a parameter with an access modifier.
         (Node::FunctionLikeParameter(parameter), Method)
             if parameter.hooks.is_none()
@@ -2066,21 +2093,41 @@ fn check_accessor_node(node: Node<'_, '_>, property: &[u8], in_lambda: bool, con
 /// the start of the constructor in declaration order, before the members declared after it are set, so it cannot read
 /// the object, as in C#. Returns whether it reported one.
 fn report_this_in_initial_value(node: Node<'_, '_>, context: &mut Context<'_, '_, '_>) -> bool {
+    report_this(
+        node,
+        "An initial value cannot use `this`: it runs before the constructor body, while the object is built.",
+        Some("Set the member in the constructor body instead."),
+        context,
+    )
+}
+
+/// Reports each `this` in the arguments of `: super(…)` or `: this(…)`. They run before the object exists, as C#'s
+/// CS0027 says: `: this(…)` builds the object, and `: super(…)` runs before the class's own constructor body.
+fn report_this_in_initializer(initializer: &ConstructorInitializer, context: &mut Context<'_, '_, '_>) {
+    report_this(
+        Node::ArgumentList(&initializer.argument_list),
+        "`this` is not available before the constructor runs: pass a parameter instead.",
+        None,
+        context,
+    );
+}
+
+/// Reports each `this` in `node` with `message` and `help`, and returns whether it reported one.
+fn report_this(node: Node<'_, '_>, message: &str, help: Option<&str>, context: &mut Context<'_, '_, '_>) -> bool {
     let mut reported = false;
     if let Node::ConstantAccess(access) = node
         && context.names.binding(&access.name) == Some(Binding::This)
     {
-        context.report(
-            Issue::error(
-                "An initial value cannot use `this`: it runs before the constructor body, while the object is built.",
-            )
-            .with_annotation(Annotation::primary(access.span()).with_message("Used here."))
-            .with_help("Set the member in the constructor body instead."),
-        );
+        let issue =
+            Issue::error(message).with_annotation(Annotation::primary(access.span()).with_message("Used here."));
+        context.report(match help {
+            Some(help) => issue.with_help(help),
+            None => issue,
+        });
         reported = true;
     }
 
-    ensure_sufficient_stack(|| node.visit_children(|child| reported |= report_this_in_initial_value(child, context)));
+    ensure_sufficient_stack(|| node.visit_children(|child| reported |= report_this(child, message, help, context)));
 
     reported
 }

@@ -442,7 +442,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A class sets the initial values PHP takes as no default, those that are not constant or belong to a `readonly`
     /// property, at the start of its constructor, in declaration order. A class without a constructor gets a public
-    /// one that spans the class. The property of each promoted `Set` parameter comes just before the constructor.
+    /// one that spans the class, and calls `parent::__construct()` after them when a constructor exists above the
+    /// class, which the checker allows only when that constructor takes no parameters. The property of each promoted
+    /// `Set` parameter comes just before the constructor.
     fn class(&mut self, class: &Class) -> u32 {
         self.class = self.names.get(&class.name);
         self.enter(class.name.value);
@@ -498,6 +500,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         if !has_constructor && !initial_values.is_empty() {
             let line = self.line(class.left_brace);
+            if self.types.parent_constructor(self.class).is_some() {
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+                initial_values.push(self.parent_construct(line, arguments));
+            }
             let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
             let body = self.node(SHARP_AST_STMT_LIST, 0, line, &initial_values);
 
@@ -638,7 +644,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// no return type. Its body starts with `first_statements`: the class's initial values that are not constant in
     /// the constructor, or the call of an `extern` method's native function, which is that method's whole body. Any
     /// other abstract method has no statement list. A method with statements makes each `Set` parameter a `Set` before
-    /// them.
+    /// them. A constructor's `: super(…)` runs after them as `parent::__construct(…)`, and does nothing when no
+    /// constructor exists above the class.
     fn method(&mut self, method: &Method, flags: u32, first_statements: &[u32]) -> u32 {
         if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 {
             unreachable!("check_slice refuses a method without an access modifier");
@@ -657,6 +664,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.set_parameters(&method.parameter_list)
         };
         statements.extend_from_slice(first_statements);
+        if let Some(initializer) = &method.initializer
+            && self.types.parent_constructor(self.class).is_some()
+        {
+            let arguments = self.arguments(&initializer.argument_list, &[]);
+            statements.push(self.parent_construct(self.line(initializer), arguments));
+        }
         let body = self.method_body(&method.body, method.returns_value(), statements);
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
@@ -673,6 +686,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             php_method_name(method),
             &[parameters, NULL, body, return_type, attributes],
         )
+    }
+
+    /// `parent::__construct(…)` with `arguments`, the call `: super(…)` runs as, a static call of `parent` as
+    /// `super.m()`'s is.
+    fn parent_construct(&mut self, line: u32, arguments: u32) -> u32 {
+        let class = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
+        let method = self.string(0, line, b"__construct");
+
+        self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
     }
 
     /// A method's statement list: `statements`, then its block's statements, or its expression body, which it returns

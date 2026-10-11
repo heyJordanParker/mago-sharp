@@ -43,6 +43,7 @@ pub use crate::cst::cst::class_like::Interface;
 pub use crate::cst::cst::class_like::Trait;
 pub use crate::cst::cst::class_like::constant::ClassLikeConstant;
 pub use crate::cst::cst::class_like::constant::ClassLikeConstantItem;
+pub use crate::cst::cst::class_like::constructor::ConstructorInitializer;
 pub use crate::cst::cst::class_like::enum_case::EnumCase;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseBackedItem;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseItem;
