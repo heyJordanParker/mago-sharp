@@ -7,6 +7,7 @@ use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Literal;
@@ -119,7 +120,7 @@ pub(crate) fn float_cast<A>(context: &Context<'_, '_, A>, value: &Expression<'_>
 where
     A: Arena,
 {
-    let text = String::from_utf8_lossy(&context.source_file.contents[value.span().to_range_usize()]);
+    let text = quoted_source(context, value.span());
 
     if matches!(
         value,
@@ -139,10 +140,47 @@ where
     }
 }
 
-/// The float form of an int literal, negated or not, as `2` gives `2.0` and `-3` gives `-3.0`.
+/// The source text at `span`, as one line: every run of whitespace that holds a newline becomes one space, so a value
+/// written over several lines keeps a message's title on one line.
+pub(crate) fn quoted_source<A>(context: &Context<'_, '_, A>, span: Span) -> String
+where
+    A: Arena,
+{
+    let text = String::from_utf8_lossy(&context.source_file.contents[span.to_range_usize()]);
+    let mut quoted = String::with_capacity(text.len());
+    let mut whitespace = String::new();
+
+    for character in text.chars() {
+        if character.is_whitespace() {
+            whitespace.push(character);
+            continue;
+        }
+
+        if whitespace.contains('\n') {
+            quoted.push(' ');
+        } else {
+            quoted.push_str(&whitespace);
+        }
+
+        whitespace.clear();
+        quoted.push(character);
+    }
+
+    quoted
+}
+
+/// The float form of an int literal, negated or not, as `2` gives `2.0` and `-3` gives `-3.0`. A decimal literal keeps
+/// the digits written, so `1_000_000` gives `1_000_000.0`. A hex, octal or binary literal gives its value, as `0x1F`
+/// gives `31.0`, since `0x1F.0` is no float and `017.0` is seventeen.
 pub(crate) fn float_literal(value: &Expression<'_>) -> Option<String> {
     let integer = |expression: &Expression<'_>| match expression.unparenthesized() {
-        Expression::Literal(Literal::Integer(LiteralInteger { value: Some(integer), .. })) => Some(*integer),
+        Expression::Literal(Literal::Integer(LiteralInteger { raw, value: Some(integer), .. })) => {
+            let decimal = *raw == b"0"
+                || (raw.first().is_some_and(|digit| matches!(digit, b'1'..=b'9'))
+                    && raw.iter().all(|byte| byte.is_ascii_digit() || *byte == b'_'));
+
+            Some(if decimal { String::from_utf8_lossy(raw).into_owned() } else { integer.to_string() })
+        }
         _ => None,
     };
 

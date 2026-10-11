@@ -149,6 +149,11 @@ pub(crate) fn is_array_contained_by_array(
     let input_known_items_cow = known_items_view(input_array);
     let container_known_items = known_items_view(container_array);
 
+    // A known item refused only for an `int` where a `float` is expected does not end the comparison, so the items
+    // after it are still compared. The array is refused for an `int` only when everything else fits, as
+    // `are_parts_contained_by` decides for a union's parts.
+    let mut refused_for_int = false;
+
     if let Some(input_known_items) = &input_known_items_cow {
         for (input_key, (input_is_optional, input_item_value_type)) in input_known_items.iter() {
             if let Some((container_is_optional, container_item_value_type)) =
@@ -167,7 +172,11 @@ pub(crate) fn is_array_contained_by_array(
                     inside_assertion,
                     atomic_comparison_result,
                 ) {
-                    return false;
+                    if !std::mem::take(&mut atomic_comparison_result.int_for_float) {
+                        return false;
+                    }
+
+                    refused_for_int = true;
                 }
             } else if let (Some(ck_type), cv_type) = (&container_key_type, &container_value_type) {
                 if !union_comparator::is_contained_by(
@@ -178,7 +187,13 @@ pub(crate) fn is_array_contained_by_array(
                     false,
                     inside_assertion,
                     atomic_comparison_result,
-                ) || !union_comparator::is_contained_by(
+                ) {
+                    atomic_comparison_result.int_for_float = false;
+
+                    return false;
+                }
+
+                if !union_comparator::is_contained_by(
                     codebase,
                     input_item_value_type,
                     cv_type,
@@ -187,7 +202,11 @@ pub(crate) fn is_array_contained_by_array(
                     inside_assertion,
                     atomic_comparison_result,
                 ) {
-                    return false;
+                    if !std::mem::take(&mut atomic_comparison_result.int_for_float) {
+                        return false;
+                    }
+
+                    refused_for_int = true;
                 }
             } else {
                 return false;
@@ -264,8 +283,8 @@ pub(crate) fn is_array_contained_by_array(
         }
     }
 
-    input_value_type.is_never()
-        || is_element_type_contained_by(
+    if !input_value_type.is_never()
+        && !is_element_type_contained_by(
             codebase,
             &input_value_type,
             &container_value_type,
@@ -273,6 +292,13 @@ pub(crate) fn is_array_contained_by_array(
             inside_assertion,
             atomic_comparison_result,
         )
+    {
+        return false;
+    }
+
+    atomic_comparison_result.int_for_float = refused_for_int;
+
+    !refused_for_int
 }
 
 #[cfg(test)]
