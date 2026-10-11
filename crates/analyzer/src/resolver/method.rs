@@ -1149,18 +1149,35 @@ where
     true
 }
 
-/// The collection type the place `object` is declared with: a typed local, a parameter, a property, or `field`, the
-/// storage of the property whose accessor is running. A PHP# collection is the `List` or `Map` its place declares, so
-/// its methods, its index reads and its `[k, v]` loops follow that type. A value the analyzer saw assigned last, such
-/// as a list of one implementation, or a `List` literal in a `Map<int, V>`, narrows neither its kind nor its elements.
-/// Only a property a PHP# class declares names a collection: a plain PHP `array` property, on a PHP class or reached
-/// through a PHP# one, is typed by the value it holds, as in PHP.
+/// The first collection type the place `object` is declared with, as [`get_declared_type`] finds it. A PHP# collection
+/// is the `List`, `Map` or `Set` its place declares, so its methods, its index reads and its `[k, v]` loops follow that
+/// type. A value the analyzer saw assigned last, such as a list of one implementation, or a `List` literal in a
+/// `Map<int, V>`, narrows neither its kind nor its elements.
 pub(crate) fn get_declared_collection<'arena, A>(
     context: &Context<'_, 'arena, A>,
     block_context: &BlockContext<'_>,
     artifacts: &AnalysisArtifacts,
     object: &Expression<'arena>,
 ) -> Option<TArray>
+where
+    A: Arena,
+{
+    get_declared_type(context, block_context, artifacts, object)?.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(array) => Some(array.clone()),
+        _ => None,
+    })
+}
+
+/// The type the place `object` is declared with, whole: a typed local, a parameter, a property, or `field`, the
+/// storage of the property whose accessor is running. Only a property a PHP# class declares has a declared type here:
+/// a plain PHP `array` property, on a PHP class or reached through a PHP# one, is typed by the value it holds, as in
+/// PHP.
+pub(crate) fn get_declared_type<'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'arena>,
+) -> Option<TUnion>
 where
     A: Arena,
 {
@@ -1171,11 +1188,11 @@ where
         object => object,
     };
 
-    let declared = match object {
+    match object {
         Expression::ConstantAccess(access) => {
             let variable_id = get_bare_name_variable_id(&access.name, context.resolved_names)?;
 
-            match block_context.local_types.get(&variable_id) {
+            Some(match block_context.local_types.get(&variable_id) {
                 Some((local_type, _)) => local_type.as_ref().clone(),
                 None => block_context
                     .scope
@@ -1186,7 +1203,7 @@ where
                     .get_type_metadata()?
                     .type_union
                     .clone(),
-            }
+            })
         }
         Expression::Access(Access::Property(access)) => {
             let ClassLikeMemberSelector::Identifier(property) = &access.property else {
@@ -1203,21 +1220,16 @@ where
             // `Class.name` is a static property of the class it names. Any other object is analyzed before its
             // property's collection is asked for, so its class is its expression type.
             if let Some(class) = context.resolved_names.static_property_class(access) {
-                property_type(context.resolved_names.get(&class.name))?.clone()
+                property_type(context.resolved_names.get(&class.name)).cloned()
             } else {
                 artifacts.get_expression_type(access.object)?.types.iter().find_map(|atomic| match atomic {
                     TAtomic::Object(object) => property_type(object.get_name()?.as_bytes()).cloned(),
                     _ => None,
-                })?
+                })
             }
         }
-        _ => return None,
-    };
-
-    declared.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(array) => Some(array.clone()),
         _ => None,
-    })
+    }
 }
 
 /// The class whose methods a PHP# collection has, as spec section 12 writes them: a `List<T>` is called as

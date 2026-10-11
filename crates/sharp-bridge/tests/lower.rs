@@ -8684,6 +8684,69 @@ fn as_is_a_conditional_that_gives_the_value_or_null() {
 }
 
 /// ```php
+/// if (\is_int($count = $counts[$key] ?? null)) { return $count; }
+/// $price = \is_int(${'as#1'} = $counts[$key] ?? null) ? ${'as#1'} : null;
+/// ```
+///
+/// An index a pattern tests reads a missing key as null, as `??` does, so the index is the left side of a
+/// `COALESCE`, and a missing key reaches the test as null instead of a warning.
+#[test]
+fn an_index_a_pattern_tests_coalesces_a_missing_key_to_null() {
+    assert_eq!(
+        body_in(
+            "int? run(Map<string, int> counts, string key)",
+            "        if (counts[key] is int count) {\n            return count;\n        }\n        const price = counts[key] as int;\n        return price;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "count"
+                        COALESCE
+                          DIM
+                            VAR
+                              ZVAL "counts"
+                            VAR
+                              ZVAL "key"
+                          ZVAL null
+                  STMT_LIST
+                    RETURN
+                      VAR
+                        ZVAL "count"
+              ASSIGN
+                VAR
+                  ZVAL "price"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "as#1"
+                        COALESCE
+                          DIM
+                            VAR
+                              ZVAL "counts"
+                            VAR
+                              ZVAL "key"
+                          ZVAL null
+                  VAR
+                    ZVAL "as#1"
+                  ZVAL null
+              RETURN
+                VAR
+                  ZVAL "price"
+        "#}
+    );
+}
+
+/// ```php
 /// $limit = 10;
 /// $a = $extra === 200;
 /// $b = \is_int($extra) && $extra >= 1 && $extra < $limit || !($extra === -1);
