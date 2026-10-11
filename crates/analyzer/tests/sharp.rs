@@ -33,6 +33,7 @@ use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_names::CHANGING_COLLECTION_METHODS;
+use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::resolver::NameResolver;
 use mago_prelude::Prelude;
 use mago_reporting::Issue;
@@ -240,6 +241,17 @@ fn the_binder_knows_every_changing_collection_method() {
         let known: Vec<&str> =
             changing.iter().copied().filter(|method| CHANGING_COLLECTION_METHODS.contains(method)).collect();
         assert_eq!(known, changing, "{class} changes the collection in a method CHANGING_COLLECTION_METHODS lacks");
+    }
+}
+
+/// The bridge and the checker read the methods that run as PHP on the array from one list, which must name methods the
+/// collection stubs declare, or neither would match a call.
+#[test]
+fn every_inlined_collection_method_is_a_method_of_its_collection() {
+    for (collection, method) in INLINED_COLLECTION_METHODS {
+        let class = format!("Sharp\\{collection}Methods");
+
+        assert!(PRELUDE.metadata.get_method(class.as_bytes(), method.as_bytes()).is_some(), "{class} has no {method}");
     }
 }
 
@@ -6470,6 +6482,34 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
         issues(("src/Demo/Order.sharp", sharp), &[]),
         ["23:19 invalid-argument", "24:19 invalid-argument", "25:16 non-existent-method", "26:15 non-existent-method"]
     );
+}
+
+/// A `List` and a `Map` have `count()`, the number of elements they hold, as spec sections 21 and 24 call it. Its
+/// result is an `int`, so it is no condition on its own.
+#[test]
+fn every_collection_counts_its_elements() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int total(List<int> sizes, Map<string, int> counts)\n    {\n        return sizes.count() + counts.count();\n    }\n\n    public void wrong(List<int> sizes)\n    {\n        if (sizes.count()) { }\n        sizes.count(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n\n    /**\n     * @param ListMethods<int> $sizes\n     */\n    public function wrong(ListMethods $sizes): void\n    {\n        $sizes->count(1);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["12:13 invalid-operand", "13:21 too-many-arguments"]);
+    assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
+}
+
+/// A collection method the bridge lowers to PHP on the array, such as `count` or a `Set`'s `contains`, cannot run on a
+/// value that can also be an object, whose own method the PHP would skip. Any other collection method is a method call
+/// the engine sends to the object or the collection the value holds when it runs. A `.php` file has no PHP# collection.
+#[test]
+fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public int? get(int index) => index > 0 ? index : null;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1)) {\n            return items.get(0) ?? 0;\n        }\n        return items.count();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
+        ["16:18 not-supported-yet", "19:22 not-supported-yet"]
+    );
+    assert_eq!(issues[1].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
+    assert!(!codes(&self::issues(("src/Demo/Shelf.php", php), &[])).contains(&"not-supported-yet"));
 }
 
 /// The analyzer checks a collection method against `Sharp\ListMethods` or `Sharp\MapMethods`, and every message names
