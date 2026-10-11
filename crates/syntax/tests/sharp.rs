@@ -2436,32 +2436,43 @@ fn lazy_is_a_modifier_and_stays_a_name_elsewhere() {
         panic!("expected a call, got {:#?}", computed.body.expression);
     };
     assert_eq!(source(CODE, call.function), "lazy");
+
+    const LAMBDA: &str = "class Store\n{\n    public bool flag(bool on)\n    {\n        Function<bool(bool, int)> pass = (lazy, int count) => lazy;\n        Function<bool(bool)> same = (lazy) => lazy;\n        return pass(on, 1) && same(on);\n    }\n}\n";
+    let program = parse(&arena, "src/Store.sharp", LAMBDA);
+    assert!(program.errors.is_empty(), "an untyped lambda parameter named `lazy`: {:#?}", program.errors);
 }
 
 /// Spec section 9: a parameter has no computed property, because it receives its value. It is one error at its `=>`,
 /// and the parameter list and the class parse on.
 #[test]
 fn a_computed_parameter_is_one_error_and_the_class_parses_on() {
-    const CODE: &str = "class Store\n{\n    public Store(public string slug => trim(\"x\"), int count) {}\n\n    public int total() => 1;\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Store.sharp", CODE);
+    for member in [
+        "public Store(public string slug => trim(\"x\"), int count) {}",
+        "public int run(int slug => 1, int count) => count;",
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str =
+            Box::leak(format!("class Store\n{{\n    {member}\n\n    public int total() => 1;\n}}\n").into_boxed_str());
+        let program = parse(&arena, "src/Store.sharp", code);
 
-    let [error] = program.errors else {
-        panic!("expected one error, got {:#?}", program.errors);
-    };
-    assert_eq!(
-        error.to_string(),
-        "A constructor parameter cannot be a computed property: a computed property has no incoming value to receive."
-    );
-    assert_eq!(source(CODE, error), "=>");
-    let [ClassLikeMember::Method(constructor), ClassLikeMember::Method(total)] = class_members(program).as_slice()
-    else {
-        panic!("expected two methods, got {:#?}", class_members(program));
-    };
-    let parameters: Vec<&str> =
-        constructor.parameter_list.parameters.iter().map(|parameter| source(CODE, &parameter.variable)).collect();
-    assert_eq!(parameters, ["slug", "count"]);
-    assert_eq!(source(CODE, &total.name), "total");
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            error.to_string(),
+            "A parameter cannot be a computed property: a computed property has no incoming value to receive.",
+            "{member}"
+        );
+        assert_eq!(source(code, error), "=>", "{member}");
+        let [ClassLikeMember::Method(method), ClassLikeMember::Method(total)] = class_members(program).as_slice()
+        else {
+            panic!("expected two methods for `{member}`, got {:#?}", class_members(program));
+        };
+        let parameters: Vec<&str> =
+            method.parameter_list.parameters.iter().map(|parameter| source(code, &parameter.variable)).collect();
+        assert_eq!(parameters, ["slug", "count"], "{member}");
+        assert_eq!(source(code, &total.name), "total", "{member}");
+    }
 }
 
 /// A static class is `static` among a class's modifiers, and a method with a native body is `extern` among a member's

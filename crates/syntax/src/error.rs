@@ -268,8 +268,7 @@ impl std::fmt::Display for ParseError {
                     .to_string()
             }
             ParseError::ComputedParameterInSharp(_) => {
-                "A constructor parameter cannot be a computed property: a computed property has no incoming value to receive."
-                    .to_string()
+                "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
             }
         };
 

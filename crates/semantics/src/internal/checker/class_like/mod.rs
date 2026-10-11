@@ -1279,6 +1279,7 @@ pub fn check_members<'ast, 'arena>(
 ) {
     let class_like_fqcn = context.display_class_like_name(class_like_fqcn);
     let mut method_names: HashMap<Vec<u8>, Span> = HashMap::new();
+    let mut main_constructor: Option<Span> = None;
     let mut constant_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
     let mut property_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
 
@@ -1291,17 +1292,20 @@ pub fn check_members<'ast, 'arena>(
         };
         if let Some(name) = callable_name {
             let lowercase_name = name.value.to_ascii_lowercase();
-            if let Some(previous) = method_names.get(&lowercase_name)
-                && let ClassLikeMember::Method(method) = member
-                && context.program.dialect.is_sharp()
-                && method.return_type_hint.is_none()
-                && method.name.value == class_like_name
-            {
+            let is_sharp_constructor = matches!(member, ClassLikeMember::Method(method)
+                if context.program.dialect.is_sharp()
+                    && method.return_type_hint.is_none()
+                    && method.name.value == class_like_name);
+            if is_sharp_constructor && let Some(main) = main_constructor {
                 context.report(
                     Issue::error("A class has one main constructor: PHP# has no overloading by argument types.")
                         .with_annotation(Annotation::primary(name.span()).with_message("A second constructor."))
-                        .with_annotation(Annotation::secondary(*previous).with_message("The main constructor.")),
+                        .with_annotation(Annotation::secondary(main).with_message("The main constructor.")),
                 );
+            } else if is_sharp_constructor {
+                // A method named after its class has its own error, so a constructor after one is not defined again.
+                main_constructor = Some(name.span());
+                method_names.entry(lowercase_name).or_insert(name.span());
             } else if let Some(previous) = method_names.get(&lowercase_name) {
                 let method_display = context.display_member(class_like_name, BytesDisplay(name.value));
                 context.report(
