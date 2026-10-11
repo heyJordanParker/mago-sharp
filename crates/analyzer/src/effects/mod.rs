@@ -20,6 +20,7 @@ use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 
+use crate::code::IssueCode;
 use crate::graph::strongly_connected_parts;
 use crate::utils::names::sharp_class_like_name;
 
@@ -52,12 +53,28 @@ pub(crate) enum Changed {
 /// The roots of a value. A value with no root is fresh: the body made it, so changing it changes nothing given.
 pub(crate) type Roots = BTreeSet<Changed>;
 
-/// A PHP# body: a method by its lowercase class and method names, or an accessor by its lowercase class, its
-/// property's PHP name (`$total`) and `get` or `set`.
+/// A PHP# body: a method by its lowercase class and method names, an accessor by its lowercase class, its
+/// property's PHP name (`$total`) and `get` or `set`, or a lambda by the name its function value's `source` gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Body {
     Method(Word, Word),
     Accessor(Word, Word, Word),
+    Lambda(Word),
+}
+
+/// A lambda or a method value a body gives a place whose PHP# function type lists its effects. Spec section 29 holds
+/// it to that list, and only the solve knows the effects of the body it runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FunctionValue {
+    /// The body the value runs.
+    pub(crate) body: Body,
+    /// The effects the place's function type lists, by full class name.
+    pub(crate) allowed: Vec<Word>,
+    pub(crate) span: Span,
+    /// The place's type as the value's file writes it, such as `Function<int(int)>`.
+    pub(crate) declared: String,
+    /// The code a value of the wrong type gets in this place, such as `invalid-argument`.
+    pub(crate) code: IssueCode,
 }
 
 /// A call from one PHP# body to another, with the roots of what it passes.
@@ -83,6 +100,7 @@ pub struct EffectSummary {
     pub(crate) calls: Vec<Call>,
     /// Each change, with the write and the place written as the source writes it.
     pub(crate) changes: Vec<(Changed, Span, Word)>,
+    pub(crate) function_values: Vec<FunctionValue>,
     /// The name each import of the body's file gives its class, and the file's namespace and imports, as
     /// `Context::imported_names` and `Context::scope` hold them, shared by the file's bodies. A message about the body
     /// names classes, and the imports its code needs, as its file does.
@@ -166,6 +184,8 @@ pub struct Effects {
     index: HashMap<Body, usize>,
     /// Each body's items, its own in source order first, and each once.
     solved: Vec<Vec<(Item, Origin)>>,
+    /// Each function value, with the position of the body that gives it, whose file names the classes of a message.
+    function_values: Vec<(FunctionValue, usize)>,
 }
 
 impl Effects {
@@ -255,12 +275,20 @@ impl Effects {
                 .iter()
                 .map(|summary| match summary.body {
                     Body::Method(class, _) | Body::Accessor(class, _, _) => (class, summary.member),
+                    Body::Lambda(_) => (empty_word(), summary.member),
                 })
                 .collect(),
             imports: summaries.iter().map(|summary| Arc::clone(&summary.imports)).collect(),
             scopes: summaries.iter().map(|summary| Arc::clone(&summary.scope)).collect(),
             index,
             solved,
+            function_values: summaries
+                .iter()
+                .enumerate()
+                .flat_map(|(position, summary)| {
+                    summary.function_values.iter().map(move |value| (value.clone(), position))
+                })
+                .collect(),
         }
     }
 
@@ -292,16 +320,34 @@ impl Effects {
         let short_name_counts = OnceCell::new();
         let mut issues = check::getters_must_be_pure(self, codebase, &short_name_counts);
         issues.extend(check::laws_must_be_pure(self, codebase, &short_name_counts));
+        issues.extend(check::function_values_must_fit_their_types(self, codebase, &short_name_counts));
 
         issues
     }
 
     fn body_impurity(&self, body: Body) -> Option<Impurity> {
-        let position = *self.index.get(&body)?;
         let constructor = matches!(body, Body::Method(_, method) if method.as_bytes() == b"__construct");
+
+        self.first_item(body, |item| !(constructor && item == Item::Changed(Changed::This)))
+    }
+
+    /// Why `body` has an effect that `allowed` does not list: a foreign effect it does not name, or an unknown one.
+    fn effect_outside(&self, body: Body, allowed: &[Word]) -> Option<Impurity> {
+        self.first_item(body, |item| match item {
+            Item::Effect(Effect::Foreign(effect)) => {
+                !allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes()))
+            }
+            Item::Effect(Effect::Unknown(_)) => true,
+            Item::Changed(_) => false,
+        })
+    }
+
+    /// The first item of `body` that `keep` keeps, as the call or write in `body` that leads to it.
+    fn first_item(&self, body: Body, keep: impl Fn(Item) -> bool) -> Option<Impurity> {
+        let position = *self.index.get(&body)?;
         let &(mut item, mut origin) = self.solved[position]
             .iter()
-            .filter(|(item, _)| !(constructor && *item == Item::Changed(Changed::This)))
+            .filter(|(item, _)| keep(*item))
             .min_by_key(|(_, origin)| origin.span.start.offset)?;
 
         let span = origin.span;
@@ -321,6 +367,26 @@ impl Effects {
         };
 
         Some(Impurity { span, path, cause: origin.cause, effect })
+    }
+
+    /// Each function value whose body has an effect its place's function type does not list, each once, with the
+    /// body's class and member as messages name them, the imports and the scope of the file that gives the value, and
+    /// the call that has the effect.
+    fn unfit_function_values(
+        &self,
+    ) -> impl Iterator<Item = (&FunctionValue, (Word, Word), &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
+        let mut reported = Vec::new();
+        self.function_values.iter().filter_map(move |(value, giver)| {
+            if reported.contains(&(value.span, value.body)) {
+                return None;
+            }
+            reported.push((value.span, value.body));
+
+            let impurity = self.effect_outside(value.body, &value.allowed)?;
+            let name = self.names[*self.index.get(&value.body)?];
+
+            Some((value, name, &*self.imports[*giver], &*self.scopes[*giver], impurity))
+        })
     }
 
     /// Each body with its member as messages name it, the imports and the scope of its file, and why it is impure.

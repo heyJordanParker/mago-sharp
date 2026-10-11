@@ -47,6 +47,7 @@ use crate::artifacts::ClosureBindScope;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::invocation::Invocation;
@@ -672,6 +673,14 @@ where
                     *argument_offset,
                     argument_expression,
                     &invocation.target,
+                );
+                record_function_values(
+                    context,
+                    artifacts,
+                    &argument_value_type,
+                    &final_parameter_type,
+                    argument_expression.span(),
+                    IssueCode::InvalidArgument,
                 );
             }
 

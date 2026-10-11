@@ -10,6 +10,9 @@ use mago_codex::metadata::r#extern::ExternMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
+use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_names::binding::Local;
 use mago_names::binding::php_variable_name;
@@ -28,6 +31,7 @@ use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
+use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Is;
 use mago_syntax::cst::LocalDeclaration;
@@ -45,18 +49,22 @@ use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::artifacts::CallTarget;
+use crate::code::IssueCode;
 use crate::context::Context;
 use crate::effects::Body;
 use crate::effects::Call;
 use crate::effects::Changed;
 use crate::effects::Effect;
 use crate::effects::EffectSummary;
+use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::statement::function_like::FunctionLikeBody;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
 
-/// Records the summary of `body`, which messages name by `member`, and whose parameters are declared at `parameters`,
-/// into `artifacts`.
+/// Records the summary of the method or accessor `body`, which messages name by `member`, and whose parameters are
+/// declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with the function
+/// values the analysis gave places since the last body.
 pub(crate) fn record<'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -69,8 +77,98 @@ pub(crate) fn record<'arena, A>(
 {
     let class = match body {
         Body::Method(class, _) | Body::Accessor(class, _, _) => class,
+        Body::Lambda(_) => empty_word(),
     };
 
+    let function_values = std::mem::take(&mut artifacts.function_values);
+    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, code);
+    summary.function_values = function_values;
+    artifacts.effect_summaries.push(summary);
+    artifacts.effect_summaries.append(&mut lambdas);
+}
+
+/// Records each lambda and method value `value` holds where a `.sharp` file gives it the place of type `declared` at
+/// `span`, when `declared`'s function types list effects. Only the solve knows the effects of the body such a value
+/// runs, so it holds the value to the effects every one of those types lists, and refuses it with `code`, the code a
+/// value of the wrong type gets in that place.
+pub(crate) fn record_function_values<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    value: &TUnion,
+    declared: &TUnion,
+    span: Span,
+    code: IssueCode,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    let mut allowed: Option<Vec<Word>> = None;
+    for atomic in declared.types.iter() {
+        let TAtomic::Callable(TCallable::Signature(TCallableSignature { effects: Some(effects), .. })) = atomic else {
+            continue;
+        };
+
+        allowed = Some(match allowed {
+            None => effects.clone(),
+            Some(known) => known
+                .into_iter()
+                .filter(|known| effects.iter().any(|effect| effect.as_bytes().eq_ignore_ascii_case(known.as_bytes())))
+                .collect(),
+        });
+    }
+    let Some(allowed) = allowed else {
+        return;
+    };
+
+    let codebase = context.codebase;
+    for atomic in value.types.iter() {
+        let source = match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) if signature.effects.is_some() => signature.source,
+            TAtomic::Callable(TCallable::Alias(identifier)) => Some(*identifier),
+            _ => None,
+        };
+        let body = match source {
+            Some(FunctionLikeIdentifier::Closure(name)) => Body::Lambda(name),
+            Some(FunctionLikeIdentifier::Method(class, method)) => {
+                let Some(declaring_class) = codebase.get_declaring_method_class(class.as_bytes(), method.as_bytes())
+                else {
+                    continue;
+                };
+                if !codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|class| class.flags.is_sharp()) {
+                    continue;
+                }
+
+                Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), ascii_lowercase_word(method.as_bytes()))
+            }
+            Some(FunctionLikeIdentifier::Function(_)) | None => continue,
+        };
+
+        artifacts.function_values.push(FunctionValue {
+            body,
+            allowed: allowed.clone(),
+            span,
+            declared: display_sharp_type(context, declared),
+            code,
+        });
+    }
+}
+
+/// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
+fn summarize<'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
+    class: Word,
+    body: Body,
+    member: Word,
+    parameters: Vec<Span>,
+    code: FunctionLikeBody<'_, 'arena>,
+) -> (EffectSummary, Vec<EffectSummary>)
+where
+    A: Arena,
+{
     let imports = Arc::clone(&context.imported_names);
     let scope = Arc::clone(&context.scope);
     let empty_summary = || EffectSummary {
@@ -79,6 +177,7 @@ pub(crate) fn record<'arena, A>(
         effects: Vec::new(),
         calls: Vec::new(),
         changes: Vec::new(),
+        function_values: Vec::new(),
         imports: Arc::clone(&imports),
         scope: Arc::clone(&scope),
     };
@@ -94,6 +193,7 @@ pub(crate) fn record<'arena, A>(
         inlining: Vec::new(),
         grew: false,
         summary: empty_summary(),
+        lambda_summaries: Vec::new(),
     };
 
     // A local takes the roots of every value assigned to it anywhere in the body, so the walk repeats until no
@@ -117,8 +217,7 @@ pub(crate) fn record<'arena, A>(
         }
     }
 
-    let summary = recorder.summary;
-    artifacts.effect_summaries.push(summary);
+    (recorder.summary, recorder.lambda_summaries)
 }
 
 /// The state of one body's walk.
@@ -143,6 +242,8 @@ where
     /// Whether a local gained a root during this walk.
     grew: bool,
     summary: EffectSummary,
+    /// The summary of each lambda written in the body, once, which a function value of the lambda runs.
+    lambda_summaries: Vec<EffectSummary>,
 }
 
 impl<'ctx, 'ast, 'arena, A> Recorder<'_, 'ctx, 'ast, 'arena, A>
@@ -433,6 +534,34 @@ where
         self.inlining.pop();
     }
 
+    /// Records the summary of the lambda written at `span` as its own body, once, so the solve knows the effects of a
+    /// function value of it.
+    fn record_lambda(
+        &mut self,
+        span: Span,
+        parameters: &FunctionLikeParameterList<'arena>,
+        code: FunctionLikeBody<'ast, 'arena>,
+    ) {
+        let FunctionLikeIdentifier::Closure(name) = FunctionLikeIdentifier::for_closure(self.context.source_file, span)
+        else {
+            return;
+        };
+        let body = Body::Lambda(name);
+        if self.lambda_summaries.iter().any(|summary| summary.body == body) {
+            return;
+        }
+
+        let parameters = parameters.parameters.iter().map(|parameter| parameter.variable.span).collect();
+        let (summary, lambdas) =
+            summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, code);
+        self.lambda_summaries.push(summary);
+        for lambda in lambdas {
+            if !self.lambda_summaries.iter().any(|summary| summary.body == lambda.body) {
+                self.lambda_summaries.push(lambda);
+            }
+        }
+    }
+
     fn call(&mut self, call: &'ast CallExpression<'arena>) {
         let span = call.span();
         let (receiver, arguments, function) = match call {
@@ -442,13 +571,22 @@ where
             CallExpression::StaticMethod(call) => (None, &call.argument_list, None),
         };
 
-        // A call of a lambda written in this body runs the lambda here. A call of any other function a local holds is
-        // pure, as a `Function` type is until the parser gives `Function<…>` its `uses`.
+        // A call of a lambda written in this body runs the lambda here. A call of any other function value, such as a
+        // local's or a parameter's, has the effects its function type lists.
         if let Some(lambda) = function.and_then(|function| self.lambda(function)) {
             let roots: Vec<Roots> = arguments.arguments.iter().map(|argument| self.roots(argument.value())).collect();
             self.inline(lambda, |index| roots.get(index).cloned().unwrap_or_default());
 
             return;
+        }
+
+        if let Some(function) = function
+            && let Some(function_type) = self.artifacts.get_expression_type(function)
+        {
+            let cause = (empty_word(), self.text(function.span()));
+            for effect in declared_effects(function_type) {
+                self.summary.effects.push((Effect::Foreign(effect), span, cause));
+            }
         }
 
         let artifacts = self.artifacts;
@@ -488,33 +626,39 @@ where
     }
 
     /// Records a call of the property `property` of `class` that holds a function. A PHP# class declares it with a
-    /// `Function` type, which is pure without `uses`. A plain PHP closure or callable is `Unknown`, because an `extern`
-    /// declares a class's members, not the code a property holds. An object's `__invoke` is recorded as the method it
-    /// is.
+    /// `Function` type, which has the effects its `uses` lists. A plain PHP closure or callable is `Unknown`, because an
+    /// `extern` declares a class's members, not the code a property holds. An object's `__invoke` is recorded as the
+    /// method it is.
     fn property_call(&mut self, class: Word, property: Word, span: Span) {
         let codebase = self.codebase();
         let Some(class_like) = codebase.get_class_like(class.as_bytes()) else {
             return;
         };
+        let property_type = codebase
+            .get_property(class.as_bytes(), property.as_bytes())
+            .and_then(|metadata| metadata.type_metadata.as_ref())
+            .map(|metadata| &metadata.type_union);
+        let cause =
+            (class_like.original_name, word(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes())));
         if class_like.flags.is_sharp() {
+            for effect in property_type.map(declared_effects).unwrap_or_default() {
+                self.summary.effects.push((Effect::Foreign(effect), span, cause));
+            }
+
             return;
         }
 
-        let holds_object = codebase
-            .get_property(class.as_bytes(), property.as_bytes())
-            .and_then(|metadata| metadata.type_metadata.as_ref())
-            .is_some_and(|metadata| {
-                metadata.type_union.types.iter().all(|atomic| {
-                    matches!(atomic, TAtomic::Object(object)
-                        if object.get_name().is_some_and(|name| !name.as_bytes().eq_ignore_ascii_case(b"Closure")))
-                })
-            });
+        let holds_object = property_type.is_some_and(|property_type| {
+            property_type.types.iter().all(|atomic| {
+                matches!(atomic, TAtomic::Object(object)
+                    if object.get_name().is_some_and(|name| !name.as_bytes().eq_ignore_ascii_case(b"Closure")))
+            })
+        });
         if holds_object {
             return;
         }
 
-        let property = property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes());
-        self.summary.effects.push((Effect::Unknown(None), span, (class_like.original_name, word(property))));
+        self.summary.effects.push((Effect::Unknown(None), span, cause));
     }
 
     /// Records a PHP# operator on instances at `span`: it runs the static method its class declares, which takes
@@ -712,7 +856,8 @@ where
     }
 }
 
-/// Walks one body, leaving out the lambdas and classes written in it: a lambda runs only where it is called.
+/// Walks one body, leaving out the lambdas and classes written in it: a lambda runs only where it is called, so the walk
+/// records each lambda as a body of its own.
 struct SummaryWalker;
 
 impl SummaryWalker {
@@ -741,9 +886,19 @@ impl<'ast, 'arena, A> Walker<'ast, 'arena, Recorder<'_, '_, 'ast, 'arena, A>> fo
 where
     A: Arena,
 {
-    fn walk_closure(&self, _: &'ast Closure<'arena>, _: &mut Recorder<'_, '_, 'ast, 'arena, A>) {}
+    fn walk_closure(&self, closure: &'ast Closure<'arena>, recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>) {
+        let code = FunctionLikeBody::Statements(closure.body.statements.as_slice(), closure.body.span());
+        recorder.record_lambda(closure.span(), &closure.parameter_list, code);
+    }
 
-    fn walk_arrow_function(&self, _: &'ast ArrowFunction<'arena>, _: &mut Recorder<'_, '_, 'ast, 'arena, A>) {}
+    fn walk_arrow_function(
+        &self,
+        arrow_function: &'ast ArrowFunction<'arena>,
+        recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
+    ) {
+        let code = FunctionLikeBody::Expression(arrow_function.expression);
+        recorder.record_lambda(arrow_function.span(), &arrow_function.parameter_list, code);
+    }
 
     fn walk_anonymous_class(&self, _: &'ast AnonymousClass<'arena>, _: &mut Recorder<'_, '_, 'ast, 'arena, A>) {}
 
@@ -866,6 +1021,28 @@ fn lambda_literal<'ast, 'arena>(expression: &'ast Expression<'arena>) -> Option<
     let expression = expression.unparenthesized();
 
     matches!(expression, Expression::ArrowFunction(_) | Expression::Closure(_)).then_some(expression)
+}
+
+/// The effects the function types of `value_type` list, each once. A function value with a `source` runs a PHP# body,
+/// whose effects its body's summary records instead.
+fn declared_effects(value_type: &TUnion) -> Vec<Word> {
+    let mut effects: Vec<Word> = Vec::new();
+    for atomic in value_type.types.iter() {
+        let TAtomic::Callable(TCallable::Signature(signature)) = atomic else {
+            continue;
+        };
+        if signature.source.is_some() {
+            continue;
+        }
+
+        for effect in signature.effects.iter().flatten() {
+            if !effects.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())) {
+                effects.push(*effect);
+            }
+        }
+    }
+
+    effects
 }
 
 /// A plain PHP name as PHP# writes it: `App\now` as `App.now`.
