@@ -130,6 +130,7 @@ impl FunctionReturnTypeProvider for ShapeProvider {
                     })))]),
                 )))))
             }
+            TArray::Set(_) => None,
         }
     }
 }

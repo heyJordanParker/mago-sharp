@@ -955,6 +955,7 @@ where
             match result_array {
                 TArray::Keyed(keyed) => keyed.non_empty = should_be_non_empty,
                 TArray::List(list) => list.non_empty = should_be_non_empty,
+                TArray::Set(_) => {}
             }
         }
     }

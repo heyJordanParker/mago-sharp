@@ -98,6 +98,7 @@ impl FunctionReturnTypeProvider for CaptureGroupsProvider {
 
                 has_unknown || !list.element_type.is_never()
             }
+            TArray::Set(_) => return Some(capture_groups_fallback_type()),
         };
 
         Some(TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(

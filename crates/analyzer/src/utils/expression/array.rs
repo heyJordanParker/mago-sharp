@@ -260,6 +260,27 @@ where
 
                 accumulate_value_type(&mut value_type, new_type, context.codebase, preserve_array_shapes);
             }
+            // A PHP# `Set` has no index: `contains` tests an element and `add` adds one. Plain PHP reads the array it
+            // runs as, each element under its own key.
+            TAtomic::Array(TArray::Set(element_type)) => {
+                if context.dialect.is_sharp() {
+                    let set_type = display_atomic(context, atomic_var_type);
+                    context.collector.report_with_code(
+                        IssueCode::InvalidArrayAccess,
+                        Issue::error(format!("A `{set_type}` has no index."))
+                            .with_annotation(Annotation::primary(access_span).with_message("This reads an index."))
+                            .with_help("Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`."),
+                    );
+                }
+
+                has_valid_expected_index = true;
+                accumulate_value_type(
+                    &mut value_type,
+                    element_type.as_ref().clone(),
+                    context.codebase,
+                    preserve_array_shapes,
+                );
+            }
             TAtomic::Scalar(TScalar::String(_)) => {
                 let new_type = handle_array_access_on_string(
                     context,

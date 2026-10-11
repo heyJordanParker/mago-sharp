@@ -1,6 +1,6 @@
 [package]
 name = "mago"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 authors = ["Seifeddine Gmati <azjezz@carthage.software>"]
 license = "MIT OR Apache-2.0"
@@ -14,7 +14,7 @@ exclude = ["composer", "scripts"]
 package.edition = "2024"
 package.authors = ["Seifeddine Gmati <azjezz@carthage.software>"]
 package.license = "MIT OR Apache-2.0"
-package.version = "0.3.0"
+package.version = "0.3.1"
 package.homepage = "https://github.com/heyJordanParker/mago-sharp"
 package.repository = "https://github.com/heyJordanParker/mago-sharp"
 package.rust-version = "1.97.0"
@@ -158,40 +158,40 @@ semicolon_inside_block = "allow"
 inline_modules = "allow"
 
 [workspace.dependencies]
-mago-syntax-core = { path = "crates/syntax-core", version = "0.3.0" }
-mago-syntax = { path = "crates/syntax", version = "0.3.0" }
-mago-phpdoc-syntax = { path = "crates/phpdoc-syntax", version = "0.3.0" }
-mago-twig-syntax = { path = "crates/twig-syntax", version = "0.3.0" }
-mago-casing = { path = "crates/casing", version = "0.3.0" }
-mago-composer = { path = "crates/composer", version = "0.3.0" }
-mago-text-edit = { path = "crates/text-edit", version = "0.3.0" }
-mago-formatter = { path = "crates/formatter", version = "0.3.0" }
-mago-fingerprint = { path = "crates/fingerprint", version = "0.3.0" }
-mago-flags = { path = "crates/flags", version = "0.3.0" }
-mago-hir = { path = "crates/hir", version = "0.3.0" }
-mago-word = { path = "crates/word", version = "0.3.0" }
-mago-bytes = { path = "crates/bytes", version = "0.3.0" }
-mago-linter = { path = "crates/linter", version = "0.3.0" }
-mago-names = { path = "crates/names", version = "0.3.0" }
-mago-reporting = { path = "crates/reporting", version = "0.3.0", default-features = false }
-mago-span = { path = "crates/span", version = "0.3.0" }
-mago-wasm = { path = "crates/wasm", version = "0.3.0" }
-mago-php-version = { path = "crates/php-version", version = "0.3.0" }
-mago-analyzer = { path = "crates/analyzer", version = "0.3.0" }
-mago-algebra = { path = "crates/algebra", version = "0.3.0" }
-mago-allocator = { path = "crates/allocator", version = "0.3.0" }
-mago-codex = { path = "crates/codex", version = "0.3.0" }
-mago-prelude = { path = "crates/prelude", version = "0.3.0" }
-mago-semantics = { path = "crates/semantics", version = "0.3.0" }
-mago-collector = { path = "crates/collector", version = "0.3.0" }
-mago-database = { path = "crates/database", version = "0.3.0", default-features = false }
-mago-guard = { path = "crates/guard", version = "0.3.0" }
-mago-orchestrator = { path = "crates/orchestrator", version = "0.3.0" }
-mago-server = { path = "crates/server", version = "0.3.0" }
-mago-extension = { path = "crates/extension", version = "0.3.0" }
-mago-sharp-bridge = { path = "crates/sharp-bridge", version = "0.3.0" }
-mago-sharp-lean = { path = "crates/sharp-lean", version = "0.3.0" }
-mago-build-id = { path = "crates/build-id", version = "0.3.0" }
+mago-syntax-core = { path = "crates/syntax-core", version = "0.3.1" }
+mago-syntax = { path = "crates/syntax", version = "0.3.1" }
+mago-phpdoc-syntax = { path = "crates/phpdoc-syntax", version = "0.3.1" }
+mago-twig-syntax = { path = "crates/twig-syntax", version = "0.3.1" }
+mago-casing = { path = "crates/casing", version = "0.3.1" }
+mago-composer = { path = "crates/composer", version = "0.3.1" }
+mago-text-edit = { path = "crates/text-edit", version = "0.3.1" }
+mago-formatter = { path = "crates/formatter", version = "0.3.1" }
+mago-fingerprint = { path = "crates/fingerprint", version = "0.3.1" }
+mago-flags = { path = "crates/flags", version = "0.3.1" }
+mago-hir = { path = "crates/hir", version = "0.3.1" }
+mago-word = { path = "crates/word", version = "0.3.1" }
+mago-bytes = { path = "crates/bytes", version = "0.3.1" }
+mago-linter = { path = "crates/linter", version = "0.3.1" }
+mago-names = { path = "crates/names", version = "0.3.1" }
+mago-reporting = { path = "crates/reporting", version = "0.3.1", default-features = false }
+mago-span = { path = "crates/span", version = "0.3.1" }
+mago-wasm = { path = "crates/wasm", version = "0.3.1" }
+mago-php-version = { path = "crates/php-version", version = "0.3.1" }
+mago-analyzer = { path = "crates/analyzer", version = "0.3.1" }
+mago-algebra = { path = "crates/algebra", version = "0.3.1" }
+mago-allocator = { path = "crates/allocator", version = "0.3.1" }
+mago-codex = { path = "crates/codex", version = "0.3.1" }
+mago-prelude = { path = "crates/prelude", version = "0.3.1" }
+mago-semantics = { path = "crates/semantics", version = "0.3.1" }
+mago-collector = { path = "crates/collector", version = "0.3.1" }
+mago-database = { path = "crates/database", version = "0.3.1", default-features = false }
+mago-guard = { path = "crates/guard", version = "0.3.1" }
+mago-orchestrator = { path = "crates/orchestrator", version = "0.3.1" }
+mago-server = { path = "crates/server", version = "0.3.1" }
+mago-extension = { path = "crates/extension", version = "0.3.1" }
+mago-sharp-bridge = { path = "crates/sharp-bridge", version = "0.3.1" }
+mago-sharp-lean = { path = "crates/sharp-lean", version = "0.3.1" }
+mago-build-id = { path = "crates/build-id", version = "0.3.1" }
 tracing = { version = "0.1.40" }
 foldhash = "0.2"
 serde_json = { version = "1.0.138" }

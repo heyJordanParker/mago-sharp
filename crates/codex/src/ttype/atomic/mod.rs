@@ -868,6 +868,7 @@ pub fn populate_atomic_type(
                     populate!(union Arc::make_mut(&mut parameters.1));
                 }
             }
+            TArray::Set(element_type) => populate!(union Arc::make_mut(element_type)),
         },
         TAtomic::Callable(TCallable::Signature(signature)) => {
             if let Some(return_type) = signature.get_return_type_mut() {

@@ -61,6 +61,7 @@ use mago_span::Span;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Statement;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
 
@@ -73,6 +74,7 @@ use crate::context::block::ReferenceConstraint;
 use crate::context::block::ReferenceConstraintSource;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_set_literal_type;
 use crate::expression::instantiation::report_missing_type_arguments;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
@@ -1672,7 +1674,7 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
     parameter_metadata: &'ctx FunctionLikeParameterMetadata,
     declared_type: &TUnion,
     default_expression: &Expression<'arena>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
 ) where
     A: Arena,
 {
@@ -1686,9 +1688,12 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
         return;
     }
 
-    let Some(default_type) = artifacts.get_expression_type(default_expression) else {
+    let Some(default_type) = get_set_literal_type(context, artifacts, default_expression, declared_type)
+        .or_else(|| artifacts.get_expression_type(default_expression).cloned())
+    else {
         return;
     };
+    let default_type = &default_type;
 
     if default_type.is_never() {
         return;
@@ -1781,6 +1786,7 @@ where
     }
 
     report_map_keys_without_backing_value(context, &type_metadata.type_union, type_metadata.span);
+    report_unsupported_set_elements(context, &type_metadata.type_union, type_metadata.span);
 
     let codebase = context.codebase;
     let mut type_refs = type_metadata.type_union.get_child_nodes();
@@ -1964,6 +1970,32 @@ where
 
         let key_id = display_sharp_type(context, key_type);
         context.collector.report_with_code(IssueCode::TemplateConstraintViolation, map_key_error(&key_id, span));
+    }
+}
+
+/// Reports each PHP# `Set` written in `type_union` whose element type is a class or an enum without a backing value.
+/// A `Set` runs keyed by each element, so the first `Set` slice holds `int`, `string` and backed enums, and the
+/// semantic checks refuse every other element a type can name without the codebase.
+pub(crate) fn report_unsupported_set_elements<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    for type_ref in type_union.get_all_child_nodes() {
+        let TypeRef::Atomic(TAtomic::Array(TArray::Set(element_type))) = type_ref else {
+            continue;
+        };
+        if get_backing_key_type(element_type, context.codebase, Dialect::Sharp).is_always_array_key(true) {
+            continue;
+        }
+
+        context.collector.report_with_code(
+            IssueCode::NotSupportedYet,
+            Issue::error("This type is not supported yet in PHP#.").with_annotation(Annotation::primary(span)),
+        );
     }
 }
 

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::add_union_type;
@@ -19,6 +21,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
 use crate::invocation::resolver::resolve_invocation_type;
 use crate::utils::names::display_sharp_type;
@@ -38,6 +41,22 @@ where
         && let Some(return_type) = fetch_list_wrap_return_type(context, artifacts, invocation)
     {
         return Ok(return_type);
+    }
+
+    if context.dialect.is_sharp() && is_method(invocation, b"Sharp\\SetMethods", b"filter") {
+        return Ok(fetch_set_filter_return_type(context, invocation, template_result, parameters));
+    }
+
+    if context.dialect.is_sharp()
+        && is_sorted_by(invocation)
+        && let Some(selector) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
+        && let Some(selector) = selector.value()
+        && let Some([key_type]) = artifacts
+            .inferred_type_arguments
+            .get(&(invocation.span.start.offset, invocation.span.end.offset))
+            .map(Vec::as_slice)
+    {
+        check_sorted_by_key(context, selector, key_type);
     }
 
     if let Some(return_type) = fetch_invocation_provider_return_type(context, block_context, artifacts, invocation) {
@@ -60,10 +79,7 @@ fn fetch_list_wrap_return_type<A>(
 where
     A: Arena,
 {
-    let Some(FunctionLikeIdentifier::Method(class, method)) = invocation.target.get_function_like_identifier() else {
-        return None;
-    };
-    if !class.as_bytes().eq_ignore_ascii_case(b"Sharp\\List") || !method.as_bytes().eq_ignore_ascii_case(b"wrap") {
+    if !is_method(invocation, b"Sharp\\List", b"wrap") {
         return None;
     }
 
@@ -125,6 +141,40 @@ where
     );
 
     Some(get_list(element_type))
+}
+
+/// Gives a PHP# `Set<T>`'s `filter` its type `Set<T>`. A docblock writes no `Set`, so `Sharp\SetMethods::filter`
+/// declares the array a `Set` runs as, and the call keeps that array's elements as a `Set`.
+fn fetch_set_filter_return_type<A>(
+    context: &Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+) -> TUnion
+where
+    A: Arena,
+{
+    let declared = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
+    let element_type =
+        declared.get_single_array().map_or_else(get_mixed, |array| get_array_parameters(array, context.codebase).1);
+
+    TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
+}
+
+/// Whether `invocation` calls `sortedBy` on a PHP# `List`, `Map` or `Set`, which orders by the key its function returns.
+fn is_sorted_by(invocation: &Invocation<'_, '_, '_>) -> bool {
+    [b"Sharp\\ListMethods".as_slice(), b"Sharp\\MapMethods", b"Sharp\\SetMethods"]
+        .into_iter()
+        .any(|class| is_method(invocation, class, b"sortedBy"))
+}
+
+/// Whether `invocation` calls the method `method` of the class `class`.
+fn is_method(invocation: &Invocation<'_, '_, '_>, class: &[u8], method: &[u8]) -> bool {
+    matches!(
+        invocation.target.get_function_like_identifier(),
+        Some(FunctionLikeIdentifier::Method(called_class, called_method))
+            if called_class.as_bytes().eq_ignore_ascii_case(class) && called_method.as_bytes().eq_ignore_ascii_case(method)
+    )
 }
 
 /// Requests a custom return type from registered providers and reports provider issues.

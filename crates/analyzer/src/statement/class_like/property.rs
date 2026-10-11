@@ -38,6 +38,7 @@ use crate::effects;
 use crate::effects::Body;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_set_literal_type;
 use crate::statement::analyze_statements;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
@@ -160,7 +161,7 @@ where
         if (is_sharp
             || !(declared_type_metadata.type_union.is_mixed()
                 || declared_type_metadata.type_union.has_template_types()))
-            && let Some(value_type) = artifacts.get_expression_type(value)
+            && let Some(value_type) = artifacts.get_expression_type(value).cloned()
             && !value_type.is_never()
         {
             let mut declared_type = declared_type_metadata.type_union.clone();
@@ -173,18 +174,19 @@ where
                     ..Default::default()
                 },
             );
+            let value_type = get_set_literal_type(context, artifacts, value, &declared_type).unwrap_or(value_type);
 
             let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
             if !union_comparator::is_contained_by(
                 context.codebase,
-                value_type,
+                &value_type,
                 &declared_type,
                 !is_sharp,
                 !is_sharp,
                 false,
                 &mut comparison_result,
             ) {
-                let value_type_str = display_value_type(context, value_type, &declared_type);
+                let value_type_str = display_value_type(context, &value_type, &declared_type);
                 let declared_type_str = display_type(context, &declared_type);
                 let property =
                     display_member(context, class_metadata.original_name, mago_bytes::BytesDisplay(variable_name));

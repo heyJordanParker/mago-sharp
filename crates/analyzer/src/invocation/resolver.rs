@@ -368,6 +368,10 @@ where
                         }
                     }
                 }
+                TArray::Set(element_type) => {
+                    *std::sync::Arc::make_mut(element_type) =
+                        resolve_union(context, invocation, template_result, parameters, (**element_type).clone());
+                }
             }
 
             vec![TAtomic::Array(array)]

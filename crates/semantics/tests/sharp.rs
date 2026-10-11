@@ -2844,18 +2844,35 @@ fn a_null_start_needs_a_type() {
     assert_eq!(issues(code), ["7:21 A null start needs a type: write `T? value = null`."]);
 }
 
-/// `List` takes one type argument and `Map` two, and none is `void`. A class takes any number, which the analyzer
-/// checks, so `Set<string>` and `Paged<Line>` are generic class types.
+/// `List` and `Set` take one type argument and `Map` two, and none is `void`. A class takes any number, which the
+/// analyzer checks, so `Paged<Line>` is a generic class type.
 #[test]
-fn a_list_or_map_with_the_wrong_type_arguments_is_not_supported_yet() {
-    let code = "class Report\n{\n    public List<void> run(Set<string> a, List<int, int> b, Map<string> c, Paged<Line> d)\n    {\n        return [];\n    }\n}\n";
+fn a_list_map_or_set_with_the_wrong_type_arguments_is_not_supported_yet() {
+    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "3:12 This type is not supported yet in PHP#.",
-            "3:42 This type is not supported yet in PHP#.",
-            "3:60 This type is not supported yet in PHP#.",
+            "3:27 This type is not supported yet in PHP#.",
+            "3:47 This type is not supported yet in PHP#.",
+            "3:65 This type is not supported yet in PHP#.",
+        ]
+    );
+}
+
+/// The first `Set` slice holds `int`, `string` and backed enums, which run as the keys of a PHP array. A named type
+/// may be a backed enum, which only the analyzer knows, so it passes here.
+#[test]
+fn a_set_of_an_element_other_than_int_string_or_a_named_type_is_not_supported_yet() {
+    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e)\n    {\n        return [];\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:55 This type is not supported yet in PHP#.",
+            "3:69 This type is not supported yet in PHP#.",
+            "3:82 This type is not supported yet in PHP#.",
         ]
     );
 }

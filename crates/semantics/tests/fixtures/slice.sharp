@@ -263,7 +263,7 @@ public class Report
         Map<int, string>? labels = null;
         sizes["a"] = (sizes["a"] ?? 0) + numbers[1];
         this.sizes["b"] = array_sum(numbers);
-        const nested = ["x": ["a": 1]];
+        const nested = ["x": ["a": items[1].rate]];
         nested["x"]["a"] = items[0]?.rate ?? items[1].rate;
         for (const [string name, size] of sizes) {
             this.sizes[name] = size;

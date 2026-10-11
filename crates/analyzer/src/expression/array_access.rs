@@ -130,9 +130,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
 
 /// Spec section 12 types a PHP# `Map` read `V?`, because a key is often missing. A bare read throws on a missing
 /// key, so a `Map` is read only where the read is handled: `??` and `?.` read a missing key as null, as `isset`
-/// does. A refused bare read keeps the type `V` it would have when it runs, so it is reported once. A `List` read
-/// stays bare, because a `List`'s keys run without gaps. A place is the collection it is declared as, whatever
-/// literal it holds.
+/// does, and so do `is`, `as` and `match`, whose PHP reads the index they test with `??`. A refused bare read keeps
+/// the type `V` it would have when it runs, so it is reported once. A `List` read stays bare, because a `List`'s keys
+/// run without gaps. A place is the collection it is declared as, whatever literal it holds.
 pub(crate) fn check_sharp_map_read<'arena, A>(
     access: &ArrayAccess<'arena>,
     context: &mut Context<'_, 'arena, A>,

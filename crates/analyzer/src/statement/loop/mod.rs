@@ -1571,22 +1571,35 @@ where
 
                 let (k, v) = get_array_parameters(array, context.codebase);
 
-                // Spec section 12 reads a PHP# `List`'s indexes from `entries()`, so `[k, v]` reads a `Map`, which a place
-                // is when it is declared one, whatever literal it holds. A `Map`'s key reads back as its key type: the
-                // lowering casts a `string` key PHP stored as an `int`.
+                // Spec section 12 reads a PHP# `List`'s indexes from `entries()`, and a `Set` has no keys of its own, so
+                // `[k, v]` reads a `Map`, which a place is when it is declared one, whatever literal it holds. A `Map`'s
+                // key reads back as its key type: the lowering casts a `string` key PHP stored as an `int`.
                 if context.dialect.is_sharp()
-                    && get_declared_collection(context, block_context, artifacts, iterator)
-                        .as_ref()
-                        .unwrap_or(array)
-                        .is_list()
                     && let Some(key) = foreach.target.key()
+                    && let Some((kind, help)) =
+                        match get_declared_collection(context, block_context, artifacts, iterator)
+                            .as_ref()
+                            .unwrap_or(array)
+                        {
+                            TArray::List(_) => {
+                                Some(("List", "Loop over `list.entries()` to read each index with its value."))
+                            }
+                            TArray::Set(_) => {
+                                Some(("Set", "Loop over the elements alone, as in `for (const x of set)`."))
+                            }
+                            TArray::Keyed(_) => None,
+                        }
                 {
                     context.collector.report_with_code(
                         IssueCode::InvalidIterator,
-                        Issue::error("`for (const [k, v] of x)` reads the keys of a `Map`, and this is a `List`.")
-                            .with_annotation(Annotation::primary(iterator.span()).with_message("This is a `List`."))
-                            .with_annotation(Annotation::secondary(key.span()).with_message("Its key is read here."))
-                            .with_help("Loop over `list.entries()` to read each index with its value."),
+                        Issue::error(format!(
+                            "`for (const [k, v] of x)` reads the keys of a `Map`, and this is a `{kind}`."
+                        ))
+                        .with_annotation(
+                            Annotation::primary(iterator.span()).with_message(format!("This is a `{kind}`.")),
+                        )
+                        .with_annotation(Annotation::secondary(key.span()).with_message("Its key is read here."))
+                        .with_help(help),
                     );
                 }
 

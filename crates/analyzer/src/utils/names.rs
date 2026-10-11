@@ -317,9 +317,9 @@ where
     context.codebase.get_function(name.as_bytes()).map_or(name, |m| m.original_name)
 }
 
-/// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is `Sharp\ListMethods`
-/// or `Sharp\MapMethods`. The analyzer checks a method call on a `List` or `Map` against those classes, and a message
-/// names the type the code wrote instead.
+/// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is `Sharp\ListMethods`,
+/// `Sharp\MapMethods` or `Sharp\SetMethods`. The analyzer checks a method call on a `List`, `Map` or `Set` against
+/// those classes, and a message names the type the code wrote instead.
 #[must_use]
 pub(crate) fn display_sharp_collection<A>(context: &Context<'_, '_, A>, object: &TObject) -> Option<String>
 where
@@ -487,6 +487,7 @@ where
                 TArray::Keyed(_) => {
                     format!("Map<{}, {}>", display_sharp_type(context, &key), display_sharp_type(context, &value))
                 }
+                TArray::Set(_) => format!("Set<{}>", display_sharp_type(context, &value)),
             }
         }
         TAtomic::Iterable(iterable) => format!("Iterable<{}>", display_sharp_type(context, iterable.get_value_type())),
@@ -650,7 +651,7 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `List` or `Map` when `object` is `Sharp\ListMethods` or `Sharp\MapMethods`.
+/// Returns `List`, `Map` or `Set` when `object` is `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods`.
 #[must_use]
 pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
     let name = object.get_name()?;
@@ -659,9 +660,18 @@ pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
         Some("List")
     } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\MapMethods") {
         Some("Map")
+    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\SetMethods") {
+        Some("Set")
     } else {
         None
     }
+}
+
+/// A class under `Sharp\` that the prelude declares as a plain PHP stub.
+// Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
+#[must_use]
+pub(crate) fn is_prelude_stub(class: Word) -> bool {
+    class.as_bytes().len() > 6 && class.as_bytes()[..6].eq_ignore_ascii_case(b"sharp\\")
 }
 
 /// Produces a user-facing display string for a `FunctionLikeIdentifier`: a method reads `Order::total` in PHP and

@@ -24,6 +24,7 @@ fn has_required_known_entry(array: &TArray) -> bool {
         TArray::Keyed(keyed_array) => {
             keyed_array.known_items.as_ref().is_some_and(|items| items.values().any(|(is_optional, _)| !*is_optional))
         }
+        TArray::Set(_) => false,
     }
 }
 
@@ -39,6 +40,7 @@ fn key_and_value_types(array: &TArray) -> (Option<Cow<'_, TUnion>>, Cow<'_, TUni
             }
             None => (None, Cow::Owned(get_never())),
         },
+        TArray::Set(element_type) => (Some(Cow::Borrowed(element_type.as_ref())), Cow::Borrowed(element_type.as_ref())),
     }
 }
 
@@ -53,6 +55,7 @@ fn known_items_view(array: &TArray) -> Option<Cow<'_, BTreeMap<ArrayKey, (bool, 
                     .collect(),
             )
         }),
+        TArray::Set(_) => None,
     }
 }
 
@@ -73,6 +76,39 @@ pub(crate) fn is_array_contained_by_array(
 
     if input_array.is_empty() {
         return !container_array.is_non_empty() && !has_required_known_entry(container_array);
+    }
+
+    // A PHP# `Set` is its own collection: only a `Set` is one, and a `Set` is no `List` or `Map`. It passes where
+    // plain PHP takes an array of any key, which it runs as.
+    match (input_array, container_array) {
+        (TArray::Set(input_element_type), TArray::Set(container_element_type)) => {
+            return union_comparator::is_contained_by(
+                codebase,
+                input_element_type,
+                container_element_type,
+                false,
+                input_element_type.ignore_falsable_issues(),
+                inside_assertion,
+                atomic_comparison_result,
+            );
+        }
+        (TArray::Set(input_element_type), TArray::Keyed(keyed_array)) => {
+            return keyed_array.known_items.is_none()
+                && keyed_array.parameters.as_ref().is_some_and(|(key_type, value_type)| {
+                    key_type.is_array_key()
+                        && union_comparator::is_contained_by(
+                            codebase,
+                            input_element_type,
+                            value_type,
+                            false,
+                            input_element_type.ignore_falsable_issues(),
+                            inside_assertion,
+                            atomic_comparison_result,
+                        )
+                });
+        }
+        (TArray::Set(_), TArray::List(_)) | (TArray::List(_) | TArray::Keyed(_), TArray::Set(_)) => return false,
+        (TArray::List(_) | TArray::Keyed(_), TArray::List(_) | TArray::Keyed(_)) => {}
     }
 
     if container_array.is_list()

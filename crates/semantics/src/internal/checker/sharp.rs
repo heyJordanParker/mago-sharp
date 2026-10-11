@@ -2516,9 +2516,11 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
 }
 
 /// Whether the slice has a type: the built-in types of spec section 24, or a class or a type parameter written by its
-/// short name, or a nullable type, or `List<T>` or `Map<TKey, TValue>` of spec section 12, `Class<T>` of section 25 or
-/// a class with type arguments of section 11, none of them `void`, or a function type of spec section 14.1 without a
-/// `void` parameter, whose inner types the walk checks next. The analyzer checks a generic class's arity.
+/// short name, or a nullable type, or `List<T>`, `Map<TKey, TValue>` or `Set<T>` of spec section 12, `Class<T>` of
+/// section 25 or a class with type arguments of section 11, none of them `void`, or a function type of spec section
+/// 14.1 without a `void` parameter, whose inner types the walk checks next. The analyzer checks a generic class's arity.
+/// A `Set` holds an `int`, a `string` or a named type, which the analyzer accepts only as a backed enum, because its
+/// elements run as the keys of a PHP array.
 fn is_slice_type(hint: &Hint) -> bool {
     match hint {
         Hint::Integer(_)
@@ -2530,10 +2532,15 @@ fn is_slice_type(hint: &Hint) -> bool {
         | Hint::Nullable(_) => true,
         Hint::Mixed(any) => any.value == ANY,
         Hint::Generic(generic) => {
-            let arguments = &generic.type_arguments.arguments;
+            let arguments = generic.type_arguments.arguments.as_slice();
 
             built_in_generic_arity(generic.name.value).is_none_or(|arity| arguments.len() == arity)
-                && !arguments.iter().any(|argument| matches!(argument, Hint::Void(_)))
+                && match (generic.name.value, arguments) {
+                    (b"Set", [element]) => {
+                        matches!(element, Hint::Integer(_) | Hint::String(_) | Hint::Identifier(Identifier::Local(_)))
+                    }
+                    _ => !arguments.iter().any(|argument| matches!(argument, Hint::Void(_))),
+                }
         }
         Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),
         _ => false,

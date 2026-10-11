@@ -36,6 +36,7 @@ use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_set_literal_type;
 use crate::expression::is_refused;
 use crate::statement::function_like::expect_function_type;
 use crate::statement::function_like::get_scope_static_class_type;
@@ -324,6 +325,12 @@ pub fn handle_return_value<'ctx, A>(
 
             expected_return_type = return_type;
         }
+    }
+
+    if let Some(return_value) = return_value
+        && let Some(set_type) = get_set_literal_type(context, artifacts, return_value, &expected_return_type)
+    {
+        inferred_return_type = Rc::new(set_type);
     }
 
     if return_value.is_some() {

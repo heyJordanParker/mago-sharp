@@ -258,10 +258,7 @@ fn zip_input_arrays(
         let array = array_type.get_single_array()?;
 
         let value_type = array_value_type(array);
-        all_inputs_non_empty &= match array {
-            TArray::List(list) => list.non_empty,
-            TArray::Keyed(keyed) => keyed.is_non_empty(),
-        };
+        all_inputs_non_empty &= array.is_non_empty();
 
         tuple_items.insert(ArrayKey::Integer(offset as i64), (false, value_type.as_nullable()));
     }
@@ -280,5 +277,6 @@ fn array_value_type(array: &TArray) -> TUnion {
     match array {
         TArray::List(list) => (*list.element_type).clone(),
         TArray::Keyed(keyed) => keyed.get_value_type().cloned().unwrap_or_else(get_mixed),
+        TArray::Set(element_type) => (**element_type).clone(),
     }
 }

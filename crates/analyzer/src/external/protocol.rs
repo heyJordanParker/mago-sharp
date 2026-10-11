@@ -67,6 +67,7 @@ use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_bool;
 use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_float;
@@ -94,6 +95,7 @@ use mago_reporting::Issue;
 use mago_reporting::Level;
 use mago_span::HasSpan;
 use mago_syntax::cst::NodeKind;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::Safety;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -910,6 +912,7 @@ pub(super) fn encode_provider_request<'type_info>(
     invocation: &Invocation<'_, '_, '_>,
     artifacts: &'type_info AnalysisArtifacts,
     source_file: &File,
+    codebase: &CodebaseMetadata,
     generation: u64,
     memoize: bool,
     trace_enabled: bool,
@@ -947,6 +950,7 @@ pub(super) fn encode_provider_request<'type_info>(
         invocation,
         artifacts,
         source_file,
+        codebase,
         generation,
         memoize,
         trace_enabled,
@@ -961,6 +965,7 @@ pub(super) fn encode_property_type_request<'type_info>(
     access: PropertyAccessKind,
     receiver_type: &'type_info TUnion,
     span: mago_span::Span,
+    codebase: &CodebaseMetadata,
     generation: u64,
     trace_enabled: bool,
 ) -> Result<PropertyTypeRequest<'type_info>, ExternalAnalyzerError> {
@@ -980,18 +985,13 @@ pub(super) fn encode_property_type_request<'type_info>(
         PropertyAccessKind::Write => 2,
     });
     let snapshot_start = trace_enabled.then(Instant::now);
-    let mut references = Vec::new();
-    encode_union_snapshot(&mut writer, receiver_type, &mut references, 0)?;
+    let mut types = Vec::new();
+    encode_union_snapshot(&mut writer, receiver_type, &mut types, codebase, 0)?;
     let type_snapshot_duration = snapshot_start.map_or(Duration::ZERO, |start| start.elapsed());
     writer.write_u32(span.start.offset);
     writer.write_u32(span.end.offset);
 
-    Ok(PropertyTypeRequest {
-        payload: writer.finish(),
-        snapshotted_types: references.len(),
-        types: references.into_iter().map(Cow::Borrowed).collect(),
-        type_snapshot_duration,
-    })
+    Ok(PropertyTypeRequest { payload: writer.finish(), snapshotted_types: types.len(), types, type_snapshot_duration })
 }
 
 pub(super) fn decode_property_type_response<'type_info>(
@@ -1028,6 +1028,7 @@ pub(super) fn encode_call_forwarding_request<'type_info>(
     member: &[u8],
     property: bool,
     receiver_type: &'type_info TUnion,
+    codebase: &CodebaseMetadata,
     generation: u64,
     trace_enabled: bool,
 ) -> Result<PropertyTypeRequest<'type_info>, ExternalAnalyzerError> {
@@ -1044,16 +1045,11 @@ pub(super) fn encode_call_forwarding_request<'type_info>(
     writer.write_bytes(member)?;
     writer.write_bool(property);
     let snapshot_start = trace_enabled.then(Instant::now);
-    let mut references = Vec::new();
-    encode_union_snapshot(&mut writer, receiver_type, &mut references, 0)?;
+    let mut types = Vec::new();
+    encode_union_snapshot(&mut writer, receiver_type, &mut types, codebase, 0)?;
     let type_snapshot_duration = snapshot_start.map_or(Duration::ZERO, |start| start.elapsed());
 
-    Ok(PropertyTypeRequest {
-        payload: writer.finish(),
-        snapshotted_types: references.len(),
-        types: references.into_iter().map(Cow::Borrowed).collect(),
-        type_snapshot_duration,
-    })
+    Ok(PropertyTypeRequest { payload: writer.finish(), snapshotted_types: types.len(), types, type_snapshot_duration })
 }
 
 pub(super) fn decode_call_forwarding_response<'type_info>(
@@ -1087,6 +1083,7 @@ pub(super) fn encode_property_initialization_request(
     declaring_class: &[u8],
     property: &PropertyMetadata,
     generation: u64,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<Vec<u8>, ExternalAnalyzerError> {
     let mut writer = message_writer(PROPERTY_INITIALIZATION_REQUEST);
@@ -1100,7 +1097,7 @@ pub(super) fn encode_property_initialization_request(
     }
 
     writer.write_bytes(declaring_class)?;
-    metadata::write_property(&mut writer, property, session)?;
+    metadata::write_property(&mut writer, property, codebase, session)?;
     Ok(writer.finish())
 }
 
@@ -1115,6 +1112,7 @@ pub(super) fn encode_class_initializer_request(
     provider_indices: &[u16],
     class: &ClassLikeMetadata,
     generation: u64,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<Vec<u8>, ExternalAnalyzerError> {
     let mut writer = message_writer(CLASS_INITIALIZER_REQUEST);
@@ -1125,7 +1123,7 @@ pub(super) fn encode_class_initializer_request(
     for index in provider_indices {
         writer.write_u16(*index);
     }
-    metadata::write_class_like(&mut writer, class, session)?;
+    metadata::write_class_like(&mut writer, class, codebase, session)?;
     Ok(writer.finish())
 }
 
@@ -1312,6 +1310,7 @@ fn encode_return_type_request<'type_info>(
     invocation: &Invocation<'_, '_, '_>,
     artifacts: &'type_info AnalysisArtifacts,
     source_file: &File,
+    codebase: &CodebaseMetadata,
     generation: u64,
     memoize: bool,
     trace_enabled: bool,
@@ -1337,19 +1336,20 @@ fn encode_return_type_request<'type_info>(
             writer.write_bytes(name)?;
             let snapshot_start = trace_enabled.then(Instant::now);
             let mut receiver_type_references = Vec::new();
-            encode_union_snapshot(&mut writer, receiver_type, &mut receiver_type_references, 0)?;
+            encode_union_snapshot(&mut writer, receiver_type, &mut receiver_type_references, codebase, 0)?;
             if let Some(start) = snapshot_start {
                 type_snapshot_duration = type_snapshot_duration.saturating_add(start.elapsed());
             }
 
             writer.write_u32(if memoize { 0 } else { invocation.span.start.offset });
             writer.write_u32(if memoize { 0 } else { invocation.span.end.offset });
-            let receiver_types = receiver_type_references.into_iter().cloned().collect();
+            let receiver_types = receiver_type_references.into_iter().map(Cow::into_owned).collect();
             return encode_return_type_arguments(
                 writer,
                 invocation,
                 artifacts,
                 source_file,
+                codebase,
                 receiver_types,
                 0,
                 type_snapshot_duration,
@@ -1371,6 +1371,7 @@ fn encode_return_type_request<'type_info>(
         invocation,
         artifacts,
         source_file,
+        codebase,
         Vec::new(),
         0,
         type_snapshot_duration,
@@ -1387,6 +1388,7 @@ fn encode_return_type_arguments<'type_info>(
     invocation: &Invocation<'_, '_, '_>,
     artifacts: &'type_info AnalysisArtifacts,
     source_file: &File,
+    codebase: &CodebaseMetadata,
     receiver_types: Vec<TUnion>,
     mut typed_arguments: usize,
     mut type_snapshot_duration: Duration,
@@ -1421,7 +1423,14 @@ fn encode_return_type_arguments<'type_info>(
             typed_arguments += 1;
             writer.write_bytes(argument_type.get_id().as_bytes())?;
             let snapshot_start = trace_enabled.then(Instant::now);
-            encode_union_snapshot_with_offset(&mut writer, argument_type, &mut argument_types, receiver_type_count, 0)?;
+            encode_union_snapshot_with_offset(
+                &mut writer,
+                argument_type,
+                &mut argument_types,
+                codebase,
+                receiver_type_count,
+                0,
+            )?;
             if let Some(start) = snapshot_start {
                 type_snapshot_duration = type_snapshot_duration.saturating_add(start.elapsed());
             }
@@ -1437,7 +1446,7 @@ fn encode_return_type_arguments<'type_info>(
 
     let mut types = Vec::with_capacity(receiver_type_count + argument_types.len());
     types.extend(receiver_types.into_iter().map(Cow::Owned));
-    types.extend(argument_types.into_iter().map(Cow::Borrowed));
+    types.extend(argument_types);
 
     Ok(ReturnTypeRequest {
         payload: writer.finish(),
@@ -1466,26 +1475,44 @@ fn get_method_receiver_type(method_context: &MethodTargetContext<'_>) -> Result<
 pub(super) fn encode_union_snapshot<'type_info>(
     writer: &mut PayloadWriter,
     union: &'type_info TUnion,
-    types: &mut Vec<&'type_info TUnion>,
+    types: &mut Vec<Cow<'type_info, TUnion>>,
+    codebase: &CodebaseMetadata,
     depth: usize,
 ) -> Result<(), ExternalAnalyzerError> {
-    encode_union_snapshot_with_offset(writer, union, types, 0, depth)
+    encode_union_snapshot_with_offset(writer, union, types, codebase, 0, depth)
 }
 
 fn encode_union_snapshot_with_offset<'type_info>(
     writer: &mut PayloadWriter,
     union: &'type_info TUnion,
-    types: &mut Vec<&'type_info TUnion>,
+    types: &mut Vec<Cow<'type_info, TUnion>>,
+    codebase: &CodebaseMetadata,
     offset: usize,
     depth: usize,
 ) -> Result<(), ExternalAnalyzerError> {
-    let mut table = SnapshotTypeTable { offset, types };
+    let mut table = SnapshotTypeTable { offset, types, codebase };
     encode_union_snapshot_inner(writer, union, &mut table, depth)
+}
+
+/// Encodes a type the snapshot makes rather than borrows. Its handles own it and every type in it, numbered on from
+/// the handles before them.
+fn encode_owned_union_snapshot(
+    writer: &mut PayloadWriter,
+    union: &TUnion,
+    types: &mut SnapshotTypeTable<'_, '_>,
+    depth: usize,
+) -> Result<(), ExternalAnalyzerError> {
+    let mut owned = Vec::new();
+    let offset = types.offset + types.types.len();
+    encode_union_snapshot_with_offset(writer, union, &mut owned, types.codebase, offset, depth)?;
+    types.types.extend(owned.into_iter().map(|union| Cow::Owned(union.into_owned())));
+    Ok(())
 }
 
 struct SnapshotTypeTable<'table, 'type_info> {
     offset: usize,
-    types: &'table mut Vec<&'type_info TUnion>,
+    types: &'table mut Vec<Cow<'type_info, TUnion>>,
+    codebase: &'table CodebaseMetadata,
 }
 
 impl<'type_info> SnapshotTypeTable<'_, 'type_info> {
@@ -1495,7 +1522,7 @@ impl<'type_info> SnapshotTypeTable<'_, 'type_info> {
             .checked_add(self.types.len())
             .and_then(|handle| u32::try_from(handle).ok())
             .ok_or_else(|| protocol("external type handle exceeds u32::MAX"))?;
-        self.types.push(union);
+        self.types.push(Cow::Borrowed(union));
         Ok(handle)
     }
 }
@@ -1882,15 +1909,40 @@ fn encode_array_snapshot<'type_info>(
 
             writer.write_bool(keyed.parameters.is_some());
             if let Some((key_type, value_type)) = &keyed.parameters {
-                encode_union_snapshot_inner(writer, key_type, types, depth + 1)?;
+                encode_backing_key_snapshot(writer, key_type, Dialect::Php, types, depth + 1)?;
                 encode_union_snapshot_inner(writer, value_type, types, depth + 1)?;
             }
 
             writer.write_bool(keyed.non_empty);
         }
+        // An external analyzer is plain PHP, which sees a `Set` as the array it runs as: a `Map` of the element type,
+        // keyed by each element's key.
+        TArray::Set(element_type) => {
+            writer.write_u8(2);
+            writer.write_bool(false);
+            writer.write_bool(true);
+            encode_backing_key_snapshot(writer, element_type, Dialect::Sharp, types, depth + 1)?;
+            encode_union_snapshot_inner(writer, element_type, types, depth + 1)?;
+            writer.write_bool(false);
+        }
     }
 
     Ok(())
+}
+
+/// Encodes `key_type` as the key of the array it runs as: an external analyzer is plain PHP, which keys a PHP# `Map`
+/// or `Set` of a backed enum by the case's backing value. `dialect` is the dialect that wrote `key_type`.
+fn encode_backing_key_snapshot<'type_info>(
+    writer: &mut PayloadWriter,
+    key_type: &'type_info TUnion,
+    dialect: Dialect,
+    types: &mut SnapshotTypeTable<'_, 'type_info>,
+    depth: usize,
+) -> Result<(), ExternalAnalyzerError> {
+    match get_backing_key_type(key_type, types.codebase, dialect) {
+        Cow::Borrowed(key_type) => encode_union_snapshot_inner(writer, key_type, types, depth),
+        Cow::Owned(key_type) => encode_owned_union_snapshot(writer, &key_type, types, depth),
+    }
 }
 
 fn encode_reference_snapshot<'type_info>(
@@ -3334,10 +3386,62 @@ pub(super) mod testing {
 
         let mut writer = PayloadWriter::new();
         let mut types = Vec::new();
-        encode_union_snapshot(&mut writer, &ty, &mut types, 0).unwrap();
+        encode_union_snapshot(&mut writer, &ty, &mut types, &CodebaseMetadata::new(), 0).unwrap();
 
         assert_eq!(types.len(), 73);
         assert!(!writer.finish().is_empty());
+    }
+
+    /// A codebase that declares the string-backed enum `Status`.
+    fn string_backed_status() -> CodebaseMetadata {
+        let arena = mago_allocator::LocalArena::new();
+        let file = mago_database::file::File::ephemeral(
+            Cow::Borrowed(b"status.php"),
+            Cow::Borrowed(b"<?php enum Status: string { case Open = 'open'; }"),
+        );
+        let program = mago_syntax::parser::parse_file(&arena, &file);
+        let names = mago_names::resolver::NameResolver::new(&arena).resolve(program);
+        let mut codebase = mago_codex::scanner::scan_program(&arena, &file, program, &names, PHPVersion::LATEST);
+        mago_codex::populator::populate_codebase(
+            &mut codebase,
+            &mut mago_codex::reference::SymbolReferences::new(),
+            WordSet::default(),
+            HashSet::default(),
+        );
+
+        codebase
+    }
+
+    /// The key and value types an external analyzer receives for `array`, written as their ids.
+    fn snapshot_key_and_value(array: TArray, codebase: &CodebaseMetadata) -> Vec<String> {
+        let array = TUnion::from_atomic(TAtomic::Array(array));
+        let mut types = Vec::new();
+        encode_union_snapshot(&mut PayloadWriter::new(), &array, &mut types, codebase, 0).unwrap();
+
+        types[1..].iter().map(|ty| ty.get_id().to_string()).collect()
+    }
+
+    /// A `Set` runs as an array that keys each element by its key, which for a backed enum is its backing value, so an
+    /// external analyzer sees a `Set` of a string-backed enum as a `Map` keyed by `string`.
+    #[test]
+    fn a_set_of_a_backed_enum_is_keyed_by_the_backing_type() {
+        let codebase = string_backed_status();
+        let status = TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status"))));
+
+        assert_eq!(snapshot_key_and_value(TArray::Set(Arc::new(status)), &codebase), ["string", "enum(Status)"]);
+    }
+
+    /// A `Map` keyed by a backed enum runs as an array keyed by each case's backing value, so an external analyzer sees
+    /// a `Map<Status, int>` of a string-backed `Status` keyed by `string`. A PHP array keeps the key type it declares.
+    #[test]
+    fn a_map_keyed_by_a_backed_enum_is_keyed_by_the_backing_type() {
+        let codebase = string_backed_status();
+        let status = TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status"))));
+        let map = TKeyedArray::new_with_parameters(Arc::new(status), Arc::new(get_int()));
+        let array = TKeyedArray::new_with_parameters(Arc::new(get_int()), Arc::new(get_int()));
+
+        assert_eq!(snapshot_key_and_value(TArray::Keyed(map), &codebase), ["string", "int"]);
+        assert_eq!(snapshot_key_and_value(TArray::Keyed(array), &codebase), ["int", "int"]);
     }
 
     #[test]

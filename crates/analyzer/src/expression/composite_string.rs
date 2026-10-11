@@ -24,9 +24,9 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::binary::utils::display_operand;
 use crate::expression::unary::cast_type_to_string;
 use crate::utils::expression::get_block_expression_id;
-use crate::utils::names::display_type;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
     fn analyze<'ctx, A>(
@@ -91,28 +91,26 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
                 continue;
             };
 
-            if context.dialect.is_sharp() && part_type.is_mixed() {
-                let part_type_str = display_type(context, &part_type);
+            if context.dialect.is_sharp() && !part_type.is_never() && !is_shown(&part_type) {
+                report_unshown(context, part, &part_type);
+                all_literals = false;
+                resulting_strings = None;
 
-                context.collector.report_with_code(
-                    IssueCode::MixedOperand,
-                    Issue::error(format!("A template shows only a checked value, but this is `{part_type_str}`."))
-                        .with_annotation(
-                            Annotation::primary(part.span()).with_message(format!("This has type `{part_type_str}`")),
-                        )
-                        .with_note("PHP# refuses each use of an `Any` or `Any?` until it is checked.")
-                        .with_help("Check what the value is with `is`, `as` or `match` before the template shows it."),
-                );
+                continue;
             }
 
-            let casted_part_type = cast_type_to_string(
-                &part_type,
-                part_expression_id.as_ref().map(|w| w.as_bytes()),
-                context,
-                block_context,
-                artifacts,
-                part.span(),
-            )?;
+            let casted_part_type = if context.dialect.is_sharp() && part_type.is_bool() {
+                bool_text(&part_type)
+            } else {
+                cast_type_to_string(
+                    &part_type,
+                    part_expression_id.as_ref().map(|w| w.as_bytes()),
+                    context,
+                    block_context,
+                    artifacts,
+                    part.span(),
+                )?
+            };
 
             if casted_part_type.is_never() {
                 impossible = true;
@@ -220,6 +218,47 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
 
         Ok(())
     }
+}
+
+/// Whether a PHP# template shows a value of `part_type`: an `int`, a `float`, a `string` or a `bool`, literal and
+/// narrowed types included, as spec section 18 states.
+fn is_shown(part_type: &TUnion) -> bool {
+    part_type.is_int() || part_type.is_float() || part_type.is_string() || part_type.is_bool()
+}
+
+/// Refuses `part` of a PHP# template, whose type `part_type` the template does not show.
+fn report_unshown<A>(context: &mut Context<'_, '_, A>, part: &StringPart<'_>, part_type: &TUnion)
+where
+    A: Arena,
+{
+    let name = display_operand(context, part_type);
+    let help = if part_type.is_mixed() {
+        "Check what the value is with `is`, `as` or `match` first."
+    } else if part_type.is_nullable() && is_shown(&part_type.to_non_nullable()) {
+        "Test it with `!= null` first."
+    } else {
+        "Show a value taken from it instead, such as a property or the result of a method."
+    };
+
+    context.collector.report_with_code(
+        IssueCode::InvalidOperand,
+        Issue::error(format!("A template shows `int`, `float`, `string` or `bool`, and `{name}` is none of them."))
+            .with_annotation(Annotation::primary(part.span()).with_message(format!("This is `{name}`.")))
+            .with_help(help),
+    );
+}
+
+/// The text a PHP# template shows for a value of the `bool` type `part_type`: `true` or `false`.
+fn bool_text(part_type: &TUnion) -> TUnion {
+    let mut texts = Vec::new();
+    if part_type.types.iter().any(|atomic| !atomic.is_false()) {
+        texts.push(TAtomic::Scalar(TScalar::literal_string(word("true"))));
+    }
+    if part_type.types.iter().any(|atomic| !atomic.is_true()) {
+        texts.push(TAtomic::Scalar(TScalar::literal_string(word("false"))));
+    }
+
+    TUnion::from_vec(texts)
 }
 
 #[cfg(test)]

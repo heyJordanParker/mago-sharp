@@ -312,6 +312,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Unset<'arena> {
                                 known_non_list,
                             })));
                         }
+                        set @ TArray::Set(_) => atomics.push(TAtomic::Array(set)),
                     }
                 }
 

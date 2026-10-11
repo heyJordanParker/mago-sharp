@@ -27,6 +27,7 @@ use super::Lowering;
 use super::NULL;
 use super::ZEND_NAME_FQ;
 use super::is_current_position;
+use super::set_parameter;
 use super::types::DeclarationKind;
 use super::types::receiver_classes;
 use crate::lower::checked::CheckedProgram;
@@ -142,8 +143,9 @@ impl Lowering<'_, '_> {
             }
             _ => return None,
         };
+        // A form runs without the method's statements before its body, which make each `Set` parameter a `Set`.
         let parameters = &method.parameter_list.parameters;
-        if parameters.iter().any(|parameter| parameter.is_variadic()) {
+        if parameters.iter().any(|parameter| parameter.is_variadic() || set_parameter(parameter).is_some()) {
             return None;
         }
 
@@ -328,7 +330,7 @@ impl Lowering<'_, '_> {
     }
 
     /// Whether reading `expression` runs nothing: a literal, a name, a lambda or `typeof(X)`.
-    fn is_pure(&self, expression: &Expression) -> bool {
+    pub(super) fn is_pure(&self, expression: &Expression) -> bool {
         match expression {
             Expression::Parenthesized(parenthesized) => self.is_pure(parenthesized.expression),
             Expression::Literal(_) | Expression::ArrowFunction(_) | Expression::Closure(_) | Expression::TypeOf(_) => {

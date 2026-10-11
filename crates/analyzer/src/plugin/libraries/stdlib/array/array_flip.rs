@@ -64,6 +64,7 @@ impl FunctionReturnTypeProvider for ArrayFlipProvider {
         match array {
             TArray::Keyed(keyed) => flip_keyed_array(keyed),
             TArray::List(list) => flip_list(list),
+            TArray::Set(_) => None,
         }
     }
 }

@@ -2141,6 +2141,1029 @@ fn a_backed_enum_value_goes_into_list_add_as_its_case() {
 }
 
 /// ```php
+/// $tags = ["vip" => "vip", "new" => "new"];
+/// $states = [\Lib\Calc::Active->value => \Lib\Calc::Active, $status->value => $status];
+/// $names = [($element#1 = \strtoupper($name)) => $element#1];
+/// ```
+///
+/// Spec section 12: a `Set` holds each element under its key, the element or a backed enum's `->value`. PHP reads an
+/// element's key before its value, so an element that runs something goes in through a hidden variable its key
+/// assigns, and runs once.
+#[test]
+fn a_set_literal_holds_each_element_under_its_key() {
+    assert_eq!(
+        body_in(
+            "void run(Calc status, string name)",
+            "        Set<string> tags = [\"vip\", \"new\"];\n        Set<Calc> states = [Calc.Active, status];\n        Set<string> names = [strtoupper(name)];\n",
+            &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "vip"
+                    ZVAL "vip"
+                  ARRAY_ELEM
+                    ZVAL "new"
+                    ZVAL "new"
+              ASSIGN
+                VAR
+                  ZVAL "states"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    CLASS_CONST
+                      ZVAL "Lib\\Calc"
+                      ZVAL "Active"
+                    PROP
+                      CLASS_CONST
+                        ZVAL "Lib\\Calc"
+                        ZVAL "Active"
+                      ZVAL "value"
+                  ARRAY_ELEM
+                    VAR
+                      ZVAL "status"
+                    PROP
+                      VAR
+                        ZVAL "status"
+                      ZVAL "value"
+              ASSIGN
+                VAR
+                  ZVAL "names"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    VAR
+                      ZVAL "element#1"
+                    ASSIGN
+                      VAR
+                        ZVAL "element#1"
+                      CALL
+                        ZVAL "strtoupper"
+                        ARG_LIST
+                          VAR
+                            ZVAL "name"
+        "#}
+    );
+}
+
+/// ```php
+/// $tags = [];
+/// $tags = ["b" => "b"];
+/// ```
+///
+/// A list literal assigned to a local declared `Set` is that `Set`, each element under its key.
+#[test]
+fn a_list_literal_assigned_to_a_set_local_is_a_set() {
+    assert_eq!(
+        body_in("void run(bool flag)", "        Set<string> tags = [];\n        tags = [\"b\"];\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                ARRAY [3]
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "b"
+                    ZVAL "b"
+        "#}
+    );
+}
+
+/// ```php
+/// $branch = [];
+/// if ($flag) { $branch = ["d" => "d"]; } else { $branch = ["e" => "e"]; }
+/// ```
+///
+/// A list literal assigned in either branch of an `if` to a local declared `Set` is that `Set`.
+#[test]
+fn a_list_literal_assigned_in_each_branch_of_an_if_to_a_set_local_is_a_set() {
+    assert_eq!(
+        body_in(
+            "void run(bool flag)",
+            "        Set<string> branch = [];\n        if (flag) {\n            branch = [\"d\"];\n        } else {\n            branch = [\"e\"];\n        }\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "branch"
+                ARRAY [3]
+              IF
+                IF_ELEM
+                  VAR
+                    ZVAL "flag"
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "branch"
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "d"
+                          ZVAL "d"
+                IF_ELEM
+                  null
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "branch"
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "e"
+                          ZVAL "e"
+        "#}
+    );
+}
+
+/// ```php
+/// $maybe = $maybe === null ? null : \Sharp\Set::from($maybe);
+/// $maybe ??= ["c" => "c"];
+/// ```
+///
+/// A list literal that `??=` assigns to a nullable `Set` is that `Set`.
+#[test]
+fn a_list_literal_that_coalescing_assigns_to_a_nullable_set_is_a_set() {
+    assert_eq!(
+        body_in("void run(Set<string>? maybe)", "        maybe ??= [\"c\"];\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "maybe"
+                CONDITIONAL
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL null
+                  ZVAL null
+                  STATIC_CALL
+                    ZVAL "Sharp\\Set"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "maybe"
+              ASSIGN_COALESCE
+                VAR
+                  ZVAL "maybe"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "c"
+                    ZVAL "c"
+        "#}
+    );
+}
+
+/// ```php
+/// private array $tags = ["a" => "a"];
+/// ```
+///
+/// A list literal that is the initial value of a property declared `Set` is that `Set`, its constant default.
+#[test]
+fn a_list_literal_initial_value_of_a_set_property_is_a_set() {
+    assert_eq!(
+        property_groups(&Lowered::new("class Report\n{\n    private Set<string> tags = [\"a\"];\n}\n")),
+        [indoc! {r#"
+            PROP_GROUP [4]
+              TYPE [7]
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "tags"
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ZVAL "a"
+                      ZVAL "a"
+                  null
+                  null
+              null
+        "#}]
+    );
+}
+
+/// ```php
+/// $this->tags = ["c" => "c"];
+/// \Report::$shared = ["d" => "d"];
+/// $this->hooked = ["e" => "e"];
+/// ```
+///
+/// A list literal assigned to a field, a static field or a property with accessors declared `Set` is that `Set`.
+#[test]
+fn a_list_literal_assigned_to_a_set_property_is_a_set() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    private Set<string> tags = [];\n    private static Set<string> shared = [];\n    public Set<string> hooked { get; set; } = [];\n\n    public void run()\n    {\n        this.tags = [\"c\"];\n        Report.shared = [\"d\"];\n        this.hooked = [\"e\"];\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "tags"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "c"
+                    ZVAL "c"
+              ASSIGN
+                STATIC_PROP
+                  ZVAL "Report"
+                  ZVAL "shared"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "d"
+                    ZVAL "d"
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "hooked"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "e"
+                    ZVAL "e"
+        "#}
+    );
+}
+
+/// ```php
+/// public function run(): array { return ["a" => "a"]; }
+/// public function short(): array { return ["b" => "b"]; }
+/// ```
+///
+/// A list literal a method declared to return a `Set` returns, from a block or as its expression body, is that `Set`.
+#[test]
+fn a_list_literal_returned_where_a_set_is_declared_is_a_set() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public Set<string> run()\n    {\n        return [\"a\"];\n    }\n\n    public Set<string> short() => [\"b\"];\n}\n",
+    );
+    let body = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 2));
+
+    assert_eq!(
+        body("run"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "a"
+                    ZVAL "a"
+        "#}
+    );
+    assert_eq!(
+        body("short"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "b"
+                    ZVAL "b"
+        "#}
+    );
+}
+
+/// ```php
+/// public function run(array $seed = ["a" => "a"]): int { $seed = \Sharp\Set::from($seed); return \count($seed); }
+/// ```
+///
+/// A list literal that is the default of a parameter declared `Set` is that `Set`.
+#[test]
+fn a_list_literal_default_of_a_set_parameter_is_a_set() {
+    let lowered = Lowered::new("class Report\n{\n    public int run(Set<string> seed = [\"a\"]) => seed.count();\n}\n");
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("run"), 0)),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                TYPE [7]
+                ZVAL "seed"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "a"
+                    ZVAL "a"
+                null
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// $tags = \Sharp\Set::from($tags);
+/// $states = \Sharp\Set::from($states);
+/// !isset($tags[$name]) && ($tags += [$name => $name]);
+/// isset($tags[$element#1 = \strtoupper($name)]) && $tags->delete($element#1) === null;
+/// !isset($states[$status->value]) && ($states += [$status->value => $status]);
+/// isset($states[\Lib\Calc::Closed->value]) && $states->delete(\Lib\Calc::Closed->value) === null;
+/// $tags = [];
+/// return isset($tags[$name]);
+/// ```
+///
+/// Until the engine runs `Set` methods (php-sharp #57), each method that reads or changes an element by its key is
+/// the PHP that does it on the array: `add` and `remove` give whether they changed the `Set`, and `remove` runs
+/// `Sharp\Collection`'s `delete`. An element that runs something goes in through a hidden variable, so it runs once.
+#[test]
+fn set_methods_read_and_change_each_element_under_its_key() {
+    assert_eq!(
+        body_in(
+            "bool run(Set<string> tags, Set<Calc> states, Calc status, string name)",
+            "        tags.add(name);\n        tags.remove(strtoupper(name));\n        states.add(status);\n        states.remove(Calc.Closed);\n        tags.clear();\n        return tags.contains(name);\n",
+            &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                STATIC_CALL
+                  ZVAL "Sharp\\Set"
+                  ZVAL "from"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "states"
+                STATIC_CALL
+                  ZVAL "Sharp\\Set"
+                  ZVAL "from"
+                  ARG_LIST
+                    VAR
+                      ZVAL "states"
+              AND
+                UNARY_OP [14]
+                  ISSET
+                    DIM
+                      VAR
+                        ZVAL "tags"
+                      VAR
+                        ZVAL "name"
+                ASSIGN_OP [1]
+                  VAR
+                    ZVAL "tags"
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      VAR
+                        ZVAL "name"
+                      VAR
+                        ZVAL "name"
+              AND
+                ISSET
+                  DIM
+                    VAR
+                      ZVAL "tags"
+                    ASSIGN
+                      VAR
+                        ZVAL "element#1"
+                      CALL
+                        ZVAL "strtoupper"
+                        ARG_LIST
+                          VAR
+                            ZVAL "name"
+                BINARY_OP [16]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "tags"
+                    ZVAL "delete"
+                    ARG_LIST
+                      VAR
+                        ZVAL "element#1"
+                  ZVAL null
+              AND
+                UNARY_OP [14]
+                  ISSET
+                    DIM
+                      VAR
+                        ZVAL "states"
+                      PROP
+                        VAR
+                          ZVAL "status"
+                        ZVAL "value"
+                ASSIGN_OP [1]
+                  VAR
+                    ZVAL "states"
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      VAR
+                        ZVAL "status"
+                      PROP
+                        VAR
+                          ZVAL "status"
+                        ZVAL "value"
+              AND
+                ISSET
+                  DIM
+                    VAR
+                      ZVAL "states"
+                    PROP
+                      CLASS_CONST
+                        ZVAL "Lib\\Calc"
+                        ZVAL "Closed"
+                      ZVAL "value"
+                BINARY_OP [16]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "states"
+                    ZVAL "delete"
+                    ARG_LIST
+                      PROP
+                        CLASS_CONST
+                          ZVAL "Lib\\Calc"
+                          ZVAL "Closed"
+                        ZVAL "value"
+                  ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                ARRAY [3]
+              RETURN
+                ISSET
+                  DIM
+                    VAR
+                      ZVAL "tags"
+                    VAR
+                      ZVAL "name"
+        "#}
+    );
+}
+
+/// ```php
+/// $tags = \Sharp\Set::from($tags);
+/// $count = \count($tags);
+/// $kept = $tags->filterValues($keep);
+/// $tags->any($keep);
+/// return \array_values($tags);
+/// ```
+///
+/// `count` and `toList` are PHP's functions on the array. `filter` keeps each element under its key, as
+/// `Sharp\Collection`'s `filterValues` does, and any other `Set` method is the `Sharp\Collection` method of its name.
+#[test]
+fn set_count_to_list_and_filter_are_the_php_that_reads_the_array() {
+    assert_eq!(
+        body_in(
+            "List<string> run(Set<string> tags, Function<bool(string)> keep)",
+            "        const count = tags.count();\n        const kept = tags.filter(keep);\n        tags.any(keep);\n        return tags.toList();\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                STATIC_CALL
+                  ZVAL "Sharp\\Set"
+                  ZVAL "from"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "count"
+                CALL
+                  ZVAL "count"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "kept"
+                METHOD_CALL
+                  VAR
+                    ZVAL "tags"
+                  ZVAL "filterValues"
+                  ARG_LIST
+                    VAR
+                      ZVAL "keep"
+              METHOD_CALL
+                VAR
+                  ZVAL "tags"
+                ZVAL "any"
+                ARG_LIST
+                  VAR
+                    ZVAL "keep"
+              RETURN
+                CALL
+                  ZVAL "array_values"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+        "#}
+    );
+}
+
+/// ```php
+/// !isset($this->tags["vip"]) && ($this->tags += ["vip" => "vip"]);
+/// isset(($receiver#1 = $this->next())->tags["old"]) && $receiver#1->tags->delete("old") === null;
+/// $this->next()->tags = [];
+/// !isset(($receiver#1 = $this->names())["x"]) && ($receiver#1 += ["x" => "x"]);
+/// return isset($this->names()["vip"]);
+/// ```
+///
+/// A `Set` method changes a property through the property, which runs its hooks. A receiver read twice whose object
+/// runs something goes through a hidden variable its first read assigns, as PHP refuses a write to an assignment. A
+/// change of any other value changes a copy of it.
+#[test]
+fn a_set_method_changes_a_property_through_the_property() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Set<string> tags { get => field; set => field = value; } = [];\n\n    public bool run()\n    {\n        this.tags.add(\"vip\");\n        this.next().tags.remove(\"old\");\n        this.next().tags.clear();\n        this.names().add(\"x\");\n        return this.names().contains(\"vip\");\n    }\n\n    private Report next() => this;\n\n    private Set<string> names() => this.tags;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              AND
+                UNARY_OP [14]
+                  ISSET
+                    DIM
+                      PROP
+                        VAR
+                          ZVAL "this"
+                        ZVAL "tags"
+                      ZVAL "vip"
+                ASSIGN_OP [1]
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "tags"
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ZVAL "vip"
+                      ZVAL "vip"
+              AND
+                ISSET
+                  DIM
+                    PROP
+                      ASSIGN
+                        VAR
+                          ZVAL "receiver#1"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "next"
+                          ARG_LIST
+                      ZVAL "tags"
+                    ZVAL "old"
+                BINARY_OP [16]
+                  METHOD_CALL
+                    PROP
+                      VAR
+                        ZVAL "receiver#1"
+                      ZVAL "tags"
+                    ZVAL "delete"
+                    ARG_LIST
+                      ZVAL "old"
+                  ZVAL null
+              ASSIGN
+                PROP
+                  METHOD_CALL
+                    VAR
+                      ZVAL "this"
+                    ZVAL "next"
+                    ARG_LIST
+                  ZVAL "tags"
+                ARRAY [3]
+              AND
+                UNARY_OP [14]
+                  ISSET
+                    DIM
+                      ASSIGN
+                        VAR
+                          ZVAL "receiver#1"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "names"
+                          ARG_LIST
+                      ZVAL "x"
+                ASSIGN_OP [1]
+                  VAR
+                    ZVAL "receiver#1"
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ZVAL "x"
+                      ZVAL "x"
+              RETURN
+                ISSET
+                  DIM
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "names"
+                      ARG_LIST
+                    ZVAL "vip"
+        "#}
+    );
+}
+
+/// ```php
+/// $names = $names === null ? null : \Sharp\Set::from($names);
+/// ($names === null) ? null : (!isset($names["vip"]) && ($names += ["vip" => "vip"]));
+/// ($other?->tags === null) ? null : (isset($other->tags["old"]) && $other->tags->delete("old") === null);
+/// return ($names === null) ? null : isset($names["vip"]);
+/// ```
+///
+/// A null-safe `Set` method tests its receiver first, as its first read, and gives null for a null receiver. The
+/// method's reads after the test read the receiver without `?->`.
+#[test]
+fn a_null_safe_set_method_tests_its_receiver_first() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    private Set<string>? tags = null;\n\n    public bool? run(Set<string>? names, Report? other)\n    {\n        names?.add(\"vip\");\n        other?.tags?.remove(\"old\");\n        return names?.contains(\"vip\");\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "names"
+                CONDITIONAL
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "names"
+                    ZVAL null
+                  ZVAL null
+                  STATIC_CALL
+                    ZVAL "Sharp\\Set"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "names"
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "names"
+                  ZVAL null
+                ZVAL null
+                AND
+                  UNARY_OP [14]
+                    ISSET
+                      DIM
+                        VAR
+                          ZVAL "names"
+                        ZVAL "vip"
+                  ASSIGN_OP [1]
+                    VAR
+                      ZVAL "names"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "vip"
+                        ZVAL "vip"
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  NULLSAFE_PROP
+                    VAR
+                      ZVAL "other"
+                    ZVAL "tags"
+                  ZVAL null
+                ZVAL null
+                AND
+                  ISSET
+                    DIM
+                      PROP
+                        VAR
+                          ZVAL "other"
+                        ZVAL "tags"
+                      ZVAL "old"
+                  BINARY_OP [16]
+                    METHOD_CALL
+                      PROP
+                        VAR
+                          ZVAL "other"
+                        ZVAL "tags"
+                      ZVAL "delete"
+                      ARG_LIST
+                        ZVAL "old"
+                    ZVAL null
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "names"
+                    ZVAL null
+                  ZVAL null
+                  ISSET
+                    DIM
+                      VAR
+                        ZVAL "names"
+                      ZVAL "vip"
+        "#}
+    );
+}
+
+/// ```php
+/// public readonly array $tags;
+/// public function __construct(array $tags, array $ids)
+/// {
+///     $this->tags = \Sharp\Set::from($tags);
+///     $ids = \Sharp\Set::from($ids);
+/// }
+/// ```
+///
+/// Plain PHP and a `List` argument pass a `Set` parameter any array of its elements, so a method with a body makes
+/// each `Set` parameter a `Set` first. PHP sets a promoted property before the body runs, and a get-only one only
+/// once, so a promoted `Set` parameter is a plain parameter beside the property it declares, `[129]`
+/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, which the body sets to the `Set`. A method without a body has no
+/// statements.
+#[test]
+fn a_set_parameter_becomes_a_set_before_the_body_runs() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\ninterface Tagged\n{\n    void keep(Set<string> kept);\n}\n\nclass Order\n{\n    public Order(public Set<string> tags { get; }, Set<int> ids) {}\n}\n",
+    );
+    let body = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 2));
+
+    assert_eq!(
+        property_groups(&lowered),
+        [indoc! {r#"
+            PROP_GROUP [129]
+              TYPE [7]
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "tags"
+                  null
+                  null
+                  null
+              null
+        "#}]
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("__construct"), 0)),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                TYPE [7]
+                ZVAL "tags"
+                null
+                null
+                null
+                null
+              PARAM
+                TYPE [7]
+                ZVAL "ids"
+                null
+                null
+                null
+                null
+        "#}
+    );
+    assert_eq!(body("keep"), "null\n");
+    assert_eq!(
+        body("__construct"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "tags"
+                STATIC_CALL
+                  ZVAL "Sharp\\Set"
+                  ZVAL "from"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "ids"
+                STATIC_CALL
+                  ZVAL "Sharp\\Set"
+                  ZVAL "from"
+                  ARG_LIST
+                    VAR
+                      ZVAL "ids"
+        "#}
+    );
+}
+
+/// ```php
+/// $prefix = "v";
+/// $check = function (array $tags) use ($prefix) { $tags = \Sharp\Set::from($tags); return isset($tags[$prefix]); };
+/// $size = function (array $tags) { $tags = \Sharp\Set::from($tags); return \count($tags); };
+/// return $check($extra) ? $size($extra) : 0;
+/// ```
+///
+/// A call of a lambda that declares a parameter `Set` passes it a list too, so a lambda makes each `Set` parameter a
+/// `Set` first, as a method does. PHP's `fn` has no statements before its expression, so a lambda with an expression
+/// body and a `Set` parameter is a `CLOSURE` whose `use` list captures what the binder says it captures.
+#[test]
+fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
+    assert_eq!(
+        body_in(
+            "int run(List<string> extra)",
+            "        const prefix = \"v\";\n        const check = (Set<string> tags) => tags.contains(prefix);\n        const size = (Set<string> tags) => {\n            return tags.count();\n        };\n        return check(extra) ? size(extra) : 0;\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "prefix"
+                ZVAL "v"
+              ASSIGN
+                VAR
+                  ZVAL "check"
+                CLOSURE "" @10-10
+                  PARAM_LIST
+                    PARAM
+                      TYPE [7]
+                      ZVAL "tags"
+                      null
+                      null
+                      null
+                      null
+                  CLOSURE_USES
+                    ZVAL "prefix"
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "tags"
+                      STATIC_CALL
+                        ZVAL "Sharp\\Set"
+                        ZVAL "from"
+                        ARG_LIST
+                          VAR
+                            ZVAL "tags"
+                    RETURN
+                      ISSET
+                        DIM
+                          VAR
+                            ZVAL "tags"
+                          VAR
+                            ZVAL "prefix"
+                  null
+                  null
+              ASSIGN
+                VAR
+                  ZVAL "size"
+                CLOSURE "" @11-13
+                  PARAM_LIST
+                    PARAM
+                      TYPE [7]
+                      ZVAL "tags"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "tags"
+                      STATIC_CALL
+                        ZVAL "Sharp\\Set"
+                        ZVAL "from"
+                        ARG_LIST
+                          VAR
+                            ZVAL "tags"
+                    RETURN
+                      CALL
+                        ZVAL "count"
+                        ARG_LIST
+                          VAR
+                            ZVAL "tags"
+                  null
+                  null
+              RETURN
+                CONDITIONAL
+                  CALL
+                    VAR
+                      ZVAL "check"
+                    ARG_LIST
+                      VAR
+                        ZVAL "extra"
+                  CALL
+                    VAR
+                      ZVAL "size"
+                    ARG_LIST
+                      VAR
+                        ZVAL "extra"
+                  ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// public function many(array ...$groups): int { $groups = \array_map(\Sharp\Set::from(...), $groups); return \count($groups); }
+/// public static function op_Addition(\App\Tenant\Order $order, array $tags): \App\Tenant\Order
+/// {
+///     $tags = \Sharp\Set::from($tags);
+///     return $order;
+/// }
+/// public function maybe(?array ...$groups): int
+/// {
+///     $groups = \array_map(fn ($set) => $set === null ? null : \Sharp\Set::from($set), $groups);
+///     return \count($groups);
+/// }
+/// ```
+///
+/// A variadic `Set` parameter takes a list for each of its elements, so each element becomes a `Set`, under its
+/// position or its name, and a null element of a nullable one stays null. An operator is a method, and makes each
+/// `Set` parameter a `Set` first too.
+#[test]
+fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Order\n{\n    public int many(Set<string> ...groups) => count(groups);\n\n    public static Order operator +(Order order, Set<string> tags) => order;\n\n    public int maybe(Set<string>? ...groups) => count(groups);\n}\n",
+    );
+    let body = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 2));
+
+    assert_eq!(
+        body("many"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "groups"
+                CALL
+                  ZVAL "array_map"
+                  ARG_LIST
+                    STATIC_CALL
+                      ZVAL "Sharp\\Set"
+                      ZVAL "from"
+                      CALLABLE_CONVERT
+                    VAR
+                      ZVAL "groups"
+              RETURN
+                CALL
+                  ZVAL "count"
+                  ARG_LIST
+                    VAR
+                      ZVAL "groups"
+        "#}
+    );
+    assert_eq!(
+        body("op_Addition"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                STATIC_CALL
+                  ZVAL "Sharp\\Set"
+                  ZVAL "from"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+              RETURN
+                VAR
+                  ZVAL "order"
+        "#}
+    );
+    assert_eq!(
+        body("maybe"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "groups"
+                CALL
+                  ZVAL "array_map"
+                  ARG_LIST
+                    ARROW_FUNC "" @9-9
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "set"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      CONDITIONAL
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "set"
+                          ZVAL null
+                        ZVAL null
+                        STATIC_CALL
+                          ZVAL "Sharp\\Set"
+                          ZVAL "from"
+                          ARG_LIST
+                            VAR
+                              ZVAL "set"
+                      null
+                      null
+                    VAR
+                      ZVAL "groups"
+              RETURN
+                CALL
+                  ZVAL "count"
+                  ARG_LIST
+                    VAR
+                      ZVAL "groups"
+        "#}
+    );
+}
+
+/// ```php
 /// public array $tags = [] { set { $this->tags = []; $this->tags->add("x"); } }
 /// ```
 ///
@@ -8357,6 +9380,57 @@ fn a_template_is_an_encaps_list_of_its_text_and_interpolations() {
 }
 
 /// ```php
+/// return "Paid: {["false", "true"][$paid]} of {$extra} for {$name} {["false", "true"][true]}";
+/// ```
+///
+/// Spec section 18 shows a `bool` in a template as `true` or `false`, where PHP's string conversion gives `1` or
+/// nothing, so a `bool` part reads its text from `["false", "true"]`, where PHP reads `false` as the index 0 and
+/// `true` as the index 1. The optimizer keeps the read as one `FETCH_DIM_R` of a constant array, where
+/// `$paid ? "true" : "false"` takes four instructions. An `int` and a `string` part lower as before.
+#[test]
+fn a_bool_in_a_template_is_its_text_read_by_the_bool() {
+    assert_eq!(
+        body_in(
+            "string run(bool paid, int extra, string name)",
+            "        return `Paid: ${paid} of ${extra} for ${name} ${true}`;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ENCAPS_LIST
+                  ZVAL "Paid: "
+                  DIM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "false"
+                        null
+                      ARRAY_ELEM
+                        ZVAL "true"
+                        null
+                    VAR
+                      ZVAL "paid"
+                  ZVAL " of "
+                  VAR
+                    ZVAL "extra"
+                  ZVAL " for "
+                  VAR
+                    ZVAL "name"
+                  ZVAL " "
+                  DIM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "false"
+                        null
+                      ARRAY_ELEM
+                        ZVAL "true"
+                        null
+                    ZVAL true
+        "#}
+    );
+}
+
+/// ```php
 /// $twice = fn (int $a) => $a * $extra; $half = fn ($b) => \intdiv($b, 2); return $twice($half(4));
 /// ```
 ///
@@ -8901,6 +9975,69 @@ fn as_is_a_conditional_that_gives_the_value_or_null() {
               RETURN
                 VAR
                   ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
+/// if (\is_int($count = $counts[$key] ?? null)) { return $count; }
+/// $price = \is_int(${'as#1'} = $counts[$key] ?? null) ? ${'as#1'} : null;
+/// ```
+///
+/// An index a pattern tests reads a missing key as null, as `??` does, so the index is the left side of a
+/// `COALESCE`, and a missing key reaches the test as null instead of a warning.
+#[test]
+fn an_index_a_pattern_tests_coalesces_a_missing_key_to_null() {
+    assert_eq!(
+        body_in(
+            "int? run(Map<string, int> counts, string key)",
+            "        if (counts[key] is int count) {\n            return count;\n        }\n        const price = counts[key] as int;\n        return price;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "count"
+                        COALESCE
+                          DIM
+                            VAR
+                              ZVAL "counts"
+                            VAR
+                              ZVAL "key"
+                          ZVAL null
+                  STMT_LIST
+                    RETURN
+                      VAR
+                        ZVAL "count"
+              ASSIGN
+                VAR
+                  ZVAL "price"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "as#1"
+                        COALESCE
+                          DIM
+                            VAR
+                              ZVAL "counts"
+                            VAR
+                              ZVAL "key"
+                          ZVAL null
+                  VAR
+                    ZVAL "as#1"
+                  ZVAL null
+              RETURN
+                VAR
+                  ZVAL "price"
         "#}
     );
 }

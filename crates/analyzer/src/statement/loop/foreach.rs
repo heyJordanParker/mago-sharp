@@ -275,6 +275,7 @@ fn refine_foreach_array_values(array_type: &TUnion, value_type: &TUnion) -> Opti
                     keyed.parameters = Some((Arc::new(get_arraykey()), Arc::new(value_type.clone())));
                 }
             }
+            TArray::Set(_) => return None,
         }
     }
 

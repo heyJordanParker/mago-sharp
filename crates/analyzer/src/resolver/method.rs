@@ -1146,18 +1146,35 @@ where
     true
 }
 
-/// The collection type the place `object` is declared with: a typed local, a parameter, a property, or `field`, the
-/// storage of the property whose accessor is running. A PHP# collection is the `List` or `Map` its place declares, so
-/// its methods, its index reads and its `[k, v]` loops follow that type. A value the analyzer saw assigned last, such
-/// as a list of one implementation, or a `List` literal in a `Map<int, V>`, narrows neither its kind nor its elements.
-/// Only a property a PHP# class declares names a collection: a plain PHP `array` property, on a PHP class or reached
-/// through a PHP# one, is typed by the value it holds, as in PHP.
+/// The first collection type the place `object` is declared with, as [`get_declared_type`] finds it. A PHP# collection
+/// is the `List`, `Map` or `Set` its place declares, so its methods, its index reads and its `[k, v]` loops follow that
+/// type. A value the analyzer saw assigned last, such as a list of one implementation, or a `List` literal in a
+/// `Map<int, V>`, narrows neither its kind nor its elements.
 pub(crate) fn get_declared_collection<'arena, A>(
     context: &Context<'_, 'arena, A>,
     block_context: &BlockContext<'_>,
     artifacts: &AnalysisArtifacts,
     object: &Expression<'arena>,
 ) -> Option<TArray>
+where
+    A: Arena,
+{
+    get_declared_type(context, block_context, artifacts, object)?.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(array) => Some(array.clone()),
+        _ => None,
+    })
+}
+
+/// The type the place `object` is declared with, whole: a typed local, a parameter, a property, or `field`, the
+/// storage of the property whose accessor is running. Only a property a PHP# class declares has a declared type here:
+/// a plain PHP `array` property, on a PHP class or reached through a PHP# one, is typed by the value it holds, as in
+/// PHP.
+pub(crate) fn get_declared_type<'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'arena>,
+) -> Option<TUnion>
 where
     A: Arena,
 {
@@ -1168,11 +1185,11 @@ where
         object => object,
     };
 
-    let declared = match object {
+    match object {
         Expression::ConstantAccess(access) => {
             let variable_id = get_bare_name_variable_id(&access.name, context.resolved_names)?;
 
-            match block_context.local_types.get(&variable_id) {
+            Some(match block_context.local_types.get(&variable_id) {
                 Some((local_type, _)) => local_type.as_ref().clone(),
                 None => block_context
                     .scope
@@ -1183,7 +1200,7 @@ where
                     .get_type_metadata()?
                     .type_union
                     .clone(),
-            }
+            })
         }
         Expression::Access(Access::Property(access)) => {
             let ClassLikeMemberSelector::Identifier(property) = &access.property else {
@@ -1205,8 +1222,8 @@ where
                 let class = context.resolved_names.get(&class.name);
 
                 is_declared_in_sharp(class)
-                    .then(|| context.codebase.get_property_type(class, property_name.as_bytes()))??
-                    .clone()
+                    .then(|| context.codebase.get_property_type(class, property_name.as_bytes()))?
+                    .cloned()
             } else {
                 let receiver = if is_this(access.object, context.resolved_names) {
                     block_context.locals.get(&word("$this"))?.as_ref()
@@ -1220,21 +1237,17 @@ where
                     _ => false,
                 });
 
-                is_sharp_receiver.then(|| get_localized_property_type(context, receiver, property_name))??
+                is_sharp_receiver.then(|| get_localized_property_type(context, receiver, property_name))?
             }
         }
-        _ => return None,
-    };
-
-    declared.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(array) => Some(array.clone()),
         _ => None,
-    })
+    }
 }
 
 /// The class whose methods a PHP# collection has, as spec section 12 writes them: a `List<T>` is called as
-/// `Sharp\ListMethods<T>` and a `Map<K, V>` as `Sharp\MapMethods<K, V>`, so each method is typed by the elements.
-/// A PHP# element type is never narrower than `int` or `string`, so a literal the analyzer knows widens to it.
+/// `Sharp\ListMethods<T>`, a `Map<K, V>` as `Sharp\MapMethods<K, V>` and a `Set<T>` as `Sharp\SetMethods<T>`, so each
+/// method is typed by the elements. A PHP# element type is never narrower than `int` or `string`, so a literal the
+/// analyzer knows widens to it.
 fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> TObject {
     let (mut key, mut value) = get_array_parameters(array, codebase);
     key.widen_scalars();
@@ -1243,6 +1256,7 @@ fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> TObjec
     TObject::Named(match array {
         TArray::List(_) => TNamedObject::new_with_type_parameters(word("Sharp\\ListMethods"), Some(vec![value])),
         TArray::Keyed(_) => TNamedObject::new_with_type_parameters(word("Sharp\\MapMethods"), Some(vec![key, value])),
+        TArray::Set(_) => TNamedObject::new_with_type_parameters(word("Sharp\\SetMethods"), Some(vec![value])),
     })
 }
 

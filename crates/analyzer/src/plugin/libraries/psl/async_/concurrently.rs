@@ -110,6 +110,7 @@ fn unwrap_closure_return_array(array: &TArray, context: &ProviderContext<'_, '_,
                 known_non_list: keyed.known_non_list,
             }))))
         }
+        TArray::Set(_) => None,
     }
 }
 

@@ -1199,9 +1199,28 @@ fn intersect_atomic_types(
     }
 
     if let (TAtomic::Array(left_array), TAtomic::Array(right_array)) = (type_1, type_2) {
+        // A `Set` meets only another `Set`, or the plain PHP `array` it runs as.
+        match (left_array, right_array) {
+            (TArray::Set(left_element_type), TArray::Set(right_element_type)) => {
+                let element_type = intersect_union_types(left_element_type, right_element_type, codebase)?;
+                *intersection_performed = true;
+                return Some(TAtomic::Array(TArray::Set(Arc::new(element_type))));
+            }
+            (set @ TArray::Set(_), other) | (other, set @ TArray::Set(_)) => {
+                if !other.is_vanilla() {
+                    return None;
+                }
+
+                *intersection_performed = true;
+                return Some(TAtomic::Array(set.clone()));
+            }
+            _ => {}
+        }
+
         let array_has_known_shape = |array: &TArray| match array {
             TArray::List(list) => list.known_elements.is_some(),
             TArray::Keyed(keyed) => keyed.known_items.is_some(),
+            TArray::Set(_) => false,
         };
 
         if array_has_known_shape(left_array) || array_has_known_shape(right_array) {
@@ -1529,6 +1548,9 @@ pub fn get_array_parameters(array_type: &TArray, codebase: &CodebaseMetadata) ->
 
             (key_type, value_type)
         }
+        // A `Set` is keyed by each element, which runs as its backing value when it is a backed enum, as a `Map`'s
+        // key does.
+        TArray::Set(element_type) => (element_type.as_ref().clone(), element_type.as_ref().clone()),
     }
 }
 
@@ -1612,6 +1634,7 @@ pub fn get_array_value_parameter(array_type: &TArray, codebase: &CodebaseMetadat
 
             value_param
         }
+        TArray::Set(element_type) => element_type.as_ref().clone(),
     }
 }
 

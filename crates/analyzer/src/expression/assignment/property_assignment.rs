@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::add_union_type;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
@@ -14,8 +15,9 @@ use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
-use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::PropertyAccess;
 
 use crate::artifacts::AnalysisArtifacts;
@@ -23,7 +25,11 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_empty_literal_type;
+use crate::expression::array::get_set_literal_type;
 use crate::expression::assignment::PropertyWriteKind;
+use crate::resolver::method::get_declared_type;
 use crate::resolver::property::resolve_instance_properties;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
@@ -40,12 +46,13 @@ pub fn analyze<'ctx, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     property_access: &PropertyAccess<'arena>,
     assigned_value_type: &TUnion,
-    assigned_value_span: Option<Span>,
+    assigned_value: Option<&Expression<'arena>>,
     write_kind: PropertyWriteKind,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
 {
+    let assigned_value_span = assigned_value.map(HasSpan::span);
     let property_access_id = get_property_access_expression_id(
         property_access.object,
         &property_access.property,
@@ -68,6 +75,30 @@ where
         true,  // `for_assignment`
     )?;
     block_context.flags.set_inside_assignment(was_inside_assignment);
+
+    // A property a PHP# class declares as a `List`, a `Map` or a `Set`, or a union of them, takes only a literal of a
+    // collection it declares, from `=` and from `??=`, and keeps the collection its literal names when one empties it.
+    // A list literal written to a `Set` is that `Set`. Its object is analyzed by now, so the property is found through
+    // any object: a local, `this`, an element, a call or another property.
+    let declared_type = match write_kind {
+        PropertyWriteKind::Direct | PropertyWriteKind::Coalesce if context.dialect.is_sharp() => {
+            let target = Expression::Access(Access::Property(property_access.clone()));
+
+            get_declared_type(context, block_context, artifacts, &target)
+        }
+        _ => None,
+    };
+    let mut literal_type = None;
+    if let Some(declared_type) = &declared_type {
+        if let Some(assigned_value) = assigned_value {
+            check_sharp_literal_kind(context, assigned_value, declared_type);
+        }
+        literal_type = match assigned_value_type.types.as_ref() {
+            [TAtomic::Array(array)] if array.is_empty() => get_empty_literal_type(assigned_value, declared_type),
+            _ => assigned_value.and_then(|value| get_set_literal_type(context, artifacts, value, declared_type)),
+        };
+    }
+    let assigned_value_type = literal_type.as_ref().unwrap_or(assigned_value_type);
 
     let mut resolved_property_type = None;
     let mut readable_type: Option<TUnion> = None;

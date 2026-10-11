@@ -53,6 +53,7 @@ use crate::effects::Effect;
 use crate::effects::EffectSummary;
 use crate::effects::Roots;
 use crate::statement::function_like::FunctionLikeBody;
+use crate::utils::names::is_prelude_stub;
 
 /// Records the summary of `body`, which messages name by `member`, and whose parameters are declared at `parameters`,
 /// into `artifacts`.
@@ -865,12 +866,6 @@ fn lambda_literal<'ast, 'arena>(expression: &'ast Expression<'arena>) -> Option<
     let expression = expression.unparenthesized();
 
     matches!(expression, Expression::ArrowFunction(_) | Expression::Closure(_)).then_some(expression)
-}
-
-/// A class under `Sharp\` that the prelude declares as a plain PHP stub.
-// Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
-fn is_prelude_stub(class: Word) -> bool {
-    class.as_bytes().len() > 6 && class.as_bytes()[..6].eq_ignore_ascii_case(b"sharp\\")
 }
 
 /// A plain PHP name as PHP# writes it: `App\now` as `App.now`.

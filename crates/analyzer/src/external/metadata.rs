@@ -135,32 +135,44 @@ pub(super) fn handle_query(
         GET_CLASS_LIKES => query_class_likes(reader, writer, codebase, session),
         GET_FUNCTIONS => query_names(reader, writer, |name, writer| {
             write_optional(writer, codebase.get_function(name), |writer, metadata| {
-                write_function_like(writer, FunctionLikeIdentifier::Function(metadata.original_name), metadata, session)
+                write_function_like(
+                    writer,
+                    FunctionLikeIdentifier::Function(metadata.original_name),
+                    metadata,
+                    codebase,
+                    session,
+                )
             })
         }),
         GET_METHODS => query_members(reader, writer, |class, member, writer| {
             write_optional(writer, codebase.get_method(class, member), |writer, metadata| {
-                write_function_like(writer, method_identifier(codebase, class, member, metadata), metadata, session)
+                write_function_like(
+                    writer,
+                    method_identifier(codebase, class, member, metadata),
+                    metadata,
+                    codebase,
+                    session,
+                )
             })
         }),
         GET_CONSTANTS => query_names(reader, writer, |name, writer| {
             write_optional(writer, codebase.get_constant(name), |writer, metadata| {
-                write_constant(writer, metadata, session)
+                write_constant(writer, metadata, codebase, session)
             })
         }),
         GET_PROPERTIES => query_members(reader, writer, |class, member, writer| {
             write_optional(writer, codebase.get_property(class, member), |writer, metadata| {
-                write_property(writer, metadata, session)
+                write_property(writer, metadata, codebase, session)
             })
         }),
         GET_CLASS_CONSTANTS => query_members(reader, writer, |class, member, writer| {
             write_optional(writer, codebase.get_class_constant(class, member), |writer, metadata| {
-                write_class_constant(writer, metadata, session)
+                write_class_constant(writer, metadata, codebase, session)
             })
         }),
         GET_ENUM_CASES => query_members(reader, writer, |class, member, writer| {
             write_optional(writer, codebase.get_enum_case(class, member), |writer, metadata| {
-                write_enum_case(writer, metadata, session)
+                write_enum_case(writer, metadata, codebase, session)
             })
         }),
         LIST_CLASS_LIKES => list_class_likes(reader, writer, codebase),
@@ -168,12 +180,18 @@ pub(super) fn handle_query(
         LIST_CONSTANTS => list_constants(reader, writer, codebase),
         GET_DECLARING_METHODS => query_members(reader, writer, |class, member, writer| {
             write_optional(writer, codebase.get_declaring_method(class, member), |writer, metadata| {
-                write_function_like(writer, method_identifier(codebase, class, member, metadata), metadata, session)
+                write_function_like(
+                    writer,
+                    method_identifier(codebase, class, member, metadata),
+                    metadata,
+                    codebase,
+                    session,
+                )
             })
         }),
         GET_DECLARING_PROPERTIES => query_members(reader, writer, |class, member, writer| {
             write_optional(writer, codebase.get_declaring_property(class, member), |writer, metadata| {
-                write_property(writer, metadata, session)
+                write_property(writer, metadata, codebase, session)
             })
         }),
         CHECK_EXISTENCE => check_existence(reader, writer, codebase),
@@ -181,12 +199,12 @@ pub(super) fn handle_query(
         GET_CLASS_LIKE_RELATIONS => get_class_like_relations(reader, writer, codebase),
         GET_MAGIC_PROPERTIES => query_members(reader, writer, |class, member, writer| {
             write_optional(writer, codebase.get_magic_property(class, member), |writer, metadata| {
-                write_property(writer, metadata, session)
+                write_property(writer, metadata, codebase, session)
             })
         }),
         GET_DECLARING_MAGIC_PROPERTIES => query_members(reader, writer, |class, member, writer| {
             write_optional(writer, codebase.get_declaring_magic_property(class, member), |writer, metadata| {
-                write_property(writer, metadata, session)
+                write_property(writer, metadata, codebase, session)
             })
         }),
         GET_FUNCTION_LIKES => query_function_likes(reader, writer, codebase, session),
@@ -365,29 +383,29 @@ fn write_method_projection(
     if fields & METHOD_FIELDS_PARAMETERS != 0 {
         writer.write_u32(metadata.parameters.len() as u32);
         for parameter in &metadata.parameters {
-            write_parameter(writer, parameter, session)?;
+            write_parameter(writer, parameter, codebase, session)?;
         }
     }
     if fields & METHOD_FIELDS_RETURN_TYPES != 0 {
-        write_optional_type_metadata(writer, metadata.return_type_declaration_metadata.as_ref(), session)?;
-        write_optional_type_metadata(writer, metadata.return_type_metadata.as_ref(), session)?;
+        write_optional_type_metadata(writer, metadata.return_type_declaration_metadata.as_ref(), codebase, session)?;
+        write_optional_type_metadata(writer, metadata.return_type_metadata.as_ref(), codebase, session)?;
     }
     if fields & METHOD_FIELDS_TEMPLATES != 0 {
-        write_templates(writer, &metadata.template_types, None, None)?;
+        write_templates(writer, &metadata.template_types, None, None, codebase)?;
     }
     if fields & METHOD_FIELDS_ATTRIBUTES != 0 {
-        write_attributes(writer, &metadata.attributes, session)?;
+        write_attributes(writer, &metadata.attributes, codebase, session)?;
     }
     if fields & METHOD_FIELDS_THROWN_TYPES != 0 {
         writer.write_u32(metadata.thrown_types.len() as u32);
         for thrown in &metadata.thrown_types {
-            write_type_metadata(writer, thrown, session)?;
+            write_type_metadata(writer, thrown, codebase, session)?;
         }
     }
     if fields & METHOD_FIELDS_ASSERTIONS != 0 {
-        write_assertions(writer, &metadata.assertions)?;
-        write_assertions(writer, &metadata.if_true_assertions)?;
-        write_assertions(writer, &metadata.if_false_assertions)?;
+        write_assertions(writer, &metadata.assertions, codebase)?;
+        write_assertions(writer, &metadata.if_true_assertions, codebase)?;
+        write_assertions(writer, &metadata.if_false_assertions, codebase)?;
         writer.write_bool(metadata.assertions_inferred);
     }
     if fields & METHOD_FIELDS_GLOBALS != 0 {
@@ -419,7 +437,7 @@ fn write_method_projection(
         writer.write_u32(constraints.len() as u32);
         for (name, constraint) in constraints {
             writer.write_bytes(name.as_bytes())?;
-            write_type_metadata(writer, constraint, session)?;
+            write_type_metadata(writer, constraint, codebase, session)?;
         }
     }
 
@@ -441,6 +459,7 @@ fn query_function_likes(
                 writer,
                 canonical_function_like_identifier(codebase, identifier, metadata),
                 metadata,
+                codebase,
                 session,
             )
         })?;
@@ -614,7 +633,7 @@ fn query_class_likes(
             _ => unreachable!(),
         };
 
-        write_optional(writer, metadata, |writer, metadata| write_class_like(writer, metadata, session))
+        write_optional(writer, metadata, |writer, metadata| write_class_like(writer, metadata, codebase, session))
     })
 }
 
@@ -669,6 +688,7 @@ where
 pub(super) fn write_class_like(
     writer: &mut PayloadWriter,
     metadata: &ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_bytes(metadata.name.as_bytes())?;
@@ -699,11 +719,12 @@ pub(super) fn write_class_like(
         &metadata.template_types,
         Some(&metadata.template_variance),
         Some(&metadata.template_readonly),
+        codebase,
     )?;
-    write_attributes(writer, &metadata.attributes, session)?;
-    write_type_aliases(writer, &metadata.type_aliases, session)?;
-    write_mixins(writer, &metadata.mixins)?;
-    write_optional_atomic(writer, metadata.enum_type.as_ref())?;
+    write_attributes(writer, &metadata.attributes, codebase, session)?;
+    write_type_aliases(writer, &metadata.type_aliases, codebase, session)?;
+    write_mixins(writer, &metadata.mixins, codebase)?;
+    write_optional_atomic(writer, metadata.enum_type.as_ref(), codebase)?;
     write_optional_bool(writer, metadata.has_sealed_methods);
     write_optional_bool(writer, metadata.has_sealed_properties);
     write_version_constraint(writer, &metadata.version_constraint);
@@ -720,12 +741,12 @@ pub(super) fn write_declarations(
     class_likes.sort_unstable_by_key(|class_like| class_like.span.start.offset);
     writer.write_u32(class_likes.len() as u32);
     for class_like in class_likes {
-        write_class_like(writer, class_like, &session)?;
+        write_class_like(writer, class_like, metadata, &session)?;
         let mut properties = class_like.properties.values().collect::<Vec<_>>();
         properties.sort_unstable_by(|left, right| left.name.0.as_bytes().cmp(right.name.0.as_bytes()));
         writer.write_u32(properties.len() as u32);
         for property in properties {
-            write_property(writer, property, &session)?;
+            write_property(writer, property, metadata, &session)?;
         }
     }
 
@@ -743,7 +764,7 @@ pub(super) fn write_declarations(
                 FunctionLikeIdentifier::Closure(function_like.name)
             }
         };
-        write_function_like(writer, identifier, function_like, &session)?;
+        write_function_like(writer, identifier, function_like, metadata, &session)?;
     }
 
     Ok(())
@@ -753,6 +774,7 @@ fn write_function_like(
     writer: &mut PayloadWriter,
     identifier: FunctionLikeIdentifier,
     metadata: &FunctionLikeMetadata,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     encode_function_like_identifier(writer, identifier)?;
@@ -769,22 +791,22 @@ fn write_function_like(
     write_optional_location(writer, metadata.name_span, session)?;
     writer.write_u32(metadata.parameters.len() as u32);
     for parameter in &metadata.parameters {
-        write_parameter(writer, parameter, session)?;
+        write_parameter(writer, parameter, codebase, session)?;
     }
 
-    write_optional_type_metadata(writer, metadata.return_type_declaration_metadata.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.return_type_metadata.as_ref(), session)?;
-    write_templates(writer, &metadata.template_types, None, None)?;
-    write_attributes(writer, &metadata.attributes, session)?;
+    write_optional_type_metadata(writer, metadata.return_type_declaration_metadata.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.return_type_metadata.as_ref(), codebase, session)?;
+    write_templates(writer, &metadata.template_types, None, None, codebase)?;
+    write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u32(metadata.thrown_types.len() as u32);
     for thrown in &metadata.thrown_types {
-        write_type_metadata(writer, thrown, session)?;
+        write_type_metadata(writer, thrown, codebase, session)?;
     }
 
     write_words(writer, metadata.globals_accessed.iter().copied())?;
-    write_assertions(writer, &metadata.assertions)?;
-    write_assertions(writer, &metadata.if_true_assertions)?;
-    write_assertions(writer, &metadata.if_false_assertions)?;
+    write_assertions(writer, &metadata.assertions, codebase)?;
+    write_assertions(writer, &metadata.if_true_assertions, codebase)?;
+    write_assertions(writer, &metadata.if_false_assertions, codebase)?;
     writer.write_bool(metadata.assertions_inferred);
     writer.write_bool(metadata.has_docblock);
     writer.write_u64(metadata.flags.bits());
@@ -801,7 +823,7 @@ fn write_function_like(
         writer.write_u32(constraints.len() as u32);
         for (name, constraint) in constraints {
             writer.write_bytes(name.as_bytes())?;
-            write_type_metadata(writer, constraint, session)?;
+            write_type_metadata(writer, constraint, codebase, session)?;
         }
     }
 
@@ -839,20 +861,25 @@ fn method_identifier(
 fn write_assertions(
     writer: &mut PayloadWriter,
     assertions: &BTreeMap<Word, Vec<Assertion>>,
+    codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(assertions.len() as u32);
     for (variable, values) in assertions {
         writer.write_bytes(variable.as_bytes())?;
         writer.write_u32(values.len() as u32);
         for assertion in values {
-            write_assertion(writer, assertion)?;
+            write_assertion(writer, assertion, codebase)?;
         }
     }
     Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
-fn write_assertion(writer: &mut PayloadWriter, assertion: &Assertion) -> Result<(), ExternalAnalyzerError> {
+fn write_assertion(
+    writer: &mut PayloadWriter,
+    assertion: &Assertion,
+    codebase: &CodebaseMetadata,
+) -> Result<(), ExternalAnalyzerError> {
     let kind = match assertion {
         Assertion::Any => 1,
         Assertion::IsType(_) => 2,
@@ -909,8 +936,8 @@ fn write_assertion(writer: &mut PayloadWriter, assertion: &Assertion) -> Result<
         | Assertion::IsIdentical(atomic)
         | Assertion::IsNotIdentical(atomic)
         | Assertion::IsEqual(atomic)
-        | Assertion::IsNotEqual(atomic) => write_atomic(writer, atomic)?,
-        Assertion::InArray(union) | Assertion::NotInArray(union) => write_union(writer, union)?,
+        | Assertion::IsNotEqual(atomic) => write_atomic(writer, atomic, codebase)?,
+        Assertion::InArray(union) | Assertion::NotInArray(union) => write_union(writer, union, codebase)?,
         Assertion::HasArrayKey(key)
         | Assertion::DoesNotHaveArrayKey(key)
         | Assertion::HasNonnullEntryForKey(key)
@@ -942,8 +969,12 @@ fn write_assertion(writer: &mut PayloadWriter, assertion: &Assertion) -> Result<
     Ok(())
 }
 
-fn write_atomic(writer: &mut PayloadWriter, atomic: &TAtomic) -> Result<(), ExternalAnalyzerError> {
-    write_union(writer, &TUnion::from_atomic(atomic.clone()))
+fn write_atomic(
+    writer: &mut PayloadWriter,
+    atomic: &TAtomic,
+    codebase: &CodebaseMetadata,
+) -> Result<(), ExternalAnalyzerError> {
+    write_union(writer, &TUnion::from_atomic(atomic.clone()), codebase)
 }
 
 fn write_array_key(writer: &mut PayloadWriter, key: &ArrayKey) -> Result<(), ExternalAnalyzerError> {
@@ -968,17 +999,18 @@ fn write_array_key(writer: &mut PayloadWriter, key: &ArrayKey) -> Result<(), Ext
 fn write_parameter(
     writer: &mut PayloadWriter,
     metadata: &FunctionLikeParameterMetadata,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_bytes(metadata.name.0.as_bytes())?;
     write_location(writer, metadata.span, session)?;
     write_location(writer, metadata.name_span, session)?;
-    write_optional_type_metadata(writer, metadata.type_declaration_metadata.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.out_type.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.closure_this_type.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.default_type.as_ref(), session)?;
-    write_attributes(writer, &metadata.attributes, session)?;
+    write_optional_type_metadata(writer, metadata.type_declaration_metadata.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.out_type.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.closure_this_type.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.default_type.as_ref(), codebase, session)?;
+    write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u64(metadata.flags.bits());
     Ok(())
 }
@@ -986,6 +1018,7 @@ fn write_parameter(
 pub(super) fn write_property(
     writer: &mut PayloadWriter,
     metadata: &PropertyMetadata,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_bytes(metadata.name.0.as_bytes())?;
@@ -993,13 +1026,13 @@ pub(super) fn write_property(
     write_optional_location(writer, metadata.name_span, session)?;
     write_visibility(writer, metadata.read_visibility);
     write_visibility(writer, metadata.write_visibility);
-    write_optional_type_metadata(writer, metadata.type_declaration_metadata.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.write_type_metadata.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.default_type_metadata.as_ref(), session)?;
-    write_attributes(writer, &metadata.attributes, session)?;
+    write_optional_type_metadata(writer, metadata.type_declaration_metadata.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.write_type_metadata.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.default_type_metadata.as_ref(), codebase, session)?;
+    write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u64(metadata.flags.bits());
-    write_property_hooks(writer, &metadata.hooks, session)?;
+    write_property_hooks(writer, &metadata.hooks, codebase, session)?;
     write_version_constraint(writer, &metadata.version_constraint);
     Ok(())
 }
@@ -1007,6 +1040,7 @@ pub(super) fn write_property(
 fn write_property_hooks(
     writer: &mut PayloadWriter,
     hooks: &mago_word::WordMap<PropertyHookMetadata>,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     let mut hooks: Vec<_> = hooks.values().collect();
@@ -1018,13 +1052,13 @@ fn write_property_hooks(
         writer.write_u64(hook.flags.bits());
         writer.write_bool(hook.parameter.is_some());
         if let Some(parameter) = &hook.parameter {
-            write_parameter(writer, parameter, session)?;
+            write_parameter(writer, parameter, codebase, session)?;
         }
 
         writer.write_bool(hook.returns_by_ref);
         writer.write_bool(hook.is_abstract);
-        write_attributes(writer, &hook.attributes, session)?;
-        write_optional_type_metadata(writer, hook.return_type_metadata.as_ref(), session)?;
+        write_attributes(writer, &hook.attributes, codebase, session)?;
+        write_optional_type_metadata(writer, hook.return_type_metadata.as_ref(), codebase, session)?;
         writer.write_bool(hook.has_docblock);
     }
 
@@ -1034,15 +1068,16 @@ fn write_property_hooks(
 fn write_class_constant(
     writer: &mut PayloadWriter,
     metadata: &ClassLikeConstantMetadata,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_bytes(metadata.name.as_bytes())?;
     write_location(writer, metadata.span, session)?;
     write_visibility(writer, metadata.visibility);
-    write_optional_type_metadata(writer, metadata.type_declaration.as_ref(), session)?;
-    write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), session)?;
-    write_optional_atomic(writer, metadata.inferred_type.as_ref())?;
-    write_attributes(writer, &metadata.attributes, session)?;
+    write_optional_type_metadata(writer, metadata.type_declaration.as_ref(), codebase, session)?;
+    write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), codebase, session)?;
+    write_optional_atomic(writer, metadata.inferred_type.as_ref(), codebase)?;
+    write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u64(metadata.flags.bits());
     write_version_constraint(writer, &metadata.version_constraint);
     Ok(())
@@ -1051,13 +1086,14 @@ fn write_class_constant(
 fn write_enum_case(
     writer: &mut PayloadWriter,
     metadata: &EnumCaseMetadata,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_bytes(metadata.name.as_bytes())?;
     write_location(writer, metadata.span, session)?;
     write_location(writer, metadata.name_span, session)?;
-    write_optional_atomic(writer, metadata.value_type.as_ref())?;
-    write_attributes(writer, &metadata.attributes, session)?;
+    write_optional_atomic(writer, metadata.value_type.as_ref(), codebase)?;
+    write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u64(metadata.flags.bits());
     write_version_constraint(writer, &metadata.version_constraint);
     Ok(())
@@ -1066,13 +1102,14 @@ fn write_enum_case(
 fn write_constant(
     writer: &mut PayloadWriter,
     metadata: &ConstantMetadata,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_bytes(metadata.name.as_bytes())?;
     write_location(writer, metadata.span, session)?;
-    write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), session)?;
-    write_optional_union(writer, metadata.inferred_type.as_ref())?;
-    write_attributes(writer, &metadata.attributes, session)?;
+    write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), codebase, session)?;
+    write_optional_union(writer, metadata.inferred_type.as_ref(), codebase)?;
+    write_attributes(writer, &metadata.attributes, codebase, session)?;
     writer.write_u64(metadata.flags.bits());
     write_version_constraint(writer, &metadata.version_constraint);
     Ok(())
@@ -1105,10 +1142,11 @@ fn write_optional_location(
 fn write_type_metadata(
     writer: &mut PayloadWriter,
     metadata: &TypeMetadata,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     write_location(writer, metadata.span, session)?;
-    write_union(writer, &metadata.type_union)?;
+    write_union(writer, &metadata.type_union, codebase)?;
     writer.write_bool(metadata.from_docblock);
     writer.write_bool(metadata.inferred);
     Ok(())
@@ -1117,14 +1155,18 @@ fn write_type_metadata(
 fn write_optional_type_metadata(
     writer: &mut PayloadWriter,
     metadata: Option<&TypeMetadata>,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
-    write_optional(writer, metadata, |writer, metadata| write_type_metadata(writer, metadata, session))
+    write_optional(writer, metadata, |writer, metadata| write_type_metadata(writer, metadata, codebase, session))
 }
 
-fn write_union(writer: &mut PayloadWriter, union: &TUnion) -> Result<(), ExternalAnalyzerError> {
-    let mut references = Vec::new();
-    encode_union_snapshot(writer, union, &mut references, 0)
+fn write_union(
+    writer: &mut PayloadWriter,
+    union: &TUnion,
+    codebase: &CodebaseMetadata,
+) -> Result<(), ExternalAnalyzerError> {
+    encode_union_snapshot(writer, union, &mut Vec::new(), codebase, 0)
 }
 
 trait MixinType {
@@ -1145,29 +1187,42 @@ impl MixinType for TypeMetadata {
     }
 }
 
-fn write_mixins<T>(writer: &mut PayloadWriter, mixins: &[T]) -> Result<(), ExternalAnalyzerError>
+fn write_mixins<T>(
+    writer: &mut PayloadWriter,
+    mixins: &[T],
+    codebase: &CodebaseMetadata,
+) -> Result<(), ExternalAnalyzerError>
 where
     T: MixinType,
 {
     writer.write_u32(mixins.len() as u32);
     for mixin in mixins {
-        write_union(writer, mixin.type_union())?;
+        write_union(writer, mixin.type_union(), codebase)?;
     }
 
     Ok(())
 }
 
-fn write_optional_union(writer: &mut PayloadWriter, union: Option<&TUnion>) -> Result<(), ExternalAnalyzerError> {
-    write_optional(writer, union, write_union)
+fn write_optional_union(
+    writer: &mut PayloadWriter,
+    union: Option<&TUnion>,
+    codebase: &CodebaseMetadata,
+) -> Result<(), ExternalAnalyzerError> {
+    write_optional(writer, union, |writer, union| write_union(writer, union, codebase))
 }
 
-fn write_optional_atomic(writer: &mut PayloadWriter, atomic: Option<&TAtomic>) -> Result<(), ExternalAnalyzerError> {
-    write_optional(writer, atomic, |writer, atomic| write_union(writer, &TUnion::from_atomic(atomic.clone())))
+fn write_optional_atomic(
+    writer: &mut PayloadWriter,
+    atomic: Option<&TAtomic>,
+    codebase: &CodebaseMetadata,
+) -> Result<(), ExternalAnalyzerError> {
+    write_optional(writer, atomic, |writer, atomic| write_atomic(writer, atomic, codebase))
 }
 
 fn write_attributes(
     writer: &mut PayloadWriter,
     attributes: &[AttributeMetadata],
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(attributes.len() as u32);
@@ -1180,7 +1235,7 @@ fn write_attributes(
             write_location(writer, argument.span, session)?;
             write_optional_location(writer, argument.name_span, session)?;
             write_optional_location(writer, argument.value_span, session)?;
-            write_optional_union(writer, argument.value_type.as_ref())?;
+            write_optional_union(writer, argument.value_type.as_ref(), codebase)?;
             write_optional(writer, argument.value.as_ref(), |writer, value| {
                 write_constant_expression(writer, value, session)
             })?;
@@ -1257,13 +1312,14 @@ fn write_templates(
     templates: &TemplateTypes,
     variances: Option<&[Variance]>,
     readonly: Option<&mago_word::WordSet>,
+    codebase: &CodebaseMetadata,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(templates.len() as u32);
     for (index, (name, template)) in templates.iter().enumerate() {
         writer.write_bytes(name.as_bytes())?;
         encode_generic_parent(writer, template.defining_entity)?;
-        write_union(writer, &template.constraint)?;
-        write_optional_union(writer, template.default.as_ref())?;
+        write_union(writer, &template.constraint, codebase)?;
+        write_optional_union(writer, template.default.as_ref(), codebase)?;
         writer
             .write_u8(variance(variances.and_then(|values| values.get(index)).copied().unwrap_or(Variance::Invariant)));
         writer.write_bool(readonly.is_some_and(|names| names.contains(name)));
@@ -1275,6 +1331,7 @@ fn write_templates(
 fn write_type_aliases(
     writer: &mut PayloadWriter,
     aliases: &mago_word::WordMap<TypeMetadata>,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     let mut aliases: Vec<_> = aliases.iter().collect();
@@ -1282,7 +1339,7 @@ fn write_type_aliases(
     writer.write_u32(aliases.len() as u32);
     for (name, metadata) in aliases {
         writer.write_bytes(name.as_bytes())?;
-        write_type_metadata(writer, metadata, session)?;
+        write_type_metadata(writer, metadata, codebase, session)?;
     }
 
     Ok(())

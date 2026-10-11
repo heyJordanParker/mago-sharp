@@ -62,12 +62,12 @@ pub struct GenericHint<'arena> {
     pub type_arguments: TypeArgumentList<'arena>,
 }
 
-/// The number of type arguments a PHP# generic type takes when `name` is one of PHP#'s own `List`, `Map` and `Class`,
-/// which name no class, or `None` for any other name.
+/// The number of type arguments a PHP# generic type takes when `name` is one of PHP#'s own `List`, `Map`, `Set` and
+/// `Class`, which name no class, or `None` for any other name.
 #[must_use]
 pub fn built_in_generic_arity(name: &[u8]) -> Option<usize> {
     match name {
-        b"List" | b"Class" => Some(1),
+        b"List" | b"Set" | b"Class" => Some(1),
         b"Map" => Some(2),
         _ => None,
     }

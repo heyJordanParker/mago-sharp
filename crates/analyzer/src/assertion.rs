@@ -18,6 +18,7 @@ use mago_codex::ttype::atomic::scalar::string::TStringCasing;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::get_array_value_parameter;
 use mago_codex::ttype::get_arraykey;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_bool;
 use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_float;
@@ -41,6 +42,7 @@ use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::dialect::Dialect;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
@@ -672,6 +674,11 @@ fn get_possible_array_key_argument_type(
                             codebase,
                         );
                     }
+                }
+            }
+            TArray::Set(element_type) => {
+                for atomic in get_backing_key_type(element_type, codebase, Dialect::Sharp).types.as_ref() {
+                    add_possible_key_argument_type(atomic, input_key_type, &mut key_type, codebase);
                 }
             }
         }

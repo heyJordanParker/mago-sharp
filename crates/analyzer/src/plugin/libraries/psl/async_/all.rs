@@ -113,6 +113,7 @@ pub(super) fn unwrap_awaitable_array(array: &TArray, context: &ProviderContext<'
                 known_non_list: keyed.known_non_list,
             }))))
         }
+        TArray::Set(_) => None,
     }
 }
 

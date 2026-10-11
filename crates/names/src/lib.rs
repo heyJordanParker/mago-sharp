@@ -27,12 +27,12 @@ pub mod scope;
 
 mod internal;
 
-/// The methods of a PHP# `List` or `Map` that change it.
+/// The methods of a PHP# `List`, `Map` or `Set` that change it.
 ///
 /// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
 /// [`ResolvedNames::is_written`] reports. The binder knows no types, so a call of a method of these names on an object
 /// writes its local too, which captures it by reference, as harmless.
-pub const CHANGING_COLLECTION_METHODS: [&str; 3] = ["add", "set", "delete"];
+pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "delete", "remove", "clear"];
 
 /// The last segment of the full name `name`, as a PHP# import writes it.
 #[must_use]

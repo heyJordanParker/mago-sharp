@@ -257,6 +257,7 @@ pub(crate) fn expand_atomic(
                     }
                 }
             }
+            TArray::Set(element_type) => expand_union(codebase, Arc::make_mut(element_type), options),
         },
         TAtomic::Object(object) => {
             if let Some(parameter) = resolve_generic_static_type(object, codebase, options) {

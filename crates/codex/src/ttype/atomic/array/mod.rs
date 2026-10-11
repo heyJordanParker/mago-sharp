@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use mago_word::Word;
+use mago_word::concat_word;
 
 use crate::ttype::TType;
 use crate::ttype::TypeRef;
@@ -25,6 +26,9 @@ pub enum TArray {
     List(TList),
     /// Represents an array used as a map (string keys or non-standard integer keys). `array<Tk, Tv>`.
     Keyed(TKeyedArray),
+    /// Represents a PHP# `Set<T>`, holding its element type: an array keyed by each element, or by a backed enum's
+    /// backing value, with the element as the value. Iteration follows insertion order.
+    Set(Arc<TUnion>),
 }
 
 impl PartialEq for TArray {
@@ -37,6 +41,7 @@ impl PartialEq for TArray {
         match (self, other) {
             (TArray::List(a), TArray::List(b)) => a == b,
             (TArray::Keyed(a), TArray::Keyed(b)) => a == b,
+            (TArray::Set(a), TArray::Set(b)) => a == b,
             _ => false,
         }
     }
@@ -79,6 +84,7 @@ impl TArray {
                 list.element_type.is_never()
                     && list.known_elements.as_ref().is_none_or(std::collections::BTreeMap::is_empty)
             }
+            Self::Set(element_type) => element_type.is_never(),
         }
     }
 
@@ -88,6 +94,7 @@ impl TArray {
         match &self {
             Self::Keyed(keyed_array) => keyed_array.known_items.as_ref().is_some_and(|items| !items.is_empty()),
             Self::List(list) => list.known_elements.as_ref().is_some_and(|items| !items.is_empty()),
+            Self::Set(_) => false,
         }
     }
 
@@ -96,6 +103,7 @@ impl TArray {
         match &self {
             Self::Keyed(keyed_array) => keyed_array.parameters.is_none(),
             Self::List(list) => list.element_type.is_never(),
+            Self::Set(element_type) => element_type.is_never(),
         }
     }
 
@@ -106,6 +114,7 @@ impl TArray {
         match &self {
             Self::Keyed(keyed_array) => keyed_array.non_empty,
             Self::List(list) => list.non_empty,
+            Self::Set(_) => false,
         }
     }
 
@@ -129,7 +138,7 @@ impl TArray {
 
                 key_parameter.is_array_key() && value_parameter.is_vanilla_mixed()
             }
-            Self::List(_) => false,
+            Self::List(_) | Self::Set(_) => false,
         }
     }
 
@@ -163,6 +172,7 @@ impl TArray {
                     size = 1;
                 }
             }
+            Self::Set(_) => {}
         }
 
         size
@@ -180,6 +190,7 @@ impl TArray {
                 None
             }
             Self::List(_) => Some(get_int()),
+            Self::Set(element_type) => Some(element_type.as_ref().clone()),
         }
     }
 
@@ -195,6 +206,7 @@ impl TArray {
                 None
             }
             Self::List(list) => Some(list.element_type.as_ref().clone()),
+            Self::Set(element_type) => Some(element_type.as_ref().clone()),
         }
     }
 
@@ -218,6 +230,7 @@ impl TArray {
 
                 false
             }
+            Self::Set(_) => false,
             Self::List(list) => {
                 if list.non_empty {
                     return true;
@@ -257,6 +270,7 @@ impl TArray {
                 !keyed_array.non_empty
             }
             Self::List(list) => list.known_elements.is_none() && list.element_type.is_never() && !list.non_empty,
+            Self::Set(element_type) => element_type.is_never(),
         }
     }
 
@@ -270,6 +284,7 @@ impl TArray {
                 .as_ref()
                 .is_some_and(|p| p.0.contains_placeholder() || p.1.contains_placeholder()),
             Self::List(list) => list.element_type.contains_placeholder(),
+            Self::Set(element_type) => element_type.contains_placeholder(),
         }
     }
 
@@ -293,6 +308,11 @@ impl TArray {
                     *Arc::make_mut(&mut list.element_type) = get_mixed();
                 }
             }
+            Self::Set(element_type) => {
+                if matches!(element_type.get_single(), TAtomic::Placeholder) {
+                    *Arc::make_mut(element_type) = get_mixed();
+                }
+            }
         }
     }
 }
@@ -302,6 +322,7 @@ impl TType for TArray {
         match self {
             TArray::Keyed(keyed_array) => keyed_array.get_child_nodes(),
             TArray::List(list) => list.get_child_nodes(),
+            TArray::Set(element_type) => vec![TypeRef::Union(element_type)],
         }
     }
 
@@ -309,6 +330,7 @@ impl TType for TArray {
         match self {
             TArray::Keyed(keyed_array) => keyed_array.needs_population(),
             TArray::List(list) => list.needs_population(),
+            TArray::Set(element_type) => element_type.needs_population(),
         }
     }
 
@@ -316,6 +338,7 @@ impl TType for TArray {
         match self {
             TArray::Keyed(keyed_array) => keyed_array.is_expandable(),
             TArray::List(list) => list.is_expandable(),
+            TArray::Set(element_type) => element_type.is_expandable(),
         }
     }
 
@@ -323,6 +346,7 @@ impl TType for TArray {
         match self {
             TArray::Keyed(keyed_array) => keyed_array.is_complex(),
             TArray::List(list) => list.is_complex(),
+            TArray::Set(element_type) => element_type.is_complex(),
         }
     }
 
@@ -330,6 +354,7 @@ impl TType for TArray {
         match self {
             TArray::List(list_data) => list_data.get_id(),
             TArray::Keyed(keyed_data) => keyed_data.get_id(),
+            TArray::Set(element_type) => concat_word!(b"set<", element_type.get_id(), b">"),
         }
     }
 
@@ -337,6 +362,9 @@ impl TType for TArray {
         match self {
             TArray::List(list_data) => list_data.get_pretty_id_with_indent(indent),
             TArray::Keyed(keyed_data) => keyed_data.get_pretty_id_with_indent(indent),
+            TArray::Set(element_type) => {
+                concat_word!(b"set<", element_type.get_pretty_id_with_indent(indent), b">")
+            }
         }
     }
 }

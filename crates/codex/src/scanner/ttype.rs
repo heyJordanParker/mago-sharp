@@ -20,6 +20,7 @@ use crate::misc::GenericParent;
 use crate::scanner::Context;
 use crate::ttype::TType;
 use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::atomic::callable::TCallableSignature;
 use crate::ttype::atomic::callable::parameter::TCallableParameter;
@@ -279,6 +280,7 @@ fn union_from_hint(
 
                         get_keyed_array(arguments.swap_remove(0), value)
                     }
+                    b"Set" => wrap_atomic(TAtomic::Array(TArray::Set(Arc::new(arguments.swap_remove(0))))),
                     b"Class" => builder::get_class_strings_of(
                         TClassLikeStringKind::Class,
                         arguments.swap_remove(0),

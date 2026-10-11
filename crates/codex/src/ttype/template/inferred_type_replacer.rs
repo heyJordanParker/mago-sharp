@@ -289,6 +289,9 @@ fn replace_atomic(
                     }
                 }
             }
+            TArray::Set(element_type) => {
+                *Arc::make_mut(element_type) = replace_with_polarity(element_type, template_result, codebase, polarity);
+            }
         },
         TAtomic::Iterable(iterable) => {
             let key_type = iterable.get_key_type_mut();

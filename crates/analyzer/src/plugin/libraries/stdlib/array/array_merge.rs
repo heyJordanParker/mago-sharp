@@ -173,6 +173,7 @@ impl FunctionReturnTypeProvider for ArrayMergeProvider {
                             });
                         }
                     }
+                    TArray::Set(_) => return None,
                 }
             } else if let Some((iterable_key, iterable_value)) = get_iterable_parameters(iterable, codebase) {
                 all_arguments_are_lists = false;

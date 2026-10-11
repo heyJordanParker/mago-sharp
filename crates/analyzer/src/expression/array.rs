@@ -20,6 +20,7 @@ use mago_codex::ttype::combiner::combine;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_empty_keyed_array;
@@ -44,6 +45,7 @@ use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::VariadicArrayElement;
+use mago_syntax::dialect::Dialect;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
@@ -104,6 +106,60 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LegacyArray<'arena> {
     {
         analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())
     }
+}
+
+/// The type a PHP# literal has at a place declared a `Set`: spec section 12 makes a list literal the `Set` of its
+/// elements, which the lowering keys by each element. The literal keeps this type, so its place checks its elements. A
+/// `Map` literal there is refused by [`check_sharp_literal_kind`], and keeps the `Set` of its values, so its place adds
+/// no second issue, unless the place also declares a `Map`, which takes it as it is. `None` for any other value or
+/// place. The literal inside any parentheses gets the type too, since the lowering reads it there.
+pub(crate) fn get_set_literal_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    value: &Expression<'_>,
+    declared_type: &TUnion,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let literal = unwrap_expression(value);
+    let Expression::Array(array_literal) = literal else {
+        return None;
+    };
+    let declares_set = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
+    let declares_map = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
+    if !context.dialect.is_sharp() || !declares_set || (declares_map && is_map_literal(array_literal) == Some(true)) {
+        return None;
+    }
+
+    let array = artifacts.get_expression_type(value)?.get_single_array()?;
+    let (_, element_type) = get_array_parameters(array, context.codebase);
+    let set_type = TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))));
+    artifacts.set_expression_type(literal, set_type.clone());
+    artifacts.set_expression_type(value, set_type.clone());
+
+    Some(set_type)
+}
+
+/// The type an empty value written to a place declared `declared` has there: PHP types `[]` and `[:]` as one empty
+/// array, and the place keeps the collection it declares, so its rules and elements stay. `[]` is the place's `List`
+/// or `Set` and `[:]` its `Map`, whichever its union names. A literal no collection there takes, which
+/// [`check_sharp_literal_kind`] refuses, and any other empty value keep every collection the place declares, so the
+/// place adds no second issue. `None` where `declared` holds no collection.
+pub(crate) fn get_empty_literal_type(value: Option<&Expression<'_>>, declared: &TUnion) -> Option<TUnion> {
+    let collections = declared.types.iter().filter(|atomic| matches!(atomic, TAtomic::Array(_)));
+    let is_map_literal = match value.map(Expression::unparenthesized) {
+        Some(Expression::Array(literal)) => is_map_literal(literal),
+        _ => None,
+    };
+    let taken: Vec<TAtomic> = collections
+        .clone()
+        .filter(|atomic| Some(matches!(atomic, TAtomic::Array(TArray::Keyed(_)))) == is_map_literal)
+        .cloned()
+        .collect();
+    let types = if taken.is_empty() { collections.cloned().collect() } else { taken };
+
+    (!types.is_empty()).then(|| TUnion::from_vec(types))
 }
 
 #[derive(Debug)]
@@ -561,19 +617,17 @@ fn report_sharp_literal_spreads<A>(
                     continue;
                 };
 
+                let is_list_or_map =
+                    |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(_) | TArray::Keyed(_)));
+
                 if spread_type.types.iter().all(|atomic| atomic.is_list() || atomic.is_never()) {
                     false
-                } else if spread_type
-                    .types
-                    .iter()
-                    .all(|atomic| matches!(atomic, TAtomic::Array(_)) || atomic.is_never())
-                {
+                } else if spread_type.types.iter().all(|atomic| is_list_or_map(atomic) || atomic.is_never()) {
                     true
                 } else {
                     // A value that may not be iterable already has PHP's own error.
                     if let Some(atomic) = spread_type.types.iter().find(|atomic| {
-                        !matches!(atomic, TAtomic::Array(_))
-                            && get_iterable_value_parameter(atomic, context.codebase).is_some()
+                        !is_list_or_map(atomic) && get_iterable_value_parameter(atomic, context.codebase).is_some()
                     }) {
                         let type_str = display_atomic(context, atomic);
                         context.collector.report_with_code(
@@ -614,9 +668,12 @@ fn report_sharp_literal_spreads<A>(
 }
 
 /// Reports a PHP# literal written where the other collection is declared. `[]` and `[a, b]` are `List` literals, and
-/// `[:]` and `[key: value]` are `Map` literals, whatever their place declares. A literal reaches the place as `value`
-/// itself, or through the right side of `??`, either branch of `? :` or an arm of a `match`, at any depth. A literal of
-/// spreads names no collection of its own, and `report_sharp_literal_spreads` checks what it spreads.
+/// `[:]` and `[key: value]` are `Map` literals, whatever their place declares. A place declared a `Set` takes a `List`
+/// literal, which becomes the `Set` of its elements. A literal is refused only when no collection in `declared` takes
+/// its kind, whatever their order, so `List.wrap`'s `T|List<T>` takes either literal once `T` is a `Map`. A literal
+/// reaches the place as `value` itself, or through the right side of `??`, either branch of `? :` or an arm of a
+/// `match`, at any depth. A literal of spreads names no collection of its own, and `report_sharp_literal_spreads`
+/// checks what it spreads.
 pub(crate) fn check_sharp_literal_kind<A>(context: &mut Context<'_, '_, A>, value: &Expression<'_>, declared: &TUnion)
 where
     A: Arena,
@@ -625,12 +682,15 @@ where
         return;
     }
 
-    let Some(collection) = declared.types.iter().find_map(|atomic| match atomic {
+    let collections = declared.types.iter().filter_map(|atomic| match atomic {
         TAtomic::Array(array) => Some(array),
         _ => None,
-    }) else {
+    });
+    let Some(collection) = collections.clone().next() else {
         return;
     };
+    let takes_map_literal = collections.clone().any(|array| matches!(array, TArray::Keyed(_)));
+    let takes_list_literal = collections.clone().any(|array| matches!(array, TArray::List(_) | TArray::Set(_)));
 
     // The values still to look at, last first, so the literals are reported in the order they are written.
     let mut values = vec![value];
@@ -656,18 +716,21 @@ where
             _ => continue,
         };
 
-        let is_map_literal = match literal.elements.iter().find(|element| element.is_key_value() || element.is_value())
-        {
-            Some(element) => element.is_key_value(),
-            None if literal.elements.is_empty() => literal.colon.is_some(),
-            None => continue,
+        let Some(is_map_literal) = is_map_literal(literal) else {
+            continue;
         };
+        if (is_map_literal && takes_map_literal) || (!is_map_literal && takes_list_literal) {
+            continue;
+        }
 
-        let message = match (is_map_literal, collection.is_list(), literal.elements.is_empty()) {
-            (false, false, true) => "`[]` is an empty List. An empty Map is written `[:]`.",
-            (false, false, false) => "A Map literal is written `[key: value]`.",
-            (true, true, true) => "`[:]` is an empty Map. An empty List is written `[]`.",
-            (true, true, false) => "A List literal is written `[a, b]`.",
+        // No collection takes the literal, so the first is of a kind it cannot reach, and names the literal to write.
+        let message = match (is_map_literal, collection, literal.elements.is_empty()) {
+            (false, TArray::Keyed(_), true) => "`[]` is an empty List. An empty Map is written `[:]`.",
+            (false, TArray::Keyed(_), false) => "A Map literal is written `[key: value]`.",
+            (true, TArray::List(_), true) => "`[:]` is an empty Map. An empty List is written `[]`.",
+            (true, TArray::List(_), false) => "A List literal is written `[a, b]`.",
+            (true, TArray::Set(_), true) => "`[:]` is an empty Map. An empty Set is written `[]`.",
+            (true, TArray::Set(_), false) => "A Set literal is written `[a, b]`.",
             _ => continue,
         };
 
@@ -678,6 +741,16 @@ where
                 Annotation::primary(literal.span()).with_message(format!("Declared `{declared_str}`.")),
             ),
         );
+    }
+}
+
+/// Whether a PHP# literal is a `Map` literal, `[:]` or `[key: value]`, rather than a `List` literal, `[]` or `[a, b]`.
+/// `None` for a literal of spreads alone, which names no collection of its own.
+fn is_map_literal(literal: &Array<'_>) -> Option<bool> {
+    match literal.elements.iter().find(|element| element.is_key_value() || element.is_value()) {
+        Some(element) => Some(element.is_key_value()),
+        None if literal.elements.is_empty() => Some(literal.colon.is_some()),
+        None => None,
     }
 }
 
@@ -805,6 +878,20 @@ fn handle_variadic_array_element<'arena, A>(
                     }
 
                     (None, Cow::Borrowed(list_data.get_element_type()))
+                }
+                // A PHP# `Set` spread is refused above; plain PHP spreads the array it runs as, keyed by each
+                // element's backing value.
+                TArray::Set(element_type) => {
+                    all_non_empty = false;
+                    array_creation_info.is_list = false;
+                    array_creation_info.can_create_objectlike = false;
+
+                    (
+                        Some(Cow::Owned(
+                            get_backing_key_type(element_type, context.codebase, Dialect::Sharp).into_owned(),
+                        )),
+                        Cow::Borrowed(element_type.as_ref()),
+                    )
                 }
             },
             atomic => {

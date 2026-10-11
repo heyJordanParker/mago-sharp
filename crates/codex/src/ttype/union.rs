@@ -1105,6 +1105,7 @@ impl TUnion {
                     Some((_, v)) => Some(Cow::Borrowed(v)),
                     None => Some(Cow::Owned(get_mixed())),
                 },
+                TArray::Set(element_type) => Some(Cow::Borrowed(element_type)),
             },
             _ => None,
         }
@@ -1396,6 +1397,7 @@ fn widen_atomic(atomic: &mut TAtomic, kind: WidenKind) {
                     }
                 }
             }
+            TArray::Set(element_type) => widen_arc_union(element_type, kind),
         },
         TAtomic::Iterable(iterable) => {
             widen_arc_union(&mut iterable.key_type, kind);

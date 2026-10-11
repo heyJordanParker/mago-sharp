@@ -2009,6 +2009,7 @@ where
             program,
             resolved_names,
             artifacts,
+            codebase,
             node_analysis_targets: node_analysis_requirements.as_ref().map(NodeAnalysisRequirements::targets),
         };
         for (backend_index, backend) in self.backends.iter().enumerate() {
@@ -2467,6 +2468,7 @@ where
                 invocation,
                 artifacts,
                 source_file,
+                codebase,
                 session.generation(),
                 memoize,
                 self.trace_enabled,
@@ -2637,6 +2639,7 @@ where
                 invocation,
                 artifacts,
                 source_file,
+                codebase,
                 session.generation(),
                 memoize,
                 self.trace_enabled,
@@ -2793,6 +2796,7 @@ where
                 invocation,
                 artifacts,
                 source_file,
+                codebase,
                 session.generation(),
                 memoize,
                 self.trace_enabled,
@@ -2900,6 +2904,7 @@ where
                 access,
                 receiver_type,
                 span,
+                codebase,
                 session.generation(),
                 self.trace_enabled,
             )
@@ -2987,6 +2992,7 @@ where
                 member,
                 property,
                 receiver_type,
+                codebase,
                 session.generation(),
                 self.trace_enabled,
             )
@@ -3058,6 +3064,7 @@ where
                 original_class,
                 property,
                 session.generation(),
+                codebase,
                 session,
             )
             .inspect_err(|_| self.record_error())?;
@@ -3151,9 +3158,14 @@ where
             }
 
             let encode_start = self.trace_enabled.then(Instant::now);
-            let request =
-                protocol::encode_class_initializer_request(indices.as_slice(), class, session.generation(), session)
-                    .inspect_err(|_| self.record_error())?;
+            let request = protocol::encode_class_initializer_request(
+                indices.as_slice(),
+                class,
+                session.generation(),
+                codebase,
+                session,
+            )
+            .inspect_err(|_| self.record_error())?;
             if let Some(start) = encode_start {
                 self.telemetry.encode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
                 self.telemetry.request_bytes.fetch_add(request.len() as u64, Ordering::Relaxed);

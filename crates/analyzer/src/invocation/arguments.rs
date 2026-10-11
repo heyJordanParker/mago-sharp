@@ -10,6 +10,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
@@ -38,6 +39,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::invocation::InvocationTarget;
+use crate::invocation::analyzer::adjust_offset_for_variadic;
 use crate::statement::function_like::closure_parameter_types;
 use crate::statement::function_like::rejected_nullable_parameter::writes_null;
 use crate::utils::expression::is_referenceable;
@@ -346,9 +348,27 @@ pub fn verify_argument_type<'arena, A>(
     };
     let parameter_type = backing_parameter_type.as_ref().unwrap_or(parameter_type);
 
+    // Spec section 12 converts a list passed where a `Set` is expected: a PHP# method or lambda makes a `Set` of each
+    // parameter it declares `Set` before its body runs, so that parameter takes a `List` of its elements too. A call
+    // through a `Function` value, of plain PHP, or of a parameter whose `Set` comes from a template runs no such body.
+    let list_accepting_parameter_type = invocation_target
+        .get_function_like_metadata()
+        .filter(|function| function.flags.is_sharp())
+        .and_then(|_| invocation_target.get_parameter(adjust_offset_for_variadic(invocation_target, argument_offset)))
+        .and_then(|parameter| parameter.get_type())
+        .filter(|declared_type| is_declared_set(declared_type))
+        .and_then(|_| get_list_accepting_set_type(parameter_type));
+
     let mut union_comparison_result = ComparisonResult::for_dialect(context.dialect);
-    let type_match_found =
-        is_contained_by(context.codebase, input_type, parameter_type, true, true, false, &mut union_comparison_result);
+    let type_match_found = is_contained_by(
+        context.codebase,
+        input_type,
+        list_accepting_parameter_type.as_ref().unwrap_or(parameter_type),
+        true,
+        true,
+        false,
+        &mut union_comparison_result,
+    );
 
     if type_match_found {
         return;
@@ -529,6 +549,32 @@ fn get_backing_array_type(parameter_type: &TUnion, codebase: &CodebaseMetadata, 
     Some(TUnion::from_vec(
         parameter_type.types.iter().map(|atomic| backing_atomic(atomic).unwrap_or_else(|| atomic.clone())).collect(),
     ))
+}
+
+/// Whether a parameter declared `declared_type` is written `Set<T>` or `Set<T>?`, the parameters the lowering converts.
+fn is_declared_set(declared_type: &TUnion) -> bool {
+    declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
+        && declared_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_)) | TAtomic::Null))
+}
+
+/// Returns `parameter_type` with each `Set` also taking a `List` of its elements, or `None` when it has no `Set`.
+fn get_list_accepting_set_type(parameter_type: &TUnion) -> Option<TUnion> {
+    let lists: Vec<TAtomic> = parameter_type
+        .types
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Array(TArray::Set(element_type)) => {
+                Some(TAtomic::Array(TArray::List(TList::new(Arc::clone(element_type)))))
+            }
+            _ => None,
+        })
+        .collect();
+
+    if lists.is_empty() {
+        return None;
+    }
+
+    Some(TUnion::from_vec(parameter_type.types.iter().cloned().chain(lists).collect()))
 }
 
 /// Gets the element type when unpacking an argument with the spread operator. In PHP# a type that may not be iterable

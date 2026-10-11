@@ -185,6 +185,9 @@ fn replace_atomic(
                         self::replace(&list_data.element_type, template_result, codebase, next_opts);
                 }
             }
+            TArray::Set(element_type) => {
+                *Arc::make_mut(element_type) = self::replace(element_type, template_result, codebase, next_opts);
+            }
         },
         TAtomic::Object(TObject::Named(named_object)) => {
             let object_name = named_object.name;

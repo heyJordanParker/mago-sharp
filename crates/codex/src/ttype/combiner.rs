@@ -405,6 +405,7 @@ fn finalize_sealed_arrays(arrays: &mut Vec<TArray>, codebase: &CodebaseMetadata)
     arrays.sort_unstable_by_key(|a| match a {
         TArray::List(list) => list.known_elements.as_ref().map_or(0, std::collections::BTreeMap::len),
         TArray::Keyed(keyed) => keyed.known_items.as_ref().map_or(0, std::collections::BTreeMap::len),
+        TArray::Set(_) => 0,
     });
 
     let mut keep = vec![true; arrays.len()];
@@ -977,6 +978,11 @@ fn scrape_type_properties(
                             combine_union_types(&existing_types.1, &params.1, codebase, options),
                         )),
                     };
+                }
+                // A `Set` is no list or map shape, so each `Set` type stays a member of the union.
+                TArray::Set(element_type) => {
+                    let set = TAtomic::Array(TArray::Set(element_type));
+                    combination.value_types.insert(set.get_id(), set);
                 }
             }
         }

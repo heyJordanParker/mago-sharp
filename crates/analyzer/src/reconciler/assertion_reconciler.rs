@@ -478,6 +478,11 @@ where
                     new_keyed.parameters = Some((Arc::new(narrowed_key), Arc::new(narrowed_value)));
                     TAtomic::Array(TArray::Keyed(new_keyed))
                 }
+                TArray::Set(element_type) => TAtomic::Array(TArray::Set(Arc::new(intersect_union_types(
+                    element_type,
+                    iter_value,
+                    context.codebase,
+                )?))),
             });
         }
         _ => (),
