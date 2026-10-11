@@ -2791,13 +2791,8 @@ fn a_type_class_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
 
     let php_class = "<?php\n\nnamespace Sharp;\n\nfinal class Bool\n{\n    public static function tryParse(mixed $value): ?bool { return null; }\n}\n";
     let php_enum = "<?php\n\nnamespace Sharp;\n\nenum Int\n{\n    case One;\n}\n";
-    assert_eq!(
-        [
-            messages_with(settings(), ("src/Sharp/Bool.php", php_class), &[]),
-            messages_with(settings(), ("src/Sharp/Int.php", php_enum), &[])
-        ],
-        [Vec::<String>::new(), Vec::new()]
-    );
+    assert_eq!(messages_with(settings(), ("src/Sharp/Bool.php", php_class), &[]), Vec::<String>::new());
+    assert_eq!(messages_with(settings(), ("src/Sharp/Int.php", php_enum), &[]), Vec::<String>::new());
 }
 
 #[test]

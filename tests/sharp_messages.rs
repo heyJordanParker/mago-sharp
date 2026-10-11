@@ -2,15 +2,17 @@
 //! it names nothing only PHP has, and a test of one asserts the `.php` twin as well, so a `.sharp` rule leaves PHP's
 //! messages alone.
 //!
-//! A test's expected strings are what it asserts, so the checks read them from the test source rather than running
-//! the analyzer. A string's dialect is that of the first file path in the innermost part of its statement that names
-//! one, which is the file under test, since every helper takes the analyzed file before the others.
+//! A test's expected strings are what its assertions compare with the words they render, so the checks read them from
+//! the test source rather than running the analyzer. An assertion is an `assert!`, an `assert_eq!` or a call of a helper
+//! that asserts, wherever it sits. A string's dialect is that of the analyzed file the assertion names: the first file
+//! path of its arguments outside a list, since the files beside the analyzed one come in a list.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use proc_macro2::Delimiter;
+use proc_macro2::Punct;
 use proc_macro2::Spacing;
 use proc_macro2::TokenStream;
 use proc_macro2::TokenTree;
@@ -301,7 +303,21 @@ struct Test {
 struct TestFile {
     items: HashMap<String, Vec<TokenTree>>,
     functions: HashSet<String>,
+    /// The helpers that read the words of an issue.
     renderers: HashSet<String>,
+    /// The helpers that assert, each with the places of the parameters its assertions compare.
+    asserting: HashMap<String, Vec<usize>>,
+}
+
+/// One assertion of a test: an `assert!`, an `assert_eq!` or an `assert_ne!`, or a call of a helper that asserts.
+struct Assertion {
+    arguments: Vec<TokenTree>,
+    /// The arguments it compares with what it renders.
+    compared: Vec<Vec<TokenTree>>,
+    /// Whether it pins what it compares, as `assert_ne!` and an `assert!` of a negation do not.
+    pins: bool,
+    /// The helper it calls, whose body names the file when the arguments do not.
+    helper: Option<String>,
 }
 
 type Bindings = HashMap<String, Vec<TokenTree>>;
@@ -344,14 +360,14 @@ fn split(tokens: &[TokenTree], separator: char) -> Vec<&[TokenTree]> {
     parts
 }
 
-/// Splits a block's `tokens` into statements: each ends at a `;`, or at the block of a loop or an `if` with no `else`
-/// after it.
+/// Splits a block's `tokens` into statements: each ends at a `;`, or at the block of a loop, a `match` or an `if` with
+/// no `else` after it.
 fn statements(tokens: &[TokenTree]) -> Vec<&[TokenTree]> {
     let mut statements = Vec::new();
     let mut start = 0;
     for (index, token) in tokens.iter().enumerate() {
         let ends_block = is_block(token)
-            && matches!(&tokens[start], TokenTree::Ident(keyword) if ["for", "while", "loop", "if"].contains(&keyword.to_string().as_str()))
+            && matches!(&tokens[start], TokenTree::Ident(keyword) if ["for", "while", "loop", "if", "match"].contains(&keyword.to_string().as_str()))
             && !matches!(tokens.get(index + 1), Some(TokenTree::Ident(keyword)) if keyword == "else");
         if is_punct(Some(token), ';') || ends_block {
             statements.push(&tokens[start..index + usize::from(ends_block)]);
@@ -362,9 +378,124 @@ fn statements(tokens: &[TokenTree]) -> Vec<&[TokenTree]> {
     statements
 }
 
-/// Every name a `let` binds anywhere in `tokens`, each to the tokens of its value.
+/// The name of each part of a pattern, in order: a tuple's names, or the one name.
+fn pattern_names(pattern: &[TokenTree]) -> Vec<String> {
+    let first_name = |part: &[TokenTree]| {
+        part.iter().find_map(|token| match token {
+            TokenTree::Ident(name) if name != "mut" && name != "ref" => Some(name.to_string()),
+            _ => None,
+        })
+    };
+    match pattern {
+        [TokenTree::Group(tuple)] if tuple.delimiter() == Delimiter::Parenthesis => {
+            split(&trees(tuple.stream()), ',').into_iter().map(|part| first_name(part).unwrap_or_default()).collect()
+        }
+        _ => first_name(pattern).into_iter().collect(),
+    }
+}
+
+/// Binds each name of a `for` pattern to its part of every value the loop walks, so `for (code, expected) in [...]`
+/// binds `expected` to the second part of each tuple.
+fn loop_bindings(statement: &[TokenTree], into: &mut Bindings) {
+    let Some(within) = statement.iter().position(|token| matches!(token, TokenTree::Ident(keyword) if keyword == "in"))
+    else {
+        return;
+    };
+    let Some(body) = statement.iter().rposition(is_block).filter(|body| *body > within) else { return };
+    let mut walked = statement[within + 1..body].to_vec();
+    while is_punct(walked.first(), '&') {
+        walked.remove(0);
+    }
+    if let [TokenTree::Ident(name)] = walked.as_slice()
+        && let Some(value) = into.get(&name.to_string())
+    {
+        walked = value.clone();
+    }
+    let values: Vec<Vec<TokenTree>> = match walked.as_slice() {
+        [TokenTree::Group(list)] if list.delimiter() == Delimiter::Bracket => {
+            split(&trees(list.stream()), ',').into_iter().filter(|value| !value.is_empty()).map(<[_]>::to_vec).collect()
+        }
+        _ => vec![walked],
+    };
+    let names = pattern_names(&statement[1..within]);
+    for (place, name) in names.iter().enumerate().filter(|(_, name)| !name.is_empty()) {
+        let mut bound = Vec::new();
+        for value in &values {
+            let part = match value.as_slice() {
+                [TokenTree::Group(tuple)] if names.len() > 1 && tuple.delimiter() == Delimiter::Parenthesis => {
+                    split(&trees(tuple.stream()), ',').get(place).map(|part| part.to_vec()).unwrap_or_default()
+                }
+                _ => value.clone(),
+            };
+            bound.extend(part);
+            bound.push(TokenTree::Punct(Punct::new(',', Spacing::Alone)));
+        }
+        into.insert(name.clone(), bound);
+    }
+}
+
+/// The names of a closure's parameters and where its body starts, when `value` is a closure.
+fn closure_parameters(value: &[TokenTree]) -> Option<(Vec<Option<String>>, usize)> {
+    let start = usize::from(matches!(value.first(), Some(TokenTree::Ident(keyword)) if keyword == "move"));
+    if !is_punct(value.get(start), '|') {
+        return None;
+    }
+    let end = start + 1 + value[start + 1..].iter().position(|token| is_punct(Some(token), '|'))?;
+    let parameters = &value[start + 1..end];
+    let names = if parameters.is_empty() {
+        Vec::new()
+    } else {
+        split(parameters, ',').into_iter().map(|part| pattern_names(split(part, ':')[0]).pop()).collect()
+    };
+    Some((names, end + 1))
+}
+
+/// Binds each parameter of a closure a `let` holds to its argument at every call of the closure in `tokens`.
+fn closure_bindings(tokens: &[TokenTree], into: &mut Bindings) {
+    let closures: HashMap<String, Vec<Option<String>>> = into
+        .iter()
+        .filter_map(|(name, value)| closure_parameters(value).map(|(parameters, _)| (name.clone(), parameters)))
+        .collect();
+    let mut calls = Vec::new();
+    closure_calls(tokens, &closures, &mut calls);
+    for (closure, arguments) in calls {
+        let parts = split(&arguments, ',');
+        for (parameter, argument) in closures[&closure].iter().zip(parts) {
+            if let Some(parameter) = parameter {
+                let bound = into.entry(parameter.clone()).or_default();
+                bound.extend(argument.iter().cloned());
+                bound.push(TokenTree::Punct(Punct::new(',', Spacing::Alone)));
+            }
+        }
+    }
+}
+
+fn closure_calls(
+    tokens: &[TokenTree],
+    closures: &HashMap<String, Vec<Option<String>>>,
+    into: &mut Vec<(String, Vec<TokenTree>)>,
+) {
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            TokenTree::Ident(name) if closures.contains_key(&name.to_string()) => {
+                if let Some(TokenTree::Group(arguments)) = tokens.get(index + 1)
+                    && arguments.delimiter() == Delimiter::Parenthesis
+                {
+                    into.push((name.to_string(), trees(arguments.stream())));
+                }
+            }
+            TokenTree::Group(group) => closure_calls(&trees(group.stream()), closures, into),
+            _ => {}
+        }
+    }
+}
+
+/// Every name a `let` or a `for` binds anywhere in `tokens`, each to the tokens of its value.
 fn bindings(tokens: &[TokenTree], into: &mut Bindings) {
     for statement in statements(tokens) {
+        if matches!(statement.first(), Some(TokenTree::Ident(keyword)) if keyword == "for") {
+            loop_bindings(statement, into);
+        }
         if matches!(statement.first(), Some(TokenTree::Ident(keyword)) if keyword == "let") {
             let assign = statement.iter().enumerate().position(|(index, token)| {
                 matches!(token, TokenTree::Punct(punct) if punct.as_char() == '=' && punct.spacing() == Spacing::Alone)
@@ -402,7 +533,13 @@ fn bindings(tokens: &[TokenTree], into: &mut Bindings) {
 impl TestFile {
     fn parse(source: &str) -> (Self, Vec<(String, Vec<TokenTree>)>) {
         let top = trees(source.parse::<TokenStream>().expect("a test file is Rust"));
-        let mut file = Self { items: HashMap::new(), functions: HashSet::new(), renderers: HashSet::new() };
+        let mut file = Self {
+            items: HashMap::new(),
+            functions: HashSet::new(),
+            renderers: HashSet::new(),
+            asserting: HashMap::new(),
+        };
+        let mut parameters = HashMap::new();
         let mut tests = Vec::new();
         let mut is_test = false;
         let mut index = 0;
@@ -413,7 +550,17 @@ impl TestFile {
                 }
                 TokenTree::Ident(keyword) if keyword == "fn" => {
                     let name = top[index + 1].to_string();
+                    let mut names = None;
                     while !is_block(&top[index]) {
+                        if names.is_none() && parenthesized(Some(&top[index])) {
+                            let TokenTree::Group(list) = &top[index] else { unreachable!() };
+                            names = Some(
+                                split(&trees(list.stream()), ',')
+                                    .into_iter()
+                                    .map(|part| pattern_names(part).pop())
+                                    .collect::<Vec<_>>(),
+                            );
+                        }
                         index += 1;
                     }
                     let TokenTree::Group(body) = &top[index] else { unreachable!() };
@@ -421,7 +568,8 @@ impl TestFile {
                         tests.push((name, trees(body.stream())));
                     } else {
                         file.functions.insert(name.clone());
-                        file.items.insert(name, trees(body.stream()));
+                        file.items.insert(name.clone(), trees(body.stream()));
+                        parameters.insert(name, names.unwrap_or_default());
                     }
                     is_test = false;
                 }
@@ -451,7 +599,88 @@ impl TestFile {
             file.renderers.extend(found);
         }
 
+        let mut asserting = HashMap::new();
+        for (name, names) in &parameters {
+            let mut compared = HashSet::new();
+            for assertion in file.assertions(&file.items[name]) {
+                for argument in assertion.compared.iter().filter(|_| assertion.pins) {
+                    file.free_names(argument, &mut compared);
+                }
+            }
+            let places: Vec<usize> = (0..names.len())
+                .filter(|place| names[*place].as_ref().is_some_and(|name| compared.contains(name)))
+                .collect();
+            if !places.is_empty() {
+                asserting.insert(name.clone(), places);
+            }
+        }
+        file.asserting = asserting;
+
         (file, tests)
+    }
+
+    /// Every name `tokens` read outside the arguments of a helper.
+    fn free_names(&self, tokens: &[TokenTree], into: &mut HashSet<String>) {
+        let mut index = 0;
+        while index < tokens.len() {
+            match &tokens[index] {
+                TokenTree::Ident(name)
+                    if self.functions.contains(&name.to_string()) && parenthesized(tokens.get(index + 1)) =>
+                {
+                    index += 1;
+                }
+                TokenTree::Ident(name) => {
+                    into.insert(name.to_string());
+                }
+                TokenTree::Group(group) => self.free_names(&trees(group.stream()), into),
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+
+    /// Every assertion in `tokens`, nested ones included.
+    fn assertions(&self, tokens: &[TokenTree]) -> Vec<Assertion> {
+        let mut assertions = Vec::new();
+        let mut index = 0;
+        while index < tokens.len() {
+            match &tokens[index] {
+                TokenTree::Ident(name) if is_punct(tokens.get(index + 1), '!') => {
+                    let name = name.to_string();
+                    if let Some(TokenTree::Group(arguments)) = tokens.get(index + 2)
+                        && ["assert", "assert_eq", "assert_ne"].contains(&name.as_str())
+                    {
+                        let arguments = trees(arguments.stream());
+                        let pins = name == "assert_eq" || (name == "assert" && !is_punct(arguments.first(), '!'));
+                        let compared = split(&arguments, ',')
+                            .into_iter()
+                            .take(match name.as_str() {
+                                "assert_eq" => 2,
+                                _ => usize::from(pins),
+                            })
+                            .map(<[_]>::to_vec)
+                            .collect();
+                        assertions.push(Assertion { arguments, compared, pins, helper: None });
+                        index += 2;
+                    }
+                }
+                TokenTree::Ident(name) if parenthesized(tokens.get(index + 1)) => {
+                    if let Some(places) = self.asserting.get(&name.to_string()) {
+                        let TokenTree::Group(arguments) = &tokens[index + 1] else { unreachable!() };
+                        let arguments = trees(arguments.stream());
+                        let parts = split(&arguments, ',');
+                        let compared =
+                            places.iter().filter_map(|place| parts.get(*place)).map(|part| part.to_vec()).collect();
+                        assertions.push(Assertion { arguments, compared, pins: true, helper: Some(name.to_string()) });
+                        index += 1;
+                    }
+                }
+                TokenTree::Group(group) => assertions.extend(self.assertions(&trees(group.stream()))),
+                _ => {}
+            }
+            index += 1;
+        }
+        assertions
     }
 
     /// The value `name` holds where `bindings` are in scope: a `let`, a constant or a static.
@@ -485,13 +714,19 @@ impl TestFile {
         self.dialect_seen(tokens, bindings, &mut HashSet::new())
     }
 
-    /// A call's arguments come before its callee, whose own body names a file only when it fixes the dialect.
+    /// A call's arguments come before its callee, whose own body names a file only when it fixes the dialect. A list
+    /// comes last, as it holds the files beside the analyzed one.
     fn dialect_seen(&self, tokens: &[TokenTree], bindings: &Bindings, seen: &mut HashSet<String>) -> Option<Dialect> {
+        let mut lists = Vec::new();
         let mut index = 0;
         while index < tokens.len() {
             let found = match &tokens[index] {
                 token @ TokenTree::Literal(_) => {
                     string(token).and_then(|text| PATH.captures(&text).map(|path| Dialect::of_extension(&path[1])))
+                }
+                TokenTree::Group(list) if list.delimiter() == Delimiter::Bracket => {
+                    lists.push(trees(list.stream()));
+                    None
                 }
                 TokenTree::Group(group) => self.dialect_seen(&trees(group.stream()), bindings, seen),
                 TokenTree::Ident(name) => {
@@ -522,7 +757,7 @@ impl TestFile {
             }
             index += 1;
         }
-        None
+        lists.iter().find_map(|list| self.dialect_seen(list, bindings, seen))
     }
 
     /// Every string `tokens` assert, reached through bindings, with the dialect of the file each was rendered from.
@@ -541,6 +776,13 @@ impl TestFile {
         let dialect = self.dialect(tokens, bindings).or(inherited);
         let mut index = 0;
         while index < tokens.len() {
+            if index == 0
+                && let Some((_, body)) = closure_parameters(tokens)
+            {
+                // A closure's parameters are its inputs: only its body asserts.
+                index = body;
+                continue;
+            }
             match &tokens[index] {
                 token @ TokenTree::Literal(_) => {
                     if let Some(text) = string(token) {
@@ -553,28 +795,13 @@ impl TestFile {
                 TokenTree::Group(group) => self.expected(&trees(group.stream()), dialect, bindings, seen, into),
                 TokenTree::Ident(name) => {
                     let name = name.to_string();
-                    if name == "for" {
-                        // A loop's pattern and the values it walks are inputs: only its body asserts.
-                        index += tokens[index..].iter().position(is_block).unwrap_or(0);
-                        continue;
-                    }
-                    let next = tokens.get(index + 1);
-                    if is_punct(next, '!') && ["assert", "assert_eq", "assert_ne"].contains(&name.as_str()) {
-                        let TokenTree::Group(arguments) = &tokens[index + 2] else { unreachable!() };
-                        let arguments = trees(arguments.stream());
-                        let dialect = self.dialect(&arguments, bindings).or(dialect);
-                        let compared = match name.as_str() {
-                            "assert" if !is_punct(arguments.first(), '!') => 1,
-                            "assert_eq" => 2,
-                            _ => 0,
-                        };
-                        for argument in split(&arguments, ',').into_iter().take(compared) {
-                            self.expected(argument, dialect, bindings, seen, into);
+                    if self.functions.contains(&name) && parenthesized(tokens.get(index + 1)) {
+                        // A helper's arguments are its inputs. One that takes none gives the value its body holds.
+                        let takes_none =
+                            matches!(&tokens[index + 1], TokenTree::Group(none) if none.stream().is_empty());
+                        if takes_none && !self.renderers.contains(&name) && seen.insert(name.clone()) {
+                            self.expected(&self.items[&name], dialect, bindings, seen, into);
                         }
-                        index += 3;
-                        continue;
-                    }
-                    if self.functions.contains(&name) && parenthesized(next) {
                         index += 2;
                         continue;
                     }
@@ -602,50 +829,45 @@ impl TestFile {
     }
 
     /// Reads one test: the strings each assertion that renders words expects, and whether one pins what a `.php` file
-    /// reports.
+    /// reports, its words or that it reports none.
     fn test(&self, name: String, body: &[TokenTree]) -> Test {
         let mut bindings = Bindings::new();
         self::bindings(body, &mut bindings);
+        closure_bindings(body, &mut bindings);
 
         let mut expected = Vec::new();
         let mut asserts_php = false;
-        for statement in statements(body) {
-            if matches!(statement.first(), Some(TokenTree::Ident(keyword)) if keyword == "let") {
+        for assertion in self.assertions(body) {
+            let dialect = self.dialect(&assertion.arguments, &bindings).or_else(|| {
+                assertion.helper.as_ref().and_then(|helper| self.dialect(&self.items[helper], &Bindings::new()))
+            });
+            asserts_php |= dialect == Some(Dialect::Php) && assertion.compared.iter().any(|value| is_empty(value));
+            let renders = match &assertion.helper {
+                Some(helper) => self.renderers.contains(helper),
+                None => self.renders(&assertion.arguments, &bindings),
+            };
+            if !renders {
                 continue;
             }
-            let renders = self.renders(statement, &bindings);
-            asserts_php |=
-                (renders || asserts_nothing(statement)) && self.dialect(statement, &bindings) == Some(Dialect::Php);
-            if renders {
-                self.expected(statement, None, &bindings, &mut HashSet::new(), &mut expected);
+            for value in &assertion.compared {
+                self.expected(value, dialect, &bindings, &mut HashSet::new(), &mut expected);
             }
         }
-        asserts_php |=
-            expected.iter().any(|string| string.dialect == Some(Dialect::Php) && !message(&string.text).is_empty());
+        asserts_php |= expected.iter().any(|string| {
+            own_dialect(&string.text).or(string.dialect) == Some(Dialect::Php) && !message(&string.text).is_empty()
+        });
 
         Test { name, expected, asserts_php }
     }
 }
 
-/// Whether `statement` asserts that a result is empty, which pins every word it could hold.
-fn asserts_nothing(statement: &[TokenTree]) -> bool {
-    let [TokenTree::Ident(assert), bang, TokenTree::Group(arguments)] = statement else { return false };
-    if !is_punct(Some(bang), '!') {
-        return false;
-    }
-    let arguments = trees(arguments.stream());
-    match assert.to_string().as_str() {
-        "assert_eq" => split(&arguments, ',').iter().take(2).any(|argument| {
-            let argument = compact(argument);
-            ["[]", "vec![]", "Vec::new()"].contains(&argument.as_str())
-                || (argument.starts_with("Vec::<") && argument.ends_with(">::new()"))
-        }),
-        "assert" => split(&arguments, ',').first().is_some_and(|condition| {
-            let condition = compact(condition);
-            !condition.starts_with('!') && condition.ends_with(".is_empty()")
-        }),
-        _ => false,
-    }
+/// Whether a compared value is empty, which pins every word a result could hold: `[]`, an empty `Vec`, or an
+/// `is_empty()` an `assert!` holds.
+fn is_empty(value: &[TokenTree]) -> bool {
+    let value = compact(value);
+    ["[]", "vec![]", "Vec::new()"].contains(&value.as_str())
+        || (value.starts_with("Vec::<") && value.ends_with(">::new()"))
+        || value.ends_with(".is_empty()")
 }
 
 /// `tokens` as source text without spaces.
