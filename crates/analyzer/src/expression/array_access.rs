@@ -135,7 +135,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
 /// the type `V` it would have when it runs, so it is reported once. A `List` read stays bare, because a `List`'s keys
 /// run without gaps. A place is the collections it is declared as, whatever literal it holds, and a place that may be
 /// a `Map` is read as one. A place that may be a `Set` has no index at all, which the `Set`'s own rule refuses, so
-/// this rule adds no second report.
+/// this rule adds no second report to its bare read.
 pub(crate) fn check_sharp_map_read<'arena, A>(
     access: &ArrayAccess<'arena>,
     context: &mut Context<'_, 'arena, A>,
@@ -144,27 +144,31 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
 ) where
     A: Arena,
 {
-    let is_map_read = |container: &TUnion| {
-        container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
-            && !container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
+    let has_map =
+        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
+    let has_set =
+        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
+    let (may_be_map, may_be_set) = match get_declared_collection(context, block_context, artifacts, access.array) {
+        Some(declared) => (has_map(&declared), has_set(&declared)),
+        None => artifacts
+            .get_expression_type(access.array)
+            .map_or((false, false), |container| (has_map(container), has_set(container))),
     };
-    let reads_map = match get_declared_collection(context, block_context, artifacts, access.array) {
-        Some(declared) => is_map_read(&declared),
-        None => artifacts.get_expression_type(access.array).is_some_and(is_map_read),
-    };
-    if !reads_map {
+    if !may_be_map {
         return;
     }
 
-    if !block_context.flags.inside_isset() {
+    if block_context.flags.inside_isset() {
+        if let Some(read) = artifacts.get_expression_type(access).cloned() {
+            artifacts.set_expression_type(access, read.as_nullable());
+        }
+    } else if !may_be_set {
         context.collector.report_with_code(
             IssueCode::PossiblyUndefinedArrayIndex,
             Issue::error("A `Map` is not read by a bare index, because its key may be missing.")
                 .with_annotation(Annotation::primary(access.span()).with_message("This read throws when the key is missing."))
                 .with_help("Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."),
         );
-    } else if let Some(read) = artifacts.get_expression_type(access).cloned() {
-        artifacts.set_expression_type(access, read.as_nullable());
     }
 }
 
