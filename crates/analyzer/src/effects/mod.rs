@@ -160,9 +160,6 @@ impl Impurity {
 /// A class name and a member as a message writes them, the class named by `class_name`: `Clock.now`, `trim` with no
 /// class, and `Clock` with no member.
 fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -> String {
-    if class.is_empty() && member.is_empty() {
-        return nameless();
-    }
     if class.is_empty() {
         member.to_string()
     } else if member.is_empty() {
@@ -170,12 +167,6 @@ fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -
     } else {
         display_sharp_member(class_name(class), member)
     }
-}
-
-/// A call with neither a class nor a member.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn nameless() -> String {
-    String::new()
 }
 
 /// What a body does: an effect, or a change of a root.
