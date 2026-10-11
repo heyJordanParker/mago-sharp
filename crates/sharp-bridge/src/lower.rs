@@ -2352,14 +2352,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP, 0, line, &[this, property])
     }
 
-    /// The PHP a call of a collection method runs on the array (spec section 12), or none for a method that runs on
-    /// `Sharp\Collection`. `count()` on a `List`, a `Map` or a `Set` is `\count($c)`. Until the engine runs `Set`
-    /// methods (php-sharp #57), each `Set` method that finds or changes an element by its key is the PHP that does
-    /// it: `contains(x)` is `isset($s[K])`, `add(x)` is `!isset($s[K]) && ($s += [K => x])`, `remove(x)` is
-    /// `isset($s[K]) && $s->delete(K) === null`, which runs `Sharp\Collection`'s `delete`, and `clear()` is
-    /// `$s = []`. `toList()` is `\array_values($s)`, and `filter(f)` is `$s->filterValues(f)`, which keeps the keys.
-    /// A change reaches a property through the property, which runs its hooks, and a value that lives nowhere changes
-    /// as a copy. A null-safe call tests its receiver first and gives null for null.
+    /// The PHP a call of one of the [`INLINED_COLLECTION_METHODS`] runs on the array, or none for any other call. A
+    /// change reaches a property through the property, which runs its hooks, and a value that lives nowhere changes as
+    /// a copy. A null-safe call tests its receiver first and gives null for null.
     fn collection_call(
         &mut self,
         call: &Expression,
@@ -2367,7 +2362,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         arguments: &ArgumentList,
         null_safe: bool,
     ) -> Option<u32> {
-        let (method, changes) = self.php_collection_method(call)?;
+        let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
         let element = || {
             arguments
@@ -2377,7 +2372,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 .unwrap_or_else(|| unreachable!("the checker refuses a `Set` method call without its element"))
         };
 
-        let mut collection = self.collection_receiver(receiver, changes || null_safe);
+        let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
         let test = null_safe.then(|| {
             let receiver = self.read_collection(&mut collection, line, true);
 
@@ -2444,13 +2439,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
-            _ => {
+            b"filter" => {
                 let set = self.read_collection(&mut collection, line, false);
                 let filter = self.string(0, line, b"filterValues");
                 let arguments = self.arguments(arguments, &[]);
 
                 self.node(SHARP_AST_METHOD_CALL, 0, line, &[set, filter, arguments])
             }
+            _ => unreachable!(
+                "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
+                String::from_utf8_lossy(&method)
+            ),
         };
         self.release_collection(collection);
 
@@ -2464,19 +2463,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// The collection method the method call `call` runs as PHP on the array, one of the
-    /// [`INLINED_COLLECTION_METHODS`], in lowercase, and whether it changes the collection. None for a call of any other
-    /// method.
-    fn php_collection_method(&self, call: &Expression) -> Option<(Vec<u8>, bool)> {
+    /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the method the method call `call` runs as
+    /// PHP on the array, one of the [`INLINED_COLLECTION_METHODS`], and whether that PHP reads the receiver twice. None
+    /// for a call of any other method.
+    fn php_collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>, bool)> {
         let (collection, method) = self.types.collection_method(call)?;
         if !INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
             *inlined_collection == collection && inlined.as_bytes().eq_ignore_ascii_case(&method)
         }) {
             return None;
         }
-        let changes = matches!(method.as_slice(), b"add" | b"remove");
+        let reads_twice = matches!(method.as_slice(), b"add" | b"remove");
 
-        Some((method, changes))
+        Some((collection, method, reads_twice))
     }
 
     /// The receiver of a collection method call. A method that reads it `twice` holds a value or an object that runs

@@ -64,7 +64,8 @@ final class List
 
 /**
  * The methods a PHP# `List<T>` has. The analyzer checks a call on a list against them, and the engine runs them on
- * `Sharp\Collection`, except `count`, which runs as PHP's `count`. A method without `@mutation-free` changes the list.
+ * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which run as PHP. A method
+ * without `@mutation-free` changes the list.
  *
  * @template T
  */
@@ -194,7 +195,8 @@ final class ListMethods
 
 /**
  * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs them on
- * `Sharp\Collection`, except `count`, which runs as PHP's `count`. A method without `@mutation-free` changes the map.
+ * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which run as PHP. A method
+ * without `@mutation-free` changes the map.
  *
  * @template K of array-key
  * @template V

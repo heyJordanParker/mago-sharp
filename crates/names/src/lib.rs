@@ -34,12 +34,11 @@ mod internal;
 /// writes its local too, which captures it by reference, as harmless.
 pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "delete", "remove", "clear"];
 
-/// The methods of a PHP# `List`, `Map` or `Set` that run as PHP on the array instead of on `Sharp\Collection`, as
-/// `(collection, method)` pairs.
+/// The methods of a PHP# `List`, `Map` or `Set` that run as PHP functions or operators on the array, not as
+/// `Sharp\Collection` methods, as `(collection, method)` pairs.
 ///
-/// `count()` is PHP's `count` on every collection. Until the engine runs `Set` methods (php-sharp #57), each `Set`
-/// method that finds or changes an element by its key is the PHP that does it. The bridge lowers each of them from the
-/// checker's types, so the checker refuses one on a value that can also be an object, whose own method would not run.
+/// The bridge lowers each of them from the checker's types, so the checker refuses one on a value that can also be an
+/// object, whose own method would not run.
 pub const INLINED_COLLECTION_METHODS: [(&str, &str); 9] = [
     ("List", "count"),
     ("Map", "count"),

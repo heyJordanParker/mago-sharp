@@ -17,6 +17,7 @@ use indoc::indoc;
 
 use mago_database::file::File;
 use mago_database::file::FileType;
+use mago_names::INLINED_COLLECTION_METHODS;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::Unit;
 use mago_sharp_bridge::inline_forms;
@@ -2730,6 +2731,41 @@ fn every_collection_counts_with_php_count() {
                         ZVAL "counts"
         "#}
     );
+}
+
+/// Each method `INLINED_COLLECTION_METHODS` names lowers to PHP on the array, never to a call of the method itself,
+/// which `Sharp\Collection` may not have. Only `filter` stays a method call, of `filterValues`, which keeps the keys.
+#[test]
+fn every_inlined_collection_method_lowers_to_php_on_the_array() {
+    for (collection, method) in INLINED_COLLECTION_METHODS {
+        let receiver = match collection {
+            "Map" => "Map<string, int>",
+            _ => &format!("{collection}<int>"),
+        };
+        let argument = match method {
+            "add" | "remove" | "contains" => "1",
+            "filter" => "value => value > 0",
+            _ => "",
+        };
+        let body = Lowered::new(&format!(
+            "namespace App.Tenant;\n\nclass Report\n{{\n    public void run({receiver} values)\n    {{\n        values.{method}({argument});\n    }}\n}}\n"
+        ))
+        .body();
+        // The call is the last statement, after a `Set` parameter becomes a `Set`.
+        let root = body
+            .lines()
+            .rfind(|line| line.starts_with("  ") && !line.starts_with("   "))
+            .expect("the call lowers to a statement")
+            .trim();
+
+        if method == "filter" {
+            assert_eq!(root, "METHOD_CALL", "{collection}.{method}:\n{body}");
+            assert!(body.contains("ZVAL \"filterValues\""), "{collection}.{method}:\n{body}");
+        } else {
+            assert_ne!(root, "METHOD_CALL", "{collection}.{method}:\n{body}");
+            assert!(!body.contains("filterValues"), "{collection}.{method}:\n{body}");
+        }
+    }
 }
 
 /// ```php
