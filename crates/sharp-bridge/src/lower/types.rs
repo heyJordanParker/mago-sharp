@@ -616,11 +616,11 @@ enum Parameter {
     Bound,
 }
 
-/// `r#type` in the one PHP# spelling the engine parses, task 090's type text: a class by its full dotted name as it is
-/// declared, the built-in types, `List<T>`, `Map<K, V>`, `Iterable<T>`, `Class<T>`, `Function<R(P1, P2)>`, a type
-/// parameter as `Any?`, `T?`, `(A|B)?`, `A & B`, and an intersection in parentheses inside a union or a nullable type,
-/// `(A & B)|C` and `(A & B)?`. Union and intersection members are sorted by their text, and a space comes only after a
-/// comma and around `&`.
+/// `r#type` in the one PHP# spelling the engine parses, the type text of php-sharp's decision 72: a class by its full
+/// dotted name as it is declared, the built-in types, `List<T>`, `Map<K, V>`, `Set<T>`, `Iterable<T>`, `Class<T>`,
+/// `Function<R(P1, P2)>`, a type parameter as `Any?`, `T?`, `(A|B)?`, `A & B`, and an intersection in parentheses
+/// inside a union or a nullable type, `(A & B)|C` and `(A & B)?`. Union and intersection members are sorted by their
+/// text, and a space comes only after a comma and around `&`.
 pub(crate) fn type_text(r#type: &TUnion, codebase: &CodebaseMetadata) -> String {
     text(r#type, codebase, Parameter::Any)
 }
@@ -706,6 +706,7 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
             _ => class_text(object.name, codebase),
         },
         TAtomic::Array(TArray::List(array)) => format!("List<{}>", type_text(&array.element_type)),
+        TAtomic::Array(TArray::Set(element_type)) => format!("Set<{}>", type_text(element_type)),
         TAtomic::Array(TArray::Keyed(array)) => {
             let (key, value) = array.parameters.as_ref().unwrap_or_else(|| {
                 unreachable!("PHP# writes a Map with its key and value types, not `{}`", atomic.get_id())
@@ -755,6 +756,7 @@ mod tests {
     use mago_codex::misc::GenericParent;
     use mago_codex::ttype::TType;
     use mago_codex::ttype::atomic::TAtomic;
+    use mago_codex::ttype::atomic::array::TArray;
     use mago_codex::ttype::atomic::callable::TCallable;
     use mago_codex::ttype::atomic::callable::TCallableSignature;
     use mago_codex::ttype::atomic::callable::parameter::TCallableParameter;
@@ -788,6 +790,10 @@ mod tests {
         let arguments = (!arguments.is_empty()).then_some(arguments);
 
         wrap_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(word(name), arguments))))
+    }
+
+    fn set(element: TUnion) -> TUnion {
+        wrap_atomic(TAtomic::Array(TArray::Set(Arc::new(element))))
     }
 
     fn union(members: &[TUnion]) -> TUnion {
@@ -828,6 +834,8 @@ mod tests {
 
         assert_eq!(text(&page), "App.PaginatedList<Map<string, List<App.Order>>>");
         assert_eq!(text(&class("App\\Pair", vec![order.clone(), get_int()])), "App.Pair<App.Order, int>");
+        assert_eq!(text(&class("App\\Box", vec![set(get_int())])), "App.Box<Set<int>>");
+        assert_eq!(text(&set(order.clone())), "Set<App.Order>");
         assert_eq!(text(&wrap_atomic(TAtomic::Iterable(TIterable::of_value(Arc::new(order))))), "Iterable<App.Order>");
     }
 
