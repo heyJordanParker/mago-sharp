@@ -122,7 +122,11 @@ pub fn check_class<'ast, 'arena>(class: &'ast Class<'arena>, context: &mut Conte
             // Spec section 5 makes a PHP# class `public` or, by default, `internal`.
             Modifier::Public(_) if context.program.dialect.is_sharp() => {}
             // Only PHP# parses these, and `check_slice` decides them.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => {}
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_) => {}
             Modifier::Public(keyword)
             | Modifier::Protected(keyword)
             | Modifier::Private(keyword)
@@ -1058,7 +1062,11 @@ pub fn check_anonymous_class<'ast, 'arena>(
     for modifier in &anonymous_class.modifiers {
         match &modifier {
             // Only PHP# parses these, and `check_slice` decides them.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => {}
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_) => {}
             Modifier::Static(_)
             | Modifier::Abstract(_)
             | Modifier::PrivateSet(_)
@@ -1283,7 +1291,18 @@ pub fn check_members<'ast, 'arena>(
         };
         if let Some(name) = callable_name {
             let lowercase_name = name.value.to_ascii_lowercase();
-            if let Some(previous) = method_names.get(&lowercase_name) {
+            if let Some(previous) = method_names.get(&lowercase_name)
+                && let ClassLikeMember::Method(method) = member
+                && context.program.dialect.is_sharp()
+                && method.return_type_hint.is_none()
+                && method.name.value == class_like_name
+            {
+                context.report(
+                    Issue::error("A class has one main constructor: PHP# has no overloading by argument types.")
+                        .with_annotation(Annotation::primary(name.span()).with_message("A second constructor."))
+                        .with_annotation(Annotation::secondary(*previous).with_message("The main constructor.")),
+                );
+            } else if let Some(previous) = method_names.get(&lowercase_name) {
                 let method_display = context.display_member(class_like_name, BytesDisplay(name.value));
                 context.report(
                     Issue::error(format!("{class_like_kind} method `{method_display}` has already been defined"))

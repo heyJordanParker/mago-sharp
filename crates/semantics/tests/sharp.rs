@@ -300,19 +300,26 @@ fn a_catch_variable_is_out_of_scope_after_its_catch_block() {
     assert_eq!(issues(code), ["10:15 `failure` is used after the block that declares it closes."]);
 }
 
+/// The guard clause, an `if` without `else` around one `return` or `throw`, is the one body the spec writes without
+/// braces, as in `if (!tenant.active) throw new InactiveTenant(tenant);`. Every other body without braces, an `else`
+/// beside one included, is not supported yet.
 #[test]
-fn an_if_or_else_without_braces_is_not_supported_yet() {
-    let code = leak(method(
-        "        if (extra > 1) return 1;\n        if (extra > 2) {\n            return 2;\n        } else return 3;\n        return extra;\n",
-    ));
+fn only_the_guard_clause_goes_without_braces() {
+    let guards = "namespace App.Tenant;\n\nclass Report\n{\n    public void run(int extra)\n    {\n        if (extra > 1) return;\n        if (extra > 2) throw new Failure(extra);\n    }\n\n    public int total(int extra)\n    {\n        if (extra > 1) return 1;\n        return extra;\n    }\n}\n";
+    let refused = [
+        "        if (extra > 1) return 1; else {\n            return 2;\n        }\n",
+        "        if (extra > 1) {\n            return 1;\n        } else return 2;\n",
+        "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2) return 2;\n",
+        "        if (extra > 1) extra = 1;\n",
+        "        if (extra > 1) this.run(extra);\n",
+    ];
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 This statement without braces is not supported yet in PHP#.",
-            "8:9 This statement without braces is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(guards), Vec::<String>::new());
+    for body in refused {
+        let code = leak(method(&format!("{body}        return extra;\n")));
+
+        assert_eq!(issues(code), ["7:9 This statement without braces is not supported yet in PHP#."], "{body}");
+    }
 }
 
 #[test]
@@ -1909,6 +1916,40 @@ fn a_promoted_member_outside_the_slice_is_not_supported_yet() {
             "5:27 This modifier is not supported yet in PHP#.",
         ]
     );
+}
+
+/// Spec section 9: a parameter receives its value, and a lazy property computes its own, so no parameter is `lazy`,
+/// whether it declares a member or not.
+#[test]
+fn a_parameter_cannot_be_lazy() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(public lazy int id { get; }, lazy int count) {}\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:26 A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
+            "5:48 A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
+        ]
+    );
+}
+
+/// `lazy` is a modifier of spec section 6.5, which the engine cannot run yet on a property or anywhere else.
+#[test]
+fn lazy_off_a_parameter_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public lazy int total => 1;\n\n    public lazy int run() => 1;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["5:12 `lazy` is not supported yet in PHP#.", "7:12 `lazy` is not supported yet in PHP#."]
+    );
+}
+
+/// Spec section 9.1: a class has one unnamed main constructor, and no overloading by argument types.
+#[test]
+fn a_class_has_one_main_constructor() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report(string name) {}\n}\n";
+
+    assert_eq!(issues(code), ["6:12 A class has one main constructor: PHP# has no overloading by argument types."]);
 }
 
 #[test]
