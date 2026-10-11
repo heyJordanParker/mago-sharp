@@ -351,7 +351,7 @@ jobs:
         run: |
           git diff "origin/$GITHUB_BASE_REF..." > pull-request.diff
           cargo mutants --in-place --in-diff pull-request.diff --workspace --file "$MUTANTS_FILES" \
-            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" --baseline skip --timeout 300 \
+            --shard "${{ matrix.shard }}/${{ strategy.job-total }}" --baseline skip --timeout 300 --caught --unviable \
             --test-package mago-analyzer --test-package mago-semantics --test-package mago-sharp-bridge \
             --cargo-arg=--locked --cargo-arg=--tests
 
