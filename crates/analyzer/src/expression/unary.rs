@@ -63,6 +63,8 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::assign_to_expression;
+use crate::expression::assignment::read_before_write;
+use crate::expression::assignment::write_after_read;
 use crate::expression::binary::utils::analyze_instance_operator;
 use crate::expression::binary::utils::refuse_non_int_operands;
 use crate::expression::call::method_call::analyze_implicit_method_call;
@@ -98,7 +100,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
         block_context.flags.set_inside_variable_reference(is_variable_reference);
         block_context.flags.set_inside_negation(if is_negation { !was_in_negation } else { was_in_negation });
 
-        self.operand.analyze(context, block_context, artifacts)?;
+        let (analyzed, read_issues) =
+            if matches!(self.operator, UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)) {
+                read_before_write(context, |context| self.operand.analyze(context, block_context, artifacts))
+            } else {
+                (self.operand.analyze(context, block_context, artifacts), None)
+            };
+        analyzed?;
 
         block_context.flags.set_inside_negation(was_in_negation);
         block_context.flags.set_inside_reference(was_in_reference);
@@ -383,11 +391,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
                 }
             }
             UnaryPrefixOperator::PreIncrement(_) => {
-                let resulting_type = increment_operand(context, block_context, artifacts, self.operand, self.span())?;
+                let resulting_type = write_after_read(context, read_issues.as_ref(), |context| {
+                    increment_operand(context, block_context, artifacts, self.operand, self.span())
+                })?;
                 artifacts.set_rc_expression_type(self, resulting_type);
             }
             UnaryPrefixOperator::PreDecrement(_) => {
-                let resulting_type = decrement_operand(context, block_context, artifacts, self.operand, self.span())?;
+                let resulting_type = write_after_read(context, read_issues.as_ref(), |context| {
+                    decrement_operand(context, block_context, artifacts, self.operand, self.span())
+                })?;
                 artifacts.set_rc_expression_type(self, resulting_type);
             }
             UnaryPrefixOperator::IntCast(_, _) | UnaryPrefixOperator::IntegerCast(_, _) => {
@@ -531,17 +543,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPostfix<'arena> {
     {
         let was_in_general_use = block_context.flags.inside_general_use();
         block_context.flags.set_inside_general_use(true);
-        self.operand.analyze(context, block_context, artifacts)?;
+        let (analyzed, read_issues) =
+            read_before_write(context, |context| self.operand.analyze(context, block_context, artifacts));
+        analyzed?;
         block_context.flags.set_inside_general_use(was_in_general_use);
 
-        match self.operator {
+        write_after_read(context, read_issues.as_ref(), |context| match self.operator {
             UnaryPostfixOperator::PostIncrement(span) => {
-                increment_operand(context, block_context, artifacts, self.operand, span)?;
+                increment_operand(context, block_context, artifacts, self.operand, span)
             }
             UnaryPostfixOperator::PostDecrement(span) => {
-                decrement_operand(context, block_context, artifacts, self.operand, span)?;
+                decrement_operand(context, block_context, artifacts, self.operand, span)
             }
-        }
+        })?;
 
         if let Some(operand_type) = artifacts.get_rc_expression_type(&self.operand).cloned() {
             artifacts.set_rc_expression_type(self, operand_type);
@@ -859,9 +873,6 @@ where
     });
 
     let operand_id = get_block_expression_id(operand, context, block_context);
-    // `++` and `--` are assignment operations: each writes back what it read.
-    let was_inside_assignment_operation = block_context.flags.inside_assignment_operation();
-    block_context.flags.set_inside_assignment_operation(true);
     let successful = assign_to_expression(
         context,
         block_context,
@@ -873,7 +884,6 @@ where
         false,
         PropertyWriteKind::Mutation,
     )?;
-    block_context.flags.set_inside_assignment_operation(was_inside_assignment_operation);
 
     if !successful {
         context.collector.report_with_code(
@@ -1097,9 +1107,6 @@ where
     });
 
     let operand_id = get_block_expression_id(operand, context, block_context);
-    // `++` and `--` are assignment operations: each writes back what it read.
-    let was_inside_assignment_operation = block_context.flags.inside_assignment_operation();
-    block_context.flags.set_inside_assignment_operation(true);
     let successful = assign_to_expression(
         context,
         block_context,
@@ -1111,7 +1118,6 @@ where
         false,
         PropertyWriteKind::Mutation,
     )?;
-    block_context.flags.set_inside_assignment_operation(was_inside_assignment_operation);
 
     if !successful {
         context.collector.report_with_code(

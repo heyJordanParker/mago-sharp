@@ -6481,6 +6481,32 @@ fn a_coalescing_write_to_an_index_of_a_scalar_is_refused_as_in_php() {
     );
 }
 
+/// `+=`, `++` and `??=` read an index of a scalar and write it, and the index is refused once, by the read, or by the
+/// write where the read is inside `??`. PHP reports `+=` and `++` twice, from its read and its write.
+#[test]
+fn a_compound_write_to_an_index_of_a_scalar_is_refused_once() {
+    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public void bump(int z)\n    {\n        z[0] += 1;\n        z[1]++;\n        z[2] ??= 1;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function bump(int $z): void\n    {\n        $z[0] += 1;\n        $z[1]++;\n        $z[2] ??= 1;\n    }\n}\n";
+    let refusals = |file| {
+        issues(file, &[]).into_iter().filter(|issue| issue.ends_with(" invalid-array-access")).collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        refusals(("src/Demo/Scalars.sharp", sharp)),
+        ["7:9 invalid-array-access", "8:9 invalid-array-access", "9:9 invalid-array-access"]
+    );
+    assert_eq!(
+        refusals(("src/Demo/Scalars.php", php)),
+        [
+            "9:9 invalid-array-access",
+            "9:9 invalid-array-access",
+            "10:9 invalid-array-access",
+            "10:9 invalid-array-access",
+            "11:9 invalid-array-access",
+        ]
+    );
+}
+
 /// A write by index in a `for` loop's step runs on every pass, and is refused as one in the body is: a `Set` has no
 /// index, and an `int` is not written by index. PHP refuses the `int`.
 #[test]
