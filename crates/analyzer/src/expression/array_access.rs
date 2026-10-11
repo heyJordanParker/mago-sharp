@@ -133,7 +133,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
 /// key, so a `Map` is read only where the read is handled: `??` and `?.` read a missing key as null, as `isset`
 /// does. A refused bare read keeps the type `V` it would have when it runs, so it is reported once. A `List` read
 /// stays bare, because a `List`'s keys run without gaps. A place is the collections it is declared as, whatever
-/// literal it holds, and a place that may be a `Map` is read as one.
+/// literal it holds, and a place that may be a `Map` is read as one. A place that may be a `Set` has no index at all,
+/// which the `Set`'s own rule refuses, so this rule adds no second report.
 pub(crate) fn check_sharp_map_read<'arena, A>(
     access: &ArrayAccess<'arena>,
     context: &mut Context<'_, 'arena, A>,
@@ -142,13 +143,15 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
 ) where
     A: Arena,
 {
-    let has_map =
-        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
-    let may_be_map = match get_declared_collection(context, block_context, artifacts, access.array) {
-        Some(declared) => has_map(&declared),
-        None => artifacts.get_expression_type(access.array).is_some_and(has_map),
+    let is_map_read = |container: &TUnion| {
+        container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
+            && !container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
     };
-    if !may_be_map {
+    let reads_map = match get_declared_collection(context, block_context, artifacts, access.array) {
+        Some(declared) => is_map_read(&declared),
+        None => artifacts.get_expression_type(access.array).is_some_and(is_map_read),
+    };
+    if !reads_map {
         return;
     }
 

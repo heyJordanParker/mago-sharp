@@ -4945,21 +4945,18 @@ fn a_key_and_value_loop_over_a_local_that_may_be_a_set_or_a_map_is_refused_by_th
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
 
-/// Pin: a local that may be a `Set` or a `Map` is not written by index, which a `Set` does not have, and not read by a
-/// bare index, which a `Map` read must handle and a `Set` does not have. Both rules refuse the read. PHP writes and
-/// reads an index of either array.
+/// A local that may be a `Set` or a `Map` has no index, because a `Set` has none, so every write and read by index is
+/// refused once by the `Set`, handled with `??` or not. The `Map`'s rule for a bare read adds no second report. PHP
+/// writes and reads an index of either array.
 #[test]
 fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags[\"a\"] = 1;\n        return tags[\"a\"];\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<int, int> $ids\n     * @param array<string, int> $counts\n     */\n    public function run(bool $ready, array $ids, array $counts): int\n    {\n        $tags = $ready ? $ids : $counts;\n        $tags['a'] = 1;\n        return $tags['a'];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags[\"a\"] = 1;\n        int handled = tags[\"a\"] ?? 0;\n        return tags[\"a\"] + handled;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<int, int> $ids\n     * @param array<string, int> $counts\n     */\n    public function run(bool $ready, array $ids, array $counts): int\n    {\n        $tags = $ready ? $ids : $counts;\n        $tags['a'] = 1;\n        $handled = $tags['a'] ?? 0;\n        return $tags['a'] + $handled;\n    }\n}\n";
 
+    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
     assert_eq!(
         refusals(("src/Demo/Tags.sharp", sharp), &[]),
-        [
-            "8:9 invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.",
-            "9:16 invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.",
-            "9:16 possibly-undefined-array-index A `Map` is not read by a bare index, because its key may be missing. | Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`.",
-        ]
+        [format!("8:9 {no_index}"), format!("9:23 {no_index}"), format!("10:16 {no_index}")]
     );
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
