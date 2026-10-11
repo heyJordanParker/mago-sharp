@@ -1,5 +1,6 @@
 use strum::Display;
 
+use mago_database::file::File;
 use mago_span::HasSpan;
 use mago_span::Span;
 
@@ -34,6 +35,15 @@ pub struct Module<'arena> {
 #[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum ModuleMember<'arena> {
     Law(Law<'arena>),
+}
+
+impl Module<'_> {
+    /// Whether `file` is where a module is declared, spec section 32: its folder's `Module.sharp`.
+    #[inline]
+    #[must_use]
+    pub fn is_declared_in(file: &File) -> bool {
+        file.name.rsplit(|&byte| byte == b'/').next() == Some(b"Module.sharp".as_slice())
+    }
 }
 
 impl HasSpan for Module<'_> {

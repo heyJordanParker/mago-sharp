@@ -1736,11 +1736,13 @@ fn orphan_patch_constant_diagnostic(meta: &ConstantMetadata) -> Issue {
 /// Determines which metadata value to keep when merging duplicates.
 ///
 /// Priority:
-///   1. user-defined > patch > external > built-in > other.
-///   2. non-polyfill > polyfill — tools like rector/phpstan/psalm ship
+///   1. plain PHP > PHP# module — a PHP# module never changes what plain PHP
+///      code means, so a plain PHP class-like of its name keeps the name.
+///   2. user-defined > patch > external > built-in > other.
+///   3. non-polyfill > polyfill — tools like rector/phpstan/psalm ship
 ///      skeleton stubs gated by `if (!class_exists('X'))` that should never
 ///      shadow a concrete definition.
-///   3. smaller span wins as a deterministic tie-breaker.
+///   4. smaller span wins as a deterministic tie-breaker.
 ///
 /// Returns `true` if the new value should replace the existing one.
 fn should_replace_metadata(
@@ -1749,6 +1751,14 @@ fn should_replace_metadata(
     new_flags: MetadataFlags,
     new_span: Span,
 ) -> bool {
+    if new_flags.is_module() && !existing_flags.is_sharp() {
+        return false;
+    }
+
+    if existing_flags.is_module() && !new_flags.is_sharp() {
+        return true;
+    }
+
     let new_is_user_defined = new_flags.is_user_defined();
     let existing_is_user_defined = existing_flags.is_user_defined();
 

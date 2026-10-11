@@ -7357,6 +7357,25 @@ fn a_module_is_no_class_so_no_code_creates_or_extends_it() {
     }
 }
 
+/// A plain PHP class named like a PHP# module keeps its name, whichever file the scan reads first, so plain PHP code
+/// that uses it analyzes as it does in Mago.
+#[test]
+fn a_plain_php_class_named_like_a_module_keeps_its_name() {
+    let module = ("app/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n");
+    let class = (
+        "app/Shop/Module.php",
+        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Shop;\n\nfinal class Module\n{\n    public function one(): int\n    {\n        return 1;\n    }\n}\n",
+    );
+    let uses = (
+        "app/Shop/Uses.php",
+        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Shop;\n\nfinal class Uses\n{\n    public function run(): int\n    {\n        return (new Module())->one();\n    }\n}\n",
+    );
+
+    for others in [[module, class], [class, module]] {
+        assert_eq!(issues(uses, &others), Vec::<String>::new(), "{:?}", others.map(|(name, _)| name));
+    }
+}
+
 /// Semantics takes a well-formed `extern` method in any namespace, because the engine compiles the standard library
 /// from `vendor/` without knowing it is vendored. The analyzer knows a project file, and refuses it there.
 #[test]

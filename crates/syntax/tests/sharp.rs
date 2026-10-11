@@ -2667,6 +2667,36 @@ fn a_module_service_or_parent_is_one_not_supported_error_and_the_module_parses_o
     }
 }
 
+/// Spec section 32: a module holds no statements, branches, loops or methods. Any member but a law is one error at the
+/// member, and the law after it still parses.
+#[test]
+fn a_module_member_other_than_a_law_is_one_error_and_the_module_parses_on() {
+    for member in ["public int total(int a) => a + 1;", "private int count = 0;", "public const int LIMIT = 3;"] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("namespace App.Shop;\n\nmodule\n{{\n    {member}\n    law same(int a) => a == a;\n}}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "app/Shop/Module.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), "A module states only laws.", "{member}");
+        assert_eq!(source(code, error), member, "{member}");
+        let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+            panic!("expected a namespace for `{member}`, got {:#?}", program.statements);
+        };
+        let [Statement::Module(module)] = namespace.statements().as_slice() else {
+            panic!("expected one module for `{member}`, got {:#?}", namespace.statements());
+        };
+        assert!(
+            matches!(module.members.as_slice(), [ModuleMember::Law(law)] if law.name.value == b"same"),
+            "the module keeps parsing after `{member}`"
+        );
+    }
+}
+
 /// PHP has no laws, so a `.php` member that starts with `law` stays a typed property, and `law(…)` a call.
 #[test]
 fn law_in_a_php_file_is_a_name() {

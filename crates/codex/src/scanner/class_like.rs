@@ -257,7 +257,8 @@ where
 }
 
 /// Registers a PHP# module, spec sections 28 and 32, as the class-like `<Namespace>\Module` flagged as a module,
-/// holding only its laws, so every class-law path serves a module law.
+/// holding only its laws, so every class-law path serves a module law. Only its folder's `Module.sharp` declares it:
+/// semantics refuses a module in any other file.
 #[inline]
 pub fn register_module<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -268,6 +269,10 @@ pub fn register_module<'arena, A>(
 where
     A: Arena,
 {
+    if !Module::is_declared_in(context.file) {
+        return None;
+    }
+
     let original_name = word(context.resolved_names.get(&module.module));
     let name = ascii_lowercase_word(original_name.as_bytes());
     if codebase.class_likes.contains_key(&name) {

@@ -2,6 +2,7 @@ use mago_allocator::prelude::*;
 use mago_span::HasSpan;
 
 use crate::T;
+use crate::cst::cst::ClassLikeMember;
 use crate::cst::cst::Module;
 use crate::cst::cst::ModuleMember;
 use crate::cst::sequence::Sequence;
@@ -14,7 +15,7 @@ where
 {
     /// Parses a PHP# module, spec section 32: `module` and its members in braces. A member is a law, spec section 28.
     /// The parser reads section 32's parent header and service bindings, and reports each as not supported yet where
-    /// it starts.
+    /// it starts. It reads any other member as a class member, drops it, and reports it once at its span.
     pub(crate) fn parse_module(&mut self) -> Result<Module<'arena>, ParseError> {
         let module = self.expect_any_keyword()?;
         if self.stream.is_at(T![":"])? {
@@ -33,16 +34,16 @@ where
                 continue;
             }
 
-            if self.is_at_law()? {
-                match self.parse_law() {
-                    Ok(law) => members.push(ModuleMember::Law(law)),
-                    Err(error) => self.errors.push(error),
-                }
-                continue;
+            let position_before = self.stream.current_position();
+            match self.parse_classlike_member() {
+                Ok(ClassLikeMember::Law(law)) => members.push(ModuleMember::Law(law)),
+                Ok(member) => self.errors.push(ParseError::NonLawInSharpModule(member.span())),
+                Err(error) => self.errors.push(error),
             }
-
-            self.errors.push(self.stream.unexpected(Some(token), &[T![Identifier], T!["}"]]));
-            self.stream.consume()?;
+            if self.stream.current_position() == position_before {
+                self.errors.push(self.stream.unexpected(Some(token), &[]));
+                self.stream.consume()?;
+            }
         }
 
         Ok(Module { module, left_brace, members: Sequence::new(members), right_brace: self.stream.eat_span(T!["}"])? })

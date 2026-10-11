@@ -3354,11 +3354,12 @@ pub fn check_module(module: &Module, context: &mut Context<'_, '_, '_>) {
 /// Decides a module by its file's name, spec section 32: the module of a folder is declared in its `Module.sharp`. An
 /// environment module, in `Module.<Environment>.sharp`, is not supported yet.
 fn check_module_file_name(module: &Module, context: &mut Context<'_, '_, '_>) -> Option<Place> {
-    let name = file_name(context);
-    if name == b"Module.sharp" {
+    if Module::is_declared_in(context.source_file) {
         return Some(Place::Module);
     }
 
+    let path: &[u8] = &context.source_file.name;
+    let name = path.rsplit(|&byte| byte == b'/').next().unwrap_or(path);
     let issue = if name.starts_with(b"Module.") && name.ends_with(b".sharp") {
         Issue::error("An environment module is not supported yet in PHP#.")
             .with_annotation(Annotation::primary(module.module.span).with_message("Not supported yet."))
@@ -3374,7 +3375,7 @@ fn check_module_file_name(module: &Module, context: &mut Context<'_, '_, '_>) ->
 /// Whether `statement` may stand at the top of the checked file: any statement outside `Module.sharp`, and in
 /// `Module.sharp` its namespace, its imports and its first module, spec section 32.
 fn is_module_file_statement(statement: &Statement, context: &Context<'_, '_, '_>) -> bool {
-    if file_name(context) != b"Module.sharp" {
+    if !Module::is_declared_in(context.source_file) {
         return true;
     }
 
@@ -3388,13 +3389,6 @@ fn is_module_file_statement(statement: &Statement, context: &Context<'_, '_, '_>
             .is_some_and(|first| first == module.span()),
         _ => false,
     }
-}
-
-/// The checked file's name without its folders, as in `Module.sharp`.
-fn file_name<'ctx>(context: &Context<'ctx, '_, '_>) -> &'ctx [u8] {
-    let name: &'ctx [u8] = &context.source_file.name;
-
-    name.rsplit(|&byte| byte == b'/').next().unwrap_or(name)
 }
 
 /// The name an import gives its class in the file: the name after `as`, or else the last segment of the class name.

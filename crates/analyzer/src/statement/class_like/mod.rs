@@ -714,6 +714,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
 }
 
 /// Spec sections 28 and 32: a module is its namespace's class-like `Module`, and its laws are analyzed as a class's.
+/// Only its folder's `Module.sharp` declares it, and semantics already refused a module in any other file.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -724,6 +725,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
     where
         A: Arena,
     {
+        if !Module::is_declared_in(context.source_file) {
+            return Ok(());
+        }
+
         let name = context.resolved_names.get(&self.module);
         let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
             tracing::warn!("Module {} not found in codebase", BytesDisplay(name));
