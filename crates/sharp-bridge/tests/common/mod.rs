@@ -156,8 +156,10 @@ pub fn checked_file<R>(
         .analyze_with_artifacts(program, &mut result)
         .expect("the analysis runs");
     let issues: Vec<Issue> = semantic_issues.into_iter().chain(result.issues).collect();
-    let leaks: Vec<String> = issues
+    let parse_errors: Vec<Issue> = program.errors.iter().map(Issue::from).collect();
+    let leaks: Vec<String> = parse_errors
         .iter()
+        .chain(&issues)
         .filter_map(|issue| {
             let (text, word) = sharp_words::banned_word(issue)?;
             Some(format!("`{}` says {text:?}, which names {word}", issue.code.as_deref().unwrap_or("none")))

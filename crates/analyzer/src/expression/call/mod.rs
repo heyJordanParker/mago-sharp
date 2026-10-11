@@ -526,7 +526,7 @@ where
                     )
                     .with_note(format!("This often means the {kind_str} is misspelled, or not defined or autoloaded."))
                     .with_help(format!(
-                        "Check the spelling of `{name_str}`. Call a method as `this.{name_str}()` or `Class.{name_str}()`, or declare the function in a `.php` file."
+                        "Check the spelling of `{name_str}`, or declare `function {name_str}()` in a `.php` file outside any namespace."
                     )),
             );
         } else if !skip_error_on_not_found {

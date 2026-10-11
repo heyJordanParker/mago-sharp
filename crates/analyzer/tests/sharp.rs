@@ -191,6 +191,9 @@ fn adding_a_mixed_operand_reports_mixed_operand_as_in_php() {
         messages(("src/Demo/Report.php", php), &[("src/Lib/Source.php", source)])[0],
         "Left operand in binary operation has type `mixed`."
     );
+
+    let fixed = "namespace Demo;\n\nimport Lib.Source;\n\nclass Report\n{\n    public static int total()\n    {\n        const value = Source.value();\n        if (value is int n) {\n            return n + 1;\n        }\n        return 0;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", fixed), &[("src/Lib/Source.php", source)]), Vec::<String>::new());
 }
 
 #[test]
@@ -382,6 +385,13 @@ fn bare_constants_resolve_as_in_php() {
         messages(("src/Demo/Report.php", php), &[])[..2],
         ["Undefined constant: `Demo\\MISSING`.", "Right operand in binary operation has type `mixed`."]
     );
+
+    let limits = (
+        "src/Demo/Limits.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Limits\n{\n    public const int MAX = 10;\n}\n",
+    );
+    let fixed = "namespace Demo;\n\nclass Report\n{\n    public static int total()\n    {\n        return PHP_INT_MAX - Limits.MAX;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", fixed), &[limits]), Vec::<String>::new());
 }
 
 #[test]
@@ -1830,12 +1840,15 @@ fn calling_a_function_that_does_not_exist_is_reported_as_in_php() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[])[0],
-        "7:16 non-existent-function Function `missing` could not be found. | Check the spelling of `missing`. Call a method as `this.missing()` or `Class.missing()`, or declare the function in a `.php` file."
+        "7:16 non-existent-function Function `missing` could not be found. | Check the spelling of `missing`, or declare `function missing()` in a `.php` file outside any namespace."
     );
     assert_eq!(
         messages(("src/Demo/Report.php", php), &[])[0],
         "Could not find definition for function `Demo\\missing` (also tried as `missing` in a broader scope)."
     );
+
+    let declared = ("src/helpers.php", "<?php\n\nfunction missing(int $value): int\n{\n    return $value;\n}\n");
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[declared]), Vec::<String>::new());
 }
 
 /// The engine calls a bare function name as the global function, so a call the analyzer resolves to a namespaced
@@ -3275,6 +3288,9 @@ fn ordering_an_any_keeps_its_report_unless_the_other_side_has_no_order() {
             "9:40 invalid-operand `<` orders numbers, strings and classes that declare `operator <=>`, and `bool` is none of them. | Order a number or a string taken from the value instead.",
         ]
     );
+
+    let fixed = "namespace Demo;\n\nclass Report\n{\n    public static bool a(Any value)\n    {\n        if (value is int n) {\n            return n < 1;\n        }\n        return false;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", fixed), &[]), Vec::<String>::new());
 }
 
 /// Numbers, strings and instances of a class that declares `operator <=>` keep their order.
@@ -3674,9 +3690,7 @@ fn a_lambda_passed_to_php_takes_its_parameter_types_from_the_php_signature_as_in
 #[test]
 fn a_function_type_is_a_closure_type_that_takes_lambdas_and_calls_as_in_php() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)> scale;\n\n    public Report(int factor)\n    {\n        this.scale = n => n * factor;\n    }\n\n    public Function<bool(int)> above(int floor) => n => n > floor;\n\n    public int run(int extra)\n    {\n        const scale = this.scale;\n        const check = this.above(extra);\n        Function<int(int)> twice = n => n * 2;\n        return check(twice(scale(extra))) ? 1 : 0;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $scale;\n\n    public function __construct(int $factor)\n    {\n        $this->scale = fn (int $n) => $n * $factor;\n    }\n\n    /** @return \\Closure(int): bool */\n    public function above(int $floor): \\Closure { return fn (int $n) => $n > $floor; }\n\n    public function run(int $extra): int\n    {\n        $scale = $this->scale;\n        $check = $this->above($extra);\n        $twice = fn (int $n) => $n * 2;\n        return $check($twice($scale($extra))) ? 1 : 0;\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
 
@@ -3801,6 +3815,9 @@ fn an_unchecked_any_is_refused_wherever_its_type_matters() {
             .collect::<Vec<_>>(),
         ["Cannot reliably negate a `mixed` operand."]
     );
+
+    let fixed = "namespace Demo;\n\nclass Inbox\n{\n    public int negate(Any? value)\n    {\n        if (value is int n) {\n            return -n;\n        }\n        return 0;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Inbox.sharp", fixed), &[]), Vec::<String>::new());
 }
 
 #[test]
@@ -3815,8 +3832,8 @@ fn stepping_or_ordering_an_any_names_it_any() {
             .filter(|refusal| is_operand_refusal(refusal))
             .collect::<Vec<_>>(),
         [
-            "8:9 mixed-operand Cannot reliably increment an `Any?` operand. | Check the operand with `is` or `match` first, as in `if (value is int n)`, and increment `n`.",
-            "10:9 mixed-operand Cannot reliably decrement an `Any?` operand. | Check the operand with `is` or `match` first, as in `if (value is int n)`, and decrement `n`.",
+            "8:9 mixed-operand Cannot reliably increment an `Any?` operand. | Check the operand with `is` or `match` first, as in `if (value is int n)`, and write `value = n + 1`.",
+            "10:9 mixed-operand Cannot reliably decrement an `Any?` operand. | Check the operand with `is` or `match` first, as in `if (value is int n)`, and write `value = n - 1`.",
             "11:16 mixed-operand Left operand of `<=>` is `Any?`, which has no order. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
         ]
     );
@@ -3831,6 +3848,9 @@ fn stepping_or_ordering_an_any_names_it_any() {
             "Left operand in spaceship comparison (`<=>`) has `mixed` type.",
         ]
     );
+
+    let fixed = "namespace Demo;\n\nclass Inbox\n{\n    public Any? up(Any? input)\n    {\n        let value = input;\n        if (value is int n) {\n            value = n + 1;\n        }\n        return value;\n    }\n\n    public Any? down(Any? input)\n    {\n        let value = input;\n        if (value is int n) {\n            value = n - 1;\n        }\n        return value;\n    }\n\n    public int order(Any? value)\n    {\n        if (value is int n) {\n            return n <=> 1;\n        }\n        return 0;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Inbox.sharp", fixed), &[]), Vec::<String>::new());
 }
 
 const SHAPES: &str = "<?php\n\nnamespace Lib;\n\ninterface Shape\n{\n}\n\nfinal class Circle implements Shape\n{\n    public function __construct(public float $radius)\n    {\n    }\n}\n\nfinal class Square implements Shape\n{\n    public function __construct(public float $side)\n    {\n    }\n}\n";
@@ -5751,9 +5771,7 @@ fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
 #[test]
 fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
     let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n\n    /** @return null|\\Closure(Cart): Charge */\n    public function current(): ?\\Closure { return $this->fallback; }\n\n    /** @param \\Closure(Cart): Charge $next */\n    public function replace(\\Closure $next): void\n    {\n        $this->fallback = $next;\n    }\n}\n";
 
-    assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
 }
 
@@ -5761,18 +5779,14 @@ fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin
 #[test]
 fn a_map_of_function_types_with_two_effects_is_checked_as_its_php_twin() {
     let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n\n    public int size() => count(this.handlers);\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers;\n\n    /** @param array<string, \\Closure(Cart): Charge> $handlers */\n    public function __construct(array $handlers)\n    {\n        $this->handlers = $handlers;\n    }\n\n    public function size(): int { return count($this->handlers); }\n}\n";
 
-    assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
 }
 
 #[test]
 fn a_function_type_taking_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
     let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /** @param \\Closure(\\Closure(int): int): int $apply */\n    public function __construct(\\Closure $apply)\n    {\n        $this->apply = $apply;\n    }\n\n    /** @param \\Closure(int): int $step */\n    public function run(\\Closure $step): int { return ($this->apply)($step); }\n}\n";
 
-    assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
 }
 
@@ -5837,14 +5851,11 @@ fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() 
 }
 
 /// Spec section 29: a function type without `uses` is pure, so it holds no function value with an effect, whether the
-/// value is assigned, passed or returned, and a function type that uses `Mail` holds none that uses `Http`. PHP closures
-/// carry no effects, so the PHP twin is checked as before.
+/// value is assigned, passed or returned, and a function type that uses `Mail` holds none that uses `Http`.
 #[test]
 fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
     let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing(Function<int(int) uses Http> fetch)\n    {\n        this.rate = fetch;\n        Function<int(int)> local = fetch;\n        Pricing.apply(fetch);\n        Pricing.mail(fetch);\n    }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static int mail(Function<int(int) uses Mail> step) => step(1);\n\n    public Function<int(int)> current(Function<int(int) uses Http> fetch) => fetch;\n\n    public int price() => this.rate(2);\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    /** @param \\Closure(int): int $fetch */\n    public function __construct(\\Closure $fetch)\n    {\n        $this->rate = $fetch;\n        self::apply($fetch);\n    }\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    /**\n     * @param \\Closure(int): int $fetch\n     * @return \\Closure(int): int\n     */\n    public function current(\\Closure $fetch): \\Closure { return $fetch; }\n\n    public function price(): int { return ($this->rate)(2); }\n}\n";
 
-    assert_eq!(issues(("src/App/Shop/Pricing.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
             .iter()
@@ -5865,9 +5876,7 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
 #[test]
 fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
     let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @param null|\\Closure(int): int $step */\n    public static function apply(?\\Closure $step): int { return $step === null ? 0 : $step(1); }\n\n    /**\n     * @param \\Closure(int): int $fetch\n     * @param null|\\Closure(int): int $maybe\n     */\n    public function run(\\Closure $fetch, ?\\Closure $maybe): int { return self::apply($fetch) + self::apply($maybe); }\n}\n";
 
-    assert_eq!(issues(("src/App/Shop/Pricing.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
             .iter()
@@ -6565,6 +6574,10 @@ fn a_field_type_naming_a_missing_class_is_reported_as_a_parameter_type_is() {
         messages(("src/Demo/Tally.php", php), &[]),
         ["Cannot find class, interface, enum, or type alias `Demo\\Missing`."; 2]
     );
+
+    let declared = ("src/Lib/Missing.php", "<?php\n\nnamespace Lib;\n\nfinal class Missing\n{\n}\n");
+    let imported = "namespace Demo;\n\nimport Lib.Missing;\n\nclass Tally\n{\n    public Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        return 0;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Tally.sharp", imported), &[declared]), Vec::<String>::new());
 }
 
 /// `keys()` and `entries()` would read a backed enum key back as its backing value, so a `Map` has neither until
@@ -9100,12 +9113,7 @@ fn a_getter_calling_a_function_value_with_an_effect_is_refused_naming_the_effect
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Database> rate) { }\n\n    public int price => this.rate(2);\n\n    public int total => this.apply(this.rate);\n\n    public int stored\n    {\n        get\n        {\n            Function<int(int) uses Database> lookup = this.rate;\n            return lookup(3);\n        }\n    }\n\n    public int apply(Function<int(int) uses Database> step) => step(1);\n}\n",
     );
-    let php = (
-        "app/Shop/Pricing.php",
-        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @param \\Closure(int): int $rate */\n    public function __construct(private \\Closure $rate) {}\n\n    public int $price { get => ($this->rate)(2); }\n\n    public int $total { get => $this->apply($this->rate); }\n\n    public int $stored\n    {\n        get\n        {\n            $lookup = $this->rate;\n            return $lookup(3);\n        }\n    }\n\n    /** @param \\Closure(int): int $step */\n    public function apply(\\Closure $step): int { return $step(1); }\n}\n",
-    );
 
-    assert_eq!(issues(php, &[]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing]),
@@ -9135,19 +9143,14 @@ fn a_law_calling_a_function_value_with_the_effect_clock_is_refused() {
 
 /// Spec section 29 holds every implementation to what its declaration allows, so a lambda stored where a pure function
 /// type is declared may have no effect. The solve knows a lambda's effects only after every file is analyzed, so the
-/// refusal names the call that has the effect. The PHP twin's closure carries no effects and is checked as before.
+/// refusal names the call that has the effect.
 #[test]
 fn a_lambda_with_an_effect_stored_in_a_pure_function_type_is_refused() {
     let pricing = (
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing()\n    {\n        this.rate = n => fetch(n);\n    }\n\n    public int price() => this.rate(2);\n}\n",
     );
-    let php = (
-        "app/Shop/Pricing.php",
-        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    public function __construct()\n    {\n        $this->rate = fn (int $n): int => fetch($n);\n    }\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
-    );
 
-    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
@@ -9165,12 +9168,7 @@ fn a_lambda_with_an_effect_returned_or_held_in_a_local_of_a_pure_function_type_i
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\npublic class Pricing\n{\n    public Function<int(int)> rate() => n => fetch(n);\n\n    public int price()\n    {\n        Function<int(int)> live = n => fetch(n) + 1;\n        return live(2);\n    }\n}\n",
     );
-    let php = (
-        "app/Shop/Pricing.php",
-        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @return \\Closure(int): int */\n    public function rate(): \\Closure { return fn (int $n): int => fetch($n); }\n\n    public function price(): int\n    {\n        $live = fn (int $n): int => fetch($n) + 1;\n        return $live(2);\n    }\n}\n",
-    );
 
-    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
@@ -9222,12 +9220,7 @@ fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
         "app/Shop/Branch.sharp",
         "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live, Function<int(int)> fixed)\n    {\n        this.rate = live ? (int n) => fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => fetch(n) + 3;\n        this.rate = live ? (int n) => fetch(n) + 4 : fixed;\n        this.rate = live ? fixed : (int n) => fetch(n) + 5;\n        this.rate = live ? (int n) => fetch(n) + 6 : (int n) => fetch(n) + 7;\n    }\n\n    public int price() => this.rate(2);\n}\n",
     );
-    let php = (
-        "app/Shop/Branch.php",
-        "<?php\n\nnamespace App\\Shop;\n\nclass Branch\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    /** @param \\Closure(int): int $fixed */\n    public function __construct(bool $live, \\Closure $fixed)\n    {\n        $this->rate = $live ? fn (int $n): int => fetch($n) : fn (int $n): int => $n + 1;\n        $this->rate = $live ? $fixed : fn (int $n): int => fetch($n) + 5;\n    }\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
-    );
 
-    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
     assert_eq!(issues(branch, &[FETCH, FETCH_STUB]), Vec::<String>::new());
     let message = "invalid-property-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
     assert_eq!(
@@ -9263,12 +9256,7 @@ fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static string? read(Function<string?(string)> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
     );
-    let php = (
-        "app/Shop/Pricing.php",
-        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\Cache;\nuse Lib\\Client;\nuse Lib\\Store;\nuse Sharp\\Environment;\n\nclass Pricing\n{\n    public function __construct(private Client $client, private Cache $cache, private Store $store, private Environment $environment) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    /** @param \\Closure(string): ?string $lookup */\n    public static function read(\\Closure $lookup): ?string { return $lookup('HOME'); }\n\n    public function run(): int { return self::apply($this->client->get(...)) + self::apply($this->cache->get(...)) + self::apply($this->store->get(...)); }\n\n    public function home(): ?string { return self::read($this->environment->variable(...)); }\n}\n",
-    );
 
-    assert_eq!(issues(php, &[SERVICES]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, SERVICES, SERVICES_STUB]),
@@ -9297,12 +9285,7 @@ fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_exte
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n}\n",
     );
-    let php = (
-        "app/Shop/Pricing.php",
-        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\QuietChild;\nuse Lib\\RemoteFeed;\n\nclass Pricing\n{\n    public function __construct(private RemoteFeed $feed, private QuietChild $quiet) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function run(): int { return self::apply($this->feed->get(...)) + self::apply($this->quiet->get(...)); }\n\n    public int $price { get => $this->feed->get(1); }\n}\n",
-    );
 
-    assert_eq!(issues(php, &[feeds]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[feeds, stub]), Vec::<String>::new());
     let message = "invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
     assert_eq!(
@@ -9353,7 +9336,7 @@ fn a_php_static_method_closure_through_a_subclass_is_the_method_its_parent_decla
 }
 
 /// An initial value that is not constant runs in the constructor, so a lambda in it is held to the property's function
-/// type, even in a class with no method. PHP 8.5, the version the tests analyze, accepts a `static function` default.
+/// type, even in a class with no method.
 #[test]
 fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refused() {
     let pricing = (
@@ -9364,12 +9347,7 @@ fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refus
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate = (int n) => fetch(n);\n}\n",
     );
-    let php = (
-        "app/Shop/Pricing.php",
-        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate = static function (int $n): int { return fetch($n); };\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
-    );
 
-    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [

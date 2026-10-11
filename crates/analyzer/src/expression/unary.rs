@@ -848,7 +848,7 @@ where
                         )
                         .with_note("An `Any` may hold any value, so incrementing it is unsafe until it is checked.")
                         .with_help(
-                            "Check the operand with `is` or `match` first, as in `if (value is int n)`, and increment `n`.",
+                            "Check the operand with `is` or `match` first, as in `if (value is int n)`, and write `value = n + 1`.",
                         )
                 } else {
                     Issue::error("Cannot reliably increment a `mixed` operand.")
@@ -1097,7 +1097,7 @@ where
                         )
                         .with_note("An `Any` may hold any value, so decrementing it is unsafe until it is checked.")
                         .with_help(
-                            "Check the operand with `is` or `match` first, as in `if (value is int n)`, and decrement `n`.",
+                            "Check the operand with `is` or `match` first, as in `if (value is int n)`, and write `value = n - 1`.",
                         )
                 } else {
                     Issue::error("Cannot reliably decrement a `mixed` operand.")
