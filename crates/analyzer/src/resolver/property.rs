@@ -1553,8 +1553,10 @@ where
         false,
     );
 
+    // The signature's `source` names the class the value is read through, as a call of the method does, so an
+    // `extern` lookup starts there.
     let mut signature = get_signature_of_function_like_identifier(
-        &FunctionLikeIdentifier::Method(class_name, method.get_method_name()),
+        &FunctionLikeIdentifier::Method(class_id, method.get_method_name()),
         context.codebase,
     )?;
     signature.is_closure = true;

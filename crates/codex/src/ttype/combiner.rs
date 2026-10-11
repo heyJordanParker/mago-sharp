@@ -1325,7 +1325,16 @@ fn scrape_type_properties(
         return;
     }
 
-    let id = atomic.get_id();
+    let mut id = atomic.get_id();
+    // A PHP# lambda or method value runs its own body, whose effects only the effects solve knows, so it stays apart
+    // from every other signature of its id, and the solve holds each one to its place's type.
+    if let TAtomic::Callable(TCallable::Signature(signature)) = &atomic
+        && signature.effects.is_some()
+        && let Some(source) = signature.source
+    {
+        id = word(format!("{id}#{}", source.as_string()).as_bytes());
+    }
+
     // Two signatures with one id share their parameter and return types. The folded one keeps the PHP# rule for its
     // parameters if PHP# wrote either, and the effects of both, the first one's first.
     if let TAtomic::Callable(TCallable::Signature(signature)) = &mut atomic
@@ -1659,6 +1668,7 @@ mod tests {
 
     use super::*;
 
+    use crate::identifier::function_like::FunctionLikeIdentifier;
     use crate::ttype::atomic::TAtomic;
     use crate::ttype::atomic::array::list::TList;
     use crate::ttype::atomic::callable::TCallableSignature;
@@ -1838,6 +1848,40 @@ mod tests {
             combined(&sharp(&["Sharp\\Mail", "sharp\\http"]), &sharp(&["Sharp\\Http"])),
             [atomic(&sharp(&["Sharp\\Mail", "sharp\\http"]))]
         );
+    }
+
+    #[test]
+    fn test_combine_keeps_sharp_signatures_of_one_id_apart_when_they_run_different_bodies() {
+        let php = TCallableSignature::new(false, true)
+            .with_return_type(Some(Arc::new(TUnion::from_atomic(TAtomic::Scalar(TScalar::int())))));
+        let sharp = TCallableSignature { effects: Some(Vec::new()), ..php.clone() };
+        let lambda = |name: &str| FunctionLikeIdentifier::Closure(mago_word::word(name));
+        let atomic = |signature: &TCallableSignature, source: Option<FunctionLikeIdentifier>| {
+            TAtomic::Callable(TCallable::Signature(signature.clone().with_source(source)))
+        };
+        let combined = |first: TAtomic, second: TAtomic| {
+            let mut combined = combine(vec![first, second], &CodebaseMetadata::default(), CombinerOptions::default());
+            combined.sort();
+            combined
+        };
+        let sorted = |mut atomics: Vec<TAtomic>| {
+            atomics.sort();
+            atomics
+        };
+
+        assert_eq!(
+            combined(atomic(&sharp, Some(lambda("a"))), atomic(&sharp, Some(lambda("b")))),
+            sorted(vec![atomic(&sharp, Some(lambda("a"))), atomic(&sharp, Some(lambda("b")))])
+        );
+        assert_eq!(
+            combined(atomic(&sharp, Some(lambda("a"))), atomic(&sharp, None)),
+            sorted(vec![atomic(&sharp, Some(lambda("a"))), atomic(&sharp, None)])
+        );
+        assert_eq!(
+            combined(atomic(&sharp, Some(lambda("a"))), atomic(&sharp, Some(lambda("a")))),
+            [atomic(&sharp, Some(lambda("a")))]
+        );
+        assert_eq!(combined(atomic(&php, Some(lambda("a"))), atomic(&php, Some(lambda("b")))).len(), 1);
     }
 
     #[test]

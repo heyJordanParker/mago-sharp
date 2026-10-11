@@ -35,6 +35,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
+use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
@@ -415,6 +416,15 @@ pub fn handle_return_value<'ctx, A>(
         );
 
         if is_contained_by {
+            record_function_values(
+                context,
+                artifacts,
+                &inferred_return_type,
+                &expected_return_type,
+                return_value.span(),
+                IssueCode::InvalidReturnStatement,
+            );
+
             return;
         }
 

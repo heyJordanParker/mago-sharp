@@ -175,7 +175,7 @@ where
     Ok(())
 }
 
-/// Verifies an argument's type against the expected parameter type.
+/// Verifies an argument's type against the expected parameter type, and returns whether the argument fits it.
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     artifacts: &AnalysisArtifacts,
@@ -184,7 +184,8 @@ pub fn verify_argument_type<'arena, A>(
     argument_offset: usize,
     input_expression: &Expression<'arena>,
     invocation_target: &InvocationTarget<'_>,
-) where
+) -> bool
+where
     A: Arena,
 {
     let target_kind_str = invocation_target.guess_kind();
@@ -220,7 +221,7 @@ pub fn verify_argument_type<'arena, A>(
             ),
         );
 
-        return;
+        return false;
     }
 
     if !parameter_type.accepts_null() {
@@ -243,7 +244,7 @@ pub fn verify_argument_type<'arena, A>(
                 )),
             );
 
-            return;
+            return false;
         }
 
         if input_type.is_nullable() && !input_type.ignore_nullable_issues() {
@@ -291,7 +292,7 @@ pub fn verify_argument_type<'arena, A>(
                 .with_help(help),
             );
 
-            return;
+            return false;
         }
 
         if input_type.is_falsable() && !input_type.ignore_falsable_issues() {
@@ -344,13 +345,13 @@ pub fn verify_argument_type<'arena, A>(
     );
 
     if type_match_found {
-        return;
+        return true;
     }
 
     if let Some(value) = int_refused_for_float(&union_comparison_result, artifacts, input_expression) {
         report_int_for_float(context, IssueCode::InvalidArgument, value, parameter_type);
 
-        return;
+        return false;
     }
 
     let target_name_str = invocation_target.guess_name(context);
@@ -380,7 +381,7 @@ pub fn verify_argument_type<'arena, A>(
             .with_help("Add specific type hints or assertions to the argument value."),
         );
 
-        return;
+        return false;
     }
 
     let is_empty_container = input_type.is_empty_array() || is_empty_container_construction(input_expression);
@@ -433,7 +434,7 @@ pub fn verify_argument_type<'arena, A>(
             .any(|atomic| matches!(atomic, TAtomic::Callable(callable) if callable.is_closure()));
 
         let types_can_be_identical = (!parameter_requires_closure || input_can_be_closure)
-            && can_expression_types_be_identical(context.codebase, input_type, parameter_type, false, false);
+            && can_argument_be_identical(context.codebase, input_type, parameter_type);
 
         if types_can_be_identical && parameter_type.is_callable() && !parameter_requires_closure {
             let all_inputs_are_resolvable_aliases = input_type.types.iter().all(|atomic| {
@@ -452,7 +453,7 @@ pub fn verify_argument_type<'arena, A>(
             });
 
             if all_inputs_are_resolvable_aliases {
-                return;
+                return true;
             }
         }
 
@@ -498,6 +499,37 @@ pub fn verify_argument_type<'arena, A>(
 
         context.collector.report_with_code(kind, issue);
     }
+
+    false
+}
+
+/// Whether an argument of `input_type` can hold a value of `parameter_type`. A function value whose type lists an
+/// effect a function type does not list never holds a value of that function type, as assigning or returning it
+/// reports.
+fn can_argument_be_identical(codebase: &CodebaseMetadata, input_type: &TUnion, parameter_type: &TUnion) -> bool {
+    input_type.types.iter().any(|input| {
+        let parameter_parts: Vec<TAtomic> = parameter_type
+            .types
+            .iter()
+            .filter(|parameter| {
+                !matches!(
+                    (input, parameter),
+                    (TAtomic::Callable(TCallable::Signature(input)), TAtomic::Callable(TCallable::Signature(parameter)))
+                        if input.has_effect_outside(parameter)
+                )
+            })
+            .cloned()
+            .collect();
+
+        !parameter_parts.is_empty()
+            && can_expression_types_be_identical(
+                codebase,
+                &TUnion::from_atomic(input.clone()),
+                &TUnion::from_vec(parameter_parts),
+                false,
+                false,
+            )
+    })
 }
 
 /// Returns `parameter_type` with each `Map` keyed by a backed enum keyed by the backing type instead, or `None` when

@@ -36,6 +36,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects;
 use crate::effects::Body;
+use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
@@ -133,7 +134,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for PropertyConcreteItem<'arena> {
 
 /// Analyzes a property's default value and reports it when its type is not assignable to the property's. A PHP#
 /// initial value that is not constant runs in the constructor, and the same check covers it. In PHP# a `null` or
-/// `false` that the type does not hold is an error too, as the engine refuses it.
+/// `false` that the type does not hold is an error too, as the engine refuses it. Such an initial value is recorded as
+/// a body of its own for the effect rules.
 fn analyze_default_value<'ctx, 'arena, A>(
     variable_name: &[u8],
     value: &Expression<'arena>,
@@ -144,7 +146,8 @@ fn analyze_default_value<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    if value.is_constant(&context.settings.version, false) {
+    let is_constant = value.is_constant(&context.settings.version, false);
+    if is_constant {
         block_context.in_constant_expression(|block_context| value.analyze(context, block_context, artifacts))?;
     } else {
         value.analyze(context, block_context, artifacts)?;
@@ -178,7 +181,7 @@ where
             let value_type = get_set_literal_type(context, artifacts, value, &declared_type).unwrap_or(value_type);
 
             let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
-            if !union_comparator::is_contained_by(
+            if union_comparator::is_contained_by(
                 context.codebase,
                 &value_type,
                 &declared_type,
@@ -187,12 +190,17 @@ where
                 false,
                 &mut comparison_result,
             ) {
-                if let Some(value) = int_refused_for_float(&comparison_result, artifacts, value) {
-                    report_int_for_float(context, IssueCode::InvalidPropertyDefaultValue, value, &declared_type);
-
-                    return Ok(());
-                }
-
+                record_function_values(
+                    context,
+                    artifacts,
+                    &value_type,
+                    &declared_type,
+                    value.span(),
+                    IssueCode::InvalidPropertyDefaultValue,
+                );
+            } else if let Some(value) = int_refused_for_float(&comparison_result, artifacts, value) {
+                report_int_for_float(context, IssueCode::InvalidPropertyDefaultValue, value, &declared_type);
+            } else {
                 let value_type_str = display_value_type(context, &value_type, &declared_type);
                 let declared_type_str = display_type(context, &declared_type);
                 let property =
@@ -215,6 +223,20 @@ where
                 context.collector.report_with_code(IssueCode::InvalidPropertyDefaultValue, issue);
             }
         }
+    }
+
+    if is_sharp
+        && !is_constant
+        && let Some(class_metadata) = block_context.scope.get_class_like()
+    {
+        effects::summary::record(
+            context,
+            artifacts,
+            Body::InitialValue(class_metadata.name, php_variable_name(variable_name)),
+            word(variable_name.strip_prefix(b"$").unwrap_or(variable_name)),
+            Vec::new(),
+            FunctionLikeBody::Expression(value),
+        );
     }
 
     Ok(())

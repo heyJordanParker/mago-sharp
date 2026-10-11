@@ -50,6 +50,7 @@ use crate::context::block::BlockContext;
 use crate::context::block::ReferenceConstraintSource;
 use crate::context::scope::var_has_root;
 use crate::context::scope::var_references_dynamic;
+use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_empty_literal_type;
@@ -734,6 +735,17 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
 
         // The local keeps its written type, as the engine never checks it.
         assigned_type = local_type;
+    }
+
+    if let Some((local_type, _)) = block_context.local_types.get(&variable_id) {
+        record_function_values(
+            context,
+            artifacts,
+            &assigned_type,
+            local_type,
+            source_expression.map_or(variable_span, HasSpan::span),
+            IssueCode::InvalidLocalAssignmentValue,
+        );
     }
 
     if block_context.references_possibly_from_confusing_scope.contains(&variable_id) {

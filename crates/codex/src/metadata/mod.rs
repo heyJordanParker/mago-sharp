@@ -870,6 +870,22 @@ impl CodebaseMetadata {
         *method_id
     }
 
+    /// Gets the identifier of the function-like `identifier` names where it is declared: the declaring method's for a
+    /// method a class may inherit, and `identifier` itself for a function or a closure.
+    #[must_use]
+    pub fn get_declaring_function_like_identifier(
+        &self,
+        identifier: &crate::identifier::function_like::FunctionLikeIdentifier,
+    ) -> crate::identifier::function_like::FunctionLikeIdentifier {
+        use crate::identifier::function_like::FunctionLikeIdentifier;
+        match identifier {
+            FunctionLikeIdentifier::Method(class, method) => {
+                self.get_declaring_method_identifier(&MethodIdentifier::new(*class, *method)).into()
+            }
+            _ => *identifier,
+        }
+    }
+
     /// Checks if a method is overriding a parent method.
     #[inline]
     #[must_use]

@@ -77,12 +77,11 @@ const NOT_AN_EFFECT: &str = "is not an effect: `uses` takes Database, Http, File
 /// nothing or a class.
 #[test]
 fn a_function_type_uses_only_effects() {
-    let typo =
-        "namespace App.Shop;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Htp>? charge = null;\n}\n";
-    let class = "namespace App.Shop;\n\nimport App.Orders.Order;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Order>? charge = null;\n}\n";
+    let typo = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Htp>? charge = null;\n}\n";
+    let class = "namespace App.Shop;\n\nimport App.Orders.Order;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Order>? charge = null;\n}\n";
 
-    assert_eq!(issues(typo), [format!("5:40 `Htp` {NOT_AN_EFFECT}")]);
-    assert_eq!(issues(class), [format!("7:40 `Order` {NOT_AN_EFFECT}")]);
+    assert_eq!(issues(typo), [format!("5:32 `Htp` {NOT_AN_EFFECT}")]);
+    assert_eq!(issues(class), [format!("7:32 `Order` {NOT_AN_EFFECT}")]);
 }
 
 /// An `extern`'s `uses` takes the same effects as a function type's.
@@ -100,8 +99,8 @@ fn an_extern_uses_only_effects() {
 #[test]
 fn an_effect_name_an_import_shadows_is_refused_with_the_imported_class() {
     let extern_ = "namespace App.Stubs;\n\nimport Lib.Clock;\n\nextern Clock.now uses Clock;\n";
-    let function_type = "namespace App.Shop;\n\nimport Lib.Http;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Http>? charge = null;\n}\n";
-    let declared = "namespace App.Shop;\n\nclass Clock\n{\n    private Function<int() uses Clock>? tick = null;\n}\n";
+    let function_type = "namespace App.Shop;\n\nimport Lib.Http;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? charge = null;\n}\n";
+    let declared = "namespace App.Shop;\n\nclass Clock\n{\n    Function<int() uses Clock>? tick = null;\n}\n";
 
     assert_eq!(
         issues(extern_),
@@ -112,16 +111,16 @@ fn an_effect_name_an_import_shadows_is_refused_with_the_imported_class() {
     assert_eq!(
         issues(function_type),
         [
-            "7:40 `Http` here is the imported `Lib.Http`, not the effect `Http`. Import it under another name, as in `import Lib.Http as SystemHttp;`."
+            "7:32 `Http` here is the imported `Lib.Http`, not the effect `Http`. Import it under another name, as in `import Lib.Http as SystemHttp;`."
         ]
     );
-    assert_eq!(issues(declared), [format!("5:33 `Clock` {NOT_AN_EFFECT}")]);
+    assert_eq!(issues(declared), [format!("5:25 `Clock` {NOT_AN_EFFECT}")]);
 }
 
 /// Every standard effect passes a `uses`, `Events` too, written bare or through an import of its class.
 #[test]
 fn a_uses_takes_every_standard_effect_bare_or_imported() {
-    let function_type = "namespace App.Shop;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Http, Mail, Events>? charge = null;\n    private Function<int() uses Database, Files, Console, Process, Clock, Random, Cache, Environment>? all = null;\n}\n";
+    let function_type = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http, Mail, Events>? charge = null;\n    Function<int() uses Database, Files, Console, Process, Clock, Random, Cache, Environment>? all = null;\n}\n";
     let extern_ = "namespace App.Stubs;\n\nimport Lib.Foo;\n\nextern Foo.bar uses Http, Events;\n";
     let imported = "namespace App.Stubs;\n\nimport Lib.Foo;\nimport Sharp.Http;\n\nextern Foo.bar uses Http;\n";
 
@@ -1560,7 +1559,6 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "5:30 PHP# has no superglobals; take a Request".to_owned(),
             "12:12 An enum has no constructor: its cases are its only values.".to_owned(),
             "14:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
-            "20:9 A field without `private` or `protected` is not supported yet in PHP#.".to_owned(),
             format!("20:17 PHP# has no `__LINE__`: {line}"),
             "21:15 A constant without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             format!("21:21 PHP# has no `__LINE__`: {line}"),
@@ -2152,11 +2150,21 @@ fn an_overriding_property_is_not_supported_yet() {
     );
 }
 
+/// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, as its
+/// PHP twin declares it, while `public` stays refused: a field is storage.
 #[test]
-fn a_field_without_an_access_modifier_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int count = 0;\n}\n";
+fn a_field_without_an_access_modifier_compiles() {
+    let section_6 = "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n}\n";
+    let section_29 = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n}\n";
+    let function_types = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n    Function<int(Function<int(int) uses Http>)> apply;\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    private array $cache = [];\n    private \\Closure $priceOf;\n    private \\Closure $charge;\n    private ?\\Closure $fallback = null;\n    private array $handlers;\n    private \\Closure $apply;\n}\n";
+    let public = "namespace App.Shop;\n\nclass Checkout\n{\n    public Map<string, Plan> cache = [:];\n}\n";
 
-    assert_eq!(issues(code), ["5:9 A field without `private` or `protected` is not supported yet in PHP#."]);
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
+    assert_eq!(issues(section_6), Vec::<String>::new());
+    assert_eq!(issues(section_29), Vec::<String>::new());
+    assert_eq!(issues(function_types), Vec::<String>::new());
+    assert_eq!(issues(public), ["5:5 A PHP# field cannot be `public`: a field is `private` or `protected`."]);
 }
 
 #[test]
