@@ -13,6 +13,7 @@ use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_syntax::cst::Expression;
 use mago_word::Word;
 
 use crate::artifacts::AnalysisArtifacts;
@@ -23,9 +24,11 @@ use crate::error::AnalysisError;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::resolve_static_properties;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 pub(crate) fn analyze<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -33,12 +36,13 @@ pub(crate) fn analyze<'ctx, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     property_access: StaticProperty<'_, 'arena>,
     assigned_value_type: &TUnion,
+    assigned_value: Option<&Expression<'arena>>,
     property_access_id: Option<Word>,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
 {
-    let property_resolution = resolve_static_properties(context, block_context, artifacts, property_access)?;
+    let property_resolution = resolve_static_properties(context, block_context, artifacts, property_access, true)?;
 
     let mut resolved_property_type = None;
     let mut matched_all_properties = true;
@@ -52,7 +56,7 @@ where
             );
         }
 
-        let mut union_comparison_result = ComparisonResult::with_strict_nonnull(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
 
         let type_match_found = union_comparator::is_contained_by(
             context.codebase,
@@ -74,7 +78,16 @@ where
                 _ => php,
             };
 
-        if !type_match_found && union_comparison_result.type_coerced.is_none() {
+        if let Some(value) =
+            assigned_value.and_then(|value| int_refused_for_float(&union_comparison_result, artifacts, value))
+        {
+            report_int_for_float(
+                context,
+                IssueCode::InvalidPropertyAssignmentValue,
+                value,
+                &resolved_property.property_type,
+            );
+        } else if !type_match_found && union_comparison_result.type_coerced.is_none() {
             let property = display_property(
                 context,
                 match resolved_property.declaring_class_id {
@@ -270,6 +283,18 @@ mod tests {
         "},
         issues = [
             IssueCode::InvalidPropertyRead,
+        ]
+    }
+
+    test_analysis! {
+        name = write_private_set_static_property_from_outside,
+        code = indoc! {"
+            <?php
+            class Counter { public private(set) static int $count = 0; }
+            Counter::$count = 1;
+        "},
+        issues = [
+            IssueCode::InvalidPropertyWrite,
         ]
     }
 

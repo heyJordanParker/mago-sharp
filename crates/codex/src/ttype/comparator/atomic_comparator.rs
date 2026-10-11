@@ -146,7 +146,7 @@ pub fn is_contained_by(
         }
     }
 
-    let container_refuses_null = atomic_comparison_result.strict_nonnull
+    let container_refuses_null = atomic_comparison_result.sharp_rules
         && matches!(container_type_part, TAtomic::Mixed(mixed) if mixed.is_non_null());
     if (container_type_part.is_vanilla_mixed() && !container_refuses_null)
         || container_type_part.is_templated_as_vanilla_mixed()
@@ -179,7 +179,7 @@ pub fn is_contained_by(
             input_type_part,
             container_type_part,
             inside_assertion,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules),
         );
     }
 
