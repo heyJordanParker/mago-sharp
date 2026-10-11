@@ -2722,6 +2722,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 for parameter in node.parameters.iter() {
                     f(Node::Hint(parameter));
                 }
+
+                if let Some(uses) = &node.uses {
+                    f(Node::Uses(uses));
+                }
             }
             Node::IntersectionHint(node) => {
                 f(Node::Hint(node.left));

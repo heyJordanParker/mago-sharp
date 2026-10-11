@@ -655,7 +655,7 @@ where
                 // whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
                 // `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. A
                 // plain PHP method's or closure's parameter takes either literal, whatever its docblock says.
-                if matches!(&invocation.target, InvocationTarget::Callable { signature, .. } if signature.is_sharp)
+                if matches!(&invocation.target, InvocationTarget::Callable { signature, .. } if signature.effects.is_some())
                     || invocation.target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
                     || matches!(
                         invocation.target.get_function_like_identifier(),

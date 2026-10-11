@@ -629,6 +629,161 @@ fn a_function_type_with_one_built_in_parameter_type_reads_the_cast_as_its_parent
     assert_eq!(types, [("int", vec!["int"], "(", ")"), ("bool", vec!["string"], "(", ")")]);
 }
 
+/// The effects a function type lists after its parameter types, as written.
+fn function_type_effects<'a>(code: &'a str, hint: &Hint) -> Vec<&'a str> {
+    let Hint::Function(function) = hint else {
+        panic!("expected a function type, got {hint:#?}");
+    };
+    let mut effects = Vec::new();
+    Node::FunctionHint(function).visit_children(|child| {
+        if let Node::Uses(uses) = child {
+            effects.extend(uses.names.iter().map(|name| source(code, name)));
+        }
+    });
+
+    effects
+}
+
+/// The type of the one field of the one class in `code`.
+fn field_type<'arena>(program: &'arena Program<'arena>) -> &'arena Hint<'arena> {
+    let [ClassLikeMember::Property(Property::Plain(field))] = class_members(program).as_slice() else {
+        panic!("expected one field, got {:#?}", class_members(program));
+    };
+
+    field.hint.as_ref().expect("a type")
+}
+
+/// Spec section 29: a function type lists its effects with `uses`, inside its brackets after its parameter types.
+#[test]
+fn a_function_type_lists_its_effects_after_its_parameter_types() {
+    const CODE: &str = "class Checkout\n{\n    Function<Charge(Cart) uses Http> charge;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Checkout.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let charge = field_type(program);
+    assert_eq!(source(CODE, charge), "Function<Charge(Cart) uses Http>");
+    assert_eq!(function_type(CODE, charge), ("Charge", vec!["Cart"]));
+    assert_eq!(function_type_effects(CODE, charge), ["Http"]);
+}
+
+#[test]
+fn a_nullable_function_type_lists_its_effects_inside_the_question_mark() {
+    const CODE: &str = "class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Checkout.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Hint::Nullable(fallback) = field_type(program) else {
+        panic!("expected a nullable type, got {:#?}", field_type(program));
+    };
+    assert_eq!(source(CODE, fallback.hint), "Function<Charge(Cart) uses Http>");
+    assert_eq!(function_type_effects(CODE, fallback.hint), ["Http"]);
+}
+
+/// A comma after an effect names another effect, so the effects list ends at the function type's `>`, and a type
+/// argument list's `>>` closes both.
+#[test]
+fn a_function_type_argument_takes_every_effect_before_its_closing_angle() {
+    const CODE: &str = "class Checkout\n{\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Checkout.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let handlers = field_type(program);
+    assert_eq!(generic_type(CODE, handlers), ("Map", vec!["string", "Function<Charge(Cart) uses Http, Mail>"]));
+    let Hint::Generic(handlers) = handlers else {
+        panic!("expected a generic type, got {handlers:#?}");
+    };
+    assert_eq!(function_type_effects(CODE, &handlers.arguments.as_slice()[1]), ["Http", "Mail"]);
+}
+
+#[test]
+fn a_function_type_parameter_lists_its_own_effects() {
+    const CODE: &str = "class Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Checkout.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let apply = field_type(program);
+    assert_eq!(function_type(CODE, apply), ("int", vec!["Function<int(int) uses Http>"]));
+    assert_eq!(function_type_effects(CODE, apply), Vec::<&str>::new());
+    let Hint::Function(apply) = apply else {
+        panic!("expected a function type, got {apply:#?}");
+    };
+    assert_eq!(function_type_effects(CODE, &apply.parameters.as_slice()[0]), ["Http"]);
+}
+
+/// Effects written after a function type's `>` are refused with the form that writes them inside, and the parse goes
+/// on after them, so a field, a nullable field, a parameter and a local each report that one error.
+#[test]
+fn effects_after_a_function_type_are_a_parse_error_that_names_the_written_form() {
+    for code in [
+        "class Checkout\n{\n    Function<Charge(Cart)> uses Http charge;\n}\n",
+        "class Checkout\n{\n    Function<Charge(Cart)>? uses Http fallback;\n}\n",
+        "class Checkout\n{\n    public void run(Function<Charge(Cart)> uses Http, Mail charge) {}\n}\n",
+        "class Checkout\n{\n    public void run()\n    {\n        Function<Charge(Cart)> uses Http charge = cart => new Charge();\n    }\n}\n",
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Checkout.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{code}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            Issue::from(error).message,
+            "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`.",
+            "{code}"
+        );
+        assert!(source(code, error).starts_with("uses Http"), "{code}: {}", source(code, error));
+    }
+}
+
+/// `uses` names effects only right after a function type's parameter types, so it stays a name everywhere else, even
+/// right after a function type.
+#[test]
+fn uses_after_a_function_type_stays_a_name() {
+    const FIELD: &str = "class Checkout\n{\n    Function<int(int)> uses;\n}\n";
+    const PARAMETERS: &str = "class Checkout\n{\n    public void run(Function<int(int)> uses, Function<int(int)> other, Function<int(int)> uses2) {}\n}\n";
+    const LOCAL: &str =
+        "class Checkout\n{\n    public void run()\n    {\n        Function<int(int)> uses = x;\n    }\n}\n";
+    let arena = LocalArena::new();
+
+    let program = parse(&arena, "src/Checkout.sharp", FIELD);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Property(Property::Plain(field))] = class_members(program).as_slice() else {
+        panic!("expected one field, got {:#?}", class_members(program));
+    };
+    assert_eq!(field.hint.as_ref().map(|hint| source(FIELD, hint)), Some("Function<int(int)>"));
+    assert_eq!(field.items.first().map(|item| source(FIELD, item)), Some("uses"));
+
+    let program = parse(&arena, "src/Checkout.sharp", PARAMETERS);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(ClassLikeMember::Method(method)) = class_members(program).first() else {
+        panic!("expected a method, got {:#?}", class_members(program));
+    };
+    let parameters: Vec<(&str, &str)> = method
+        .parameter_list
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (source(PARAMETERS, parameter.hint.as_ref().expect("a type")), source(PARAMETERS, &parameter.variable))
+        })
+        .collect();
+    assert_eq!(
+        parameters,
+        [("Function<int(int)>", "uses"), ("Function<int(int)>", "other"), ("Function<int(int)>", "uses2")]
+    );
+
+    let program = parse(&arena, "src/Checkout.sharp", LOCAL);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::LocalDeclaration(local)] = method_body(program) else {
+        panic!("expected one local, got {:#?}", method_body(program));
+    };
+    assert_eq!(local.hint.map(|hint| source(LOCAL, hint)), Some("Function<int(int)>"));
+    assert_eq!(source(LOCAL, &local.name), "uses");
+}
+
 /// A `.sharp` file has no `<?php` or `?>`, so a nullable last type argument ends the type, as in `Map<string, Any?>`.
 #[test]
 fn a_nullable_type_argument_ends_a_collection_type() {

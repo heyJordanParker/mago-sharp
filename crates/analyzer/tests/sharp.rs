@@ -5359,6 +5359,81 @@ fn a_php_message_names_a_function_type_as_a_php_closure_type() {
     );
 }
 
+/// A function type's effects are PHP# alone, so a `.php` message names a function type with effects as the PHP closure
+/// type of its parameters and return type.
+#[test]
+fn a_php_message_names_a_function_type_with_effects_as_a_php_closure_type() {
+    let sharp = "namespace Demo;\n\npublic class Counter\n{\n    public int apply(Function<int(List<string>) uses Http> size) => size([\"a\"]);\n}\n";
+    let php = "<?php\n\nnamespace Lib;\n\nuse Demo\\Counter;\n\nfunction run(Counter $counter): int\n{\n    return $counter->apply(1);\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Lib/run.php", php), &[("src/Demo/Counter.sharp", sharp)])
+            .iter()
+            .map(|issue| format!("{} {}", located(php, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "9:28 invalid-argument Invalid argument type for argument #1 of `Demo\\Counter::apply`: expected `(closure(list<string>): int)`, but found `int(1)`."
+        ]
+    );
+}
+
+/// `App\Shop\Cart` and `App\Shop\Charge`, the parameter and return types of the function types below.
+const SHOP: (&str, &str) =
+    ("src/App/Shop/Shop.php", "<?php\n\nnamespace App\\Shop;\n\nfinal class Cart\n{\n}\n\nfinal class Charge\n{\n}\n");
+
+/// Spec section 29: a function type lists its effects with `uses` inside its brackets, and the PHP twin writes the
+/// closure type it runs as.
+#[test]
+fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n\n    public Charge pay(Cart cart) => this.charge(cart);\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n\n    /** @param \\Closure(Cart): Charge $charge */\n    public function __construct(\\Closure $charge)\n    {\n        $this->charge = $charge;\n    }\n\n    public function pay(Cart $cart): Charge { return ($this->charge)($cart); }\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
+    assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
+}
+
+#[test]
+fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n\n    /** @return null|\\Closure(Cart): Charge */\n    public function current(): ?\\Closure { return $this->fallback; }\n\n    /** @param \\Closure(Cart): Charge $next */\n    public function replace(\\Closure $next): void\n    {\n        $this->fallback = $next;\n    }\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
+    assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
+}
+
+/// `Http` and `Mail` are both effects of the map's value type, so the map takes two type arguments.
+#[test]
+fn a_map_of_function_types_with_two_effects_is_checked_as_its_php_twin() {
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n\n    public int size() => count(this.handlers);\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers;\n\n    /** @param array<string, \\Closure(Cart): Charge> $handlers */\n    public function __construct(array $handlers)\n    {\n        $this->handlers = $handlers;\n    }\n\n    public function size(): int { return count($this->handlers); }\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
+    assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
+}
+
+#[test]
+fn a_function_type_taking_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /** @param \\Closure(\\Closure(int): int): int $apply */\n    public function __construct(\\Closure $apply)\n    {\n        $this->apply = $apply;\n    }\n\n    /** @param \\Closure(int): int $step */\n    public function run(\\Closure $step): int { return ($this->apply)($step); }\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
+    assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
+}
+
+/// A `.sharp` message writes a function type's effects inside its brackets, each named as the file names the class:
+/// a standard effect by its short name, and an imported one by its import's name.
+#[test]
+fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() {
+    let sharp = "namespace Demo;\n\nimport Sharp.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post> step) => `Step: ${step}`;\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Receipt.sharp", sharp), &[]),
+        [
+            "7:75 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post>` is none of them. | This is `Function<int(int) uses Http, Post>`. | Show a value taken from it instead, such as a property or the result of a method.",
+        ]
+    );
+}
+
 /// A `Function` value keeps the collections its parameters declare when a `let` local copies it, when a template
 /// passes it through, and when a `List` of `Function` values gives it back.
 #[test]
@@ -8757,14 +8832,14 @@ fn a_law_calling_plain_php_with_an_effect_is_refused_on_the_call() {
 /// A law that reaches an effect through PHP# code in another file names the method it reaches.
 #[test]
 fn a_law_reaching_a_method_with_an_effect_in_another_file_is_refused() {
-    let clock = (
-        "src/Lib/Clock.php",
-        "<?php\n\nnamespace Lib;\n\nfinal class Clock\n{\n    public static function now(): int\n    {\n        return time();\n    }\n}\n",
+    let timer = (
+        "src/Lib/Timer.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Timer\n{\n    public static function now(): int\n    {\n        return time();\n    }\n}\n",
     );
-    let stub = ("app/Stubs/Clock.sharp", "namespace App.Stubs;\n\nimport Lib.Clock;\n\nextern Clock.now uses Clock;\n");
+    let stub = ("app/Stubs/Timer.sharp", "namespace App.Stubs;\n\nimport Lib.Timer;\n\nextern Timer.now uses Clock;\n");
     let order = (
         "app/Shop/Order.sharp",
-        "namespace App.Shop;\n\nimport Lib.Clock;\n\npublic class Order\n{\n    public int total() => Clock.now();\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Timer;\n\npublic class Order\n{\n    public int total() => Timer.now();\n}\n",
     );
     let checkout = (
         "app/Shop/Checkout.sharp",
@@ -8772,9 +8847,9 @@ fn a_law_reaching_a_method_with_an_effect_in_another_file_is_refused() {
     );
 
     assert_eq!(
-        effect_issues(&[checkout, order, stub, clock]),
+        effect_issues(&[checkout, order, stub, timer]),
         [
-            "app/Shop/Checkout.sharp:5:38 impure-law: Law `totalMatches` reaches `Order.total`, which calls `Clock.now` with the effect `Clock`. Laws hold only over pure code."
+            "app/Shop/Checkout.sharp:5:38 impure-law: Law `totalMatches` reaches `Order.total`, which calls `Timer.now` with the effect `Clock`. Laws hold only over pure code."
         ]
     );
 }
