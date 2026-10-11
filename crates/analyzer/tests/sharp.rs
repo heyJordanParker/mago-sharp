@@ -3111,11 +3111,18 @@ fn ordering_a_collection_is_refused() {
 }
 
 /// An `Any` or `Any?` ordered against a number keeps its own report, as it must be checked with `is` first. Against a
-/// `bool` the ordering is refused, as no check makes a `bool` ordered.
+/// `bool` the ordering is refused, as no check makes a `bool` ordered. PHP keeps its report on `mixed`.
 #[test]
 fn ordering_an_any_keeps_its_report_unless_the_other_side_has_no_order() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool a(Any value) => value < 1;\n\n    public static bool b(Any? value) => value <= 1;\n\n    public static bool c(Any value) => value < true;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function a(mixed $value): bool { return $value < 1; }\n\n    public static function b(mixed $value): bool { return $value <= 1; }\n}\n";
+    let mixed = |at: &str, op: &str| {
+        format!(
+            "{at} mixed-operand Left operand in `{op}` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `{op}` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
+        )
+    };
 
+    assert_eq!(worded(("src/Demo/Report.php", php), &[]), [mixed("7:59", "<"), mixed("9:59", "<=")]);
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[]),
         [
@@ -4671,22 +4678,28 @@ fn a_php_non_null_mixed_keeps_accepting_a_value_that_may_be_null() {
 }
 
 /// An `Any?` compares by value with a string or a number. Against another `Any?` each side is reported, naming `Any?` as
-/// PHP# writes it.
+/// PHP# writes it. PHP keeps its report on `mixed`.
 #[test]
 fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_value() {
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public bool same(Any? value, Any? other, Inbox inbox)\n    {\n        const a = value == \"1\";\n        const b = value != 2;\n        const c = 1.5 == value;\n        const d = value == other;\n        const e = value == inbox;\n        return a && b && c && d && e;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Inbox\n{\n    public function same(mixed $value, mixed $other): bool { return $value == $other; }\n}\n";
+    let mixed = |at: &str, side: &str| {
+        format!(
+            "{at} mixed-operand {side} operand in `==` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `==` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
+        )
+    };
+    let any = |at: &str, side: &str| {
+        format!(
+            "{at} mixed-operand {side} operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | An `Any` may hold any value, so `==` cannot compare it strictly until it is checked. | Narrow the value with `is` or `as` to a number or a string before comparing it."
+        )
+    };
 
+    assert_eq!(worded(("src/Demo/Inbox.php", php), &[]), [mixed("7:69", "Left"), mixed("7:79", "Right")]);
     assert_eq!(
         issues(("src/Demo/Inbox.sharp", sharp), &[]),
         ["10:19 mixed-operand", "10:28 mixed-operand", "11:19 invalid-operand"]
     );
-    assert_eq!(
-        refusals(("src/Demo/Inbox.sharp", sharp), &[])[..2],
-        [
-            "10:19 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Narrow the value with `is` or `as` to a number or a string before comparing it.",
-            "10:28 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Narrow the value with `is` or `as` to a number or a string before comparing it.",
-        ]
-    );
+    assert_eq!(worded(("src/Demo/Inbox.sharp", sharp), &[])[..2], [any("10:19", "Left"), any("10:28", "Right")]);
 }
 
 /// `?.` reads a missing key as null, as `??` does, because `x[k]?.name` runs as `($x[$k] ?? null)?->name`.
