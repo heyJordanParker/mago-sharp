@@ -1182,6 +1182,41 @@ where
     (!collections.is_empty()).then(|| TUnion::from_vec(collections))
 }
 
+/// The type an index on the PHP# place `object` is judged by: `value_type`, the value it holds, with every collection
+/// [`get_declared_collection`] finds whose kind, `List`, `Map` or `Set`, the value does not hold. The engine runs every
+/// collection as a PHP array, so a place keeps the kinds it is declared as whatever it holds, and a place that may be a
+/// `Set` or a `Map` has no index while it holds the `Map`. The value's keys and elements still type what it reads.
+/// None when nothing is added: a `.php` file, a value that holds no collection, or a place with no other kind.
+pub(crate) fn with_declared_kinds<'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'arena>,
+    value_type: &TUnion,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !value_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))) {
+        return None;
+    }
+
+    let kind = |array: &TArray| (array.is_list(), array.is_keyed());
+    let held = |declared: &TArray| {
+        value_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(array) if kind(array) == kind(declared)))
+    };
+    let declared = get_declared_collection(context, block_context, artifacts, object)?;
+    let missing: Vec<TAtomic> = declared
+        .types
+        .iter()
+        .filter(|atomic| matches!(atomic, TAtomic::Array(array) if !held(array)))
+        .cloned()
+        .collect();
+
+    (!missing.is_empty())
+        .then(|| value_type.clone_with_types(value_type.types.iter().cloned().chain(missing).collect()))
+}
+
 /// The type the place `object` is declared with, whole: a typed local, a parameter, a property, or `field`, the
 /// storage of the property whose accessor is running. Only a property a PHP# class declares has a declared type here:
 /// a plain PHP `array` property, on a PHP class or reached through a PHP# one, is typed by the value it holds, as in

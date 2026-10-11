@@ -5192,6 +5192,21 @@ fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_an_error() {
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
 
+/// A local that may be a `Set` or a `Map` stays either after it is given the `Map`, so its index is refused once by
+/// the `Set`, written, handled with `??` or read bare. PHP writes and reads an index of the array it holds.
+#[test]
+fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_an_error_after_it_holds_the_map() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags = counts;\n        tags[\"a\"] = 1;\n        int handled = tags[\"a\"] ?? 0;\n        return tags[\"a\"] + handled;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<int, int> $ids\n     * @param array<string, int> $counts\n     */\n    public function run(bool $ready, array $ids, array $counts): int\n    {\n        $tags = $ready ? $ids : $counts;\n        $tags = $counts;\n        $tags['a'] = 1;\n        $handled = $tags['b'] ?? 0;\n        return $tags['a'] + $handled;\n    }\n}\n";
+
+    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
+    assert_eq!(
+        refusals(("src/Demo/Tags.sharp", sharp), &[]),
+        [format!("9:9 {no_index}"), format!("10:23 {no_index}"), format!("11:16 {no_index}")]
+    );
+    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+}
+
 /// Pin: a local that may be a `List` or a `Map` has an index, so it is read as the `Map`: a bare read is refused and a
 /// read handled with `??` compiles. PHP reads an index of either array.
 #[test]
@@ -5203,6 +5218,22 @@ fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
         [
             "9:16 possibly-undefined-array-index A `Map` is not read by a bare index, because its key may be missing. | Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."
+        ]
+    );
+    assert_eq!(issues(("src/Demo/Sizes.php", php), &[]), Vec::<String>::new());
+}
+
+/// A local that may be a `List` or a `Map` stays either after it is given the `Map`, so the `List` refuses a write by
+/// index. PHP writes an index of the array it holds.
+#[test]
+fn a_local_that_may_be_a_list_or_a_map_is_not_written_by_index_after_it_holds_the_map() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        rows = counts;\n        rows[1] = 2;\n        return count(rows);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Sizes\n{\n    /**\n     * @param list<int> $sizes\n     * @param array<int, int> $counts\n     */\n    public function run(bool $ready, array $sizes, array $counts): int\n    {\n        $rows = $ready ? $sizes : $counts;\n        $rows = $counts;\n        $rows[1] = 2;\n        return count($rows);\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Sizes.sharp", sharp), &[]),
+        [
+            "9:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys. | Change an element with `list.set(index, value)`, as `list.set(i, list[i] + 1)` replaces `+=`, `++` and `--`, and append one with `list.add(value)`."
         ]
     );
     assert_eq!(issues(("src/Demo/Sizes.php", php), &[]), Vec::<String>::new());

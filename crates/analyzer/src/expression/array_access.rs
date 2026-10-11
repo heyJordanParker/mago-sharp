@@ -19,6 +19,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::resolver::method::get_declared_collection;
+use crate::resolver::method::with_declared_kinds;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_array_access_id;
@@ -91,7 +92,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
             }
         }
 
-        let container_type = artifacts.get_rc_expression_type(&self.array).cloned();
+        // A PHP# place is indexed as every kind of collection it is declared as, whatever it holds.
+        let container_type = artifacts.get_rc_expression_type(&self.array).cloned().map(|container_type| {
+            with_declared_kinds(context, block_context, artifacts, self.array, &container_type)
+                .map_or(container_type, Rc::new)
+        });
 
         if let Some(container_type) = container_type {
             let access_type = get_array_target_type_given_index(
