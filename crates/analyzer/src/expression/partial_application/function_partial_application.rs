@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use std::borrow::Cow;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
@@ -94,6 +95,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionPartialApplication<'aren
                                 context.codebase,
                             ) else {
                                 continue;
+                            };
+
+                            // A method value's `source` names the class it is read through, which may inherit the
+                            // method.
+                            let source_id = match source_id {
+                                FunctionLikeIdentifier::Method(class, method) => context
+                                    .codebase
+                                    .get_declaring_method_identifier(&MethodIdentifier::new(class, method))
+                                    .into(),
+                                source_id => source_id,
                             };
 
                             (source_id, signature)

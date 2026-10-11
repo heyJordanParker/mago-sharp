@@ -380,18 +380,17 @@ impl Effects {
         Some(Impurity { span, path, cause: origin.cause, effect })
     }
 
-    /// Each function value that has an effect its place's function type does not list, each once, with what it runs
-    /// as messages name it, a class and a member, the imports and the scope of the file that gives the value, and the
-    /// call that has the effect: a call in the body it runs, or the value itself for a plain PHP method.
+    /// The first function value given each place that has an effect its place's function type does not list, with
+    /// what it runs as messages name it, a class and a member, the imports and the scope of the file that gives the
+    /// value, and the call that has the effect: a call in the body it runs, or the value itself for a plain PHP method.
     fn unfit_function_values(
         &self,
     ) -> impl Iterator<Item = (&FunctionValue, (Word, Word), &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
-        let mut reported: Vec<(Span, &Runs)> = Vec::new();
+        let mut reported: Vec<Span> = Vec::new();
         self.function_values.iter().filter_map(move |(value, giver)| {
-            if reported.contains(&(value.span, &value.runs)) {
+            if reported.contains(&value.span) {
                 return None;
             }
-            reported.push((value.span, &value.runs));
 
             let (name, impurity) = match &value.runs {
                 Runs::Body(body) => (self.names[*self.index.get(body)?], self.effect_outside(*body, &value.allowed)?),
@@ -401,6 +400,7 @@ impl Effects {
                     (*callee, Impurity { span: value.span, path: Vec::new(), cause: *callee, effect: Some(*effect) })
                 }
             };
+            reported.push(value.span);
 
             Some((value, name, &*self.imports[*giver], &*self.scopes[*giver], impurity))
         })

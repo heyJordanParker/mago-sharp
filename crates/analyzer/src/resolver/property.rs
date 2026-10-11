@@ -43,7 +43,6 @@ use mago_word::concat_word;
 use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
-use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -824,7 +823,7 @@ where
                 artifacts,
                 class_id,
                 word(trim_start_byte(prop_name.as_bytes(), b'$')),
-                Span::between(object_expr.span(), selector.span()),
+                access_span,
             )
         {
             return Some(ResolvedProperty {
@@ -1554,10 +1553,13 @@ where
         false,
     );
 
-    let identifier = FunctionLikeIdentifier::Method(class_name, method.get_method_name());
-    let mut signature = get_signature_of_function_like_identifier(&identifier, context.codebase)?;
+    // The signature's `source` names the class the value is read through, as a call of the method does, so an
+    // `extern` lookup starts there.
+    let mut signature = get_signature_of_function_like_identifier(
+        &FunctionLikeIdentifier::Method(class_id, method.get_method_name()),
+        context.codebase,
+    )?;
     signature.is_closure = true;
-    artifacts.record_call_target(access_span, CallTarget::FunctionLike { callee: identifier, class: Some(class_id) });
 
     Some(TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature))))
 }

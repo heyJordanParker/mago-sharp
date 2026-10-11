@@ -151,29 +151,16 @@ pub(crate) fn record_function_values<A>(
                 let lowercase_method = ascii_lowercase_word(method.as_bytes());
                 if declaring.flags.is_sharp() {
                     Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
-                } else if is_prelude_stub(declaring_class) {
-                    continue;
                 } else {
-                    // The `extern` lookup starts from the class the value is read through, as a call's does.
-                    let read_through = artifacts
-                        .call_targets
-                        .get(&(span.start.offset, span.end.offset))
-                        .into_iter()
-                        .flatten()
-                        .find_map(|target| match target {
-                            CallTarget::FunctionLike { callee, class: Some(read_through) }
-                                if *callee == FunctionLikeIdentifier::Method(class, method) =>
-                            {
-                                Some(*read_through)
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or(declaring_class);
-                    let class_name = codebase
-                        .get_class_like(read_through.as_bytes())
-                        .map_or(read_through, |metadata| metadata.original_name);
+                    // `class` is the class the value is read through, where a call's `extern` lookup starts too.
+                    let class_name =
+                        codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
                     let callee = (class_name, metadata.original_name);
-                    let effects = plain_php_effects(extern_of(codebase, read_through, lowercase_method), callee);
+                    let effects = if is_prelude_stub(declaring_class) || is_prelude_stub(class) {
+                        prelude_stub_effects(class)
+                    } else {
+                        plain_php_effects(extern_of(codebase, class, lowercase_method), callee)
+                    };
 
                     Runs::Foreign { callee, effects }
                 }
@@ -808,8 +795,8 @@ where
         arguments: &'ast ArgumentList<'arena>,
         cause: (Word, Word),
     ) {
-        if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Environment") {
-            self.summary.effects.push((Effect::Foreign(word(b"Sharp\\Environment")), span, cause));
+        for effect in prelude_stub_effects(class) {
+            self.summary.effects.push((effect, span, cause));
         }
 
         // A function passed to the stub runs on the receiver's elements, as `uses f` will declare.
@@ -1051,6 +1038,16 @@ fn plain_php_effects(declaration: Option<&ExternMetadata>, cause: (Word, Word)) 
     match declaration {
         Some(declaration) => declaration.effects.iter().map(|effect| Effect::Foreign(*effect)).collect(),
         None => vec![Effect::Unknown(Some(cause))],
+    }
+}
+
+/// The effects of a call of a method of the prelude stub `class`: a `Sharp\Environment` method reads the environment.
+// Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
+fn prelude_stub_effects(class: Word) -> Vec<Effect> {
+    if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Environment") {
+        vec![Effect::Foreign(word(b"Sharp\\Environment"))]
+    } else {
+        Vec::new()
     }
 }
 

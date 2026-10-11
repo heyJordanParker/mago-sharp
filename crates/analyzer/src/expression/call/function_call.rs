@@ -245,11 +245,16 @@ where
                             id,
                             None,
                             span,
-                            if context
-                                .codebase
-                                .get_function_like(&id)
-                                .and_then(|metadata| metadata.return_type_metadata.as_ref())
-                                .is_some_and(|metadata| contains_parameter_variable(&metadata.type_union))
+                            // A method value's `source` names the class it is read through, which may inherit the
+                            // method.
+                            if match id {
+                                FunctionLikeIdentifier::Method(class, method) => {
+                                    context.codebase.get_declaring_method(class.as_bytes(), method.as_bytes())
+                                }
+                                _ => context.codebase.get_function_like(&id),
+                            }
+                            .and_then(|metadata| metadata.return_type_metadata.as_ref())
+                            .is_some_and(|metadata| contains_parameter_variable(&metadata.type_union))
                             {
                                 None
                             } else {

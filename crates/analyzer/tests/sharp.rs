@@ -8778,7 +8778,7 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
 fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
     let branch = (
         "app/Shop/Branch.sharp",
-        "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live, Function<int(int)> fixed)\n    {\n        this.rate = live ? (int n) => fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => fetch(n) + 3;\n        this.rate = live ? (int n) => fetch(n) + 4 : fixed;\n        this.rate = live ? fixed : (int n) => fetch(n) + 5;\n    }\n\n    public int price() => this.rate(2);\n}\n",
+        "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live, Function<int(int)> fixed)\n    {\n        this.rate = live ? (int n) => fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => fetch(n) + 3;\n        this.rate = live ? (int n) => fetch(n) + 4 : fixed;\n        this.rate = live ? fixed : (int n) => fetch(n) + 5;\n        this.rate = live ? (int n) => fetch(n) + 6 : (int n) => fetch(n) + 7;\n    }\n\n    public int price() => this.rate(2);\n}\n",
     );
     let php = (
         "app/Shop/Branch.php",
@@ -8795,6 +8795,7 @@ fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
             format!("app/Shop/Branch.sharp:10:21 {message}"),
             format!("app/Shop/Branch.sharp:11:21 {message}"),
             format!("app/Shop/Branch.sharp:12:21 {message}"),
+            format!("app/Shop/Branch.sharp:13:21 {message}"),
         ]
     );
 }
@@ -8812,16 +8813,17 @@ const SERVICES_STUB: (&str, &str) = (
 );
 
 /// A plain PHP method value runs the method, so a function type holds it only when it lists every effect the method's
-/// `extern` declares, as a call of the method has them. A method with no `extern` has an unknown effect.
+/// `extern` declares, as a call of the method has them. A method with no `extern` has an unknown effect, and a method
+/// of `Sharp\Environment` has the effect `Environment`.
 #[test]
 fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static string? read(Function<string?(string)> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
     );
     let php = (
         "app/Shop/Pricing.php",
-        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\Cache;\nuse Lib\\Client;\nuse Lib\\Store;\n\nclass Pricing\n{\n    public function __construct(private Client $client, private Cache $cache, private Store $store) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function run(): int { return self::apply($this->client->get(...)) + self::apply($this->cache->get(...)) + self::apply($this->store->get(...)); }\n}\n",
+        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\Cache;\nuse Lib\\Client;\nuse Lib\\Store;\nuse Sharp\\Environment;\n\nclass Pricing\n{\n    public function __construct(private Client $client, private Cache $cache, private Store $store, private Environment $environment) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    /** @param \\Closure(string): ?string $lookup */\n    public static function read(\\Closure $lookup): ?string { return $lookup('HOME'); }\n\n    public function run(): int { return self::apply($this->client->get(...)) + self::apply($this->cache->get(...)) + self::apply($this->store->get(...)); }\n\n    public function home(): ?string { return self::read($this->environment->variable(...)); }\n}\n",
     );
 
     assert_eq!(issues(php, &[SERVICES]), Vec::<String>::new());
@@ -8830,39 +8832,75 @@ fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     assert_eq!(
         effect_issues(&[pricing, SERVICES, SERVICES_STUB]),
         [
-            "app/Shop/Pricing.sharp:13:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
-            "app/Shop/Pricing.sharp:13:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string)>` cannot hold it.",
         ]
     );
 }
 
 /// A method value and a call of the method find the same `extern`: the one on the class it is read through, before its
-/// parent's that declares the method.
+/// parent's that declares the method, however the value reaches its place. `RemoteFeed`'s `extern` gives `get` the
+/// effect `Http` that `Feed`'s does not, and `QuietChild`'s declares the `get` of `Quiet`, which has none, pure.
 #[test]
 fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_extern() {
     let feeds = (
         "src/Lib/Feeds.php",
-        "<?php\n\nnamespace Lib;\n\nclass Feed\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class RemoteFeed extends Feed\n{\n}\n",
+        "<?php\n\nnamespace Lib;\n\nclass Feed\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class RemoteFeed extends Feed\n{\n}\n\nclass Quiet\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class QuietChild extends Quiet\n{\n}\n",
     );
-    let stub =
-        ("app/Stubs/Feeds.sharp", "namespace App.Stubs;\n\nimport Lib.RemoteFeed;\n\nextern RemoteFeed uses Http;\n");
+    let stub = (
+        "app/Stubs/Feeds.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Feed;\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\nextern Feed;\nextern RemoteFeed uses Http;\nextern QuietChild;\n",
+    );
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get);\n\n    public int price => this.feed.get(1);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\QuietChild;\nuse Lib\\RemoteFeed;\n\nclass Pricing\n{\n    public function __construct(private RemoteFeed $feed, private QuietChild $quiet) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function run(): int { return self::apply($this->feed->get(...)) + self::apply($this->quiet->get(...)); }\n\n    public int $price { get => $this->feed->get(1); }\n}\n",
     );
 
+    assert_eq!(issues(php, &[feeds]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, feeds]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[feeds, stub]), Vec::<String>::new());
+    let message = "invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
     assert_eq!(
         effect_issues(&[pricing, feeds, stub]),
         [
-            "app/Shop/Pricing.sharp:13:25 impure-getter: Getter `price` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.",
-            "app/Shop/Pricing.sharp:11:39 invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:20:25 impure-getter: Getter `price` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.".to_owned(),
+            "app/Shop/Pricing.sharp:27:20 impure-getter: Getter `stepped` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.".to_owned(),
+            format!("app/Shop/Pricing.sharp:12:39 {message}"),
+            format!("app/Shop/Pricing.sharp:12:70 {message}"),
+            format!("app/Shop/Pricing.sharp:17:30 {message}"),
         ]
     );
 }
 
+/// A method value read through a subclass runs the method its parent declares: a call of it returns the type the
+/// method's parameters give and its unused result is reported for a `#[\NoDiscard]` method, a partial application of it
+/// has the method's type, and the value of a built-in method takes no argument the method does not list.
+#[test]
+fn a_method_value_read_through_a_subclass_is_the_method_its_parent_declares() {
+    let books = (
+        "src/Lib/Books.php",
+        "<?php\n\nnamespace Lib;\n\nclass Ledger\n{\n    #[\\NoDiscard]\n    public function total(int $n): int\n    {\n        return $n;\n    }\n\n    /** @return ($n is int ? int : string) */\n    public function pick(int|string $n): int|string\n    {\n        return $n;\n    }\n}\n\nfinal class BranchLedger extends Ledger\n{\n}\n\nfinal class Bag extends \\ArrayObject\n{\n}\n",
+    );
+    let closing = (
+        "app/Shop/Closing.sharp",
+        "namespace App.Shop;\n\nimport Lib.Bag;\nimport Lib.BranchLedger;\n\npublic class Closing\n{\n    public Closing(private BranchLedger ledger, private Bag bag) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public void close()\n    {\n        (this.ledger.total)(1);\n    }\n\n    public int count() => Closing.apply(this.bag.count);\n\n    public int picked() => (this.ledger.pick)(1);\n\n    public Function<int(int)> partial() => (this.ledger.total)(?);\n}\n",
+    );
+    let php = (
+        "app/Shop/Closing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\Bag;\nuse Lib\\BranchLedger;\n\nclass Closing\n{\n    public function __construct(private BranchLedger $ledger, private Bag $bag) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function close(): void\n    {\n        ($this->ledger->total(...))(1);\n    }\n\n    public function count(): int { return self::apply($this->bag->count(...)); }\n\n    public function picked(): int { return ($this->ledger->pick(...))(1); }\n\n    /** @return \\Closure(int): int */\n    public function partial(): \\Closure { return ($this->ledger->total(...))(?); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[books]), ["17:9 unused-method-call", "20:55 invalid-argument"]);
+    assert_eq!(issues(closing, &[books]), ["14:9 unused-method-call", "17:41 invalid-argument"]);
+}
+
 /// An initial value that is not constant runs in the constructor, so a lambda in it is held to the property's function
-/// type, even in a class with no method.
+/// type, even in a class with no method. PHP 8.5, the version the tests analyze, accepts a `static function` default.
 #[test]
 fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refused() {
     let pricing = (
@@ -8873,7 +8911,13 @@ fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refus
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate = (int n) => fetch(n);\n}\n",
     );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate = static function (int $n): int { return fetch($n); };\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
+    );
 
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, FETCH]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
@@ -8890,7 +8934,12 @@ fn a_lambda_argument_of_the_wrong_type_is_refused_once() {
         "app/Shop/Twice.sharp",
         "namespace App.Shop;\n\npublic class Twice\n{\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Twice.apply((string s) => fetch(1));\n}\n",
     );
+    let php = (
+        "app/Shop/Twice.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Twice\n{\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function run(): int { return self::apply(fn (string $s): int => fetch(1)); }\n}\n",
+    );
 
+    assert_eq!(issues(php, &[FETCH]), ["10:53 invalid-argument"]);
     assert_eq!(issues(twice, &[FETCH, FETCH_STUB]), ["7:37 invalid-argument"]);
     assert_eq!(effect_issues(&[twice, FETCH, FETCH_STUB]), Vec::<String>::new());
 }

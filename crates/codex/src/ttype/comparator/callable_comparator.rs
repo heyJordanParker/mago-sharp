@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use crate::identifier::function_like::FunctionLikeIdentifier;
 use crate::metadata::CodebaseMetadata;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::callable::TCallable;
@@ -59,8 +60,15 @@ pub(crate) fn is_contained_by(
             TCallable::Alias(identifier) => {
                 codebase.get_function_like(identifier).is_some_and(|m| m.flags.is_built_in())
             }
+            // A method value's `source` names the class it is read through, which may inherit the method.
             TCallable::Signature(signature) => signature.source.as_ref().is_some_and(|identifier| {
-                codebase.get_function_like(identifier).is_some_and(|m| m.flags.is_built_in())
+                match identifier {
+                    FunctionLikeIdentifier::Method(class, method) => {
+                        codebase.get_declaring_method(class.as_bytes(), method.as_bytes())
+                    }
+                    _ => codebase.get_function_like(identifier),
+                }
+                .is_some_and(|m| m.flags.is_built_in())
             }),
         };
 
