@@ -221,6 +221,8 @@ enum NodeKind: string
     case UseType = 'UseType';
     case Extern = 'Extern';
     case Uses = 'Uses';
+    case Module = 'Module';
+    case ModuleMember = 'ModuleMember';
     case Yield = 'Yield';
     case YieldFrom = 'YieldFrom';
     case YieldPair = 'YieldPair';

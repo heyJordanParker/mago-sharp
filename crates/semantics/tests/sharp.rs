@@ -155,25 +155,76 @@ fn a_law_is_a_member_of_a_class_or_an_enum_and_of_no_interface() {
     assert_eq!(issues(code), ["17:5 This class member is not supported yet in PHP#."]);
 }
 
-/// A law's parameters range over every value, so none has a default and none collects the rest of the arguments.
+/// A law's parameters range over every value, so none has a default and none collects the rest of the arguments, in a
+/// class and in a module alike.
 #[test]
 fn a_law_parameter_with_a_default_or_a_spread_is_refused() {
-    let code = "namespace App.Shared;\n\npublic class Money\n{\n    law withDefault(int a = 1) => a == a;\n    law withRest(int ...rest) => true;\n}\n";
+    let class = "namespace App.Shared;\n\npublic class Money\n{\n    law withDefault(int a = 1) => a == a;\n    law withRest(int ...rest) => true;\n}\n";
+    let module = "namespace App.Shared;\n\nmodule\n{\n    law withDefault(int a = 1) => a == a;\n    law withRest(int ...rest) => true;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:27 A law's parameters range over every value, so `a` cannot have a default.",
-            "6:22 A law's parameters range over every value, so `rest` cannot be variadic.",
-        ]
-    );
-    assert_eq!(
-        check("src/Report.sharp", code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
-        [
-            ["A law states a fact about every value of its parameters."],
-            ["A law states a fact about every value of its parameters."],
-        ]
-    );
+    for (path, code) in [("src/Report.sharp", class), ("app/Shared/Module.sharp", module)] {
+        assert_eq!(
+            issues_in(path, code),
+            [
+                "5:27 A law's parameters range over every value, so `a` cannot have a default.",
+                "6:22 A law's parameters range over every value, so `rest` cannot be variadic.",
+            ],
+            "{path}"
+        );
+        assert_eq!(
+            check(path, code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
+            [
+                ["A law states a fact about every value of its parameters."],
+                ["A law states a fact about every value of its parameters."],
+            ],
+            "{path}"
+        );
+    }
+}
+
+/// Spec section 32: a namespace's module is declared in its folder's `Module.sharp`. An environment module, in
+/// `Module.<Environment>.sharp`, waits for the container.
+#[test]
+fn a_module_is_declared_only_in_its_folders_module_sharp() {
+    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n";
+
+    for (path, expected) in [
+        ("app/Shop/Module.sharp", None),
+        ("app/Shop/Checkout.sharp", Some("3:1 A module is declared in its folder's Module.sharp.")),
+        ("app/Shop/Module.Production.sharp", Some("3:1 An environment module is not supported yet in PHP#.")),
+    ] {
+        assert_eq!(issues_in(path, code), Vec::from_iter(expected), "{path}");
+    }
+}
+
+/// Spec section 32: `Module.sharp` holds its namespace, its imports and one module, and nothing else.
+#[test]
+fn module_sharp_holds_only_its_folders_module() {
+    let module = "module\n{\n    law same(int a) => a == a;\n}\n";
+
+    for declaration in [
+        "public class Module\n{\n}\n",
+        "public interface Priced\n{\n}\n",
+        "public enum Status\n{\n    case Open;\n}\n",
+        "extern trim;\n",
+        "module\n{\n    law other(int a) => a == a;\n}\n",
+    ] {
+        let code = leak(format!("namespace App.Shop;\n\nimport App.Mail.Mailer;\n\n{module}\n{declaration}"));
+
+        assert_eq!(
+            issues_in("app/Shop/Module.sharp", code),
+            ["10:1 Module.sharp holds only its folder's module."],
+            "{declaration}"
+        );
+    }
+}
+
+/// A module's laws are named by the module and their own names, compared ignoring case, so each name is stated once.
+#[test]
+fn a_module_states_each_law_once() {
+    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n    law Same(int b) => b == b;\n}\n";
+
+    assert_eq!(issues_in("app/Shop/Module.sharp", code), ["6:9 The module already states a law named `same`."]);
 }
 
 /// A law has no `this`, so a bare member in it is written through the class name, as in a static method.

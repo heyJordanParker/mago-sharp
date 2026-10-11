@@ -156,6 +156,8 @@ use crate::cst::cst::MethodPartialApplication;
 use crate::cst::cst::MissingArrayElement;
 use crate::cst::cst::MixedUseItemList;
 use crate::cst::cst::Modifier;
+use crate::cst::cst::Module;
+use crate::cst::cst::ModuleMember;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedPlaceholderArgument;
 use crate::cst::cst::Namespace;
@@ -482,6 +484,8 @@ pub enum NodeKind {
     UseType,
     Extern,
     Uses,
+    Module,
+    ModuleMember,
     Yield,
     YieldFrom,
     YieldPair,
@@ -755,6 +759,8 @@ pub enum Node<'ast, 'arena> {
     UseType(&'ast UseType<'arena>),
     Extern(&'ast Extern<'arena>),
     Uses(&'ast Uses<'arena>),
+    Module(&'ast Module<'arena>),
+    ModuleMember(&'ast ModuleMember<'arena>),
     Yield(&'ast Yield<'arena>),
     YieldFrom(&'ast YieldFrom<'arena>),
     YieldPair(&'ast YieldPair<'arena>),
@@ -869,6 +875,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Namespace(_)
                 | Self::Use(_)
                 | Self::Extern(_)
+                | Self::Module(_)
                 | Self::Class(_)
                 | Self::Interface(_)
                 | Self::Trait(_)
@@ -1110,6 +1117,8 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::UseType(_) => NodeKind::UseType,
             Self::Extern(_) => NodeKind::Extern,
             Self::Uses(_) => NodeKind::Uses,
+            Self::Module(_) => NodeKind::Module,
+            Self::ModuleMember(_) => NodeKind::ModuleMember,
             Self::Yield(_) => NodeKind::Yield,
             Self::YieldFrom(_) => NodeKind::YieldFrom,
             Self::YieldPair(_) => NodeKind::YieldPair,
@@ -2605,6 +2614,16 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     f(Node::LocalIdentifier(name));
                 }
             }
+            Node::Module(node) => {
+                f(Node::Keyword(&node.module));
+
+                for member in &node.members {
+                    f(Node::ModuleMember(member));
+                }
+            }
+            Node::ModuleMember(node) => match node {
+                ModuleMember::Law(node) => f(Node::Law(node)),
+            },
             Node::Yield(node) => f(match node {
                 Yield::Value(node) => Node::YieldValue(node),
                 Yield::Pair(node) => Node::YieldPair(node),
@@ -2633,6 +2652,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Statement::Namespace(node) => f(Node::Namespace(node)),
                 Statement::Use(node) => f(Node::Use(node)),
                 Statement::Extern(node) => f(Node::Extern(node)),
+                Statement::Module(node) => f(Node::Module(node)),
                 Statement::Class(node) => f(Node::Class(node)),
                 Statement::Interface(node) => f(Node::Interface(node)),
                 Statement::Trait(node) => f(Node::Trait(node)),
@@ -3052,6 +3072,8 @@ impl HasSpan for Node<'_, '_> {
             Self::UseType(node) => node.span(),
             Self::Extern(node) => node.span(),
             Self::Uses(node) => node.span(),
+            Self::Module(node) => node.span(),
+            Self::ModuleMember(node) => node.span(),
             Self::Yield(node) => node.span(),
             Self::YieldFrom(node) => node.span(),
             Self::YieldPair(node) => node.span(),
