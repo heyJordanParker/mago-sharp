@@ -159,17 +159,20 @@ where
 
     // A PHP# `Set` has no index: `contains` tests an element and `add` adds one. Its refusal is the access's only
     // report, so no other collection the place may be checks a key for an index that cannot exist. They type the read
-    // by their values, which a read handled with `??` may miss.
+    // by their values, which a read handled with `??` may miss. `+=`, `??=`, `++` and `--` write the index their read
+    // has refused already, inside `??` too.
     if context.dialect.is_sharp()
         && let Some(set) = array_like_type.types.iter().find(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
     {
-        let set_type = display_atomic(context, set);
-        context.collector.report_with_code(
-            IssueCode::InvalidArrayAccess,
-            Issue::error(format!("A `{set_type}` has no index."))
-                .with_annotation(Annotation::primary(access_span).with_message("This reads an index."))
-                .with_help("Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`."),
-        );
+        if !(in_assignment && block_context.flags.inside_assignment_operation()) {
+            let set_type = display_atomic(context, set);
+            context.collector.report_with_code(
+                IssueCode::InvalidArrayAccess,
+                Issue::error(format!("A `{set_type}` has no index."))
+                    .with_annotation(Annotation::primary(access_span).with_message("This reads an index."))
+                    .with_help("Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`."),
+            );
+        }
 
         let mut value_type = None;
         for atomic in array_like_type.types.iter() {

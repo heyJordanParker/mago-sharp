@@ -859,6 +859,9 @@ where
     });
 
     let operand_id = get_block_expression_id(operand, context, block_context);
+    // `++` and `--` are assignment operations: each writes back what it read.
+    let was_inside_assignment_operation = block_context.flags.inside_assignment_operation();
+    block_context.flags.set_inside_assignment_operation(true);
     let successful = assign_to_expression(
         context,
         block_context,
@@ -870,6 +873,7 @@ where
         false,
         PropertyWriteKind::Mutation,
     )?;
+    block_context.flags.set_inside_assignment_operation(was_inside_assignment_operation);
 
     if !successful {
         context.collector.report_with_code(
@@ -1093,6 +1097,9 @@ where
     });
 
     let operand_id = get_block_expression_id(operand, context, block_context);
+    // `++` and `--` are assignment operations: each writes back what it read.
+    let was_inside_assignment_operation = block_context.flags.inside_assignment_operation();
+    block_context.flags.set_inside_assignment_operation(true);
     let successful = assign_to_expression(
         context,
         block_context,
@@ -1104,6 +1111,7 @@ where
         false,
         PropertyWriteKind::Mutation,
     )?;
+    block_context.flags.set_inside_assignment_operation(was_inside_assignment_operation);
 
     if !successful {
         context.collector.report_with_code(

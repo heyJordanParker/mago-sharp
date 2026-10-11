@@ -70,7 +70,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
         self.array.analyze(context, block_context, artifacts)?;
         block_context.flags.set_inside_general_use(was_inside_general_use);
 
-        if let Some(keyed_array_var_id) = &keyed_array_var_id
+        // A PHP# place is indexed as every kind of collection it is declared as, whatever it holds. A `Set` has no
+        // index, so a read of one is refused even where an earlier write of the index left its type behind.
+        let container_type = artifacts.get_rc_expression_type(&self.array).cloned().map(|container_type| {
+            with_declared_kinds(context, block_context, artifacts, self.array, &container_type)
+                .map_or(container_type, Rc::new)
+        });
+        let has_no_index = context.dialect.is_sharp()
+            && container_type.as_ref().is_some_and(|container_type| {
+                container_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
+            });
+
+        if !has_no_index
+            && let Some(keyed_array_var_id) = &keyed_array_var_id
             && block_context.has_variable(keyed_array_var_id.as_bytes())
             && let Some(array_access_type) = block_context.locals.get(keyed_array_var_id).cloned()
         {
@@ -82,7 +94,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
             }
         }
 
-        if let Some(saved_type) = saved_narrowed_type {
+        if !has_no_index && let Some(saved_type) = saved_narrowed_type {
             let is_variable_key =
                 keyed_array_var_id.as_ref().is_some_and(|k| memchr::memmem::find(k.as_bytes(), b"[$").is_some());
             if is_variable_key || !saved_type.possibly_undefined() {
@@ -91,12 +103,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
                 return Ok(());
             }
         }
-
-        // A PHP# place is indexed as every kind of collection it is declared as, whatever it holds.
-        let container_type = artifacts.get_rc_expression_type(&self.array).cloned().map(|container_type| {
-            with_declared_kinds(context, block_context, artifacts, self.array, &container_type)
-                .map_or(container_type, Rc::new)
-        });
 
         if let Some(container_type) = container_type {
             let access_type = get_array_target_type_given_index(

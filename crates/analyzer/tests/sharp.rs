@@ -6448,7 +6448,7 @@ fn an_index_of_a_set_is_an_error() {
 #[test]
 fn a_compound_assignment_or_increment_on_an_index_of_a_set_is_refused_once() {
     let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void bump(Set<int> ids, int times)\n    {\n        ids[1] ??= 1;\n        ids[2] += 1;\n        ids[3]++;\n        for (let i = 0; i < times; i++) {\n            ids[4] = 1;\n            ids[5] += 1;\n        }\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param array<int, int> $ids */\n    public function bump(array $ids, int $times): void\n    {\n        $ids[1] ??= 1;\n        $ids[2] = ($ids[2] ?? 0) + 1;\n        $ids[3] = ($ids[3] ?? 0) + 1;\n        for ($i = 0; $i < $times; $i++) {\n            $ids[4] = 1;\n            $ids[5] = ($ids[5] ?? 0) + 1;\n        }\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param array<int, int> $ids */\n    public function bump(array $ids, int $times): void\n    {\n        $ids[1] ??= 1;\n        $ids[2] += 1;\n        $ids[3]++;\n        for ($i = 0; $i < $times; $i++) {\n            $ids[4] = 1;\n            $ids[5] += 1;\n        }\n    }\n}\n";
 
     let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
     assert_eq!(
@@ -6462,6 +6462,52 @@ fn a_compound_assignment_or_increment_on_an_index_of_a_set_is_refused_once() {
         ]
     );
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+}
+
+/// `??=` writes the index it reads, and its read reports nothing about what it reads from, as `isset` does, so the
+/// write refuses an index of a scalar, as PHP does.
+#[test]
+fn a_coalescing_write_to_an_index_of_a_scalar_is_refused_as_in_php() {
+    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public void fill(int x, float y, bool z)\n    {\n        x[0] ??= 1;\n        y[0] ??= 1;\n        z[0] ??= 1;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function fill(int $x, float $y, bool $z): void\n    {\n        $x[0] ??= 1;\n        $y[0] ??= 1;\n        $z[0] ??= 1;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Scalars.sharp", sharp), &[]),
+        ["7:9 invalid-array-access", "8:9 invalid-array-access", "9:9 invalid-array-access"]
+    );
+    assert_eq!(
+        issues(("src/Demo/Scalars.php", php), &[]),
+        ["9:9 invalid-array-access", "10:9 invalid-array-access", "11:9 invalid-array-access"]
+    );
+}
+
+/// A write by index in a `for` loop's step runs on every pass, and is refused as one in the body is: a `Set` has no
+/// index, and an `int` is not written by index. PHP refuses the `int`.
+#[test]
+fn a_write_by_index_in_a_for_step_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Steps\n{\n    public void fill(Set<int> ids, int y, int times)\n    {\n        for (let i = 0; i < times; ids[i] = 1) {\n            i++;\n        }\n        for (let j = 0; j < times; y[j] = 1) {\n            j++;\n        }\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Steps\n{\n    /** @param array<int, int> $ids */\n    public function fill(array $ids, int $y, int $times): void\n    {\n        for ($i = 0; $i < $times; $ids[$i] = 1) {\n            $i++;\n        }\n        for ($j = 0; $j < $times; $y[$j] = 1) {\n            $j++;\n        }\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Steps.sharp", sharp), &[]),
+        ["7:36 invalid-array-access", "10:36 invalid-array-access"]
+    );
+    assert_eq!(issues(("src/Demo/Steps.php", php), &[]), ["13:35 invalid-array-access"]);
+}
+
+/// In a loop, a write by index of a `Set` and a `+=` on the same index after it are each refused: the `+=` reads the
+/// index before it writes it, and the earlier write does not answer that read. PHP writes and reads the index.
+#[test]
+fn a_write_and_a_compound_write_to_an_index_of_a_set_in_a_loop_are_each_refused() {
+    let sharp = "namespace Demo;\n\nclass Marks\n{\n    public void mark(Set<int> ids, List<int> keys)\n    {\n        for (const n of keys) {\n            ids[n] = 1;\n            ids[n] += 1;\n        }\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Marks\n{\n    /**\n     * @param array<int, int> $ids\n     * @param list<int> $keys\n     */\n    public function mark(array $ids, array $keys): void\n    {\n        foreach ($keys as $n) {\n            $ids[$n] = 1;\n            $ids[$n] += 1;\n        }\n    }\n}\n";
+
+    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
+    assert_eq!(
+        refusals(("src/Demo/Marks.sharp", sharp), &[]),
+        [format!("8:13 {no_index}"), format!("9:13 {no_index}")]
+    );
+    assert_eq!(issues(("src/Demo/Marks.php", php), &[]), Vec::<String>::new());
 }
 
 /// A `Set` is a collection, which `==` cannot compare by value yet. PHP keeps comparing its arrays.

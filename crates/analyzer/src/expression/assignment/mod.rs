@@ -300,6 +300,9 @@ where
         None => PropertyWriteKind::Direct,
     };
 
+    // An assignment operation writes back what it read.
+    let was_inside_assignment_operation = block_context.flags.inside_assignment_operation();
+    block_context.flags.set_inside_assignment_operation(assignment_operator.is_some());
     let successful = assign_to_expression(
         context,
         block_context,
@@ -311,6 +314,7 @@ where
         false,
         property_write_kind,
     )?;
+    block_context.flags.set_inside_assignment_operation(was_inside_assignment_operation);
 
     if !successful {
         if matches!(

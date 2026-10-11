@@ -824,28 +824,21 @@ where
 
         let is_last = i == array_target_expressions.len() - 1;
 
-        // In PHP#, `+=`, `??=`, `++` and `--` read the index they write, and that read has judged it.
-        let was_read = context.dialect.is_sharp() && is_last && artifacts.get_expression_type(&array_target).is_some();
-
         block_context.flags.set_inside_assignment(true);
 
-        let mut array_expr_type = if was_read {
-            assign_value_type.clone()
-        } else {
-            get_array_target_type_given_index(
-                context,
-                block_context,
-                array_target.span(),
-                array_target.get_array().span(),
-                array_target.get_index().map(mago_span::HasSpan::span),
-                written_type,
-                &new_index_type,
-                true,
-                extended_var_id,
-                if is_last { Some(assign_value_type) } else { None },
-                false,
-            )
-        };
+        let mut array_expr_type = get_array_target_type_given_index(
+            context,
+            block_context,
+            array_target.span(),
+            array_target.get_array().span(),
+            array_target.get_index().map(mago_span::HasSpan::span),
+            written_type,
+            &new_index_type,
+            true,
+            extended_var_id,
+            if is_last { Some(assign_value_type) } else { None },
+            false,
+        );
 
         block_context.flags.set_inside_assignment(false);
         let array_expression_type_inner = (*array_expression_type).clone();
