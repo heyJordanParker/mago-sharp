@@ -1,8 +1,8 @@
 name: Set up Lean
 description: >-
-  Installs elan and the Lean version pinned in crates/sharp-lean/lean/lean-toolchain, and puts lake on PATH.
-  mago compile proves laws with Lean, and installing the pinned version up front keeps the tests that run lake in
-  parallel from each installing it.
+  Installs elan and the Lean version pinned in crates/sharp-lean/lean/lean-toolchain, checks that its lake and lean
+  run, and puts them on PATH. mago compile proves laws with Lean, and installing the pinned version up front keeps the
+  tests that run lake in parallel from each installing it.
 
 runs:
   using: composite
@@ -10,5 +10,22 @@ runs:
     - name: Install elan and Lean
       shell: bash
       run: |
-        curl -sSfL https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain "$(cat crates/sharp-lean/lean/lean-toolchain)"
+        toolchain=$(cat crates/sharp-lean/lean/lean-toolchain)
+        export PATH="$HOME/.elan/bin:$PATH"
         echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+        for attempt in 1 2 3; do
+          # elan-init only sets the default toolchain, so the toolchain install is what downloads Lean.
+          if curl -sSfL https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain "$toolchain"; then
+            if elan toolchain install "$toolchain" && lake +"$toolchain" --version && lean +"$toolchain" --version; then
+              exit 0
+            fi
+            # A failed download can leave a toolchain elan calls installed although its lake cannot run.
+            elan toolchain uninstall "$toolchain"
+          fi
+          if [[ $attempt != 3 ]]; then
+            echo "Retrying the Lean install in $((attempt * 15)) seconds (retry $attempt of 2)" >&2
+            sleep $((attempt * 15))
+          fi
+        done
+        echo "::error::Lean $toolchain did not install and run after 3 attempts. The output above names the cause."
+        exit 1
