@@ -99,28 +99,9 @@ pub fn report_int_for_float<A>(
 ) where
     A: Arena,
 {
-    let fix = if let Some(float) = float_literal(value) {
-        format!("write {float}")
-    } else {
-        let text = String::from_utf8_lossy(&context.source_file.contents[value.span().to_range_usize()]);
-        // A cast binds tighter than any binary, ternary or assignment operator, so only an operand that binds at
-        // least as tightly as the cast is quoted bare.
-        if matches!(
-            value,
-            Expression::Parenthesized(_)
-                | Expression::Literal(_)
-                | Expression::Variable(_)
-                | Expression::ConstantAccess(_)
-                | Expression::Access(_)
-                | Expression::Call(_)
-                | Expression::ArrayAccess(_)
-                | Expression::UnaryPrefix(_)
-                | Expression::UnaryPostfix(_)
-        ) {
-            format!("convert with (float) {text}")
-        } else {
-            format!("convert with (float) ({text})")
-        }
+    let fix = match float_literal(value) {
+        Some(float) => format!("write {float}"),
+        None => format!("convert with {}", float_cast(context, value)),
     };
     let declared = names::display_type(context, declared);
 
@@ -131,8 +112,35 @@ pub fn report_int_for_float<A>(
     );
 }
 
+/// The cast that makes `value` a `float`, around its source text, as `(float) count`. A cast binds tighter than any
+/// binary, ternary or assignment operator, so only an operand that binds at least as tightly as the cast is quoted
+/// bare, and `a + b` gives `(float) (a + b)`.
+pub(crate) fn float_cast<A>(context: &Context<'_, '_, A>, value: &Expression<'_>) -> String
+where
+    A: Arena,
+{
+    let text = String::from_utf8_lossy(&context.source_file.contents[value.span().to_range_usize()]);
+
+    if matches!(
+        value,
+        Expression::Parenthesized(_)
+            | Expression::Literal(_)
+            | Expression::Variable(_)
+            | Expression::ConstantAccess(_)
+            | Expression::Access(_)
+            | Expression::Call(_)
+            | Expression::ArrayAccess(_)
+            | Expression::UnaryPrefix(_)
+            | Expression::UnaryPostfix(_)
+    ) {
+        format!("(float) {text}")
+    } else {
+        format!("(float) ({text})")
+    }
+}
+
 /// The float form of an int literal, negated or not, as `2` gives `2.0` and `-3` gives `-3.0`.
-fn float_literal(value: &Expression<'_>) -> Option<String> {
+pub(crate) fn float_literal(value: &Expression<'_>) -> Option<String> {
     let integer = |expression: &Expression<'_>| match expression.unparenthesized() {
         Expression::Literal(Literal::Integer(LiteralInteger { value: Some(integer), .. })) => Some(*integer),
         _ => None,

@@ -1776,16 +1776,25 @@ fn plus_joins_two_strings_into_the_string_dot_gives_in_php() {
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["12:16 invalid-return-statement"]);
 }
 
+/// `int ** int` is an `int` in PHP# as in PHP, whatever the exponent. An `int` raised to a negative int literal always
+/// throws `ArithmeticError` in PHP#, as spec section 24 decides, so `**` and `**=` refuse it and quote the fix. A float
+/// base, or an exponent the code cannot know, compiles. The rule is PHP#'s alone, so the `.php` twin covers only the
+/// shared typing.
 #[test]
-fn exponentiation_has_the_type_it_has_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int power(int base, int exponent, float rate)\n    {\n        let result = base ** exponent;\n        result **= 2;\n        return result + rate ** 2;\n    }\n}\n";
+fn exponentiation_has_the_type_it_has_in_php_and_refuses_an_int_raised_to_a_negative_literal() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int power(int base, int exponent, float rate)\n    {\n        let result = base ** exponent;\n        result **= 2;\n        return result + rate ** 2;\n    }\n\n    public static float negative(int base, float rate)\n    {\n        let half = 2 ** -1;\n        let third = base ** -3;\n        let result = base;\n        result **= -2;\n        return rate ** -2 + half + third + result;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function power(int $base, int $exponent, float $rate): int\n    {\n        $result = $base ** $exponent;\n        $result **= 2;\n        return $result + $rate ** 2;\n    }\n}\n";
 
-    let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
-    let php_issues = issues(("src/Demo/Report.php", php), &[]);
-
-    assert!(!php_issues.is_empty(), "{php_issues:?}");
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    assert_eq!(codes(&issues(("src/Demo/Report.php", php), &[])), ["invalid-return-statement"]);
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "9:16 invalid-return-statement Invalid return type for method `Report.power`: expected `int`, but found `float`. | This has type `float` | The type `float` returned here is not compatible with the declared return type `int`. | Change the return value to match `int`, or update the method's return type declaration.",
+            "14:20 invalid-operand `2 ** -1` is an `int` raised to a negative power, which throws: write `2.0 ** -1` | This throws `ArithmeticError`.",
+            "15:21 invalid-operand `base ** -3` is an `int` raised to a negative power, which throws: write `((float) base) ** -3` | This throws `ArithmeticError`.",
+            "17:9 invalid-operand `result **= -2` is an `int` raised to a negative power, which throws: make `result` a `float` | This throws `ArithmeticError`.",
+        ]
+    );
 }
 
 /// Spec section 24 truncates `/` on two integers toward zero, so in PHP# it gives an `int`, as `/=` does on an `int`

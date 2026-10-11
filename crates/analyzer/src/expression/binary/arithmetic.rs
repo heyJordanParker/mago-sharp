@@ -43,6 +43,8 @@ use crate::expression::binary::utils::analyze_instance_operator;
 use crate::expression::binary::utils::display_operand;
 use crate::expression::binary::utils::refuse_non_int_operands;
 use crate::expression::is_refused_type;
+use crate::utils::float_cast;
+use crate::utils::float_literal;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_type;
 
@@ -91,6 +93,10 @@ where
         {
             assign_arithmetic_type(artifacts, result_type, binary);
             return Ok(());
+        }
+
+        if let BinaryOperator::Exponentiation(operator) = binary.operator {
+            report_int_raised_to_a_negative_literal(context, binary, operator, &left_type, &right_type);
         }
     }
 
@@ -1095,4 +1101,42 @@ fn definite_arithmetic_runtime_error(op: &BinaryOperator<'_>, right: &TAtomic) -
         }
         _ => None,
     }
+}
+
+/// Reports a PHP# `int` raised to a negative int literal, which always throws `ArithmeticError`, as overflow does
+/// (spec section 24). The message quotes the one fix for the code written: a `float` base, as `2.0 ** -1`. A
+/// compound `x **= -2` writes its result back into `x`, so its fix is to make `x` a `float`. An exponent the code
+/// cannot know is left to the engine.
+fn report_int_raised_to_a_negative_literal<A>(
+    context: &mut Context<'_, '_, A>,
+    binary: &Binary<'_>,
+    operator: Span,
+    left_type: &TUnion,
+    right_type: &TUnion,
+) where
+    A: Arena,
+{
+    if !left_type.is_int() || right_type.get_single_literal_int_value().is_none_or(|exponent| exponent >= 0) {
+        return;
+    }
+
+    let source =
+        |span: Span| String::from_utf8_lossy(&context.source_file.contents[span.to_range_usize()]).into_owned();
+    let written = source(binary.span());
+    let base = source(binary.lhs.span());
+    let fix = if source(operator).ends_with('=') {
+        format!("make `{base}` a `float`")
+    } else {
+        // `**` binds tighter than a cast, so a cast base is wrapped in parentheses.
+        let float_base = float_literal(binary.lhs).unwrap_or_else(|| format!("({})", float_cast(context, binary.lhs)));
+
+        // The expression starts with its base, so the rest of it follows the base's text.
+        format!("write `{float_base}{}`", &written[base.len()..])
+    };
+
+    context.collector.report_with_code(
+        IssueCode::InvalidOperand,
+        Issue::error(format!("`{written}` is an `int` raised to a negative power, which throws: {fix}"))
+            .with_annotation(Annotation::primary(binary.span()).with_message("This throws `ArithmeticError`.")),
+    );
 }
