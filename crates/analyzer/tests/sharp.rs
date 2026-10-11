@@ -2279,6 +2279,24 @@ fn a_literal_keyed_by_a_value_that_cannot_key_a_map_names_the_map_key_rule() {
     );
 }
 
+/// A literal keyed by a `float`, a `bool` or `null` names the `Map` key rule, where PHP turns the key into an `int` or
+/// a `string` without a word. PHP keeps its cast.
+#[test]
+fn a_literal_keyed_by_a_float_a_bool_or_null_names_the_map_key_rule() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Map<int, int> floats() => [1.5: 1];\n\n    public static Map<int, int> flags() => [true: 1];\n\n    public static Map<string, int> nulls() => [null: 1];\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @return array<int, int> */\n    public static function floats(): array { return [1.5 => 1]; }\n\n    /** @return array<int, int> */\n    public static function flags(): array { return [true => 1]; }\n\n    /** @return array<string, int> */\n    public static function nulls(): array { return [null => 1]; }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:46 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `float` has none. | `float` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "7:45 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `bool` has none. | `bool` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "9:48 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `null` has none. | `null` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+        ]
+    );
+}
+
 /// An operand that may be `false`, from a PHP method, asks for a check of `false`. PHP# has no falsiness, and keeps
 /// `(int)` between numbers, so no cast turns `false` into one. PHP keeps its own wording.
 #[test]
@@ -3864,6 +3882,66 @@ fn a_pattern_the_parser_refuses_reports_only_its_parse_error() {
     assert_eq!(
         messages,
         ["A list pattern is not supported yet in PHP#.", "An enum case pattern is not supported yet in PHP#."]
+    );
+}
+
+#[test]
+fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
+    let store = "<?php\n\nnamespace Demo;\n\nfinal class Store\n{\n    public static function name(): string\n    {\n        return 'a';\n    }\n\n    public static function maybe(): ?string\n    {\n        return null;\n    }\n\n    public static function keep(mixed $value): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run(Store store)\n    {\n        string? text = Store.maybe();\n        text .= Store.name();\n        int wrong = \"a\";\n        printf(text ?? \"\");\n        printf(store->missing());\n        printf(Store::missing());\n        printf(store?->missing());\n        Store.keep(fn(int x) => x.missing());\n        Store.keep(function(int x) { return x.missing(); });\n        Store.keep([\"a\" => Store.missing()]);\n        Store.keep(match (store) { Store found when found == store ? true : Store.missing() => 1, default => 2 });\n        let found = store->missing();\n        printf(found);\n        Map<string, int> counts = [\"a\" => 1];\n        Store.keep(wrong);\n        Store.keep(counts);\n        let report = new Report();\n        report.label = store->missing();\n        printf(report.label);\n        Store.keep(found + 1);\n        Store.keep(found.missing());\n        Store.keep(found.name);\n        int either = Store.maybe() ?? found;\n    }\n\n    public static Map<string, int> made() => [\"a\" => 1, \"b\" => 2];\n\n    public static int counted(Store store)\n    {\n        let found = store->missing();\n        return found;\n    }\n\n    public static void used(Store store, List<int> items)\n    {\n        let found = store->missing();\n        Store.keep(found - 1);\n        Store.keep(found < 1);\n        Store.keep(found == 1);\n        Store.keep(found && found);\n        Store.keep(!found);\n        Store.keep(-found);\n        Store.keep(found[0]);\n        Store.keep(`a ${found}`);\n        if (found) { Store.keep(1); }\n        while (found) { break; }\n        Store.keep(found ? 1 : 2);\n        Store.keep(match (found) { 1 => 2, default => 3 });\n        Store.keep(found is Store);\n        for (const value of found) { Store.keep(value); }\n        Store.keep(found?.name);\n        Store.keep(found ?? 1);\n        int number = found;\n        number += found;\n        Store.keep(found.missing().other());\n        Store.keep(items[found]);\n        Store.keep(found(1));\n        int called = found(1);\n        Store.keep(found + \"a\");\n        found.name = \"a\";\n        found[0] = 1;\n        throw found;\n    }\n\n    private string label = \"\";\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(Store $store): void\n    {\n        $text = Store::maybe();\n        $text .= Store::name();\n        printf($text ?? '');\n        printf($store->missing());\n        printf(Store::missing());\n        printf($store?->missing());\n        Store::keep(fn(int $x) => $x->missing());\n        Store::keep(function (int $x) { return $x->missing(); });\n        Store::keep(['a' => Store::missing()]);\n    }\n}\n";
+    let reports = |analyzed: (&'static str, &'static str)| -> Vec<String> {
+        analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[("src/Demo/Store.php", store)])
+            .iter()
+            .map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message))
+            .collect()
+    };
+
+    assert_eq!(
+        reports(("src/Demo/Report.php", php)),
+        [
+            "10:9 possibly-null-operand Possibly null left operand used in string concatenation (type `null|string`).",
+            "11:16 redundant-null-coalesce Redundant null coalesce: left-hand side can never be `null` or undefined.",
+            "12:24 non-existent-method Method `missing` does not exist on type `Demo\\Store`.",
+            "12:16 mixed-argument Invalid argument type for argument #1 of `printf`: expected `string`, but found `mixed`.",
+            "13:23 non-existent-method Method `missing` does not exist on type `Demo\\Store`.",
+            "13:16 mixed-argument Invalid argument type for argument #1 of `printf`: expected `string`, but found `mixed`.",
+            "14:25 non-existent-method Method `missing` does not exist on type `Demo\\Store`.",
+            "14:16 mixed-argument Invalid argument type for argument #1 of `printf`: expected `string`, but found `mixed`.",
+            "15:39 invalid-method-access Attempting to access a method on a non-object type (`int`).",
+            "16:52 invalid-method-access Attempting to access a method on a non-object type (`int`).",
+            "17:36 non-existent-method Method `missing` does not exist on type `Demo\\Store`.",
+        ]
+    );
+    assert_eq!(
+        reports(("src/Demo/Report.sharp", sharp)),
+        [
+            "8:14 parse `.=` is PHP syntax: in PHP# `.` is member access",
+            "11:21 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "12:21 parse `::` is PHP syntax: PHP# writes static access with `.`",
+            "13:21 parse `?->` is PHP syntax: PHP# writes null-safe member access with `?.`",
+            "14:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            "15:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            "16:25 parse `EqualGreaterThan` is PHP syntax that PHP# does not have",
+            "17:53 parse A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.",
+            "18:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "20:40 parse `EqualGreaterThan` is PHP syntax that PHP# does not have",
+            "24:29 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "32:51 parse `EqualGreaterThan` is PHP syntax that PHP# does not have",
+            "32:61 parse `EqualGreaterThan` is PHP syntax that PHP# does not have",
+            "36:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "42:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "9:21 invalid-local-assignment-value Invalid assignment to `wrong`: it is declared as `int`.",
+        ]
+    );
+
+    let unparsed = "<?php\n\nnamespace Demo;\n\nfunction run(): void\n{\n    printf(]);\n}\n";
+    assert_eq!(
+        reports(("src/Demo/run.php", unparsed)),
+        [
+            "7:12 parse Parse error encountered during parsing",
+            "7:12 no-value Argument #1 passed to function `printf` has type `never`, meaning it cannot produce a value.",
+        ]
     );
 }
 

@@ -42,6 +42,7 @@ use crate::expression::binary::concat::fold_concat_operands;
 use crate::expression::binary::utils::analyze_instance_operator;
 use crate::expression::binary::utils::display_operand;
 use crate::expression::binary::utils::refuse_non_int_operands;
+use crate::expression::is_refused_type;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_type;
 
@@ -64,6 +65,11 @@ where
     let fallback = Rc::new(get_mixed());
     let left_type = artifacts.get_rc_expression_type(&binary.lhs).cloned().unwrap_or_else(|| Rc::clone(&fallback));
     let right_type = artifacts.get_rc_expression_type(&binary.rhs).cloned().unwrap_or_else(|| Rc::clone(&fallback));
+
+    if let Some(refused) = [&left_type, &right_type].into_iter().find(|operand| is_refused_type(operand)) {
+        assign_arithmetic_type(artifacts, TUnion::clone(refused), binary);
+        return Ok(());
+    }
 
     if left_type.is_never() || right_type.is_never() {
         assign_arithmetic_type(artifacts, get_never(), binary);

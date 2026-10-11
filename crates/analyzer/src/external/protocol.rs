@@ -1640,7 +1640,8 @@ fn encode_atomic_snapshot<'type_info>(
             writer.write_bytes(alias.get_class_name().as_bytes())?;
             writer.write_bytes(alias.get_alias_name().as_bytes())?;
         }
-        TAtomic::Never => writer.write_u8(SNAPSHOT_NEVER),
+        // An external analyzer sees a refused PHP# expression as `never`, as it did before PHP# typed it.
+        TAtomic::Never | TAtomic::Error => writer.write_u8(SNAPSHOT_NEVER),
         TAtomic::Null => writer.write_u8(SNAPSHOT_NULL),
         TAtomic::Void => writer.write_u8(SNAPSHOT_VOID),
         TAtomic::Placeholder => writer.write_u8(SNAPSHOT_PLACEHOLDER),

@@ -84,6 +84,9 @@ mod tests {
     use crate::ttype::atomic::object::TObject;
     use crate::ttype::comparator::ComparisonResult;
     use crate::ttype::comparator::union_comparator::is_contained_by;
+    use crate::ttype::get_int;
+    use crate::ttype::get_named_object;
+    use crate::ttype::get_null;
     use crate::ttype::union::TUnion;
 
     pub(crate) fn create_test_codebase(code: &'static str) -> CodebaseMetadata {
@@ -289,5 +292,16 @@ mod tests {
         assert_eq!(first_comparison_result.type_coerced, Some(true));
         assert_eq!(second_comparison_result.type_coerced, Some(true));
         assert_eq!(first_comparison_result, second_comparison_result);
+    }
+
+    #[test]
+    fn test_the_error_type_fits_every_type_both_ways() {
+        let codebase = CodebaseMetadata::default();
+        let error = TUnion::from_atomic(TAtomic::Error);
+
+        for other in [get_int(), get_null(), get_named_object(word("Foo"), None)] {
+            assert_is_contained_by(&codebase, &error, &other, true, &mut ComparisonResult::new());
+            assert_is_contained_by(&codebase, &other, &error, true, &mut ComparisonResult::new());
+        }
     }
 }
