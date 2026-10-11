@@ -194,8 +194,11 @@ const ANY: &[u8] = b"Any";
 ///   member: a field when `private` or `protected` without accessors, and a property with accessors, which follow the
 ///   auto-property rules. A `public` parameter without accessors is an error, as spec section 9 says. The constructor
 ///   alone may be `required`, which keeps it callable as `new Self(…)` on every subclass, spec section 25. The parser
-///   reports `required` on any other member as not supported yet.
-/// - A parameter: always a type, a name and an optional default, and never by reference. A default is a constant
+///   reports `required` on any other member as not supported yet. A class has one constructor, and `check_members`
+///   reports a second one, because PHP# has no overloading by argument types. A parameter cannot be `lazy`, because a
+///   lazy property computes its own value, and `lazy` anywhere else is not supported yet.
+/// - A parameter: always a type, a name and an optional default, and never by reference. The parser reports a
+///   parameter written as a computed property, because a parameter receives its value. A default is a constant
 ///   expression: a literal, a constant, `typeof(X)`, a list or map literal of them, or the operators below on them,
 ///   without `++` and `--`. A parameter written `int ...values` is variadic, as spec section 7 writes it, and PHP's
 ///   own checks report a variadic parameter that is not the last or has a default. `check_parameter_list` reports a
@@ -230,8 +233,10 @@ const ANY: &[u8] = b"Any";
 /// - In a method body: blocks, expression statements, `return`, `let` and `const` declarations, `if` with `else if`
 ///   and `else`, `while`, `do … while`, `for` with a `let` or `const` counter or with expressions, `for … of` over a
 ///   value or a key and value, `break` and `continue` without a level, and `try` with `catch` clauses and `finally`.
-///   The body of `if`, `else` and each loop is a block in braces. A catch clause names one or more classes separated
-///   by `|`, and an optional variable written without `$`, which lives until the clause's block ends. A local
+///   The body of `if`, `else` and each loop is a block in braces, except an `if` without `else` whose body is one
+///   `return` or `throw`, as in the guard clause `if (!tenant.active) throw new InactiveTenant(tenant);`. A catch
+///   clause names one or more classes separated by `|`, and an optional variable written without `$`, which lives
+///   until the clause's block ends. A local
 ///   statement can have its type written, as in `Money? total = null;` or `const int base = 2;`, from the types
 ///   above but `void`. An expression statement whose operator is binary, as in `flags | MASK;`, is an error that
 ///   names its compound assignment or its result, because the result is never used, except `??` and an assignment
@@ -523,6 +528,25 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             report_optional_before_required(parameters, context);
 
             Some(place)
+        }
+        (Node::Modifier(Modifier::Lazy(lazy)), Parameter) => {
+            context.report(
+                Issue::error(
+                    "A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
+                )
+                .with_annotation(Annotation::primary(lazy.span).with_message("Written here.")),
+            );
+
+            None
+        }
+        (Node::Modifier(Modifier::Lazy(lazy)), _) => {
+            context.report(
+                Issue::error("`lazy` is not supported yet in PHP#.")
+                    .with_annotation(Annotation::primary(lazy.span).with_message("Not supported yet."))
+                    .with_note("A lazy property computes its value on the first read, which the engine cannot run yet."),
+            );
+
+            None
         }
         // `check_class` reports `protected` and `private` on a class, and PHP's own check `abstract` with `final`.
         // `check_static_class` reports `abstract` and `final` on a static class.
@@ -920,7 +944,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             report_not_supported(
                 statement.span(),
                 "statement without braces",
-                "PHP# writes the body of `if`, `else` and each loop as a block in braces.",
+                "PHP# writes the body of `if`, `else` and each loop as a block in braces, except an `if` without `else` whose body is one `return` or `throw`.",
                 context,
             );
 
@@ -2334,18 +2358,28 @@ fn write_target<'ast, 'arena>(node: Node<'ast, 'arena>) -> Option<&'ast Expressi
     }
 }
 
-/// Whether every body of an `if`, `else` or loop is a block in braces. An `else` may also hold the next `if`.
+/// Whether every body of an `if`, `else` or loop is a block in braces. An `else` may also hold the next `if`, whose
+/// body is a block too. An `if` without `else` may hold one `return` or `throw`, the guard clause the spec writes.
 fn has_braces(statement: &Statement) -> bool {
     let is_block = |statement: &Statement| matches!(statement, Statement::Block(_));
+    let is_guard = |statement: &Statement| match statement {
+        Statement::Return(_) => true,
+        Statement::Expression(statement) => matches!(statement.expression, Expression::Throw(_)),
+        _ => false,
+    };
 
     match statement {
-        Statement::If(If { body: IfBody::Statement(body), .. }) => {
-            is_block(body.statement)
-                && body
-                    .else_clause
-                    .as_ref()
-                    .is_none_or(|clause| is_block(clause.statement) || matches!(clause.statement, Statement::If(_)))
-        }
+        Statement::If(If { body: IfBody::Statement(body), .. }) => match &body.else_clause {
+            None if body.else_if_clauses.is_empty() => is_block(body.statement) || is_guard(body.statement),
+            None => is_block(body.statement),
+            Some(clause) => {
+                is_block(body.statement)
+                    && match clause.statement {
+                        Statement::If(If { body: IfBody::Statement(next), .. }) => is_block(next.statement),
+                        next => is_block(next) || matches!(next, Statement::If(_)),
+                    }
+            }
+        },
         Statement::While(While { body: WhileBody::Statement(body), .. })
         | Statement::For(For { body: ForBody::Statement(body), .. }) => is_block(body),
         Statement::ForOf(for_of) => is_block(for_of.body),
