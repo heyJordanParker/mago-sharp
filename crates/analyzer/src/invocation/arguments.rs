@@ -43,11 +43,13 @@ use crate::invocation::analyzer::adjust_offset_for_variadic;
 use crate::statement::function_like::rejected_nullable_parameter::writes_null;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 
 /// The part of `union` that may share a value with another type. A PHP# type parameter and its class type, as `TItem`
@@ -198,6 +200,7 @@ where
 /// Verifies an argument's type against the expected parameter type, and returns whether the argument fits it.
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
     input_type: &TUnion,
     parameter_type: &TUnion,
     argument_offset: usize,
@@ -370,6 +373,12 @@ where
 
     if type_match_found {
         return true;
+    }
+
+    if let Some(value) = int_refused_for_float(&union_comparison_result, artifacts, input_expression) {
+        report_int_for_float(context, IssueCode::InvalidArgument, value, parameter_type);
+
+        return false;
     }
 
     let target_name_str = invocation_target.guess_name(context);

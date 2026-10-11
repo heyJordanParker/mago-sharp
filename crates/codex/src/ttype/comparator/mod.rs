@@ -30,11 +30,14 @@ pub struct ComparisonResult {
     pub type_variable_lower_bounds: Vec<(Word, TemplateBound)>,
     pub type_variable_upper_bounds: Vec<(Word, TemplateBound)>,
     /// Whether the comparison follows PHP#'s rules, set for a `.sharp` file: a `nonnull` container refuses a value that
-    /// may be null, as PHP#'s `Any` does, and a type parameter is opaque, as C#'s `T` is, so it takes only itself or
-    /// `never`, and passes only as itself, as `Any?`, or as a type that holds its whole bound, such as a class its bound
-    /// reaches or the `int` that `is int n` narrows it to. A PHP file keeps upstream's rules, which let any `mixed` into
-    /// `nonnull` and any value into a template bounded by `mixed`.
+    /// may be null, as PHP#'s `Any` does, a `float` container refuses an `int`, and a type parameter is opaque, as C#'s
+    /// `T` is, so it takes only itself or `never`, and passes only as itself, as `Any?`, or as a type that holds its
+    /// whole bound, such as a class its bound reaches or the `int` that `is int n` narrows it to. A PHP file keeps
+    /// upstream's rules, which let any `mixed` into `nonnull`, an `int` into a `float`, and any value into a template
+    /// bounded by `mixed`.
     pub sharp_rules: bool,
+    /// Whether a failed comparison refused an `int` only because a `float` was expected, under `sharp_rules`.
+    pub int_for_float: bool,
 }
 
 impl Default for ComparisonResult {
@@ -55,6 +58,7 @@ impl ComparisonResult {
             type_variable_lower_bounds: vec![],
             type_variable_upper_bounds: vec![],
             sharp_rules: false,
+            int_for_float: false,
         }
     }
 
@@ -82,6 +86,7 @@ mod tests {
     use mago_database::DatabaseReader;
     use mago_database::file::File;
     use mago_names::resolver::NameResolver;
+    use mago_syntax::dialect::Dialect;
     use mago_syntax::parser::parse_file;
     use mago_word::WordSet;
     use mago_word::word;
@@ -94,9 +99,15 @@ mod tests {
     use crate::ttype::atomic::object::TObject;
     use crate::ttype::comparator::ComparisonResult;
     use crate::ttype::comparator::union_comparator::is_contained_by;
+    use std::sync::Arc;
+
+    use crate::misc::GenericParent;
+    use crate::ttype::atomic::generic::TGenericParameter;
+    use crate::ttype::get_float;
     use crate::ttype::get_int;
     use crate::ttype::get_named_object;
     use crate::ttype::get_null;
+    use crate::ttype::get_string;
     use crate::ttype::union::TUnion;
 
     pub(crate) fn create_test_codebase(code: &'static str) -> CodebaseMetadata {
@@ -312,6 +323,38 @@ mod tests {
         for other in [get_int(), get_null(), get_named_object(word("Foo"), None)] {
             assert_is_contained_by(&codebase, &error, &other, true, &mut ComparisonResult::new());
             assert_is_contained_by(&codebase, &other, &error, true, &mut ComparisonResult::new());
+        }
+    }
+
+    /// A template's value fits where its constraint fits, so it is refused only for an `int` when every part of the
+    /// constraint that does not fit is an `int`, whichever part comes last.
+    #[test]
+    fn a_template_is_refused_only_for_an_int_when_its_whole_constraint_is() {
+        let codebase = CodebaseMetadata::default();
+        let template = |constraint: TUnion| {
+            TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                word("T"),
+                Arc::new(constraint),
+                GenericParent::ClassLike(word("Box")),
+            )))
+        };
+        let string = get_string().get_single().clone();
+        let int = get_int().get_single().clone();
+
+        let mut int_result = ComparisonResult::for_dialect(Dialect::Sharp);
+        assert_is_contained_by(&codebase, &template(get_int()), &get_float(), false, &mut int_result);
+        assert!(int_result.int_for_float, "an `int` constraint is refused only for its `int`");
+
+        for constraint in [vec![string.clone(), int.clone()], vec![int, string]] {
+            let mut result = ComparisonResult::for_dialect(Dialect::Sharp);
+            assert_is_contained_by(
+                &codebase,
+                &template(TUnion::new(Cow::Owned(constraint))),
+                &get_float(),
+                false,
+                &mut result,
+            );
+            assert!(!result.int_for_float, "a `string` part is refused for more than an `int`");
         }
     }
 }

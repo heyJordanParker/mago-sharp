@@ -46,6 +46,7 @@ use crate::utils::docblock::get_type_from_var_docblock;
 use crate::utils::expression::get_direct_variable_id;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_function_like_identifier;
@@ -54,6 +55,7 @@ use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
@@ -182,6 +184,7 @@ pub fn handle_return_value<'ctx, A>(
         handle_property_hook_return(
             context,
             block_context,
+            artifacts,
             return_value,
             inferred_return_type,
             property_name,
@@ -413,6 +416,12 @@ pub fn handle_return_value<'ctx, A>(
             return;
         }
 
+        if let Some(value) = int_refused_for_float(&union_comparison_result, artifacts, return_value) {
+            report_int_for_float(context, IssueCode::InvalidReturnStatement, value, &expected_return_type);
+
+            return;
+        }
+
         let expected_return_type_str = display_type(context, &expected_return_type);
         let inferred_return_type_str = display_value_type(context, &inferred_return_type, &expected_return_type);
 
@@ -631,6 +640,7 @@ fn takes_any_value(expected_return_type: &TUnion, inferred_return_type: &TUnion,
 fn handle_property_hook_return<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
     return_value: Option<&Expression>,
     mut inferred_return_type: Rc<TUnion>,
     property_name: Word,
@@ -701,6 +711,12 @@ fn handle_property_hook_return<'ctx, A>(
         false,
         &mut comparison_result,
     ) {
+        return;
+    }
+
+    if let Some(value) = int_refused_for_float(&comparison_result, artifacts, return_value) {
+        report_int_for_float(context, IssueCode::InvalidReturnStatement, value, &expected_return_type);
+
         return;
     }
 

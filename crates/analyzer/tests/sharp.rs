@@ -355,7 +355,8 @@ fn sharp_arguments_follow_strict_conversion_rules() {
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Money.php", money)]);
     let php_issues = issues(("src/Demo/Report.php", php), &[("src/Lib/Money.php", money)]);
 
-    assert_eq!(sharp_issues, ["10:28 invalid-argument"]);
+    // PHP# also refuses the `int` passed where a `float` is expected, which `strict_types=1` converts in PHP.
+    assert_eq!(sharp_issues, ["9:32 invalid-argument", "10:28 invalid-argument"]);
     // Mago applies strict conversion rules to every file, whether or not it declares `strict_types=1`.
     assert_eq!(php_issues, ["12:29 invalid-argument"]);
 }
@@ -1814,16 +1815,23 @@ fn plus_joins_two_strings_into_the_string_dot_gives_in_php() {
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["12:16 invalid-return-statement"]);
 }
 
+/// `int ** int` is an `int` in PHP# as in PHP, whatever the exponent. An `int` raised to a negative int literal always
+/// throws `ArithmeticError` in PHP#, as spec section 24 decides, so `**` and `**=` refuse it once, wherever it lands,
+/// and quote the fix. A float base, or an exponent the code cannot know, compiles.
 #[test]
-fn exponentiation_has_the_type_it_has_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int power(int base, int exponent, float rate)\n    {\n        let result = base ** exponent;\n        result **= 2;\n        return result + rate ** 2;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function power(int $base, int $exponent, float $rate): int\n    {\n        $result = $base ** $exponent;\n        $result **= 2;\n        return $result + $rate ** 2;\n    }\n}\n";
+fn exponentiation_has_the_type_it_has_in_php_and_refuses_an_int_raised_to_a_negative_literal() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int power(int base, int exponent, float rate)\n    {\n        let result = base ** exponent;\n        result **= 2;\n        return result + rate ** 2;\n    }\n\n    public static float negative(int base, float rate)\n    {\n        let half = 2 ** -1;\n        let third = base ** -3;\n        let result = base;\n        result **= -2;\n        return rate ** -2 + half + third + result;\n    }\n\n    public float half() => 2 ** -1;\n}\n";
 
-    let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
-    let php_issues = issues(("src/Demo/Report.php", php), &[]);
-
-    assert!(!php_issues.is_empty(), "{php_issues:?}");
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "9:16 invalid-return-statement Invalid return type for method `Report.power`: expected `int`, but found `float`. | This has type `float` | The type `float` returned here is not compatible with the declared return type `int`. | Change the return value to match `int`, or update the method's return type declaration.",
+            "14:20 invalid-operand `2 ** -1` is an `int` raised to a negative power, which throws: write `2.0 ** -1` | This throws `ArithmeticError`.",
+            "15:21 invalid-operand `base ** -3` is an `int` raised to a negative power, which throws: write `((float) base) ** -3` | This throws `ArithmeticError`.",
+            "17:9 invalid-operand `result **= -2` is an `int` raised to a negative power, which throws: make `result` a `float` | This throws `ArithmeticError`.",
+            "21:28 invalid-operand `2 ** -1` is an `int` raised to a negative power, which throws: write `2.0 ** -1` | This throws `ArithmeticError`.",
+        ]
+    );
 }
 
 /// Spec section 24 truncates `/` on two integers toward zero, so in PHP# it gives an `int`, as `/=` does on an `int`
@@ -1846,6 +1854,110 @@ fn division_with_a_float_operand_gives_a_float_in_php_sharp() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public float share(int total, float parts) => total / parts;\n\n    public int whole(int total, float parts) => total / parts;\n}\n";
 
     assert_eq!(codes(&issues(("src/Demo/Report.sharp", sharp), &[])), ["invalid-return-statement"]);
+}
+
+const CELL: &str = "<?php\n\nnamespace Lib;\n\n/** @template T */\nfinal class Cell\n{\n    /** @param T $item */\n    public function __construct(private mixed $item) {}\n\n    /** @param T $item */\n    public function put(mixed $item): void\n    {\n        $this->item = $item;\n    }\n\n    /** @return T */\n    public function get(): mixed\n    {\n        return $this->item;\n    }\n}\n";
+
+const BOXES: &str = "<?php\n\nnamespace Lib;\n\n/** @template-covariant T */\nfinal class Box\n{\n    /** @param T $item */\n    public function __construct(public readonly mixed $item) {}\n}\n\nfinal class Boxes\n{\n    /** @param Box<float> $box */\n    public static function unbox(Box $box): float\n    {\n        return $box->item;\n    }\n\n    /** @param iterable<float> $values */\n    public static function total(iterable $values): float\n    {\n        $sum = 0.0;\n        foreach ($values as $value) {\n            $sum += $value;\n        }\n\n        return $sum;\n    }\n}\n";
+
+/// The issues of `analyzed`, each as its position, its code and its message, without the annotations.
+fn titled(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
+    analyze(&PLUGIN_REGISTRY, settings(), analyzed, others)
+        .iter()
+        .map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message))
+        .collect()
+}
+
+/// Spec section 24 refuses an `int` where a `float` is expected in PHP# code, wherever the value lands. Each place
+/// reports it once, at the value, with the issue code it gives any value of the wrong type. One row per place, one
+/// line each.
+#[test]
+fn an_int_where_a_float_is_expected_is_refused_in_every_place_with_its_code() {
+    let sharp = "namespace Demo;\n\nimport Lib.Cell;\n\nclass Report\n{\n    public const float RATE = 10;\n    public static float shared = 0.5;\n    public float rate = 5;\n    private Map<string, float> rates = [:];\n    public float computed => 9;\n\n    public float local() { float total = 0; total = 3; return total; }\n    public void field() { this.rate = 2; }\n    public void sharedField() { Report.shared = 11; }\n    public float scale(float by = 2) => by;\n    public float argument() => this.scale(3);\n    public float returned() { return 0; }\n    public List<float> list() { List<float> prices = [1, 2.5]; return prices; }\n    public Map<string, float> map() { Map<string, float> prices = [\"tea\": 4]; return prices; }\n    public float? nullable() { float? discount = 1; return discount; }\n    public float|string either() { float|string label = 7; return label; }\n    public float template() { const cell = new Cell(0.5); cell.put(2); return cell.get(); }\n    public List<float> added() { List<float> prices = []; prices.add(6); return prices; }\n    public Map<string, float> keyed() { Map<string, float> prices = [:]; prices[\"tea\"] = 8; return prices; }\n    public Map<string, float> keyedField() { this.rates[\"a\"] = 2; return this.rates; }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Cell.php", CELL)]),
+        [
+            "7:31 invalid-constant-value `int` is not `float`: write 10.0 | Declared `float`.",
+            "9:25 invalid-property-default-value `int` is not `float`: write 5.0 | Declared `float`.",
+            "11:30 invalid-return-statement `int` is not `float`: write 9.0 | Declared `float`.",
+            "13:42 invalid-local-assignment-value `int` is not `float`: write 0.0 | Declared `float`.",
+            "13:53 invalid-local-assignment-value `int` is not `float`: write 3.0 | Declared `float`.",
+            "14:39 invalid-property-assignment-value `int` is not `float`: write 2.0 | Declared `float`.",
+            "15:49 invalid-property-assignment-value `int` is not `float`: write 11.0 | Declared `float`.",
+            "16:35 invalid-parameter-default-value `int` is not `float`: write 2.0 | Declared `float`.",
+            "17:43 invalid-argument `int` is not `float`: write 3.0 | Declared `float`.",
+            "18:38 invalid-return-statement `int` is not `float`: write 0.0 | Declared `float`.",
+            "19:55 invalid-local-assignment-value `int` is not `float`: write 1.0 | Declared `List<float>`.",
+            "20:75 invalid-local-assignment-value `int` is not `float`: write 4.0 | Declared `Map<string, float>`.",
+            "21:50 invalid-local-assignment-value `int` is not `float`: write 1.0 | Declared `float?`.",
+            "22:57 invalid-local-assignment-value `int` is not `float`: write 7.0 | Declared `float|string`.",
+            "23:68 invalid-argument `int` is not `float`: write 2.0 | Declared `float`.",
+            "24:70 invalid-argument `int` is not `float`: write 6.0 | Declared `float`.",
+            "25:90 invalid-local-assignment-value `int` is not `float`: write 8.0 | Declared `Map<string, float>`.",
+            "26:64 invalid-property-assignment-value `int` is not `float`: write 2.0 | Declared `Map<string, float>`.",
+        ]
+    );
+}
+
+/// The refusal quotes the one fix for the code written, as rustc's E0308 help does: an int literal's float form,
+/// with the digits a decimal literal is written with, or a cast around the expression, wrapped in parentheses when
+/// the cast would bind to less than all of it. A value written over several lines is quoted on one line.
+#[test]
+fn an_int_where_a_float_is_expected_is_refused_with_the_fix_for_the_code_written() {
+    let sharp = "namespace Demo;\n\nclass Line\n{\n    public int quantity = 1;\n}\n\nclass Report\n{\n    private Line line;\n\n    public Report(Line line) { this.line = line; }\n\n    public int size() => 4;\n\n    public float zero() => 0;\n    public float negative() => -3;\n    public float million() => 1_000_000;\n    public float hex() => 0x1F;\n    public float local(int count) => count;\n    public float chain() => this.line.quantity;\n    public float call() => this.size();\n    public float sum(int a, int b) => a + b;\n    public float difference(int a, int b) => (a - b);\n    public float largest() => PHP_INT_MAX;\n    public float negated(int count) => -count;\n    public float chosen(bool flag) => flag ? 3 : 2.0;\n    public float fallback(int? n) => n ?? 0;\n    public float matched(int n) => match (n) {\n        1 => 10,\n        default => 20,\n    };\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "16:28 invalid-return-statement `int` is not `float`: write 0.0 | Declared `float`.",
+            "17:32 invalid-return-statement `int` is not `float`: write -3.0 | Declared `float`.",
+            "18:31 invalid-return-statement `int` is not `float`: write 1_000_000.0 | Declared `float`.",
+            "19:27 invalid-return-statement `int` is not `float`: write 31.0 | Declared `float`.",
+            "20:38 invalid-return-statement `int` is not `float`: convert with (float) count | Declared `float`.",
+            "21:29 invalid-return-statement `int` is not `float`: convert with (float) this.line.quantity | Declared `float`.",
+            "22:28 invalid-return-statement `int` is not `float`: convert with (float) this.size() | Declared `float`.",
+            "23:39 invalid-return-statement `int` is not `float`: convert with (float) (a + b) | Declared `float`.",
+            "24:46 invalid-return-statement `int` is not `float`: convert with (float) (a - b) | Declared `float`.",
+            "25:31 invalid-return-statement `int` is not `float`: convert with (float) PHP_INT_MAX | Declared `float`.",
+            "26:40 invalid-return-statement `int` is not `float`: convert with (float) -count | Declared `float`.",
+            "27:39 invalid-return-statement `int` is not `float`: convert with (float) (flag ? 3 : 2.0) | Declared `float`.",
+            "28:38 invalid-return-statement `int` is not `float`: convert with (float) (n ?? 0) | Declared `float`.",
+            "29:36 invalid-return-statement `int` is not `float`: convert with (float) (match (n) { 1 => 10, default => 20, }) | Declared `float`.",
+        ]
+    );
+}
+
+/// The refusal names the `int` only when it is the one reason the value does not fit. A value that may be another
+/// type, a literal with another refused element in either order, and a collection, an object or a function whose
+/// element, type argument, return type or parameter is the `int` each keep the message any value of the wrong type
+/// gets in its place.
+#[test]
+fn a_value_refused_for_more_than_an_int_keeps_the_message_of_its_place() {
+    let sharp = "namespace Demo;\n\nimport Lib.Box;\nimport Lib.Boxes;\n\nclass Report\n{\n    public float either(int|string value) => value;\n    public List<float> intFirst() => [1, \"a\"];\n    public List<float> stringFirst() => [\"a\", 1];\n    public float boxed() => Boxes.unbox(new Box(1));\n    public float total(List<int> ints) => Boxes.total(ints);\n    public float|List<float> collection(int|List<int> value) => value;\n    public float|Function<float()> callable(int|Function<int()> value) => value;\n    public Function<float(int)> half() => (float amount) => amount / 2.0;\n}\n";
+
+    assert_eq!(
+        titled(("src/Demo/Report.sharp", sharp), &[("src/Lib/Boxes.php", BOXES)]),
+        [
+            "8:46 invalid-return-statement Invalid return type for method `Report.either`: expected `float`, but found `int|string`.",
+            "9:38 invalid-return-statement Invalid return type for method `Report.intFirst`: expected `List<float>`, but found `List<int|string>`.",
+            "10:41 invalid-return-statement Invalid return type for method `Report.stringFirst`: expected `List<float>`, but found `List<int|string>`.",
+            "11:41 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Boxes.unbox`: expected `Box<float>`, but possibly received `Box<int>`.",
+            "12:55 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Boxes.total`: expected `Iterable<float>`, but possibly received `List<int>`.",
+            "13:65 invalid-return-statement Invalid return type for method `Report.collection`: expected `float|List<float>`, but found `int|List<int>`.",
+            "14:75 invalid-return-statement Invalid return type for method `Report.callable`: expected `float|Function<float()>`, but found `int|Function<int()>`.",
+            "15:43 invalid-return-statement Invalid return type for method `Report.half`: expected `Function<float(int)>`, but found `Function<float(float)>`.",
+        ]
+    );
+}
+
+/// A float, a written conversion, arithmetic with a float, an `int|float` place and a float in a template slot each
+/// land where a `float` is expected with no issue.
+#[test]
+fn a_float_a_written_conversion_and_mixed_arithmetic_land_where_a_float_is_expected() {
+    let sharp = "namespace Demo;\n\nimport Lib.Cell;\n\nclass Report\n{\n    public float run(int count, int n)\n    {\n        float total = 0.0;\n        float price = (float) count;\n        float half = count * 1.5;\n        int|float either = 1;\n        const cell = new Cell(2.0);\n        cell.put(2.0);\n        cell.put((float) n);\n        return total + price + half + either + cell.get();\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Cell.php", CELL)]), Vec::<String>::new());
 }
 
 #[test]
@@ -3617,7 +3729,7 @@ fn a_function_type_refuses_a_lambda_of_another_type_and_a_string_or_array_callab
 /// `associateBy` key a map by it, and `filterValues` keeps a map's keys.
 #[test]
 fn collection_methods_that_take_a_lambda_type_its_parameter_and_their_result() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, Map<string, int> prices)\n    {\n        List<int> evens = numbers.filter(n => n % 2 == 0);\n        List<string> labels = numbers.map(n => `#${n}`);\n        int total = evens.sumOf(n => n * 2);\n        List<string> sorted = labels.sortedBy(s => strlen(s));\n        Map<int, List<int>> groups = numbers.groupBy(n => n % 3);\n        Map<string, string> byLabel = labels.associateBy(s => s);\n        Map<string, int> cheap = prices.filterValues(p => p < 100);\n        List<int> kept = prices.filter(p => p > 0);\n        List<float> halves = prices.map(p => p / 2);\n        int first = numbers.first(n => n > 2);\n        bool expensive = prices.any(p => p > 1000);\n        return total + first + count(sorted) + count(groups) + count(byLabel) + count(cheap) + count(kept) + count(halves) + (expensive ? 1 : 0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, Map<string, int> prices)\n    {\n        List<int> evens = numbers.filter(n => n % 2 == 0);\n        List<string> labels = numbers.map(n => `#${n}`);\n        int total = evens.sumOf(n => n * 2);\n        List<string> sorted = labels.sortedBy(s => strlen(s));\n        Map<int, List<int>> groups = numbers.groupBy(n => n % 3);\n        Map<string, string> byLabel = labels.associateBy(s => s);\n        Map<string, int> cheap = prices.filterValues(p => p < 100);\n        List<int> kept = prices.filter(p => p > 0);\n        List<float> halves = prices.map(p => p / 2.0);\n        int first = numbers.first(n => n > 2);\n        bool expensive = prices.any(p => p > 1000);\n        return total + first + count(sorted) + count(groups) + count(byLabel) + count(cheap) + count(kept) + count(halves) + (expensive ? 1 : 0);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }

@@ -161,7 +161,7 @@ where
         if let Some(parameter_type) = parameter.get_type_metadata() {
             let parameter_type = expand(&parameter_type.type_union);
 
-            verify_argument_type(context, operand_type, &parameter_type, offset, operand, &target);
+            verify_argument_type(context, artifacts, operand_type, &parameter_type, offset, operand, &target);
         }
     }
 

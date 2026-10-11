@@ -217,16 +217,14 @@ pub fn is_contained_by(
     if atomic_comparison_result.sharp_rules
         && let TAtomic::GenericParameter(input_generic) = input_type_part
     {
-        return input_generic.constraint.types.iter().all(|input_bound| {
-            !input_bound.is_mixed()
-                && is_contained_by(
-                    codebase,
-                    input_bound,
-                    container_type_part,
-                    inside_assertion,
-                    atomic_comparison_result,
-                )
-        });
+        return union_comparator::are_parts_contained_by(
+            input_generic.constraint.types.iter(),
+            atomic_comparison_result,
+            |input_bound, result| {
+                !input_bound.is_mixed()
+                    && is_contained_by(codebase, input_bound, container_type_part, inside_assertion, result)
+            },
+        );
     }
 
     if matches!(input_type_part, TAtomic::Never) {

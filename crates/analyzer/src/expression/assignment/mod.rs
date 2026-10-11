@@ -74,10 +74,12 @@ use crate::utils::expression::get_non_nullsafe_expression_id;
 use crate::utils::expression::get_nullsafe_base_expressions;
 use crate::utils::expression::get_root_expression_id;
 use crate::utils::expression::is_variable;
+use crate::utils::int_refused_for_float;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 
 mod array_assignment;
@@ -568,6 +570,7 @@ where
                     artifacts,
                     static_property,
                     &source_type,
+                    source_expression,
                     target_expression_id,
                 )?,
                 None => property_assignment::analyze(
@@ -588,6 +591,7 @@ where
             artifacts,
             StaticProperty::from_static_property_access(property_access),
             &source_type,
+            source_expression,
             target_expression_id,
         )?,
         Expression::ArrayAccess(array_access) => {
@@ -787,6 +791,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
         }
     }
 
+    let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
     if let Some((local_type, local_type_span)) = block_context.local_types.get(&variable_id).cloned()
         && !union_comparator::is_contained_by(
             context.codebase,
@@ -795,28 +800,34 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
             false,
             false,
             false,
-            &mut ComparisonResult::for_dialect(context.dialect),
+            &mut comparison_result,
         )
     {
-        let name = display_variable_name(context, variable_id.as_bytes());
-        let local_type_str = display_type(context, &local_type);
-        let assigned_type_str = display_value_type(context, &assigned_type, &local_type);
+        if let Some(value) =
+            source_expression.and_then(|value| int_refused_for_float(&comparison_result, artifacts, value))
+        {
+            report_int_for_float(context, IssueCode::InvalidLocalAssignmentValue, value, &local_type);
+        } else {
+            let value_span = source_expression.map_or(variable_span, HasSpan::span);
+            let name = display_variable_name(context, variable_id.as_bytes());
+            let local_type_str = display_type(context, &local_type);
+            let assigned_type_str = display_value_type(context, &assigned_type, &local_type);
 
-        let issue = Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{local_type_str}`."))
-            .with_annotation(
-                Annotation::primary(source_expression.map_or(variable_span, HasSpan::span))
-                    .with_message(format!("This value has type `{assigned_type_str}`.")),
-            )
-            .with_annotation(
-                Annotation::secondary(local_type_span)
-                    .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
-            )
-            .with_help(format!("Assign a `{local_type_str}` value, or change the type `{name}` is declared with."));
+            let issue = Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{local_type_str}`."))
+                .with_annotation(
+                    Annotation::primary(value_span).with_message(format!("This value has type `{assigned_type_str}`.")),
+                )
+                .with_annotation(
+                    Annotation::secondary(local_type_span)
+                        .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
+                )
+                .with_help(format!("Assign a `{local_type_str}` value, or change the type `{name}` is declared with."));
 
-        context.collector.report_with_code(
-            IssueCode::InvalidLocalAssignmentValue,
-            explain_blocked_substitution(context, &assigned_type, &local_type, issue),
-        );
+            context.collector.report_with_code(
+                IssueCode::InvalidLocalAssignmentValue,
+                explain_blocked_substitution(context, &assigned_type, &local_type, issue),
+            );
+        }
 
         // The local keeps its written type, as the engine never checks it.
         assigned_type = local_type;

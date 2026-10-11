@@ -49,10 +49,12 @@ use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::report_missing_return;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::r#return::handle_return_value;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_member;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Property<'arena> {
     fn analyze<'ctx, A>(
@@ -197,6 +199,8 @@ where
                     value.span(),
                     IssueCode::InvalidPropertyDefaultValue,
                 );
+            } else if let Some(value) = int_refused_for_float(&comparison_result, artifacts, value) {
+                report_int_for_float(context, IssueCode::InvalidPropertyDefaultValue, value, &declared_type);
             } else {
                 let value_type_str = display_value_type(context, &value_type, &declared_type);
                 let declared_type_str = display_type(context, &declared_type);

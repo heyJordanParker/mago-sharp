@@ -98,7 +98,7 @@ public class Report
 
     public void touch(Calc calc)
     {
-        calc.rate = 2;
+        calc.rate = 2.0;
         calc.rate += 1;
         calc.rate++;
         this.count += 1;

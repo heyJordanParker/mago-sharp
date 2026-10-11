@@ -59,6 +59,33 @@ fn known_items_view(array: &TArray) -> Option<Cow<'_, BTreeMap<ArrayKey, (bool, 
     }
 }
 
+/// Whether a collection's element or key type fits, as [`union_comparator::is_contained_by`] decides. A type of
+/// elements is no single value, so its refusal never sets `int_for_float`. Only an element a literal writes does.
+fn is_element_type_contained_by(
+    codebase: &CodebaseMetadata,
+    input_type: &TUnion,
+    container_type: &TUnion,
+    ignore_false: bool,
+    inside_assertion: bool,
+    atomic_comparison_result: &mut ComparisonResult,
+) -> bool {
+    let fits = union_comparator::is_contained_by(
+        codebase,
+        input_type,
+        container_type,
+        false,
+        ignore_false,
+        inside_assertion,
+        atomic_comparison_result,
+    );
+
+    if !fits {
+        atomic_comparison_result.int_for_float = false;
+    }
+
+    fits
+}
+
 pub(crate) fn is_array_contained_by_array(
     codebase: &CodebaseMetadata,
     input_array: &TArray,
@@ -82,11 +109,10 @@ pub(crate) fn is_array_contained_by_array(
     // plain PHP takes an array of any key, which it runs as.
     match (input_array, container_array) {
         (TArray::Set(input_element_type), TArray::Set(container_element_type)) => {
-            return union_comparator::is_contained_by(
+            return is_element_type_contained_by(
                 codebase,
                 input_element_type,
                 container_element_type,
-                false,
                 input_element_type.ignore_falsable_issues(),
                 inside_assertion,
                 atomic_comparison_result,
@@ -96,11 +122,10 @@ pub(crate) fn is_array_contained_by_array(
             return keyed_array.known_items.is_none()
                 && keyed_array.parameters.as_ref().is_some_and(|(key_type, value_type)| {
                     key_type.is_array_key()
-                        && union_comparator::is_contained_by(
+                        && is_element_type_contained_by(
                             codebase,
                             input_element_type,
                             value_type,
-                            false,
                             input_element_type.ignore_falsable_issues(),
                             inside_assertion,
                             atomic_comparison_result,
@@ -126,6 +151,11 @@ pub(crate) fn is_array_contained_by_array(
     let input_known_items_cow = known_items_view(input_array);
     let container_known_items = known_items_view(container_array);
 
+    // A known item refused only for an `int` where a `float` is expected does not end the comparison, so the items
+    // after it are still compared. The array is refused for an `int` only when everything else fits, as
+    // `are_parts_contained_by` decides for a union's parts.
+    let mut refused_for_int = false;
+
     if let Some(input_known_items) = &input_known_items_cow {
         for (input_key, (input_is_optional, input_item_value_type)) in input_known_items.iter() {
             if let Some((container_is_optional, container_item_value_type)) =
@@ -144,7 +174,11 @@ pub(crate) fn is_array_contained_by_array(
                     inside_assertion,
                     atomic_comparison_result,
                 ) {
-                    return false;
+                    if !std::mem::take(&mut atomic_comparison_result.int_for_float) {
+                        return false;
+                    }
+
+                    refused_for_int = true;
                 }
             } else if let (Some(ck_type), cv_type) = (&container_key_type, &container_value_type) {
                 if !union_comparator::is_contained_by(
@@ -155,7 +189,13 @@ pub(crate) fn is_array_contained_by_array(
                     false,
                     inside_assertion,
                     atomic_comparison_result,
-                ) || !union_comparator::is_contained_by(
+                ) {
+                    atomic_comparison_result.int_for_float = false;
+
+                    return false;
+                }
+
+                if !union_comparator::is_contained_by(
                     codebase,
                     input_item_value_type,
                     cv_type,
@@ -164,7 +204,11 @@ pub(crate) fn is_array_contained_by_array(
                     inside_assertion,
                     atomic_comparison_result,
                 ) {
-                    return false;
+                    if !std::mem::take(&mut atomic_comparison_result.int_for_float) {
+                        return false;
+                    }
+
+                    refused_for_int = true;
                 }
             } else {
                 return false;
@@ -182,11 +226,10 @@ pub(crate) fn is_array_contained_by_array(
                         return false;
                     }
 
-                    if !union_comparator::is_contained_by(
+                    if !is_element_type_contained_by(
                         codebase,
                         &input_value_type,
                         container_item_value_type,
-                        false,
                         false,
                         inside_assertion,
                         atomic_comparison_result,
@@ -196,11 +239,10 @@ pub(crate) fn is_array_contained_by_array(
                 }
             } else if !input_has_key
                 && !input_value_type.is_never()
-                && !union_comparator::is_contained_by(
+                && !is_element_type_contained_by(
                     codebase,
                     &input_value_type,
                     container_item_value_type,
-                    false,
                     false,
                     inside_assertion,
                     atomic_comparison_result,
@@ -232,11 +274,10 @@ pub(crate) fn is_array_contained_by_array(
         };
         let input_key_type = backing_key_type.map_or(input_key_type, Cow::Owned);
 
-        if !union_comparator::is_contained_by(
+        if !is_element_type_contained_by(
             codebase,
             &input_key_type,
             &container_key_type,
-            false,
             input_key_type.ignore_falsable_issues(),
             inside_assertion,
             atomic_comparison_result,
@@ -245,16 +286,22 @@ pub(crate) fn is_array_contained_by_array(
         }
     }
 
-    input_value_type.is_never()
-        || union_comparator::is_contained_by(
+    if !input_value_type.is_never()
+        && !is_element_type_contained_by(
             codebase,
             &input_value_type,
             &container_value_type,
-            false,
             input_value_type.ignore_falsable_issues(),
             inside_assertion,
             atomic_comparison_result,
         )
+    {
+        return false;
+    }
+
+    atomic_comparison_result.int_for_float = refused_for_int;
+
+    !refused_for_int
 }
 
 #[cfg(test)]

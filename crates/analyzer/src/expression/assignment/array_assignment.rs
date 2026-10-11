@@ -53,8 +53,10 @@ use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_index_id;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 pub(crate) fn analyze<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -160,11 +162,12 @@ where
         root_array_type
     };
 
-    // A PHP# local, parameter or `field` is the collections it is declared as, so an element written into it must fit
-    // the elements of each of them, as one written into a property must, and the place keeps its type. Its key is the
-    // index checks' to report.
+    // A PHP# local, parameter, `field` or property is the collections it is declared as, so an element written into it
+    // must fit the elements of each of them, and the place keeps its type. An `int` written where the elements are
+    // `float` is reported at the value, when every refusal is for that `int`, as `are_parts_contained_by` decides for
+    // a union's parts. A property's other mismatches are `property_assignment`'s to report, and its key is the index
+    // checks'.
     if context.dialect.is_sharp()
-        && let Expression::ConstantAccess(access) = root_array_expression.unparenthesized()
         && let Some(declared) = get_declared_collection(context, block_context, artifacts, root_array_expression)
     {
         let declared_elements: Vec<TUnion> = declared
@@ -175,40 +178,71 @@ where
                 _ => None,
             })
             .collect();
-        let fits = root_array_type.types.iter().all(|atomic| {
+        let mut fits = true;
+        let mut refused_otherwise = false;
+        for atomic in root_array_type.types.iter() {
             let TAtomic::Array(written) = atomic else {
-                return true;
+                continue;
             };
             let written_element = get_array_parameters(written, context.codebase).1;
 
-            declared_elements.iter().all(|declared_element| {
-                union_comparator::is_contained_by(
+            for declared_element in &declared_elements {
+                let mut element_result = ComparisonResult::for_dialect(context.dialect);
+                if !union_comparator::is_contained_by(
                     context.codebase,
                     &written_element,
                     declared_element,
                     false,
                     false,
                     false,
-                    &mut ComparisonResult::for_dialect(context.dialect),
-                )
-            })
-        });
+                    &mut element_result,
+                ) {
+                    fits = false;
+                    refused_otherwise |= !element_result.int_for_float;
+                }
+            }
+        }
         if !fits {
-            let name = String::from_utf8_lossy(access.name.value());
-            let declared_str = display_type(context, &declared);
-            let written_str = display_value_type(context, &root_array_type, &declared);
-            context.collector.report_with_code(
-                IssueCode::InvalidLocalAssignmentValue,
-                Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{declared_str}`."))
-                    .with_annotation(
-                        Annotation::primary(array_target.span()).with_message(format!("This makes it `{written_str}`.")),
-                    )
-                    .with_help(format!(
-                        "Write a value of `{declared_str}`'s element type, or change the type `{name}` is declared with."
-                    )),
-            );
+            let comparison_result = ComparisonResult {
+                int_for_float: !refused_otherwise,
+                ..ComparisonResult::for_dialect(context.dialect)
+            };
+            let local = match root_array_expression.unparenthesized() {
+                Expression::ConstantAccess(access) => Some(access),
+                _ => None,
+            };
 
-            root_array_type = declared;
+            match (assign_value.and_then(|value| int_refused_for_float(&comparison_result, artifacts, value)), local) {
+                (Some(value), _) => {
+                    let code = if local.is_some() {
+                        IssueCode::InvalidLocalAssignmentValue
+                    } else {
+                        IssueCode::InvalidPropertyAssignmentValue
+                    };
+                    report_int_for_float(context, code, value, &declared);
+
+                    root_array_type = declared;
+                }
+                (None, Some(access)) => {
+                    let name = String::from_utf8_lossy(access.name.value());
+                    let declared_str = display_type(context, &declared);
+                    let written_str = display_value_type(context, &root_array_type, &declared);
+                    context.collector.report_with_code(
+                        IssueCode::InvalidLocalAssignmentValue,
+                        Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{declared_str}`."))
+                            .with_annotation(
+                                Annotation::primary(array_target.span())
+                                    .with_message(format!("This makes it `{written_str}`.")),
+                            )
+                            .with_help(format!(
+                                "Write a value of `{declared_str}`'s element type, or change the type `{name}` is declared with."
+                            )),
+                    );
+
+                    root_array_type = declared;
+                }
+                (None, None) => {}
+            }
         }
     }
 
