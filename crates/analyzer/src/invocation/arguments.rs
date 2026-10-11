@@ -41,11 +41,13 @@ use crate::invocation::analyzer::adjust_offset_for_variadic;
 use crate::statement::function_like::closure_parameter_types;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::report_int_for_float;
 
 /// Checks if an argument can be passed by reference.
 pub(super) fn is_argument_referenceable(
@@ -176,6 +178,7 @@ where
 /// Verifies an argument's type against the expected parameter type, and returns whether the argument fits it.
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
     input_type: &TUnion,
     parameter_type: &TUnion,
     argument_offset: usize,
@@ -330,7 +333,7 @@ where
         .filter(|declared_type| is_declared_set(declared_type))
         .and_then(|_| get_list_accepting_set_type(parameter_type));
 
-    let mut union_comparison_result = ComparisonResult::with_strict_nonnull(context.dialect.is_sharp());
+    let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
     let type_match_found = is_contained_by(
         context.codebase,
         input_type,
@@ -343,6 +346,12 @@ where
 
     if type_match_found {
         return true;
+    }
+
+    if let Some(value) = int_refused_for_float(&union_comparison_result, artifacts, input_expression) {
+        report_int_for_float(context, IssueCode::InvalidArgument, value, parameter_type);
+
+        return false;
     }
 
     let target_name_str = invocation_target.guess_name(context);

@@ -42,7 +42,7 @@ pub fn is_contained_by(
             false,
             input_k.ignore_falsable_issues(),
             inside_assertion,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules),
         )
     {
         input_k = backing_k;
@@ -51,7 +51,7 @@ pub fn is_contained_by(
     let mut all_types_contain = true;
 
     for (input, container) in [(&input_k, &container_k), (&input_v, &container_v)] {
-        let mut nested_comparison_result = ComparisonResult::new();
+        let mut nested_comparison_result = ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules);
         if !union_comparator::is_contained_by(
             codebase,
             input,

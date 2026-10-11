@@ -127,7 +127,7 @@ where
 
     let is_all_null = object_type.is_null() || object_type.is_void();
 
-    if is_null_safe {
+    if is_null_safe && !for_assignment {
         check_redundant_nullsafe(context, operator_span, object_expression, &object_type);
     }
 

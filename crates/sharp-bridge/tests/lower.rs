@@ -2877,17 +2877,15 @@ fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function
 /// !isset($this->tags["vip"]) && ($this->tags += ["vip" => "vip"]);
 /// isset(($receiver#1 = $this->next())->tags["old"]) && $receiver#1->tags->delete("old") === null;
 /// $this->next()->tags = [];
-/// !isset(($receiver#1 = $this->names())["x"]) && ($receiver#1 += ["x" => "x"]);
 /// return isset($this->names()["vip"]);
 /// ```
 ///
 /// A `Set` method changes a property through the property, which runs its hooks. A receiver read twice whose object
-/// runs something goes through a hidden variable its first read assigns, as PHP refuses a write to an assignment. A
-/// change of any other value changes a copy of it.
+/// runs something goes through a hidden variable its first read assigns, as PHP refuses a write to an assignment.
 #[test]
 fn a_set_method_changes_a_property_through_the_property() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public Set<string> tags { get => field; set => field = value; } = [];\n\n    public bool run()\n    {\n        this.tags.add(\"vip\");\n        this.next().tags.remove(\"old\");\n        this.next().tags.clear();\n        this.names().add(\"x\");\n        return this.names().contains(\"vip\");\n    }\n\n    private Report next() => this;\n\n    private Set<string> names() => this.tags;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Set<string> tags { get => field; set => field = value; } = [];\n\n    public bool run()\n    {\n        this.tags.add(\"vip\");\n        this.next().tags.remove(\"old\");\n        this.next().tags.clear();\n        return this.names().contains(\"vip\");\n    }\n\n    private Report next() => this;\n\n    private Set<string> names() => this.tags;\n}\n",
     );
 
     assert_eq!(
@@ -2945,26 +2943,6 @@ fn a_set_method_changes_a_property_through_the_property() {
                     ARG_LIST
                   ZVAL "tags"
                 ARRAY [3]
-              AND
-                UNARY_OP [14]
-                  ISSET
-                    DIM
-                      ASSIGN
-                        VAR
-                          ZVAL "receiver#1"
-                        METHOD_CALL
-                          VAR
-                            ZVAL "this"
-                          ZVAL "names"
-                          ARG_LIST
-                      ZVAL "x"
-                ASSIGN_OP [1]
-                  VAR
-                    ZVAL "receiver#1"
-                  ARRAY [3]
-                    ARRAY_ELEM
-                      ZVAL "x"
-                      ZVAL "x"
               RETURN
                 ISSET
                   DIM

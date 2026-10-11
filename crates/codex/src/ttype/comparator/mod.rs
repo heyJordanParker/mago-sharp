@@ -28,9 +28,12 @@ pub struct ComparisonResult {
     pub replacement_atomic_type: Option<TAtomic>,
     pub type_variable_lower_bounds: Vec<(Word, TemplateBound)>,
     pub type_variable_upper_bounds: Vec<(Word, TemplateBound)>,
-    /// Whether a `nonnull` container refuses a value that may be null, as PHP#'s `Any` does. The caller sets it for a
-    /// `.sharp` file. A PHP file keeps upstream's rule, which lets any `mixed` into `nonnull`.
-    pub strict_nonnull: bool,
+    /// Whether the comparison follows PHP#'s rules: a `nonnull` container refuses a value that may be null, as PHP#'s
+    /// `Any` does, and a `float` container refuses an `int`. The caller sets it for a `.sharp` file. A PHP file keeps
+    /// upstream's rules, which let any `mixed` into `nonnull` and an `int` into a `float`.
+    pub sharp_rules: bool,
+    /// Whether a failed comparison refused an `int` only because a `float` was expected, under `sharp_rules`.
+    pub int_for_float: bool,
 }
 
 impl Default for ComparisonResult {
@@ -50,14 +53,15 @@ impl ComparisonResult {
             replacement_atomic_type: None,
             type_variable_lower_bounds: vec![],
             type_variable_upper_bounds: vec![],
-            strict_nonnull: false,
+            sharp_rules: false,
+            int_for_float: false,
         }
     }
 
-    /// A result whose comparison treats `nonnull` as PHP# does when `strict_nonnull` is set.
+    /// A result whose comparison follows PHP#'s rules when `sharp_rules` is set.
     #[must_use]
-    pub fn with_strict_nonnull(strict_nonnull: bool) -> Self {
-        Self { strict_nonnull, ..Self::new() }
+    pub fn with_sharp_rules(sharp_rules: bool) -> Self {
+        Self { sharp_rules, ..Self::new() }
     }
 }
 
@@ -84,9 +88,15 @@ mod tests {
     use crate::ttype::atomic::object::TObject;
     use crate::ttype::comparator::ComparisonResult;
     use crate::ttype::comparator::union_comparator::is_contained_by;
+    use std::sync::Arc;
+
+    use crate::misc::GenericParent;
+    use crate::ttype::atomic::generic::TGenericParameter;
+    use crate::ttype::get_float;
     use crate::ttype::get_int;
     use crate::ttype::get_named_object;
     use crate::ttype::get_null;
+    use crate::ttype::get_string;
     use crate::ttype::union::TUnion;
 
     pub(crate) fn create_test_codebase(code: &'static str) -> CodebaseMetadata {
@@ -302,6 +312,38 @@ mod tests {
         for other in [get_int(), get_null(), get_named_object(word("Foo"), None)] {
             assert_is_contained_by(&codebase, &error, &other, true, &mut ComparisonResult::new());
             assert_is_contained_by(&codebase, &other, &error, true, &mut ComparisonResult::new());
+        }
+    }
+
+    /// A template's value fits where its constraint fits, so it is refused only for an `int` when every part of the
+    /// constraint that does not fit is an `int`, whichever part comes last.
+    #[test]
+    fn a_template_is_refused_only_for_an_int_when_its_whole_constraint_is() {
+        let codebase = CodebaseMetadata::default();
+        let template = |constraint: TUnion| {
+            TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                word("T"),
+                Arc::new(constraint),
+                GenericParent::ClassLike(word("Box")),
+            )))
+        };
+        let string = get_string().get_single().clone();
+        let int = get_int().get_single().clone();
+
+        let mut int_result = ComparisonResult::with_sharp_rules(true);
+        assert_is_contained_by(&codebase, &template(get_int()), &get_float(), false, &mut int_result);
+        assert!(int_result.int_for_float, "an `int` constraint is refused only for its `int`");
+
+        for constraint in [vec![string.clone(), int.clone()], vec![int, string]] {
+            let mut result = ComparisonResult::with_sharp_rules(true);
+            assert_is_contained_by(
+                &codebase,
+                &template(TUnion::new(Cow::Owned(constraint))),
+                &get_float(),
+                false,
+                &mut result,
+            );
+            assert!(!result.int_for_float, "a `string` part is refused for more than an `int`");
         }
     }
 }

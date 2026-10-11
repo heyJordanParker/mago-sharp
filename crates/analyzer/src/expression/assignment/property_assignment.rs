@@ -3,7 +3,6 @@ use std::rc::Rc;
 
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::add_union_type;
-use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
@@ -27,17 +26,18 @@ use crate::context::block::BlockContext;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
-use crate::expression::array::get_empty_literal_type;
-use crate::expression::array::get_set_literal_type;
 use crate::expression::assignment::PropertyWriteKind;
+use crate::expression::assignment::get_written_literal_type;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::property::resolve_instance_properties;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 #[inline]
 pub fn analyze<'ctx, 'arena, A>(
@@ -45,6 +45,7 @@ pub fn analyze<'ctx, 'arena, A>(
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     property_access: &PropertyAccess<'arena>,
+    is_null_safe: bool,
     assigned_value_type: &TUnion,
     assigned_value: Option<&Expression<'arena>>,
     write_kind: PropertyWriteKind,
@@ -56,7 +57,7 @@ where
     let property_access_id = get_property_access_expression_id(
         property_access.object,
         &property_access.property,
-        false,
+        is_null_safe,
         block_context.scope.get_class_like_name(),
         context.resolved_names,
         Some(context.codebase),
@@ -71,8 +72,8 @@ where
         property_access.object,
         &property_access.property,
         property_access.arrow.span(),
-        false, // `null_safe`
-        true,  // `for_assignment`
+        is_null_safe,
+        true, // `for_assignment`
     )?;
     block_context.flags.set_inside_assignment(was_inside_assignment);
 
@@ -80,10 +81,9 @@ where
     // collection it declares, from `=` and from `??=`, and keeps the collection its literal names when one empties it.
     // A list literal written to a `Set` is that `Set`. Its object is analyzed by now, so the property is found through
     // any object: a local, `this`, an element, a call or another property.
+    let target = Expression::Access(Access::Property(property_access.clone()));
     let declared_type = match write_kind {
         PropertyWriteKind::Direct | PropertyWriteKind::Coalesce if context.dialect.is_sharp() => {
-            let target = Expression::Access(Access::Property(property_access.clone()));
-
             get_declared_type(context, block_context, artifacts, &target)
         }
         _ => None,
@@ -93,10 +93,15 @@ where
         if let Some(assigned_value) = assigned_value {
             check_sharp_literal_kind(context, assigned_value, declared_type);
         }
-        literal_type = match assigned_value_type.types.as_ref() {
-            [TAtomic::Array(array)] if array.is_empty() => get_empty_literal_type(assigned_value, declared_type),
-            _ => assigned_value.and_then(|value| get_set_literal_type(context, artifacts, value, declared_type)),
-        };
+        literal_type = get_written_literal_type(
+            context,
+            artifacts,
+            &target,
+            assigned_value,
+            assigned_value_type,
+            declared_type,
+            write_kind == PropertyWriteKind::Coalesce,
+        );
     }
     let assigned_value_type = literal_type.as_ref().unwrap_or(assigned_value_type);
 
@@ -126,7 +131,7 @@ where
             );
         }
 
-        let mut union_comparison_result = ComparisonResult::with_strict_nonnull(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
 
         let type_match_found = union_comparator::is_contained_by(
             context.codebase,
@@ -149,7 +154,7 @@ where
             );
         }
 
-        if type_match_found && let Some(replacement) = union_comparison_result.replacement_union_type {
+        if type_match_found && let Some(replacement) = union_comparison_result.replacement_union_type.take() {
             widened_assigned_type = Some(match widened_assigned_type {
                 Some(existing) => add_union_type(existing, &replacement, context.codebase, CombinerOptions::default()),
                 None => replacement,
@@ -168,7 +173,16 @@ where
 
             let mut issue;
 
-            if union_comparison_result.type_coerced == Some(true) {
+            if let Some(value) =
+                assigned_value.and_then(|value| int_refused_for_float(&union_comparison_result, artifacts, value))
+            {
+                report_int_for_float(
+                    context,
+                    IssueCode::InvalidPropertyAssignmentValue,
+                    value,
+                    &resolved_property.property_type,
+                );
+            } else if union_comparison_result.type_coerced == Some(true) {
                 let issue_kind;
 
                 if union_comparison_result.type_coerced_from_nested_mixed.unwrap_or(false) {

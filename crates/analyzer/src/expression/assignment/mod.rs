@@ -8,11 +8,13 @@ use mago_algebra::disjoin_clauses;
 use mago_codex::assertion::Assertion;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::get_literal_int;
@@ -71,14 +73,16 @@ use crate::utils::expression::get_non_nullsafe_expression_id;
 use crate::utils::expression::get_nullsafe_base_expressions;
 use crate::utils::expression::get_root_expression_id;
 use crate::utils::expression::is_variable;
+use crate::utils::int_refused_for_float;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::report_int_for_float;
 
 mod array_assignment;
 pub(crate) mod property_assignment;
-mod static_property_assignment;
+pub(crate) mod static_property_assignment;
 
 /// Runs `read`, the read of an assignment operation, `+=`, `??=`, `++` or `--`, and returns what it reported in a PHP#
 /// file for [`write_after_read`].
@@ -132,6 +136,41 @@ pub(crate) enum PropertyWriteKind {
     Coalesce,
     Mutation,
     ArrayAccessMutation,
+}
+
+/// The type a PHP# write gives `target`, a place declared `declared`, when `source` is a literal that takes the
+/// collection the place declares: an empty literal, as [`get_empty_literal_type`] decides, or a list literal at a `Set`,
+/// as [`get_set_literal_type`] does. `source_type` is what `=` writes. `??=` writes `source` only when `target` is
+/// `null`, so it keeps what `target` held without `null` beside the retyped `source`. `None` when nothing is retyped.
+pub(crate) fn get_written_literal_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    target: &Expression<'_>,
+    source: Option<&Expression<'_>>,
+    source_type: &TUnion,
+    declared: &TUnion,
+    coalesce: bool,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let literal_type = |artifacts: &mut AnalysisArtifacts, value_type: &TUnion| match value_type.types.as_ref() {
+        [TAtomic::Array(array)] if array.is_empty() => get_empty_literal_type(source, declared),
+        _ => source.and_then(|source| get_set_literal_type(context, artifacts, source, declared)),
+    };
+
+    if coalesce
+        && let (Some(kept), Some(given)) = (
+            artifacts.get_expression_type(target).map(TUnion::to_non_nullable),
+            source.and_then(|source| artifacts.get_expression_type(source)).cloned(),
+        )
+    {
+        let given = literal_type(artifacts, &given)?;
+
+        return Some(add_union_type(kept, &given, context.codebase, CombinerOptions::default()));
+    }
+
+    literal_type(artifacts, source_type)
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Assignment<'arena> {
@@ -292,15 +331,19 @@ where
     if let (Some(declared_type), Some(source_expression)) = (&declared_type, source_expression) {
         check_sharp_literal_kind(context, source_expression, declared_type);
     }
-    let source_type = match (declared_type, source_type.types.as_ref()) {
-        (Some(declared_type), [TAtomic::Array(array)]) if array.is_empty() => {
-            get_empty_literal_type(source_expression, &declared_type).map_or(source_type, Rc::new)
-        }
-        (Some(declared_type), _) => source_expression
-            .and_then(|source| get_set_literal_type(context, artifacts, source, &declared_type))
-            .map_or(source_type, Rc::new),
-        _ => source_type,
-    };
+    let source_type = declared_type
+        .and_then(|declared_type| {
+            get_written_literal_type(
+                context,
+                artifacts,
+                target_expression,
+                source_expression,
+                &source_type,
+                &declared_type,
+                matches!(assignment_operator, Some(AssignmentOperator::Coalesce(_))),
+            )
+        })
+        .map_or(source_type, Rc::new);
 
     if let (Some(target_variable_id), None) = (&target_variable_id, assignment_operator)
         && block_context.flags.inside_loop()
@@ -525,6 +568,7 @@ where
                     artifacts,
                     static_property,
                     &source_type,
+                    source_expression,
                     target_expression_id,
                 )?,
                 None => property_assignment::analyze(
@@ -532,6 +576,7 @@ where
                     block_context,
                     artifacts,
                     property_access,
+                    false,
                     &source_type,
                     source_expression,
                     property_write_kind,
@@ -544,6 +589,7 @@ where
             artifacts,
             StaticProperty::from_static_property_access(property_access),
             &source_type,
+            source_expression,
             target_expression_id,
         )?,
         Expression::ArrayAccess(array_access) => {
@@ -743,6 +789,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
         }
     }
 
+    let mut comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
     if let Some((local_type, local_type_span)) = block_context.local_types.get(&variable_id).cloned()
         && !union_comparator::is_contained_by(
             context.codebase,
@@ -751,26 +798,35 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
             false,
             false,
             false,
-            &mut ComparisonResult::with_strict_nonnull(context.dialect.is_sharp()),
+            &mut comparison_result,
         )
     {
-        let name = display_variable_name(context, variable_id.as_bytes());
-        let local_type_str = display_type(context, &local_type);
-        let assigned_type_str = display_value_type(context, &assigned_type, &local_type);
+        if let Some(value) =
+            source_expression.and_then(|value| int_refused_for_float(&comparison_result, artifacts, value))
+        {
+            report_int_for_float(context, IssueCode::InvalidLocalAssignmentValue, value, &local_type);
+        } else {
+            let value_span = source_expression.map_or(variable_span, HasSpan::span);
+            let name = display_variable_name(context, variable_id.as_bytes());
+            let local_type_str = display_type(context, &local_type);
+            let assigned_type_str = display_value_type(context, &assigned_type, &local_type);
 
-        context.collector.report_with_code(
-            IssueCode::InvalidLocalAssignmentValue,
-            Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{local_type_str}`."))
-                .with_annotation(
-                    Annotation::primary(source_expression.map_or(variable_span, HasSpan::span))
-                        .with_message(format!("This value has type `{assigned_type_str}`.")),
-                )
-                .with_annotation(
-                    Annotation::secondary(local_type_span)
-                        .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
-                )
-                .with_help(format!("Assign a `{local_type_str}` value, or change the type `{name}` is declared with.")),
-        );
+            context.collector.report_with_code(
+                IssueCode::InvalidLocalAssignmentValue,
+                Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{local_type_str}`."))
+                    .with_annotation(
+                        Annotation::primary(value_span)
+                            .with_message(format!("This value has type `{assigned_type_str}`.")),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(local_type_span)
+                            .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
+                    )
+                    .with_help(format!(
+                        "Assign a `{local_type_str}` value, or change the type `{name}` is declared with."
+                    )),
+            );
+        }
 
         // The local keeps its written type, as the engine never checks it.
         assigned_type = local_type;
