@@ -274,17 +274,23 @@ impl<'analysis> Types<'analysis> {
             .collect()
     }
 
-    /// The name of the `Sharp\SetMethods` method the analyzer checked the method call `call` against, null-safe or not,
-    /// in lowercase. None for a call of any other method.
-    pub(crate) fn set_method(&self, call: &Expression) -> Option<Vec<u8>> {
+    /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked
+    /// the method call `call` against, null-safe or not: a method of `Sharp\ListMethods`, `Sharp\MapMethods` or
+    /// `Sharp\SetMethods`. None for a call of any other method.
+    pub(crate) fn collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>)> {
         let mut callees = self.artifacts.get_callees(call);
         let (Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }), None) =
             (callees.next(), callees.next())
         else {
             return None;
         };
+        let methods: [(&str, &[u8]); 3] =
+            [("List", b"Sharp\\ListMethods"), ("Map", b"Sharp\\MapMethods"), ("Set", b"Sharp\\SetMethods")];
+        let collection = methods
+            .into_iter()
+            .find_map(|(collection, methods)| class.as_bytes().eq_ignore_ascii_case(methods).then_some(collection))?;
 
-        class.as_bytes().eq_ignore_ascii_case(b"Sharp\\SetMethods").then(|| method.as_bytes().to_ascii_lowercase())
+        Some((collection, method.as_bytes().to_ascii_lowercase()))
     }
 
     /// The property `class` declares or inherits by the name `property`, if any.

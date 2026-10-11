@@ -4,6 +4,7 @@ use mago_allocator::LocalArena;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::union::TUnion;
+use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::php_method_name;
@@ -301,7 +302,8 @@ impl Lines {
     }
 }
 
-/// A value the PHP of a `Set` reads more than once, and the hidden variable that holds it, if any.
+/// A value the PHP of a `Set` or a collection method reads more than once, and the hidden variable that holds it, if
+/// any.
 struct Reread<'value, 'ast> {
     expression: &'value Expression<'ast>,
     hidden: Option<Vec<u8>>,
@@ -316,9 +318,9 @@ impl<'value, 'ast> Reread<'value, 'ast> {
     }
 }
 
-/// The receiver of a `Set` method call.
-enum SetReceiver<'receiver, 'ast> {
-    /// A local, `field` or a static property, which lowering again reads and writes the same `Set`.
+/// The receiver of a collection method call that runs as the PHP on its array.
+enum CollectionReceiver<'receiver, 'ast> {
+    /// A local, `field` or a static property, which lowering again reads and writes the same collection.
     Place(&'receiver Expression<'ast>),
     /// A property of an object, which the method reads again.
     Property(Reread<'receiver, 'ast>, &'receiver ClassLikeMemberSelector<'ast>),
@@ -1547,11 +1549,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
                 },
             },
-            // A link whose chain's conditional tests the receiver is the property call or the static call through a
-            // class value that `untested_link` found.
+            // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static call
+            // through a class value, the property call, or the plain method call.
             Expression::Call(Call::NullSafeMethod(call)) => {
-                if let Some(set_call) = self.set_call(expression, call.object, &call.argument_list, true) {
-                    return set_call;
+                if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, true) {
+                    return lowered;
                 }
 
                 let tested = self.tested_links.contains(&expression.span());
@@ -1562,32 +1564,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     return self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
                 }
 
+                let is_property_call = tested && self.is_property_call(expression, call.object);
                 let object = if tested { self.expression(call.object) } else { self.null_safe_object(call.object) };
                 let method = self.member(&call.method);
                 let keys = self.types.key_arguments(expression);
                 let arguments = self.arguments(&call.argument_list, &keys);
 
-                if tested {
+                if is_property_call {
                     let property = self.node(SHARP_AST_PROP, 0, line, &[object, method]);
 
                     self.node(SHARP_AST_CALL, 0, line, &[property, arguments])
+                } else if tested {
+                    self.node(SHARP_AST_METHOD_CALL, 0, line, &[object, method, arguments])
                 } else {
                     self.node(SHARP_AST_NULLSAFE_METHOD_CALL, 0, line, &[object, method, arguments])
                 }
             }
-            // A link whose chain's conditional tests the receiver is the method value or the static member read through
-            // a class value that `untested_link` found.
+            // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static member
+            // read through a class value, the method value, or the plain property read.
             Expression::Access(Access::NullSafeProperty(access)) => {
                 let tested = self.tested_links.contains(&expression.span());
                 if tested && let Some((class, classes)) = self.class_value(access.object) {
                     return self.static_member(line, class, &classes, &access.property);
                 }
 
+                let is_method = tested && self.is_method_value(access.object, &access.property);
                 let object = if tested { self.expression(access.object) } else { self.null_safe_object(access.object) };
                 let member = self.member(&access.property);
 
-                if tested {
+                if is_method {
                     self.method_value(line, object, member)
+                } else if tested {
+                    self.node(SHARP_AST_PROP, 0, line, &[object, member])
                 } else {
                     self.node(SHARP_AST_NULLSAFE_PROP, 0, line, &[object, member])
                 }
@@ -1922,14 +1930,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_METHOD_CALL, 0, line, &[object, member, callable])
     }
 
-    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value or a property call, with
-    /// its receiver, when `chain` is a member read, a call or an index whose chain holds one no conditional tests yet.
-    /// The walk stops at a receiver a hidden variable holds, whose links its own conditional tests.
+    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, or any
+    /// link below a collection method call that runs as PHP on the array, with its receiver, when `chain` is a member
+    /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
+    /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
+    /// holds, whose links its own conditional tests.
     fn untested_link<'chain, 'ast>(
         &self,
         chain: &'chain Expression<'ast>,
     ) -> Option<(&'chain Expression<'ast>, &'chain Expression<'ast>)> {
         let mut link = chain;
+        let mut below_php_call = false;
         loop {
             if self.null_safe_receivers.iter().any(|(span, _)| *span == link.span()) {
                 return None;
@@ -1937,11 +1948,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             link = match link {
                 Expression::Access(Access::Property(access)) => access.object,
-                Expression::Call(Call::Method(call)) => call.object,
+                Expression::Call(Call::Method(call)) => {
+                    below_php_call = below_php_call || self.php_collection_method(link).is_some();
+
+                    call.object
+                }
                 Expression::ArrayAccess(access) => access.array,
+                Expression::Parenthesized(parenthesized) => parenthesized.expression,
                 Expression::Access(Access::NullSafeProperty(access)) => {
                     if !self.tested_links.contains(&link.span())
-                        && (self.is_class_value(access.object) || self.is_method_value(access.object, &access.property))
+                        && (below_php_call
+                            || self.is_class_value(access.object)
+                            || self.is_method_value(access.object, &access.property))
                     {
                         return Some((link, access.object));
                     }
@@ -1950,7 +1968,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 Expression::Call(Call::NullSafeMethod(call)) => {
                     if !self.tested_links.contains(&link.span())
-                        && (self.is_class_value(call.object) || self.is_property_call(link, call.object))
+                        && (below_php_call
+                            || self.is_class_value(call.object)
+                            || self.is_property_call(link, call.object))
                     {
                         return Some((link, call.object));
                     }
@@ -2332,27 +2352,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP, 0, line, &[this, property])
     }
 
-    /// The PHP a call of a `Set` method runs on the array (spec section 12), or none for a method that runs on
-    /// `Sharp\Collection`. Until the engine runs `Set` methods (php-sharp #57), each method that finds or changes an
-    /// element by its key is the PHP that does it: `contains(x)` is `isset($s[K])`, `add(x)` is
-    /// `!isset($s[K]) && ($s += [K => x])`, `remove(x)` is `isset($s[K]) && $s->delete(K) === null`, which runs
-    /// `Sharp\Collection`'s `delete`, and `clear()` is `$s = []`. `count()` is `\count($s)`, `toList()` is
-    /// `\array_values($s)`, and `filter(f)` is `$s->filterValues(f)`, which keeps the keys. A change reaches a
-    /// property through the property, which runs its hooks, and a value that lives nowhere changes as a copy. A
-    /// null-safe call tests its receiver first and gives null for null.
-    fn set_call(
+    /// The PHP a call of one of the [`INLINED_COLLECTION_METHODS`] runs on the array, or none for any other call. A
+    /// change reaches a property through the property, which runs its hooks, and a value that lives nowhere changes as
+    /// a copy. A null-safe call tests its receiver first and gives null for null.
+    fn collection_call(
         &mut self,
         call: &Expression,
         receiver: &Expression,
         arguments: &ArgumentList,
         null_safe: bool,
     ) -> Option<u32> {
-        let method = self.types.set_method(call)?;
-        let changes = match method.as_slice() {
-            b"add" | b"remove" => true,
-            b"contains" | b"clear" | b"count" | b"tolist" | b"filter" => false,
-            _ => return None,
-        };
+        let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
         let element = || {
             arguments
@@ -2362,15 +2372,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 .unwrap_or_else(|| unreachable!("the checker refuses a `Set` method call without its element"))
         };
 
-        let mut set = self.set_receiver(receiver, changes || null_safe);
+        let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
         let test = null_safe.then(|| {
-            let receiver = self.read_set(&mut set, line, true);
+            let receiver = self.read_collection(&mut collection, line, true);
 
             self.is_null(line, receiver)
         });
         let lowered = match method.as_slice() {
             b"contains" => {
-                let set = self.read_set(&mut set, line, false);
+                let set = self.read_collection(&mut collection, line, false);
                 let key = self.key(element());
                 let entry = self.node(SHARP_AST_DIM, 0, line, &[set, key]);
 
@@ -2378,12 +2388,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             b"add" => {
                 let mut element = self.reread(element(), "element");
-                let held = self.read_set(&mut set, line, false);
+                let held = self.read_collection(&mut collection, line, false);
                 let key = self.set_key(&mut element);
                 let entry = self.node(SHARP_AST_DIM, 0, line, &[held, key]);
                 let held = self.node(SHARP_AST_ISSET, 0, line, &[entry]);
                 let absent = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[held]);
-                let place = self.read_set(&mut set, line, false);
+                let place = self.read_collection(&mut collection, line, false);
                 let key = self.set_key(&mut element);
                 let value = self.read(&mut element);
                 self.release(element);
@@ -2395,11 +2405,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             b"remove" => {
                 let mut element = self.reread(element(), "element");
-                let held = self.read_set(&mut set, line, false);
+                let held = self.read_collection(&mut collection, line, false);
                 let key = self.set_key(&mut element);
                 let entry = self.node(SHARP_AST_DIM, 0, line, &[held, key]);
                 let held = self.node(SHARP_AST_ISSET, 0, line, &[entry]);
-                let place = self.read_set(&mut set, line, false);
+                let place = self.read_collection(&mut collection, line, false);
                 let delete = self.string(0, line, b"delete");
                 let key = self.set_key(&mut element);
                 self.release(element);
@@ -2411,8 +2421,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_AND, 0, line, &[held, deleted])
             }
             b"clear" => {
-                let place = self.read_set(&mut set, line, false);
-                if matches!(set, SetReceiver::Value(Reread { hidden: None, .. })) {
+                let place = self.read_collection(&mut collection, line, false);
+                if matches!(collection, CollectionReceiver::Value(Reread { hidden: None, .. })) {
                     // The receiver lives nowhere, so clearing it changes nothing anyone reads.
                     place
                 } else {
@@ -2423,21 +2433,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             b"count" | b"tolist" => {
                 let function = if method == b"count" { b"count".as_slice() } else { b"array_values" };
-                let set = self.read_set(&mut set, line, false);
+                let array = self.read_collection(&mut collection, line, false);
                 let function = self.string(ZEND_NAME_FQ, line, function);
-                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[set]);
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[array]);
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
-            _ => {
-                let set = self.read_set(&mut set, line, false);
+            b"filter" => {
+                let set = self.read_collection(&mut collection, line, false);
                 let filter = self.string(0, line, b"filterValues");
                 let arguments = self.arguments(arguments, &[]);
 
                 self.node(SHARP_AST_METHOD_CALL, 0, line, &[set, filter, arguments])
             }
+            _ => unreachable!(
+                "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
+                String::from_utf8_lossy(&method)
+            ),
         };
-        self.release_set(set);
+        self.release_collection(collection);
 
         Some(match test {
             Some(test) => {
@@ -2449,13 +2463,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// The receiver of a `Set` method call. A method that reads it `twice` holds a value or an object that runs
+    /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the method the method call `call` runs as
+    /// PHP on the array, one of the [`INLINED_COLLECTION_METHODS`], and whether that PHP reads the receiver twice. None
+    /// for a call of any other method.
+    fn php_collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>, bool)> {
+        let (collection, method) = self.types.collection_method(call)?;
+        if !INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
+            *inlined_collection == collection && inlined.as_bytes().eq_ignore_ascii_case(&method)
+        }) {
+            return None;
+        }
+        let reads_twice = matches!(method.as_slice(), b"add" | b"remove");
+
+        Some((collection, method, reads_twice))
+    }
+
+    /// The receiver of a collection method call. A method that reads it `twice` holds a value or an object that runs
     /// something in a hidden variable.
-    fn set_receiver<'receiver, 'ast>(
+    fn collection_receiver<'receiver, 'ast>(
         &mut self,
         receiver: &'receiver Expression<'ast>,
         twice: bool,
-    ) -> SetReceiver<'receiver, 'ast> {
+    ) -> CollectionReceiver<'receiver, 'ast> {
         let receiver = receiver.unparenthesized();
         let hold = |lowering: &mut Self, value: &'receiver Expression<'ast>| {
             if twice { lowering.reread(value, "receiver") } else { Reread::once(value) }
@@ -2465,47 +2494,48 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::ConstantAccess(name)
                 if matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::Field)) =>
             {
-                SetReceiver::Place(receiver)
+                CollectionReceiver::Place(receiver)
             }
             Expression::Access(Access::Property(access)) if self.names.static_property_class(access).is_some() => {
-                SetReceiver::Place(receiver)
+                CollectionReceiver::Place(receiver)
             }
             Expression::Access(Access::Property(PropertyAccess { object, property, .. }))
             | Expression::Access(Access::NullSafeProperty(NullSafePropertyAccess { object, property, .. }))
                 if !self.is_class_value(object) =>
             {
-                SetReceiver::Property(hold(self, object), property)
+                CollectionReceiver::Property(hold(self, object), property)
             }
-            _ => SetReceiver::Value(hold(self, receiver)),
+            _ => CollectionReceiver::Value(hold(self, receiver)),
         }
     }
 
-    /// A read of the `Set` a method call runs on, which is also where the method writes it. The read that tests a
-    /// null-safe call's receiver reads a property with `?->`.
-    fn read_set(&mut self, set: &mut SetReceiver, line: u32, null_safe: bool) -> u32 {
-        match set {
-            SetReceiver::Place(place) => self.target(place),
-            SetReceiver::Property(object, property) => {
+    /// A read of the collection a method call runs on, which is also where the method writes it. The read that tests
+    /// a null-safe call's receiver reads a property with `?->`.
+    fn read_collection(&mut self, collection: &mut CollectionReceiver, line: u32, null_safe: bool) -> u32 {
+        match collection {
+            CollectionReceiver::Place(place) => self.target(place),
+            CollectionReceiver::Property(object, property) => {
                 let object = self.read(object);
                 let property = self.member(property);
                 let kind = if null_safe { SHARP_AST_NULLSAFE_PROP } else { SHARP_AST_PROP };
 
                 self.node(kind, 0, line, &[object, property])
             }
-            SetReceiver::Value(value) => self.read(value),
+            CollectionReceiver::Value(value) => self.read(value),
         }
     }
 
-    fn release_set(&mut self, set: SetReceiver) {
-        match set {
-            SetReceiver::Place(_) => {}
-            SetReceiver::Property(object, _) => self.release(object),
-            SetReceiver::Value(value) => self.release(value),
+    fn release_collection(&mut self, collection: CollectionReceiver) {
+        match collection {
+            CollectionReceiver::Place(_) => {}
+            CollectionReceiver::Property(object, _) => self.release(object),
+            CollectionReceiver::Value(value) => self.release(value),
         }
     }
 
-    /// `value`, which the PHP of a `Set` reads more than once. One that reads the same and runs nothing when lowered
-    /// again is lowered at each read. Any other is held in the hidden variable `name#N`, which its first read assigns.
+    /// `value`, which the PHP of a `Set` or a collection method reads more than once. One that reads the same and runs
+    /// nothing when lowered again is lowered at each read. Any other is held in the hidden variable `name#N`, which
+    /// its first read assigns.
     fn reread<'value, 'ast>(&mut self, value: &'value Expression<'ast>, name: &str) -> Reread<'value, 'ast> {
         if self.is_pure(value) || value.is_constant(&PHPVersion::PHP85, false) {
             return Reread::once(value);
@@ -2689,8 +2719,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         {
             return self.current_position(class, call);
         }
-        if let Some(set_call) = self.set_call(expression, call.object, &call.argument_list, false) {
-            return set_call;
+        if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, false) {
+            return lowered;
         }
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;
