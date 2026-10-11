@@ -46,6 +46,7 @@ use crate::utils::docblock::get_type_from_var_docblock;
 use crate::utils::expression::get_direct_variable_id;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_function_like_identifier;
@@ -54,6 +55,7 @@ use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     fn analyze<'ctx, A>(
@@ -190,6 +192,7 @@ pub fn handle_return_value<'ctx, A>(
         handle_property_hook_return(
             context,
             block_context,
+            artifacts,
             return_value,
             inferred_return_type,
             property_name,
@@ -346,9 +349,9 @@ pub fn handle_return_value<'ctx, A>(
     }
 
     if let Some(return_value) = return_value {
-        let mut union_comparison_result = ComparisonResult::with_strict_nonnull(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
 
-        if takes_any_value(&expected_return_type, &inferred_return_type, union_comparison_result.strict_nonnull) {
+        if takes_any_value(&expected_return_type, &inferred_return_type, union_comparison_result.sharp_rules) {
             return;
         }
 
@@ -421,6 +424,12 @@ pub fn handle_return_value<'ctx, A>(
                 return_value.span(),
                 IssueCode::InvalidReturnStatement,
             );
+
+            return;
+        }
+
+        if let Some(value) = int_refused_for_float(&union_comparison_result, artifacts, return_value) {
+            report_int_for_float(context, IssueCode::InvalidReturnStatement, value, &expected_return_type);
 
             return;
         }
@@ -638,16 +647,17 @@ fn returns_declared_parameter_variable(
         .any(|atomic| matches!(atomic, TAtomic::Variable(expected) if *expected == variable_name))
 }
 
-/// Whether a declared `mixed` return type takes the inferred value unchecked. With `strict_nonnull`, set for a `.sharp`
+/// Whether a declared `mixed` return type takes the inferred value unchecked. With `sharp_rules`, set for a `.sharp`
 /// file, `nonnull`, which PHP# writes `Any`, still refuses a value that may be null.
-fn takes_any_value(expected_return_type: &TUnion, inferred_return_type: &TUnion, strict_nonnull: bool) -> bool {
+fn takes_any_value(expected_return_type: &TUnion, inferred_return_type: &TUnion, sharp_rules: bool) -> bool {
     expected_return_type.is_mixed()
-        && !(strict_nonnull && !expected_return_type.accepts_null() && inferred_return_type.can_be_null())
+        && !(sharp_rules && !expected_return_type.accepts_null() && inferred_return_type.can_be_null())
 }
 
 fn handle_property_hook_return<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
     return_value: Option<&Expression>,
     mut inferred_return_type: Rc<TUnion>,
     property_name: Word,
@@ -675,8 +685,8 @@ fn handle_property_hook_return<'ctx, A>(
         inferred_return_type = Rc::new(inner);
     }
 
-    let strict_nonnull = context.dialect.is_sharp();
-    if takes_any_value(&expected_return_type, &inferred_return_type, strict_nonnull) {
+    let sharp_rules = context.dialect.is_sharp();
+    if takes_any_value(&expected_return_type, &inferred_return_type, sharp_rules) {
         return;
     }
 
@@ -709,7 +719,7 @@ fn handle_property_hook_return<'ctx, A>(
         return;
     }
 
-    let mut comparison_result = ComparisonResult::with_strict_nonnull(strict_nonnull);
+    let mut comparison_result = ComparisonResult::with_sharp_rules(sharp_rules);
     if is_contained_by(
         context.codebase,
         &inferred_return_type,
@@ -719,6 +729,12 @@ fn handle_property_hook_return<'ctx, A>(
         false,
         &mut comparison_result,
     ) {
+        return;
+    }
+
+    if let Some(value) = int_refused_for_float(&comparison_result, artifacts, return_value) {
+        report_int_for_float(context, IssueCode::InvalidReturnStatement, value, &expected_return_type);
+
         return;
     }
 

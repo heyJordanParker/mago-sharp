@@ -33,9 +33,11 @@ use crate::resolver::property::resolve_instance_properties;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 #[inline]
 pub fn analyze<'ctx, 'arena, A>(
@@ -129,7 +131,7 @@ where
             );
         }
 
-        let mut union_comparison_result = ComparisonResult::with_strict_nonnull(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
 
         let type_match_found = union_comparator::is_contained_by(
             context.codebase,
@@ -152,7 +154,7 @@ where
             );
         }
 
-        if type_match_found && let Some(replacement) = union_comparison_result.replacement_union_type {
+        if type_match_found && let Some(replacement) = union_comparison_result.replacement_union_type.take() {
             widened_assigned_type = Some(match widened_assigned_type {
                 Some(existing) => add_union_type(existing, &replacement, context.codebase, CombinerOptions::default()),
                 None => replacement,
@@ -171,7 +173,16 @@ where
 
             let mut issue;
 
-            if union_comparison_result.type_coerced == Some(true) {
+            if let Some(value) =
+                assigned_value.and_then(|value| int_refused_for_float(&union_comparison_result, artifacts, value))
+            {
+                report_int_for_float(
+                    context,
+                    IssueCode::InvalidPropertyAssignmentValue,
+                    value,
+                    &resolved_property.property_type,
+                );
+            } else if union_comparison_result.type_coerced == Some(true) {
                 let issue_kind;
 
                 if union_comparison_result.type_coerced_from_nested_mixed.unwrap_or(false) {

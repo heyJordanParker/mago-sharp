@@ -65,7 +65,7 @@ pub(crate) fn is_contained_by(
             specialized_template_type.set_from_unspecified_template(true);
         }
 
-        let mut parameter_comparison_result = ComparisonResult::new();
+        let mut parameter_comparison_result = ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules);
 
         let declared_variance =
             container_metadata.template_variance.get(parameter_offset).copied().unwrap_or(Variance::Invariant);
@@ -127,7 +127,7 @@ pub(crate) fn is_contained_by(
             && !specialized_template_type.from_template_fallback()
             && !container_type_parameter.from_template_fallback()
         {
-            let mut reverse_result = ComparisonResult::new();
+            let mut reverse_result = ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules);
             let reverse_ok = union_comparator::is_contained_by(
                 codebase,
                 container_type_parameter,
