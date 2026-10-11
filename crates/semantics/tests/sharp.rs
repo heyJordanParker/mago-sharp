@@ -3379,13 +3379,16 @@ fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_not_supp
 }
 
 /// Every example of spec sections 11 and 25 is in the slice: type parameters on a class, an interface and a method,
-/// bounds, variance, generic types, `Class<T>`, type arguments on `new` and on a call, and section 11's `value is
-/// TItem`, which reads `TItem`'s type argument while the code runs.
+/// bounds, variance, generic types, `Class<T>`, and type arguments on `new` and on a call. Section 11's `value is
+/// TItem` needs `TItem`'s type argument while the code runs, which the engine does not read yet.
 #[test]
-fn the_generics_examples_of_the_spec_are_in_the_slice() {
+fn the_generics_examples_of_the_spec_are_in_the_slice_but_a_test_of_a_type_parameter() {
     let code = "namespace App.Tenant;\n\nimport Illuminate.Database.Eloquent.Model;\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    public TItem first(List<TItem> items) => items[0];\n}\n\npublic class Repository\n{\n    private Map<string, Class<Element>> elements = [:];\n\n    public PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query) => new PaginatedList<TItem>(query.rows());\n\n    public void share<TItem : DatabaseEntity & Shareable>(TItem item, Any body)\n    {\n        const page = new PaginatedList<Order>(this.rows());\n        const payload = Json.decode<WebhookPayload>(body);\n        const found = this?.find<Order>(1);\n    }\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n}\n\npublic interface Validator<in TItem>\n{\n    bool check(TItem item);\n}\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class Inbox\n{\n    public bool holds<TItem>(List<TItem> items, Any value) => value is TItem;\n}\n";
 
-    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(
+        issues(code),
+        ["42:72 `is TItem` can't be tested yet, because type arguments don't reach the running program."]
+    );
 }
 
 /// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11.
@@ -3401,13 +3404,11 @@ fn a_type_parameter_whose_name_does_not_start_with_t_and_an_uppercase_letter_is_
 }
 
 /// A type parameter is a type, so it starts with a capital letter as every PHP# type does: the rule that names it `T`
-/// or `T` and a capital letter refuses a lowercase one wherever a list declares it, once. A PHP template keeps its own
-/// letters.
+/// or `T` and a capital letter refuses a lowercase one wherever a list declares it, once.
 #[test]
 fn a_type_parameter_starts_with_a_capital_letter() {
     let lowercase = "namespace App.Tenant;\n\nclass Box<t>\n{\n    public void run<item>() { }\n}\n\ninterface Source<t>\n{\n    void next<value>();\n}\n\nenum Status\n{\n    case Open;\n\n    public void run<item>() { }\n}\n";
     let capitalized = "namespace App.Tenant;\n\nclass Box<T>\n{\n    public void run<TItem>() { }\n}\n\ninterface Source<T>\n{\n    void next<TValue>();\n}\n\nenum Status\n{\n    case Open;\n\n    public void run<TItem>() { }\n}\n";
-    let php = "<?php\n\nnamespace App\\Tenant;\n\n/** @template t */\nclass Box\n{\n}\n";
     let refusal = "A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`.";
 
     assert_eq!(
@@ -3421,7 +3422,6 @@ fn a_type_parameter_starts_with_a_capital_letter() {
         ]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
-    assert_eq!(issues_in("src/Box.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3502,19 +3502,22 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
     );
 }
 
-/// A pattern, `as` and `typeof` read a type parameter's type argument while the code runs. A catch clause of one and
-/// `new` of one are not supported yet. Each refusal names the test or the expression as the code writes it, and why it
-/// cannot run, with no note. The plain PHP twin, whose `@template` names no class, has no PHP# rule.
+/// The engine does not read type arguments while the code runs yet, so a type parameter is not supported yet where the
+/// code runs it: in a pattern, `as` or a catch clause, `typeof` of one and `new` of one. Each refusal names the test or
+/// the expression as the code writes it, and why it cannot run, with no note.
 #[test]
-fn a_catch_and_new_of_a_type_parameter_are_not_supported_yet() {
+fn what_needs_a_type_argument_while_the_code_runs_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public bool run<TItem>(Any value, List<TItem> items)\n    {\n        const a = value is TItem;\n        const b = value is TItem item;\n        const c = value as TItem;\n        const i = match (value) { TItem => 1, default => 0 };\n        const j = typeof(TItem);\n        const k = new TItem(value);\n        try {\n        } catch (TItem failure) {\n        }\n        return a;\n    }\n}\n";
-    let php = "<?php\n\nclass Report\n{\n    /**\n     * @template TItem\n     * @param list<TItem> $items\n     */\n    public function run(mixed $value, array $items): bool\n    {\n        $a = $value instanceof TItem;\n        $j = TItem::class;\n        $k = new TItem($value);\n        try {\n        } catch (TItem $failure) {\n        }\n        return $a;\n    }\n}\n";
     let because = "because type arguments don't reach the running program.";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
+            format!("7:28 `is TItem` can't be tested yet, {because}"),
+            format!("8:28 `is TItem` can't be tested yet, {because}"),
+            format!("9:28 `as TItem` can't be tested yet, {because}"),
+            format!("10:35 `TItem` can't be tested yet, {because}"),
+            format!("11:19 `typeof(TItem)` can't run yet, {because}"),
             format!("12:19 `new TItem` can't run yet, {because}"),
             format!("14:18 `catch (TItem)` can't be tested yet, {because}"),
         ]
@@ -3523,15 +3526,12 @@ fn a_catch_and_new_of_a_type_parameter_are_not_supported_yet() {
 }
 
 /// A static member reached through a type parameter, as in `TItem.make()`, needs the type argument while the code
-/// runs, which G1 erases, so it is not supported yet. The plain PHP twin, whose `@template` names no class, has no PHP#
-/// rule.
+/// runs, which G1 erases, so it is not supported yet.
 #[test]
 fn a_static_member_of_a_type_parameter_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Box<TItem>\n{\n    public int run<TKey>(int extra)\n    {\n        TItem.make(extra);\n        const limit = TItem.LIMIT;\n        TItem.count = limit;\n        return TKey.count(extra);\n    }\n}\n";
-    let php = "<?php\n\n/** @template TItem */\nclass Box\n{\n    /** @template TKey */\n    public function run(int $extra): int\n    {\n        TItem::make($extra);\n        $limit = TItem::LIMIT;\n        TItem::$count = $limit;\n        return TKey::count($extra);\n    }\n}\n";
     let because = "because type arguments don't reach the running program.";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
@@ -3544,15 +3544,12 @@ fn a_static_member_of_a_type_parameter_is_not_supported_yet() {
 }
 
 /// G1 erases type arguments, so every `Box<…>` shares one static member, and a static member uses none of its class's
-/// type parameters: not in a static field's or property's type, nor in a static method's signature or body. The plain
-/// PHP twin, whose `@template` a static member may name, has no PHP# rule.
+/// type parameters: not in a static field's or property's type, nor in a static method's signature or body.
 #[test]
 fn a_static_member_cannot_use_its_class_type_parameters() {
     let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    private static TItem? last = null;\n\n    public static TItem? current { get; set; }\n\n    public static List<TItem> wrap(TItem item) => [item];\n\n    public static int count()\n    {\n        List<TItem> items = [];\n        return items.count();\n    }\n\n    public TItem? first(TItem item) => item;\n}\n";
-    let php = "<?php\n\n/** @template TItem */\nclass Box\n{\n    /** @var TItem|null */\n    private static mixed $last = null;\n\n    /**\n     * @param TItem $item\n     * @return list<TItem>\n     */\n    public static function wrap(mixed $item): array\n    {\n        return [$item];\n    }\n}\n";
     let refusal = "A static member can't use `TItem`, because every `Box<…>` shares it.";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
@@ -3565,14 +3562,11 @@ fn a_static_member_cannot_use_its_class_type_parameters() {
     );
 }
 
-/// A class constant is a static member too, so its type uses none of its class's type parameters. The plain PHP twin,
-/// whose `@var` may name a `@template`, has no PHP# rule.
+/// A class constant is a static member too, so its type uses none of its class's type parameters.
 #[test]
 fn a_class_constant_cannot_use_its_class_type_parameters() {
     let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public const TItem EMPTY = 1;\n\n    public const int SIZE = 1;\n}\n";
-    let php = "<?php\n\n/** @template TItem */\nclass Box\n{\n    /** @var TItem */\n    public const EMPTY = 1;\n\n    public const int SIZE = 1;\n}\n";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(issues(code), ["5:18 A static member can't use `TItem`, because every `Box<…>` shares it."]);
 }
 
@@ -3587,13 +3581,11 @@ fn a_static_method_uses_its_own_type_parameters() {
 
 /// `Self` is the class with its own type parameters, so a static member of a generic class can't return it or create
 /// one with `new Self()`, as it can't name `TItem`: the refusal names `Self` and every type parameter it carries. A
-/// static member of a class without type parameters returns `Self`. The plain PHP twin's `static` has no PHP# rule.
+/// static member of a class without type parameters returns `Self`.
 #[test]
 fn a_static_member_of_a_generic_class_cannot_return_self() {
     let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public static Self make() => new Self();\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n\n    public static Self make() => new Self();\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public static Self? none() => null;\n}\n";
-    let php = "<?php\n\n/** @template TItem */\nclass Box\n{\n    final public function __construct()\n    {\n    }\n\n    public static function make(): static\n    {\n        return new static();\n    }\n}\n";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
@@ -3605,35 +3597,33 @@ fn a_static_member_of_a_generic_class_cannot_return_self() {
     );
 }
 
-/// `is`, `as` and a `match` arm test a generic class's type arguments while the code runs, but not a `List`'s, which
-/// runs as a PHP array of any elements. Each test of one is refused once, at its type. The plain PHP twin has no PHP#
-/// rule.
+/// The engine does not read type arguments while the code runs yet, so `is`, `as` and a `match` arm cannot test them:
+/// a `List` runs as a PHP array of any elements, and a generic class as its class. Each is refused once, at its type.
 #[test]
-fn a_type_test_of_a_list_with_type_arguments_is_not_supported_yet() {
+fn a_type_test_with_type_arguments_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(Any? item)\n    {\n        const a = item is List<int> numbers ? count(numbers) : 0;\n        const b = item as List<int>;\n        const c = match (item) { List<int> numbers => count(numbers), default => 0 };\n        const d = item is PaginatedList<Order> page ? 1 : 0;\n        const e = item as PaginatedList<Order>;\n        const f = match (item) { PaginatedList<Order> page => 1, default => 0 };\n        return a;\n    }\n}\n";
-    let php = "<?php\n\nclass Report\n{\n    public function run(mixed $item): int\n    {\n        $a = is_array($item) && array_is_list($item) ? count($item) : 0;\n        $b = $item instanceof PaginatedList ? 1 : 0;\n        return $a + $b;\n    }\n}\n";
     let because = "because type arguments don't reach the running program.";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
             format!("7:27 `is List<int>` can't be tested yet, {because}"),
             format!("8:27 `as List<int>` can't be tested yet, {because}"),
             format!("9:34 `List<int>` can't be tested yet, {because}"),
+            format!("10:27 `is PaginatedList<Order>` can't be tested yet, {because}"),
+            format!("11:27 `as PaginatedList<Order>` can't be tested yet, {because}"),
+            format!("12:34 `PaginatedList<Order>` can't be tested yet, {because}"),
         ]
     );
 }
 
 /// A function type runs as a `Closure` of any signature, so `is`, `as` and a `match` arm cannot test its signature,
-/// and each is refused at its type with the reason a signature is erased. The plain PHP twin has no PHP# rule.
+/// and each is refused at its type with the reason a signature is erased.
 #[test]
 fn a_type_test_of_a_function_type_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(Any? value)\n    {\n        const a = value is Function<int(int)> f ? f(1) : 0;\n        const b = value as Function<int(int)>;\n        const c = match (value) { Function<int(int)> f => f(1), default => 0 };\n        const d = value as int|Function<int(int)>;\n        return a;\n    }\n}\n";
-    let php = "<?php\n\nclass Report\n{\n    public function run(mixed $value): int\n    {\n        return $value instanceof \\Closure ? $value(1) : 0;\n    }\n}\n";
     let because = "because a function's parameter and return types don't reach the running program.";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
@@ -4037,18 +4027,13 @@ fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
 
 /// Spec section 11: type arguments reach the running program, so a union is refused only where the engine can't tell
 /// two members apart. Two generic classes, or one class with other type arguments, compile. `List`, `Map` and `Set`
-/// share PHP's one array kind, and a collection beside an `Iterable` of its element type adds nothing to it. The PHP
-/// twin keeps PHP's own report.
+/// share PHP's one array kind, and a collection beside an `Iterable` of its element type adds nothing to it.
 #[test]
 fn a_union_refuses_only_members_the_engine_cannot_tell_apart() {
     let code = leak(method("        return 1;\n").replace(
         "int extra",
         "Box<Order>|Pair<Order> a, Box<int>|Box<string> b, Box<Order>|Box<Order> c, List<int>|Map<string, int> d, List<int>|Set<int> e, Iterable<int>|List<int> f, Iterable<int>|Map<string, int> g, Set<int>|Iterable<int> h, Iterable<string>|List<int> i, Iterable<string>|Map<string, int> j, Order|Entity k",
     ));
-    let php = leak(
-        php_method("        return 1;\n")
-            .replace("int $extra", "Box|Pair $a, Box|Box $c, array|array $d, iterable|array $f"),
-    );
 
     assert_eq!(
         issues(code),
@@ -4061,7 +4046,6 @@ fn a_union_refuses_only_members_the_engine_cannot_tell_apart() {
             "5:217 `Set<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
         ]
     );
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]

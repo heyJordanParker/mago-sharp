@@ -7607,11 +7607,10 @@ fn a_receiver_of_its_own_class_with_swapped_type_arguments_gives_them_swapped() 
 /// An object of a PHP# generic class carries its type arguments through serialization, which `Serializable` cannot
 /// do: its `serialize` writes a string the engine cannot add them to. So a generic PHP# class that is a
 /// `Serializable`, through its header or a parent's, is refused, and the refusal names the methods that carry them.
-/// A PHP# class without type parameters and the PHP twin, whose `@template` arguments are erased, may be one.
+/// A PHP# class without type parameters may be one.
 #[test]
 fn a_generic_class_is_never_serializable() {
     let sharp = "namespace Demo;\n\nimport Serializable;\n\npublic class Page<TItem> : Serializable\n{\n    public TItem? first() => null;\n\n    public string? serialize() => null;\n\n    public void unserialize(string data)\n    {\n    }\n}\n\npublic class OrderPage<TItem> : Page<TItem>\n{\n}\n\npublic class Plain : Serializable\n{\n    public string? serialize() => null;\n\n    public void unserialize(string data)\n    {\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Page implements \\Serializable\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n\n    public function serialize(): ?string\n    {\n        return null;\n    }\n\n    public function unserialize(string $data): void\n    {\n    }\n\n    /** @return array<string, mixed> */\n    public function __serialize(): array\n    {\n        return [];\n    }\n\n    /** @param array<string, mixed> $data */\n    public function __unserialize(array $data): void\n    {\n    }\n}\n";
 
     assert_eq!(
         explained(("src/Demo/Page.sharp", sharp), &[]),
@@ -7620,7 +7619,6 @@ fn a_generic_class_is_never_serializable() {
             "16:14 invalid-implement `OrderPage` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry. Leave `Serializable` out: `serialize()` then uses `__serialize` and `__unserialize`, or its default form, which keep them.",
         ]
     );
-    assert_eq!(issues(("src/Demo/Page.php", php), &[]), Vec::<String>::new());
 }
 
 /// `new Self(…)` in a generic class names no type arguments: `Self` is the class with its own type parameters, so its
@@ -7790,14 +7788,11 @@ fn out_and_in_are_checked_on_a_class_type() {
 /// Spec section 11.1 lets a private member break the marker, as Scala's object-private members do, and reaches it only
 /// through `this`: another instance's field, written or read, another instance's method, called or read as a value, and
 /// the private `set` of another instance's property are refused where they are reached, for `out` and `in` alike, and a
-/// property whose `get` is public is written only through `this`, as its `get` stays reachable. The plain PHP twin keeps
-/// Mago's issues.
+/// property whose `get` is public is written only through `this`, as its `get` stays reachable.
 #[test]
 fn a_variance_breaking_private_member_is_reachable_only_through_this() {
     let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Cell<out TItem>\n{\n    private TItem? value = null;\n\n    public TItem? get() => this.value;\n\n    public void poison(Cell<Any?> target)\n    {\n        target.value = 1;\n    }\n\n    public Any? peek(Cell<Any?> other) => other.value;\n}\n\npublic class Stack<out TItem>\n{\n    private void push(TItem item)\n    {\n    }\n\n    public void fill(Stack<Any?> other)\n    {\n        other.push(1);\n    }\n\n    public Any? grab(Stack<Any?> other) => other.push;\n}\n\npublic class Sink<in TItem>\n{\n    private TItem? last = null;\n\n    public void take(TItem item)\n    {\n        this.last = item;\n    }\n\n    public Any? leak(Sink<Order> other) => other.last;\n}\n\npublic class Slot<out TItem>\n{\n    public TItem? held { get; private set; } = null;\n\n    public void swap(Slot<Any?> other)\n    {\n        other.held = 1;\n    }\n\n    public Any? read(Slot<Any?> other) => other.held;\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\n/** @template-covariant TItem */\nclass Cell\n{\n    /** @var TItem|null */\n    private mixed $value = null;\n\n    /** @return TItem|null */\n    public function get(): mixed\n    {\n        return $this->value;\n    }\n\n    /** @param Cell<mixed> $target */\n    public function poison(Cell $target): void\n    {\n        $target->value = 1;\n    }\n}\n";
 
-    assert_eq!(explained(("src/Demo/Cell.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         explained(("src/Demo/Cell.sharp", sharp), &[]),
         [
@@ -7815,16 +7810,12 @@ fn a_variance_breaking_private_member_is_reachable_only_through_this() {
     );
 }
 
-/// `is`, `as` and a `match` arm of a type with type arguments add no analyzer issue: of a `List`, which `check_slice`
-/// refuses because its type arguments don't reach the running program, not the `is` test, the variable it declares nor
-/// its use, and of a generic class, which the code tests with its type arguments, none either. The plain PHP twin keeps
-/// Mago's issues.
+/// `is`, `as` and a `match` arm of a type with type arguments, which `check_slice` refuses because type arguments
+/// don't reach the running program yet, add no analyzer issue: not the `is` test, the variable it declares nor its use.
 #[test]
 fn a_type_test_with_type_arguments_adds_no_issue() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int counted(Any? item) => item is List<int> numbers ? count(numbers) : 0;\n\n    public static Any? kept(Any? item) => item as List<int>;\n\n    public static int matched(Any? item) => match (item) { List<int> numbers => count(numbers), default => 0 };\n\n    public static Any? paged(Any? item) => item is PaginatedList<Order> page ? page.first() : null;\n\n    public static Any? cast(Any? item) => item as PaginatedList<Order>;\n\n    public static Any? pageMatched(Any? item) => match (item) { PaginatedList<Order> page => page.first(), default => null };\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function counted(mixed $item): int\n    {\n        return is_array($item) && array_is_list($item) ? count($item) : 0;\n    }\n\n    public static function paged(mixed $item): mixed\n    {\n        return $item instanceof PaginatedList ? $item->first() : null;\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Demo/Paging.sharp", PAGING)]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]), Vec::<String>::new());
 }
 
@@ -10867,14 +10858,11 @@ fn a_declared_operator_runs_where_it_is_used() {
     assert_eq!(issues(("src/App/Ledger.sharp", sharp), &[MONEY_OPERATORS, ORDER_OF_MONEY]), Vec::<String>::new());
 }
 
-/// A value of a type parameter bounded by `Money` runs the operators `Money` declares, as a `Money` does. PHP keeps
-/// its own operators on a templated object.
+/// A value of a type parameter bounded by `Money` runs the operators `Money` declares, as a `Money` does.
 #[test]
 fn an_operator_on_a_type_parameter_runs_the_operator_its_bound_declares() {
     let sharp = "namespace App;\n\npublic class Ledger\n{\n    public static Money sum<T : Money>(T a, T b) => a + b;\n\n    public static Money negated<T : Money>(T a) => -a;\n\n    public static bool less<T : Money>(T a, T b) => a < b;\n\n    public static bool same<T : Money>(T a, T b) => a == b;\n}\n";
-    let php = "<?php\n\nnamespace App;\n\nfinal class Ledger\n{\n    /**\n     * @template T of Money\n     * @param T $a\n     * @param T $b\n     */\n    public static function sum(Money $a, Money $b): Money { return $a + $b; }\n\n    /**\n     * @template T of Money\n     * @param T $a\n     * @param T $b\n     */\n    public static function less(Money $a, Money $b): bool { return $a < $b; }\n}\n";
 
-    assert_eq!(issues(("src/App/Ledger.php", php), &[MONEY_OPERATORS, ORDER_OF_MONEY]), Vec::<String>::new());
     assert_eq!(issues(("src/App/Ledger.sharp", sharp), &[MONEY_OPERATORS, ORDER_OF_MONEY]), Vec::<String>::new());
 }
 

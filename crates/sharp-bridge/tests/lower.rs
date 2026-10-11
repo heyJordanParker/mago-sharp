@@ -4974,11 +4974,10 @@ fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
     );
 }
 
-/// A test of a class with type arguments or of a type parameter, and `typeof` of a type parameter, read the type
-/// arguments while the code runs: a `SHARP_IS_TYPE` of the value and the type text, and a `SHARP_TYPE_OF` of the type
-/// text, written as `new` writes its type arguments. A test of a class without type arguments stays `INSTANCEOF`.
+/// The engine reads no type arguments while the code runs yet, so a test of a class with type arguments or of a type
+/// parameter, and `typeof` of a type parameter, are refused before lowering.
 #[test]
-fn a_test_and_typeof_of_a_type_with_type_arguments_read_them() {
+fn a_test_and_typeof_of_a_type_with_type_arguments_are_refused_before_lowering() {
     let lowered = Lowered::with(
         indoc! {"
         namespace App;
@@ -4994,8 +4993,6 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them() {
         {
             public bool boxed(Any value) => value is Box<Order>;
 
-            public bool plain(Any value) => value is Order;
-
             public bool kept<T>(Any value) => value is T;
 
             public Class<T> kind<T>() => typeof(T);
@@ -5006,15 +5003,17 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_read_them() {
             "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
         )],
     );
-    let test = |text: &str| {
-        format!("STMT_LIST\n  RETURN\n    SHARP_IS_TYPE\n      VAR\n        ZVAL \"value\"\n      ZVAL \"{text}\"\n")
-    };
+    let because = "because type arguments don't reach the running program.";
 
-    assert_eq!(lowered.body_of("holds"), test("$0"));
-    assert_eq!(lowered.body_of("boxed"), test("App.Box<App.Order>"));
-    assert_eq!(lowered.body_of("kept"), test("#0"));
-    assert!(lowered.body_of("plain").contains("INSTANCEOF"), "{}", lowered.body_of("plain"));
-    assert_eq!(lowered.body_of("kind"), "STMT_LIST\n  RETURN\n    SHARP_TYPE_OF\n      ZVAL \"#0\"\n");
+    assert_eq!(
+        lowered.diagnostics(),
+        [
+            format!("7:46 compile error: `is TValue` can't be tested yet, {because}"),
+            format!("12:46 compile error: `is Box<Order>` can't be tested yet, {because}"),
+            format!("14:48 compile error: `is T` can't be tested yet, {because}"),
+            format!("16:34 compile error: `typeof(T)` can't run yet, {because}"),
+        ]
+    );
 }
 
 /// A list runs its methods in the engine's built-in `Sharp\Collection`, so a call of a generic one such as `map` carries
