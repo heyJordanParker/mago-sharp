@@ -8,11 +8,13 @@ use mago_algebra::disjoin_clauses;
 use mago_codex::assertion::Assertion;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::get_literal_int;
@@ -78,7 +80,7 @@ use crate::utils::names::display_variable_name;
 
 mod array_assignment;
 pub(crate) mod property_assignment;
-mod static_property_assignment;
+pub(crate) mod static_property_assignment;
 
 /// Runs `read`, the read of an assignment operation, `+=`, `??=`, `++` or `--`, and returns what it reported in a PHP#
 /// file for [`write_after_read`].
@@ -132,6 +134,41 @@ pub(crate) enum PropertyWriteKind {
     Coalesce,
     Mutation,
     ArrayAccessMutation,
+}
+
+/// The type a PHP# write gives `target`, a place declared `declared`, when `source` is a literal that takes the
+/// collection the place declares: an empty literal, as [`get_empty_literal_type`] decides, or a list literal at a `Set`,
+/// as [`get_set_literal_type`] does. `source_type` is what `=` writes. `??=` writes `source` only when `target` is
+/// `null`, so it keeps what `target` held without `null` beside the retyped `source`. `None` when nothing is retyped.
+pub(crate) fn get_written_literal_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    target: &Expression<'_>,
+    source: Option<&Expression<'_>>,
+    source_type: &TUnion,
+    declared: &TUnion,
+    coalesce: bool,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let literal_type = |artifacts: &mut AnalysisArtifacts, value_type: &TUnion| match value_type.types.as_ref() {
+        [TAtomic::Array(array)] if array.is_empty() => get_empty_literal_type(source, declared),
+        _ => source.and_then(|source| get_set_literal_type(context, artifacts, source, declared)),
+    };
+
+    if coalesce
+        && let (Some(kept), Some(given)) = (
+            artifacts.get_expression_type(target).map(TUnion::to_non_nullable),
+            source.and_then(|source| artifacts.get_expression_type(source)).cloned(),
+        )
+    {
+        let given = literal_type(artifacts, &given)?;
+
+        return Some(add_union_type(kept, &given, context.codebase, CombinerOptions::default()));
+    }
+
+    literal_type(artifacts, source_type)
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Assignment<'arena> {
@@ -292,15 +329,19 @@ where
     if let (Some(declared_type), Some(source_expression)) = (&declared_type, source_expression) {
         check_sharp_literal_kind(context, source_expression, declared_type);
     }
-    let source_type = match (declared_type, source_type.types.as_ref()) {
-        (Some(declared_type), [TAtomic::Array(array)]) if array.is_empty() => {
-            get_empty_literal_type(source_expression, &declared_type).map_or(source_type, Rc::new)
-        }
-        (Some(declared_type), _) => source_expression
-            .and_then(|source| get_set_literal_type(context, artifacts, source, &declared_type))
-            .map_or(source_type, Rc::new),
-        _ => source_type,
-    };
+    let source_type = declared_type
+        .and_then(|declared_type| {
+            get_written_literal_type(
+                context,
+                artifacts,
+                target_expression,
+                source_expression,
+                &source_type,
+                &declared_type,
+                matches!(assignment_operator, Some(AssignmentOperator::Coalesce(_))),
+            )
+        })
+        .map_or(source_type, Rc::new);
 
     if let (Some(target_variable_id), None) = (&target_variable_id, assignment_operator)
         && block_context.flags.inside_loop()

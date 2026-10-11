@@ -6385,7 +6385,7 @@ fn a_changing_set_method_needs_a_place_and_a_reading_one_runs_on_a_value() {
 /// it is with `.`, for a `List`, a `Map` and a `Set` alike, and its `set` decides whether the caller may change it.
 #[test]
 fn a_changing_collection_method_writes_back_through_a_null_safe_property() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<int>? lines = null;\n    public Map<string, int>? counts = null;\n    public Set<int>? ids = null;\n    public Set<int>? fixed { get; } = null;\n}\n\nclass Shop\n{\n    public void change(Order? order)\n    {\n        order?.lines?.add(1);\n        order?.counts?.delete(\"a\");\n        order?.ids?.add(1);\n        order?.fixed?.add(1);\n    }\n\n    public void known(Order order)\n    {\n        order?.ids?.add(1);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<int>? lines { get; set; } = null;\n    public Map<string, int>? counts { get; set; } = null;\n    public Set<int>? ids { get; set; } = null;\n    public Set<int>? fixed { get; } = null;\n}\n\nclass Shop\n{\n    public void change(Order? order)\n    {\n        order?.lines?.add(1);\n        order?.counts?.delete(\"a\");\n        order?.ids?.add(1);\n        order?.fixed?.add(1);\n    }\n\n    public void known(Order order)\n    {\n        order?.ids?.add(1);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Shop.sharp", sharp), &[]),
@@ -6402,40 +6402,64 @@ fn a_changing_collection_method_called_from_php_needs_no_place() {
     assert_eq!(issues(("src/Demo/Shop.php", php), &[]), Vec::<String>::new());
 }
 
-/// A changing method may fill a `Set` past the literal the analyzer saw in it, so its place holds the `Set` it is
-/// declared from then on: a local, and a property whose `set` the caller reaches. A `Set<int|string>` that held `[1]`
-/// and took `"a"` is no `Set<int>`. A `Set` property without a reachable `set` refuses the change, as a `List`
-/// property does.
+/// A changing method writes a `Set` back through its property's `set`, so a `Set` property without one refuses the
+/// change, as a `List` property does.
 #[test]
-fn a_set_changed_by_a_method_holds_its_declared_set() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public Set<int> fixed { get; } = [];\n}\n\nclass Tags\n{\n    public Set<int|string> all { get; private set; } = [];\n\n    public int run(Order order, Set<int|string> ids)\n    {\n        ids = [1];\n        ids.add(\"a\");\n        this.all = [2];\n        this.all.add(\"b\");\n        order.fixed.add(3);\n        Set<int|string> copy = ids;\n        Set<int|string> kept = this.all;\n        Set<int> numbers = ids;\n        Set<int> others = this.all;\n        return count(copy) + count(kept) + count(numbers) + count(others);\n    }\n}\n";
+fn a_set_property_without_a_set_refuses_a_changing_method() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public Set<int> fixed { get; } = [];\n}\n\nclass Tags\n{\n    public void run(Order order)\n    {\n        order.fixed.add(3);\n    }\n}\n";
 
-    assert_eq!(
-        issues(("src/Demo/Tags.sharp", sharp), &[]),
-        [
-            "18:15 invalid-property-write",
-            "21:28 invalid-local-assignment-value",
-            "22:27 invalid-local-assignment-value"
-        ]
-    );
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["12:15 invalid-property-write"]);
 }
 
-/// A changing method called on a place that may be one of several collections writes back once, so a `List|Set` with
-/// no place, or without a reachable `set`, refuses `add` once. A call already refused on the value is refused once:
-/// `delete` on a `Map|Set`, which a `Set` lacks, and `add` on a `Set|Box`, which the engine cannot run yet.
+/// A changing method called on a value that may be one of several collections is refused once, by the first rule it
+/// breaks. `delete` on a `Map|Set` and `add` on a `Map|Set` are refused by the collection that lacks them, and not again
+/// for writing to no place. A method the engine runs as PHP on the array, such as a `Set`'s `add` or `filter`, is not
+/// supported on a value that may be another collection or an object, because the engine would run the other
+/// collection's method on the `Set`: `List|Set` and `Set|Box`.
 #[test]
 fn a_changing_method_of_a_union_of_collections_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<int>|Set<int> both { get; } = [];\n    public Map<string, int>|Set<int> either { get; } = [];\n}\n\nclass Box\n{\n    public bool add(int value) => true;\n}\n\nclass Shop\n{\n    public void run(Order order, bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).delete(\"a\");\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        order.both.add(2);\n        order.either.delete(\"b\");\n        let tags = ready ? lines : ids;\n        tags.add(3);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).delete(\"a\");\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        return count(tags.filter(tag => tag > 0));\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Shop.sharp", sharp), &[]),
         [
-            "18:9 invalid-pass-by-reference",
-            "19:32 non-existent-method",
-            "20:32 non-existent-method",
-            "21:29 not-supported-yet",
-            "22:15 invalid-property-write",
-            "23:22 non-existent-method"
+            "12:31 not-supported-yet",
+            "13:32 non-existent-method",
+            "14:32 non-existent-method",
+            "15:29 not-supported-yet",
+            "17:14 not-supported-yet",
+            "18:27 not-supported-yet"
+        ]
+    );
+}
+
+/// `Registry.ids.add(1)` changes the static property `Registry.ids` through its `set`, as `Registry.ids = [1]` writes
+/// it, for a `List`, a `Map` and a `Set` alike. A static property whose `set` is `private` refuses both from another
+/// class, as an instance property does.
+#[test]
+fn a_changing_collection_method_writes_back_through_a_static_property() {
+    let sharp = "namespace Demo;\n\nclass Registry\n{\n    public static Set<int> ids { get; set; } = [];\n    public static List<int> lines { get; set; } = [];\n    public static Map<string, int> counts { get; set; } = [:];\n\n    public static int run()\n    {\n        Registry.ids.add(1);\n        Registry.lines.add(2);\n        Registry.counts.delete(\"a\");\n        return count(Registry.ids) + count(Registry.lines) + count(Registry.counts);\n    }\n}\n\nclass Hidden\n{\n    public static Set<int> tags { get; private set; } = [];\n}\n\nclass Outside\n{\n    public static void change()\n    {\n        Hidden.tags = [5];\n        Hidden.tags.add(5);\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Registry.sharp", sharp), &[]),
+        ["27:16 invalid-property-write", "28:16 invalid-property-write"]
+    );
+}
+
+/// `(maybe ??= []).add(1)` changes the value `??=` gives, which is not the place `maybe`, so it is refused as a call
+/// on a value with no place, for a `Set` as for a `List`. The value is the collection `maybe` is declared as, so the
+/// `Set`'s `add` checks its element too.
+#[test]
+fn a_changing_method_on_a_null_coalescing_assignment_needs_a_place() {
+    let sharp = "namespace Demo;\n\nclass Maybe\n{\n    public void run(Set<int>? ids, Set<int>? tags, List<int>? lines)\n    {\n        (ids ??= []).add(1);\n        (tags ??= []).add(\"x\");\n        (lines ??= []).add(1);\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Maybe.sharp", sharp), &[]),
+        [
+            "7:9 invalid-pass-by-reference",
+            "8:9 invalid-pass-by-reference",
+            "8:27 invalid-argument",
+            "9:9 invalid-pass-by-reference"
         ]
     );
 }
