@@ -29,6 +29,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
+use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::TypeArgumentList;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
@@ -41,6 +42,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
+use crate::expression::assignment::static_property_assignment;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
@@ -69,6 +71,7 @@ use crate::resolver::method::report_non_documented_method;
 use crate::resolver::method::report_non_existent_method;
 use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
+use crate::resolver::static_property::StaticProperty;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
@@ -326,7 +329,14 @@ where
     let mut method_resolution =
         resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)?;
 
-    if context.dialect.is_sharp()
+    let mut collections = method_resolution
+        .resolved_methods
+        .iter()
+        .map(|method| method.classname)
+        .filter(|classname| sharp_collection_name(&TObject::new_named(*classname)).is_some());
+    let first_collection = collections.next();
+    let on_several_collections = collections.any(|classname| Some(classname) != first_collection);
+    let refused_on_object = context.dialect.is_sharp()
         && method_resolution.resolved_methods.iter().any(|method| {
             let collection = sharp_collection_name(&TObject::new_named(method.classname));
             let name = method.method_identifier.get_method_name();
@@ -335,14 +345,13 @@ where
                 collection == Some(*inlined_collection) && inlined.as_bytes().eq_ignore_ascii_case(name.as_bytes())
             })
         })
-    {
-        report_collection_method_on_object(context, artifacts, object, selector);
-    }
+        && report_collection_method_on_object(context, artifacts, object, selector, on_several_collections);
 
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
 
     let mut invocation_targets = vec![];
+    let mut changes_collection = false;
     for resolved_method in method_resolution.resolved_methods {
         let metadata = context
             .codebase
@@ -361,12 +370,10 @@ where
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, span);
 
-        if (metadata.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\ListMethods")
-            || metadata.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\MapMethods"))
-            && !method_metadata.flags.is_mutation_free()
-        {
-            check_changed_collection(context, block_context, artifacts, object)?;
-        }
+        changes_collection |= matches!(
+            &resolved_method.static_class_type,
+            StaticClassType::Object(object) if sharp_collection_name(object).is_some()
+        ) && !method_metadata.flags.is_mutation_free();
 
         let method_target_context = MethodTargetContext {
             invocation_kind: MethodInvocationKind::Instance,
@@ -387,6 +394,10 @@ where
             method_context: Some(method_target_context),
             span,
         });
+    }
+
+    if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target && !refused_on_object {
+        check_changed_collection(context, block_context, artifacts, object)?;
     }
 
     if !method_resolution.unresolved_methods.is_empty() {
@@ -493,26 +504,30 @@ where
 }
 
 /// Reports one of the [`INLINED_COLLECTION_METHODS`] called on `object` when its value can also be an object, as
-/// `List<int>|Box`. The bridge lowers such a call to PHP on the array from the checker's types, so an object the value
-/// holds when the call runs never reaches its own method of that name.
+/// `List<int>|Box`, or `on_several_collections`, when the call resolves on more than one collection, as `List|Set`.
+/// The bridge lowers such a call to PHP on the array from the checker's one collection method, so an object the value
+/// holds never reaches its own method of that name, and a value that may be another collection runs as a
+/// `Sharp\Collection` method that is not that collection's. Returns whether it reported the call.
 fn report_collection_method_on_object<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
     object: &Expression<'_>,
     selector: &ClassLikeMemberSelector<'_>,
-) where
+    on_several_collections: bool,
+) -> bool
+where
     A: Arena,
 {
     let (Some(object_type), ClassLikeMemberSelector::Identifier(method)) =
         (artifacts.get_expression_type(object), selector)
     else {
-        return;
+        return false;
     };
     let holds = |kind: fn(&TAtomic) -> bool| object_type.types.iter().any(kind);
-    if !holds(|atomic| matches!(atomic, TAtomic::Array(_)))
-        || !holds(|atomic| matches!(atomic, TAtomic::Object(_) | TAtomic::Callable(_)))
-    {
-        return;
+    let on_object = holds(|atomic| matches!(atomic, TAtomic::Array(_)))
+        && holds(|atomic| matches!(atomic, TAtomic::Object(_) | TAtomic::Callable(_)));
+    if !on_object && !on_several_collections {
+        return false;
     }
 
     let method = String::from_utf8_lossy(method.value);
@@ -520,11 +535,15 @@ fn report_collection_method_on_object<A>(
     context.collector.report_with_code(
         IssueCode::NotSupportedYet,
         Issue::error(format!("Calling `{method}` on `{receiver}` is not supported by the engine yet."))
-            .with_annotation(
-                Annotation::primary(selector.span()).with_message("The value can be a collection or an object."),
-            )
+            .with_annotation(Annotation::primary(selector.span()).with_message(if on_object {
+                "The value can be a collection or an object."
+            } else {
+                "The value can be more than one kind of collection."
+            }))
             .with_help("Test which one the value is with `is` before the call."),
     );
+
+    true
 }
 
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the
@@ -561,11 +580,38 @@ where
 
             Ok(())
         }
-        Expression::Access(Access::Property(access)) => property_assignment::analyze(
+        Expression::Access(Access::Property(access)) => {
+            match StaticProperty::from_property_access(access, context.resolved_names) {
+                Some(static_property) => static_property_assignment::analyze(
+                    context,
+                    block_context,
+                    artifacts,
+                    static_property,
+                    &changed_type,
+                    get_block_expression_id(collection, context, block_context),
+                ),
+                None => property_assignment::analyze(
+                    context,
+                    block_context,
+                    artifacts,
+                    access,
+                    false,
+                    &changed_type,
+                    None,
+                    PropertyWriteKind::Mutation,
+                ),
+            }
+        }
+        Expression::Access(Access::NullSafeProperty(access)) => property_assignment::analyze(
             context,
             block_context,
             artifacts,
-            access,
+            &PropertyAccess {
+                object: access.object,
+                arrow: access.question_mark_arrow,
+                property: access.property.clone(),
+            },
+            true,
             &changed_type,
             None,
             PropertyWriteKind::Mutation,

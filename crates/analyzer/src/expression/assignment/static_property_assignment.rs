@@ -38,7 +38,7 @@ pub(crate) fn analyze<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let property_resolution = resolve_static_properties(context, block_context, artifacts, property_access)?;
+    let property_resolution = resolve_static_properties(context, block_context, artifacts, property_access, true)?;
 
     let mut resolved_property_type = None;
     let mut matched_all_properties = true;
@@ -270,6 +270,18 @@ mod tests {
         "},
         issues = [
             IssueCode::InvalidPropertyRead,
+        ]
+    }
+
+    test_analysis! {
+        name = write_private_set_static_property_from_outside,
+        code = indoc! {"
+            <?php
+            class Counter { public private(set) static int $count = 0; }
+            Counter::$count = 1;
+        "},
+        issues = [
+            IssueCode::InvalidPropertyWrite,
         ]
     }
 

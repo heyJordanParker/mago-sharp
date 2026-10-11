@@ -1398,8 +1398,8 @@ pub(crate) fn report_non_existent_method<A>(
     context.collector.report_with_code(IssueCode::NonExistentMethod, issue);
 }
 
-/// Reports a method a PHP# `List` or `Map` does not have, naming the collection type the code wrote and the methods
-/// `classname`, its `Sharp\ListMethods` or `Sharp\MapMethods`, gives it.
+/// Reports a method a PHP# `List`, `Map` or `Set` does not have, naming the collection type the code wrote and the
+/// methods `classname`, its `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods`, gives it.
 fn report_non_existent_collection_method<A>(
     context: &mut Context<'_, '_, A>,
     obj_span: Span,
