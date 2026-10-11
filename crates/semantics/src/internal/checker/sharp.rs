@@ -700,7 +700,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             context.report(
                 Issue::error("PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.")
                     .with_annotation(Annotation::primary(mixed.span).with_message("Written here."))
-                    .with_note("PHP# removes PHP's `mixed`: `Any` holds a value of any type but null, and `Any?` also allows null."),
+                    .with_note("`Any` holds a value of any type but null, and `Any?` also allows null."),
             );
 
             None
