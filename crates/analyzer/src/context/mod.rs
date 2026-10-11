@@ -38,6 +38,7 @@ use crate::code::IssueCode;
 use crate::context::assertion::AssertionContext;
 use crate::context::block::BlockContext;
 use crate::expression::binary::utils::display_operand;
+use crate::expression::is_refused_type;
 use crate::external::ExternalAnalysisSession;
 use crate::plugin::PluginRegistry;
 use crate::settings::Settings;
@@ -190,7 +191,7 @@ where
             return;
         };
 
-        if condition_type.is_bool() || condition_type.is_never() {
+        if condition_type.is_bool() || condition_type.is_never() || is_refused_type(condition_type) {
             return;
         }
 

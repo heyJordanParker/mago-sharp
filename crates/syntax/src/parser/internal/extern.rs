@@ -46,7 +46,8 @@ where
         Ok(Identifier::Dotted(DottedIdentifier { span: class.span.join(member.span), value: self.bytes(&value) }))
     }
 
-    fn parse_optional_uses(&mut self) -> Result<Option<Uses<'arena>>, ParseError> {
+    /// Parses a `uses` clause when one starts here: `uses`, which stays a name everywhere else, and its effects.
+    pub(crate) fn parse_optional_uses(&mut self) -> Result<Option<Uses<'arena>>, ParseError> {
         if !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"uses") {
             return Ok(None);
         }

@@ -47,6 +47,10 @@ pub(crate) fn is_contained_by(
         return false;
     }
 
+    if input_signature.has_effect_outside(container_signature) {
+        return false;
+    }
+
     let container_params = container_signature.get_parameters();
     let input_params = input_signature.get_parameters();
     let input_has_variadic = input_params.last().is_some_and(|p| p.is_variadic());
@@ -56,7 +60,9 @@ pub(crate) fn is_contained_by(
                 codebase.get_function_like(identifier).is_some_and(|m| m.flags.is_built_in())
             }
             TCallable::Signature(signature) => signature.source.as_ref().is_some_and(|identifier| {
-                codebase.get_function_like(identifier).is_some_and(|m| m.flags.is_built_in())
+                codebase
+                    .get_function_like(&codebase.get_declaring_function_like_identifier(identifier))
+                    .is_some_and(|m| m.flags.is_built_in())
             }),
         };
 

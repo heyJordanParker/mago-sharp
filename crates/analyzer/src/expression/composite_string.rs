@@ -25,6 +25,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::binary::utils::display_operand;
+use crate::expression::is_refused_type;
 use crate::expression::unary::cast_type_to_string;
 use crate::utils::expression::get_block_expression_id;
 
@@ -90,6 +91,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
                 // TODO: maybe it is worth reporting an issue here?
                 continue;
             };
+
+            if is_refused_type(&part_type) {
+                all_literals = false;
+                resulting_strings = None;
+
+                continue;
+            }
 
             if context.dialect.is_sharp() && !part_type.is_never() && !is_shown(&part_type) {
                 report_unshown(context, part, &part_type);

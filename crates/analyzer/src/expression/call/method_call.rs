@@ -45,6 +45,7 @@ use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::constant_access::field_storage;
+use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -323,6 +324,7 @@ where
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
 
     let mut invocation_targets = vec![];
+    let mut changes_collection = false;
     for resolved_method in method_resolution.resolved_methods {
         let metadata = context
             .codebase
@@ -341,15 +343,10 @@ where
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, span);
 
-        if context.dialect.is_sharp()
-            && matches!(
-                &resolved_method.static_class_type,
-                StaticClassType::Object(object) if sharp_collection_name(object).is_some()
-            )
-            && !method_metadata.flags.is_mutation_free()
-        {
-            check_changed_collection(context, block_context, artifacts, object)?;
-        }
+        changes_collection |= matches!(
+            &resolved_method.static_class_type,
+            StaticClassType::Object(object) if sharp_collection_name(object).is_some()
+        ) && !method_metadata.flags.is_mutation_free();
 
         let method_target_context = MethodTargetContext {
             invocation_kind: MethodInvocationKind::Instance,
@@ -370,6 +367,10 @@ where
             method_context: Some(method_target_context),
             span,
         });
+    }
+
+    if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target {
+        check_changed_collection(context, block_context, artifacts, object)?;
     }
 
     if !method_resolution.unresolved_methods.is_empty() {
@@ -453,6 +454,12 @@ where
             MethodInvocationKind::Instance,
             !has_resolved_methods,
         )?;
+    }
+
+    if let Some(object_type) = artifacts.get_rc_expression_type(object).cloned()
+        && is_refused_type(&object_type)
+    {
+        artifacts.set_rc_expression_type(&span, object_type);
     }
 
     Ok(())

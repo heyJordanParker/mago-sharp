@@ -1,4 +1,5 @@
 use mago_database::file::HasFileId;
+use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::T;
@@ -143,6 +144,16 @@ where
             hint
         };
 
+        // Effects written after a function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, are an error,
+        // and the parse goes on after them.
+        if matches!(hint, Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
+            && self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"uses")
+            && self.stream.peek_kind(1)? == Some(T![Identifier])
+            && let Some(misplaced) = self.parse_optional_uses()?
+        {
+            self.errors.push(ParseError::UsesAfterFunctionTypeInSharp(misplaced.span()));
+        }
+
         let next = self.stream.lookahead(0)?;
         Ok(match next.map(|t| t.kind) {
             Some(T!["|"]) => {
@@ -228,7 +239,7 @@ where
             && self.stream.peek_kind(1)? == Some(T!["<"]))
     }
 
-    /// Parses a PHP# function type, as in `Function<Money?(Line, string)>`.
+    /// Parses a PHP# function type, as in `Function<Money?(Line, string)>` or `Function<Charge(Cart) uses Http>`.
     fn parse_function_hint(&mut self) -> Result<FunctionHint<'arena>, ParseError> {
         let function = self.expect_any_keyword()?;
         let less_than = self.stream.eat_span(T!["<"])?;
@@ -278,6 +289,7 @@ where
             left_parenthesis,
             parameters: TokenSeparatedSequence::new(parameters, commas),
             right_parenthesis,
+            uses: self.parse_optional_uses()?,
             greater_than: self.parse_closing_angle()?,
         })
     }

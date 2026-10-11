@@ -13,7 +13,7 @@ A simple workflow that runs the formatter, linter, and analyzer on every push an
 The workflow installs Mago through Composer, so add it to your project first:
 
 ```sh
-composer require --dev "heyjordanparker/mago-sharp:^0.3.0"
+composer require --dev "heyjordanparker/mago-sharp:^0.3.1"
 ```
 
 Then create `.github/workflows/mago.yml`:

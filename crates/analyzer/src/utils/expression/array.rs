@@ -24,6 +24,7 @@ use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_int;
@@ -49,6 +50,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::var_has_root;
+use crate::expression::is_refused_type;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_sharp_type;
@@ -147,8 +149,42 @@ where
         None => access_span,
     };
 
+    if is_refused_type(array_like_type) {
+        return array_like_type.clone();
+    }
+
     if array_like_type.is_never() || index_type.is_never() {
         return get_never();
+    }
+
+    // A PHP# `Set` has no index: `contains` tests an element and `add` adds one. Its refusal is the access's only
+    // report, so no other collection the place may be checks a key for an index that cannot exist. They type the read
+    // by their values, which a read handled with `??` may miss.
+    if context.dialect.is_sharp()
+        && let Some(set) = array_like_type.types.iter().find(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
+    {
+        let set_type = display_atomic(context, set);
+        context.collector.report_with_code(
+            IssueCode::InvalidArrayAccess,
+            Issue::error(format!("A `{set_type}` has no index."))
+                .with_annotation(Annotation::primary(access_span).with_message("This reads an index."))
+                .with_help("Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`."),
+        );
+
+        let mut value_type = None;
+        for atomic in array_like_type.types.iter() {
+            if let TAtomic::Array(array) = atomic {
+                accumulate_value_type(
+                    &mut value_type,
+                    get_array_parameters(array, context.codebase).1,
+                    context.codebase,
+                    false,
+                );
+            }
+        }
+        let value_type = value_type.unwrap_or_else(get_mixed);
+
+        return if block_context.flags.inside_isset() { value_type.as_nullable() } else { value_type };
     }
 
     let mut null_index_issues = vec![];
@@ -260,19 +296,8 @@ where
 
                 accumulate_value_type(&mut value_type, new_type, context.codebase, preserve_array_shapes);
             }
-            // A PHP# `Set` has no index: `contains` tests an element and `add` adds one. Plain PHP reads the array it
-            // runs as, each element under its own key.
+            // Plain PHP reads the array a PHP# `Set` runs as, each element under its own key.
             TAtomic::Array(TArray::Set(element_type)) => {
-                if context.dialect.is_sharp() {
-                    let set_type = display_atomic(context, atomic_var_type);
-                    context.collector.report_with_code(
-                        IssueCode::InvalidArrayAccess,
-                        Issue::error(format!("A `{set_type}` has no index."))
-                            .with_annotation(Annotation::primary(access_span).with_message("This reads an index."))
-                            .with_help("Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`."),
-                    );
-                }
-
                 has_valid_expected_index = true;
                 accumulate_value_type(
                     &mut value_type,

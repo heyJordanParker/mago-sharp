@@ -27,7 +27,7 @@ wget -qO- https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/sc
 ### Épingler une version spécifique
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --version=0.3.0
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/mago-sharp/master/scripts/install.sh | bash -s -- --version=0.3.1
 ```
 
 La même syntaxe fonctionne avec `wget`.
@@ -55,7 +55,7 @@ La voie recommandée sur Windows et un bon repli sur tout système sans `bash`.
 Si vous gardez l'archive, vous pouvez la vérifier vous-même avant l'extraction.
 
 ```sh
-VERSION=0.3.0
+VERSION=0.3.1
 TARGET=x86_64-unknown-linux-gnu  # adjust for your platform
 ASSET=mago-${VERSION}-${TARGET}.tar.gz
 
@@ -79,7 +79,7 @@ L'attestation est liée à l'archive, pas au binaire extrait. Si vous n'avez gar
 Pour les projets PHP :
 
 ```sh
-composer require --dev "heyjordanparker/mago-sharp:^0.3.0"
+composer require --dev "heyjordanparker/mago-sharp:^0.3.1"
 ```
 
 Le paquet Composer est un fin wrapper. Le premier appel à `vendor/bin/mago` télécharge le binaire pré-construit correspondant depuis la release GitHub et le met en cache. Les appels suivants réutilisent le cache et ne font aucune requête réseau.

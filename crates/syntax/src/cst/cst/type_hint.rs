@@ -6,6 +6,7 @@ use mago_span::Span;
 use crate::cst::cst::identifier::Identifier;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
+use crate::cst::cst::uses::Uses;
 use crate::cst::sequence::TokenSeparatedSequence;
 
 /// Represents a type statement.
@@ -67,10 +68,13 @@ pub struct GenericHint<'arena> {
 /// Represents a PHP# function type, as spec section 14.1 writes it: the return type, then the parameter types in
 /// parentheses, in the order of a method declaration.
 ///
+/// Spec section 29 writes the effects its `uses` lists after its parameter types.
+///
 /// # Examples
 ///
 /// ```csharp
 /// Function<Money?(Line, string)>
+/// Function<Charge(Cart) uses Http, Mail>
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -81,6 +85,7 @@ pub struct FunctionHint<'arena> {
     pub left_parenthesis: Span,
     pub parameters: TokenSeparatedSequence<'arena, Hint<'arena>>,
     pub right_parenthesis: Span,
+    pub uses: Option<Uses<'arena>>,
     pub greater_than: Span,
 }
 

@@ -63,9 +63,12 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::assign_to_expression;
+use crate::expression::assignment::read_before_write;
+use crate::expression::assignment::write_after_read;
 use crate::expression::binary::utils::analyze_instance_operator;
 use crate::expression::binary::utils::refuse_non_int_operands;
 use crate::expression::call::method_call::analyze_implicit_method_call;
+use crate::expression::is_refused_type;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
@@ -97,7 +100,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
         block_context.flags.set_inside_variable_reference(is_variable_reference);
         block_context.flags.set_inside_negation(if is_negation { !was_in_negation } else { was_in_negation });
 
-        self.operand.analyze(context, block_context, artifacts)?;
+        let (analyzed, read_issues) =
+            if matches!(self.operator, UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)) {
+                read_before_write(context, |context| self.operand.analyze(context, block_context, artifacts))
+            } else {
+                (self.operand.analyze(context, block_context, artifacts), None)
+            };
+        analyzed?;
 
         block_context.flags.set_inside_negation(was_in_negation);
         block_context.flags.set_inside_reference(was_in_reference);
@@ -105,6 +114,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
         block_context.flags.set_inside_variable_reference(was_in_variable_reference);
 
         let operand_type = artifacts.get_rc_expression_type(&self.operand).cloned();
+        if let Some(operand_type) = &operand_type
+            && is_refused_type(operand_type)
+        {
+            artifacts.set_expression_type(self, TUnion::clone(operand_type));
+            return Ok(());
+        }
+
         if context.dialect.is_sharp()
             && let Some(cast_type) = sharp_number_cast_type(&self.operator)
             && let Some(operand_type) = &operand_type
@@ -375,11 +391,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
                 }
             }
             UnaryPrefixOperator::PreIncrement(_) => {
-                let resulting_type = increment_operand(context, block_context, artifacts, self.operand, self.span())?;
+                let resulting_type = write_after_read(context, read_issues.as_ref(), |context| {
+                    increment_operand(context, block_context, artifacts, self.operand, self.span())
+                })?;
                 artifacts.set_rc_expression_type(self, resulting_type);
             }
             UnaryPrefixOperator::PreDecrement(_) => {
-                let resulting_type = decrement_operand(context, block_context, artifacts, self.operand, self.span())?;
+                let resulting_type = write_after_read(context, read_issues.as_ref(), |context| {
+                    decrement_operand(context, block_context, artifacts, self.operand, self.span())
+                })?;
                 artifacts.set_rc_expression_type(self, resulting_type);
             }
             UnaryPrefixOperator::IntCast(_, _) | UnaryPrefixOperator::IntegerCast(_, _) => {
@@ -523,17 +543,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPostfix<'arena> {
     {
         let was_in_general_use = block_context.flags.inside_general_use();
         block_context.flags.set_inside_general_use(true);
-        self.operand.analyze(context, block_context, artifacts)?;
+        let (analyzed, read_issues) =
+            read_before_write(context, |context| self.operand.analyze(context, block_context, artifacts));
+        analyzed?;
         block_context.flags.set_inside_general_use(was_in_general_use);
 
-        match self.operator {
+        write_after_read(context, read_issues.as_ref(), |context| match self.operator {
             UnaryPostfixOperator::PostIncrement(span) => {
-                increment_operand(context, block_context, artifacts, self.operand, span)?;
+                increment_operand(context, block_context, artifacts, self.operand, span)
             }
             UnaryPostfixOperator::PostDecrement(span) => {
-                decrement_operand(context, block_context, artifacts, self.operand, span)?;
+                decrement_operand(context, block_context, artifacts, self.operand, span)
             }
-        }
+        })?;
 
         if let Some(operand_type) = artifacts.get_rc_expression_type(&self.operand).cloned() {
             artifacts.set_rc_expression_type(self, operand_type);
@@ -802,6 +824,8 @@ where
             TAtomic::Never => {
                 // never type is unreachable, don't produce mixed, just skip.
             }
+            // A refused operand has no value, and its refusal is its only report.
+            TAtomic::Error => possibilities.push(TAtomic::Error),
             TAtomic::Mixed(_) => {
                 context.collector.report_with_code(
                     IssueCode::MixedOperand,
@@ -1039,6 +1063,8 @@ where
             TAtomic::Never => {
                 // never type is unreachable, don't produce mixed, just skip.
             }
+            // A refused operand has no value, and its refusal is its only report.
+            TAtomic::Error => possibilities.push(TAtomic::Error),
             TAtomic::Mixed(_) => {
                 context.collector.report_with_code(
                     IssueCode::MixedOperand,

@@ -13,7 +13,7 @@ nav_section = "实用方案"
 该工作流通过 Composer 安装 Mago,所以先把它加入你的项目:
 
 ```sh
-composer require --dev "heyjordanparker/mago-sharp:^0.3.0"
+composer require --dev "heyjordanparker/mago-sharp:^0.3.1"
 ```
 
 然后创建 `.github/workflows/mago.yml`:

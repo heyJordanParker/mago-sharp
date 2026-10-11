@@ -85,6 +85,7 @@ use mago_syntax::walker::walk_while_mut;
 
 use crate::CHANGING_COLLECTION_METHODS;
 use crate::ResolvedNames;
+use crate::STANDARD_EFFECTS;
 use crate::binding::Binding;
 use crate::binding::BindingError;
 use crate::binding::Local;
@@ -288,21 +289,18 @@ impl<'arena> NameWalker<'arena> {
             return (fqn, imported);
         }
 
+        if let Some(effect) = STANDARD_EFFECTS
+            .iter()
+            .find(|effect| effect.strip_prefix("Sharp\\").is_some_and(|short| short.as_bytes() == name))
+        {
+            return (effect.as_bytes(), false);
+        }
+
         let class: &'static [u8] = match name {
             b"Int" => b"Sharp\\Int",
             b"Float" => b"Sharp\\Float",
             b"Bool" => b"Sharp\\Bool",
             b"Position" => b"Sharp\\Position",
-            b"Environment" => b"Sharp\\Environment",
-            b"Database" => b"Sharp\\Database",
-            b"Http" => b"Sharp\\Http",
-            b"Files" => b"Sharp\\Files",
-            b"Console" => b"Sharp\\Console",
-            b"Process" => b"Sharp\\Process",
-            b"Clock" => b"Sharp\\Clock",
-            b"Random" => b"Sharp\\Random",
-            b"Cache" => b"Sharp\\Cache",
-            b"Mail" => b"Sharp\\Mail",
             b"List" => b"Sharp\\List",
             b"Replaces" => b"Sharp\\Replaces",
             _ => return (fqn, imported),

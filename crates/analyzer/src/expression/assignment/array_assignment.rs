@@ -48,6 +48,7 @@ use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
+use crate::resolver::method::with_declared_kinds;
 use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
@@ -801,9 +802,14 @@ where
             array_expression_type = scoped_type;
         }
 
+        // A PHP# place is written by index as every kind of collection it is declared as, whatever it holds.
+        let declared_type =
+            with_declared_kinds(context, block_context, artifacts, array_target.get_array(), &array_expression_type);
+        let written_type = declared_type.as_ref().unwrap_or(&array_expression_type);
+
         // Spec section 12 keeps a PHP# `List`'s keys without gaps, so it changes by `set` and `add`, never by index.
         if context.dialect.is_sharp()
-            && array_expression_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
         {
             context.collector.report_with_code(
                 IssueCode::InvalidArrayAccess,
@@ -827,7 +833,7 @@ where
             array_target.span(),
             array_target.get_array().span(),
             array_target.get_index().map(mago_span::HasSpan::span),
-            &array_expression_type,
+            written_type,
             &new_index_type,
             true,
             extended_var_id,

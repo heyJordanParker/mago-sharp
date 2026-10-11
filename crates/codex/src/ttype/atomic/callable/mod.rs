@@ -26,9 +26,10 @@ pub struct TCallableSignature {
     pub is_pure: bool,
     /// `true` if this signature specifically represents a closure instance.
     pub is_closure: bool,
-    /// `true` if PHP# wrote this signature, as a `Function<…>` type or as a method or lambda of a `.sharp` file, so its
-    /// parameters are PHP# types.
-    pub is_sharp: bool,
+    /// `Some` if PHP# wrote this signature, as a `Function<…>` type or as a method or lambda of a `.sharp` file, so its
+    /// parameters are PHP# types. A `Function<…>` type holds the full class names of the effects its `uses` lists. A
+    /// method or lambda holds none, as its body's effects are inferred. `None` if PHP wrote it.
+    pub effects: Option<Vec<Word>>,
     /// Ordered list of parameters expected by the callable signature.
     pub parameters: Vec<TCallableParameter>,
     /// The return type of the callable, if specified. `None` implies `mixed` or unknown.
@@ -81,7 +82,7 @@ impl TCallableSignature {
         Self {
             is_pure,
             is_closure,
-            is_sharp: false,
+            effects: None,
             parameters: Vec::new(),
             return_type: None,
             source: None,
@@ -141,6 +142,21 @@ impl TCallableSignature {
     #[must_use]
     pub fn get_source(&self) -> Option<FunctionLikeIdentifier> {
         self.source
+    }
+
+    /// Spec section 29: whether this function value's type lists an effect the `slot` function type does not list, so
+    /// the slot never holds it. A value with a `source` runs a PHP# body, whose effects only the effects solve knows, so
+    /// the solve judges it instead. A PHP signature lists no effects, and keeps PHP's rules.
+    #[must_use]
+    pub fn has_effect_outside(&self, slot: &TCallableSignature) -> bool {
+        let (Some(effects), Some(allowed)) = (&self.effects, &slot.effects) else {
+            return false;
+        };
+
+        self.source.is_none()
+            && !effects
+                .iter()
+                .all(|effect| allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())))
     }
 
     /// Returns a new instance with the given parameters.

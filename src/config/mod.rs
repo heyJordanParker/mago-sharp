@@ -220,7 +220,7 @@ pub struct Configuration {
     ///   version is a warning. While the major version is 0 a minor release
     ///   may change the configuration, so `mago init` writes this
     ///   `{major}.{minor}` pin.
-    /// - `"0.3.0"`: exact pin; any drift is a warning, and this is the only
+    /// - `"0.3.1"`: exact pin; any drift is a warning, and this is the only
     ///   form that `mago self-update --to-project-version` can target without
     ///   ambiguity.
     ///

@@ -77,6 +77,9 @@ pub enum ParseError {
     /// A PHP# operator declared with a symbol that is no binary operator, such as `operator !`, with the symbol, at the
     /// symbol. Semantics refuses a binary operator a class cannot declare.
     UndeclarableOperatorInSharp(Box<str>, Span),
+    /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
+    /// the clause. A function type lists its effects inside its brackets.
+    UsesAfterFunctionTypeInSharp(Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -109,7 +112,8 @@ impl HasFileId for ParseError {
             | ParseError::PhpLambdaInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
-            | ParseError::UndeclarableOperatorInSharp(_, span) => span.file_id,
+            | ParseError::UndeclarableOperatorInSharp(_, span)
+            | ParseError::UsesAfterFunctionTypeInSharp(span) => span.file_id,
         }
     }
 }
@@ -146,7 +150,8 @@ impl HasSpan for ParseError {
             | ParseError::PhpLambdaInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
-            | ParseError::UndeclarableOperatorInSharp(_, span) => *span,
+            | ParseError::UndeclarableOperatorInSharp(_, span)
+            | ParseError::UsesAfterFunctionTypeInSharp(span) => *span,
         }
     }
 }
@@ -253,6 +258,10 @@ impl std::fmt::Display for ParseError {
             ParseError::UndeclarableOperatorInSharp(symbol, _) => {
                 format!("`operator {symbol}` cannot be declared: only {} can.", Operator::DECLARABLE)
             }
+            ParseError::UsesAfterFunctionTypeInSharp(_) => {
+                "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
+                    .to_string()
+            }
         };
 
         write!(f, "{message}")
@@ -301,7 +310,8 @@ impl From<&ParseError> for Issue {
             | ParseError::PhpLambdaInSharp(..)
             | ParseError::LambdaAfterOperatorInSharp(..)
             | ParseError::ConditionalInGuardInSharp(..)
-            | ParseError::UndeclarableOperatorInSharp(..) => Issue::error(error.to_string())
+            | ParseError::UndeclarableOperatorInSharp(..)
+            | ParseError::UsesAfterFunctionTypeInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())

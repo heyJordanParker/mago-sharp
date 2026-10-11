@@ -478,6 +478,7 @@ impl TUnion {
     pub fn is_always_array_key(&self, ignore_never: bool) -> bool {
         self.types.iter().all(|atomic| match atomic {
             TAtomic::Never => ignore_never,
+            TAtomic::Error => true,
             TAtomic::Scalar(scalar) => matches!(
                 scalar,
                 TScalar::ArrayKey | TScalar::Integer(_) | TScalar::String(_) | TScalar::ClassLikeString(_)
