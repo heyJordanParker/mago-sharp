@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
@@ -32,6 +33,7 @@ use crate::error::AnalysisError;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::get_function_like_target;
 use crate::expression::call::get_function_like_target_with_skip;
+use crate::expression::is_refused_type;
 use crate::expression::variable::read_variable;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -95,6 +97,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
             false,
             false, // object_has_nullsafe_null - not applicable for function calls
         )?;
+
+        if let Some(callee_type) = artifacts.get_rc_expression_type(self.function).cloned()
+            && is_refused_type(&callee_type)
+        {
+            artifacts.set_rc_expression_type(self, callee_type);
+        }
 
         if context.plugin_registry.has_function_call_hooks() {
             let mut hook_context = HookContext::new(context, block_context, artifacts);
@@ -223,6 +231,7 @@ where
     for atomic in expression_type.types.as_ref() {
         if (atomic.is_null() && expression_type.ignore_nullable_issues())
             || (atomic.is_false() && expression_type.ignore_falsable_issues())
+            || matches!(atomic, TAtomic::Error)
         {
             continue;
         }

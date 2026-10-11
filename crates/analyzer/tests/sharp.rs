@@ -2279,6 +2279,24 @@ fn a_literal_keyed_by_a_value_that_cannot_key_a_map_names_the_map_key_rule() {
     );
 }
 
+/// A literal keyed by a `float`, a `bool` or `null` names the `Map` key rule, where PHP turns the key into an `int` or
+/// a `string` without a word. PHP keeps its cast.
+#[test]
+fn a_literal_keyed_by_a_float_a_bool_or_null_names_the_map_key_rule() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Map<int, int> floats() => [1.5: 1];\n\n    public static Map<int, int> flags() => [true: 1];\n\n    public static Map<string, int> nulls() => [null: 1];\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @return array<int, int> */\n    public static function floats(): array { return [1.5 => 1]; }\n\n    /** @return array<int, int> */\n    public static function flags(): array { return [true => 1]; }\n\n    /** @return array<string, int> */\n    public static function nulls(): array { return [null => 1]; }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:46 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `float` has none. | `float` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "7:45 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `bool` has none. | `bool` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "9:48 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `null` has none. | `null` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+        ]
+    );
+}
+
 /// An operand that may be `false`, from a PHP method, asks for a check of `false`. PHP# has no falsiness, and keeps
 /// `(int)` between numbers, so no cast turns `false` into one. PHP keeps its own wording.
 #[test]
@@ -3868,6 +3886,66 @@ fn a_pattern_the_parser_refuses_reports_only_its_parse_error() {
 }
 
 #[test]
+fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
+    let store = "<?php\n\nnamespace Demo;\n\nfinal class Store\n{\n    public static function name(): string\n    {\n        return 'a';\n    }\n\n    public static function maybe(): ?string\n    {\n        return null;\n    }\n\n    public static function keep(mixed $value): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run(Store store)\n    {\n        string? text = Store.maybe();\n        text .= Store.name();\n        int wrong = \"a\";\n        printf(text ?? \"\");\n        printf(store->missing());\n        printf(Store::missing());\n        printf(store?->missing());\n        Store.keep(fn(int x) => x.missing());\n        Store.keep(function(int x) { return x.missing(); });\n        Store.keep([\"a\" => Store.missing()]);\n        Store.keep(match (store) { Store found when found == store ? true : Store.missing() => 1, default => 2 });\n        let found = store->missing();\n        printf(found);\n        Map<string, int> counts = [\"a\" => 1];\n        Store.keep(wrong);\n        Store.keep(counts);\n        let report = new Report();\n        report.label = store->missing();\n        printf(report.label);\n        Store.keep(found + 1);\n        Store.keep(found.missing());\n        Store.keep(found.name);\n        int either = Store.maybe() ?? found;\n    }\n\n    public static Map<string, int> made() => [\"a\" => 1, \"b\" => 2];\n\n    public static int counted(Store store)\n    {\n        let found = store->missing();\n        return found;\n    }\n\n    public static void used(Store store, List<int> items)\n    {\n        let found = store->missing();\n        Store.keep(found - 1);\n        Store.keep(found < 1);\n        Store.keep(found == 1);\n        Store.keep(found && found);\n        Store.keep(!found);\n        Store.keep(-found);\n        Store.keep(found[0]);\n        Store.keep(`a ${found}`);\n        if (found) { Store.keep(1); }\n        while (found) { break; }\n        Store.keep(found ? 1 : 2);\n        Store.keep(match (found) { 1 => 2, default => 3 });\n        Store.keep(found is Store);\n        for (const value of found) { Store.keep(value); }\n        Store.keep(found?.name);\n        Store.keep(found ?? 1);\n        int number = found;\n        number += found;\n        Store.keep(found.missing().other());\n        Store.keep(items[found]);\n        Store.keep(found(1));\n        int called = found(1);\n        Store.keep(found + \"a\");\n        found.name = \"a\";\n        found[0] = 1;\n        throw found;\n    }\n\n    private string label = \"\";\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(Store $store): void\n    {\n        $text = Store::maybe();\n        $text .= Store::name();\n        printf($text ?? '');\n        printf($store->missing());\n        printf(Store::missing());\n        printf($store?->missing());\n        Store::keep(fn(int $x) => $x->missing());\n        Store::keep(function (int $x) { return $x->missing(); });\n        Store::keep(['a' => Store::missing()]);\n    }\n}\n";
+    let reports = |analyzed: (&'static str, &'static str)| -> Vec<String> {
+        analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[("src/Demo/Store.php", store)])
+            .iter()
+            .map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message))
+            .collect()
+    };
+
+    assert_eq!(
+        reports(("src/Demo/Report.php", php)),
+        [
+            "10:9 possibly-null-operand Possibly null left operand used in string concatenation (type `null|string`).",
+            "11:16 redundant-null-coalesce Redundant null coalesce: left-hand side can never be `null` or undefined.",
+            "12:24 non-existent-method Method `missing` does not exist on type `Demo\\Store`.",
+            "12:16 mixed-argument Invalid argument type for argument #1 of `printf`: expected `string`, but found `mixed`.",
+            "13:23 non-existent-method Method `missing` does not exist on type `Demo\\Store`.",
+            "13:16 mixed-argument Invalid argument type for argument #1 of `printf`: expected `string`, but found `mixed`.",
+            "14:25 non-existent-method Method `missing` does not exist on type `Demo\\Store`.",
+            "14:16 mixed-argument Invalid argument type for argument #1 of `printf`: expected `string`, but found `mixed`.",
+            "15:39 invalid-method-access Attempting to access a method on a non-object type (`int`).",
+            "16:52 invalid-method-access Attempting to access a method on a non-object type (`int`).",
+            "17:36 non-existent-method Method `missing` does not exist on type `Demo\\Store`.",
+        ]
+    );
+    assert_eq!(
+        reports(("src/Demo/Report.sharp", sharp)),
+        [
+            "8:14 parse `.=` is PHP syntax: in PHP# `.` is member access",
+            "11:21 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "12:21 parse `::` is PHP syntax: PHP# writes static access with `.`",
+            "13:21 parse `?->` is PHP syntax: PHP# writes null-safe member access with `?.`",
+            "14:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            "15:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            "16:25 parse `EqualGreaterThan` is PHP syntax that PHP# does not have",
+            "17:53 parse A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.",
+            "18:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "20:40 parse `EqualGreaterThan` is PHP syntax that PHP# does not have",
+            "24:29 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "32:51 parse `EqualGreaterThan` is PHP syntax that PHP# does not have",
+            "32:61 parse `EqualGreaterThan` is PHP syntax that PHP# does not have",
+            "36:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "42:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "9:21 invalid-local-assignment-value Invalid assignment to `wrong`: it is declared as `int`.",
+        ]
+    );
+
+    let unparsed = "<?php\n\nnamespace Demo;\n\nfunction run(): void\n{\n    printf(]);\n}\n";
+    assert_eq!(
+        reports(("src/Demo/run.php", unparsed)),
+        [
+            "7:12 parse Parse error encountered during parsing",
+            "7:12 no-value Argument #1 passed to function `printf` has type `never`, meaning it cannot produce a value.",
+        ]
+    );
+}
+
+#[test]
 fn a_when_condition_that_is_not_bool_is_an_invalid_operand_named_when() {
     let sharp = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\n\nclass Report\n{\n    public static string round(Shape shape) => match (shape) {\n        Circle c when c.radius => \"round\",\n        default => \"other\",\n    };\n}\n";
 
@@ -4424,6 +4502,106 @@ fn a_bare_index_read_on_a_map_keyed_by_a_backed_enum_is_an_error() {
 }
 
 #[test]
+fn a_bare_map_read_names_the_forms_that_handle_a_missing_key() {
+    let sharp =
+        "namespace Demo;\n\nclass Tally\n{\n    public int count(Map<string, int> counts, string k) => counts[k];\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Tally.sharp", sharp), &[]),
+        [
+            "5:60 possibly-undefined-array-index A `Map` is not read by a bare index, because its key may be missing. | This read throws when the key is missing. | Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."
+        ]
+    );
+}
+
+/// Spec section 12 handles a `Map` read where it is read, with `??`, `?.`, `is`, `as`, `match` or `get`. Each form
+/// reads a parameter, a local and a property without a report.
+#[test]
+fn a_map_read_handled_by_coalescing_reports_nothing() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, int> stock = [\"a\": 1];\n\n    public int count(Map<string, int> counts, string k)\n    {\n        Map<string, int> local = [\"a\": 1];\n        return (counts[k] ?? 0) + (local[k] ?? 0) + (this.stock[k] ?? 0);\n    }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+#[test]
+fn a_map_read_handled_by_a_null_safe_read_reports_nothing() {
+    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan(public int price) { }\n}\n\nclass Tally\n{\n    private Map<string, Plan> stock = [:];\n\n    public int count(Map<string, Plan> plans, string k)\n    {\n        Map<string, Plan> local = [\"a\": new Plan(1)];\n        return (plans[k]?.price ?? 0) + (local[k]?.price ?? 0) + (this.stock[k]?.price ?? 0);\n    }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+#[test]
+fn a_map_read_handled_by_is_reports_nothing() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, int> stock = [\"a\": 1];\n\n    public int count(Map<string, int> counts, string k)\n    {\n        Map<string, int> local = [\"a\": 1];\n        let total = 0;\n        if (counts[k] is int n) {\n            total += n;\n        }\n        if (local[k] is int m) {\n            total += m;\n        }\n        if (this.stock[k] is int s) {\n            total += s;\n        }\n        if (counts[k] is int) {\n            total += 1;\n        }\n        return total;\n    }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+#[test]
+fn a_map_read_handled_by_is_not_reports_nothing() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, int> stock = [\"a\": 1];\n\n    public int count(Map<string, int> counts, string k)\n    {\n        Map<string, int> local = [\"a\": 1];\n        if (counts[k] is not int n) {\n            return 0;\n        }\n        if (local[k] is not int m) {\n            return n;\n        }\n        if (this.stock[k] is not int s) {\n            return n + m;\n        }\n        return n + m + s;\n    }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+#[test]
+fn a_map_read_handled_by_as_reports_nothing() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, int> stock = [\"a\": 1];\n\n    public int count(Map<string, int> counts, string k)\n    {\n        Map<string, int> local = [\"a\": 1];\n        int? fromCounts = counts[k] as int;\n        int? fromLocal = local[k] as int;\n        int? fromStock = this.stock[k] as int;\n        return (fromCounts ?? 0) + (fromLocal ?? 0) + (fromStock ?? 0);\n    }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+#[test]
+fn a_map_read_handled_by_match_reports_nothing() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, int> stock = [\"a\": 1];\n\n    public int count(Map<string, int> counts, string k)\n    {\n        Map<string, int> local = [\"a\": 1];\n        let total = match (counts[k]) {\n            int n => n,\n            default => 0,\n        };\n        total += match (local[k]) {\n            int m => m,\n            default => 0,\n        };\n        match (this.stock[k]) {\n            int s => {\n                total += s;\n            },\n            default => {},\n        }\n        total += match (k) {\n            \"a\" when counts[k] is int => 1,\n            default => 0,\n        };\n        return total;\n    }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+#[test]
+fn a_map_read_handled_by_get_reports_nothing() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, int> stock = [\"a\": 1];\n\n    public int count(Map<string, int> counts, string k)\n    {\n        Map<string, int> local = [\"a\": 1];\n        return (counts.get(k) ?? 0) + (local.get(k) ?? 0) + (this.stock.get(k) ?? 0);\n    }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A local that holds one of two `Map`s is a `Map`, so `is` handles its read and a bare read stays refused.
+#[test]
+fn a_read_of_a_local_holding_one_of_two_maps_is_handled_by_is() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int count(Map<string, int> a, Map<string, int> b, bool ready, string k)\n    {\n        let counts = ready ? a : b;\n        if (counts[k] is int n) {\n            return n;\n        }\n        if (counts[k] is not int m) {\n            return counts[k] ?? 0;\n        }\n        return m + counts[k];\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[]), ["14:20 possibly-undefined-array-index"]);
+}
+
+/// The closest PHP to an `is` on a `Map` read tests the key with `isset` first. Its type test of an `int` entry stays
+/// redundant, as PHP reports it.
+#[test]
+fn an_isset_test_before_a_type_test_of_a_php_array_entry_keeps_its_php_report() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Tally\n{\n    /** @var array<string, int> */\n    private array $stock = ['a' => 1];\n\n    /** @param array<string, int> $counts */\n    public function count(array $counts, string $k): int\n    {\n        $local = ['a' => 1];\n        $total = 0;\n        if (isset($counts[$k]) && is_int($counts[$k])) {\n            $total += $counts[$k];\n        }\n        if (isset($local[$k]) && is_int($local[$k])) {\n            $total += $local[$k];\n        }\n        if (isset($this->stock[$k]) && is_int($this->stock[$k])) {\n            $total += $this->stock[$k];\n        }\n        return $total;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Tally.php", php), &[]),
+        [
+            "15:35 redundant-type-comparison",
+            "15:13 redundant-logical-operation",
+            "18:34 redundant-type-comparison",
+            "18:13 redundant-logical-operation",
+            "21:40 redundant-type-comparison",
+            "21:13 redundant-logical-operation",
+        ]
+    );
+}
+
+/// An index a pattern tests reads a missing key as null on every collection, as `??` and `?.` do, so a `List` read
+/// that `is` tests may not match.
+#[test]
+fn a_list_read_tested_by_is_may_not_match() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int first(List<int> sizes, int i)\n    {\n        if (sizes[i] is int n) {\n            return n;\n        }\n        if (sizes[0] is not int m) {\n            return 0;\n        }\n        return m;\n    }\n}\n";
+
+    assert_eq!(worded(("src/Demo/Sizes.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+#[test]
 fn coalescing_an_unchecked_any_gives_a_value_that_is_never_null() {
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public Any pick(Any? maybe, Any sure) => maybe ?? sure;\n\n    public Any label(Any? maybe, string fallback)\n    {\n        Any shown = maybe ?? fallback;\n        return shown;\n    }\n}\n";
 
@@ -4910,6 +5088,34 @@ fn a_place_declared_a_map_or_a_set_takes_a_list_literal() {
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @return array<string, int>|array<int, int> */\n    public function ids(): array\n    {\n        return [1];\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+}
+
+/// A local or a property declared a `Set` or a `Map` takes a literal of either, whichever it names first: `[]` and
+/// `[1]` are the `Set`, and `[:]` and `["a": 1]` the `Map`. PHP has one kind of array, and its array of either takes
+/// every literal.
+#[test]
+fn a_local_or_a_property_declared_a_set_or_a_map_takes_either_literal() {
+    let set_first = "namespace Demo;\n\nclass Tags\n{\n    private Set<int>|Map<string, int> kept = [1];\n\n    public int ids()\n    {\n        Set<int>|Map<string, int> tags = [\"a\": 1];\n        tags = [1];\n        tags = [\"a\": 1];\n        tags = [];\n        tags = [:];\n        this.kept = [1];\n        this.kept = [\"a\": 1];\n        this.kept = [];\n        this.kept = [:];\n        return count(tags) + count(this.kept);\n    }\n}\n";
+    let map_first = "namespace Demo;\n\nclass Tags\n{\n    private Map<string, int>|Set<int> kept = [\"a\": 1];\n\n    public int ids()\n    {\n        Map<string, int>|Set<int> tags = [1];\n        tags = [1];\n        tags = [\"a\": 1];\n        tags = [];\n        tags = [:];\n        this.kept = [1];\n        this.kept = [\"a\": 1];\n        this.kept = [];\n        this.kept = [:];\n        return count(tags) + count(this.kept);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @var array<string, int>|array<int, int> */\n    private array $kept = [1];\n\n    public function ids(): int\n    {\n        /** @var array<string, int>|array<int, int> $tags */\n        $tags = [1];\n        $tags = ['a' => 1];\n        $tags = [];\n        $this->kept = [1];\n        $this->kept = ['a' => 1];\n        $this->kept = [];\n        return count($tags) + count($this->kept);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Tags.sharp", set_first), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Tags.sharp", map_first), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+}
+
+/// A local whose first value may be a `Map` or a `Set` is either from then on, so it takes a literal of either. An
+/// emptied local holds the collection its literal names: `[]` is the `Set`, which a `Set` return takes, and
+/// `["a": 1]` is the `Map`, which a `Map` local takes. PHP has one kind of array.
+#[test]
+fn a_local_that_may_be_a_map_or_a_set_takes_either_literal_and_keeps_its_kind() {
+    let map_first = "namespace Demo;\n\nclass Tags\n{\n    public Set<int> pick(bool ready, Map<string, int> counts, Set<int> ids)\n    {\n        let tags = ready ? counts : ids;\n        tags = [\"a\": 1];\n        Map<string, int> named = tags;\n        tags = [1];\n        tags = [];\n        return count(named) > 0 ? tags : ids;\n    }\n}\n";
+    let set_first = "namespace Demo;\n\nclass Tags\n{\n    public Set<int> pick(bool ready, Map<string, int> counts, Set<int> ids)\n    {\n        let tags = ready ? ids : counts;\n        tags = [\"a\": 1];\n        Map<string, int> named = tags;\n        tags = [1];\n        tags = [];\n        return count(named) > 0 ? tags : ids;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<string, int> $counts\n     * @param array<int, int> $ids\n     *\n     * @return array<int, int>\n     */\n    public function pick(bool $ready, array $counts, array $ids): array\n    {\n        $tags = $ready ? $counts : $ids;\n        $tags = ['a' => 1];\n        $tags = [1];\n        $tags = [];\n        return $tags;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Tags.sharp", map_first), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Tags.sharp", set_first), &[]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
 
@@ -6288,6 +6494,79 @@ fn an_element_written_into_a_typed_local_or_parameter_must_fit_its_type() {
         ]
     );
     assert_eq!(issues(("src/Demo/Tally.php", php), &[]), Vec::<String>::new());
+}
+
+/// A value written into a `Map` takes only a literal of the collection its value type declares, so a `Map` of `Map`s
+/// refuses `[]` and takes `[:]` and `["x": 1]`, whether a parameter, a property or a local holds it. PHP has one empty
+/// array, and its array of arrays takes `[]`.
+#[test]
+fn an_empty_list_literal_written_as_a_value_of_a_map_of_maps_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, Map<string, int>> named = [:];\n\n    public int put(Map<string, Map<string, int>> counts)\n    {\n        counts[\"a\"] = [];\n        counts[\"a\"] = [:];\n        counts[\"a\"] = [\"x\": 1];\n        this.named[\"a\"] = [];\n        Map<string, Map<string, int>> local = [:];\n        local[\"a\"] = [];\n        return count(counts) + count(local);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tally\n{\n    /** @var array<string, array<string, int>> */\n    private array $named = [];\n\n    /** @param array<string, array<string, int>> $counts */\n    public function put(array $counts): int\n    {\n        $counts['a'] = [];\n        $counts['a'] = ['x' => 1];\n        $this->named['a'] = [];\n        $local = [];\n        $local['a'] = [];\n        return count($counts) + count($local);\n    }\n}\n";
+
+    let message = "invalid-array-element `[]` is an empty List. An empty Map is written `[:]`.";
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [format!("9:23 {message}"), format!("12:27 {message}"), format!("14:22 {message}")]
+    );
+    assert_eq!(issues(("src/Demo/Tally.php", php), &[]), Vec::<String>::new());
+}
+
+/// A value written two levels into a `Map` of `Map`s of `Map`s takes only a literal of the collection its value type
+/// declares there, so `deep["a"]["b"]` refuses `[]` and takes `[:]`, as `deep["a"]` does. PHP has one empty array.
+#[test]
+fn an_empty_list_literal_written_two_levels_into_a_map_of_maps_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put()\n    {\n        Map<string, Map<string, Map<string, int>>> deep = [:];\n        deep[\"a\"][\"b\"] = [];\n        deep[\"a\"][\"b\"] = [:];\n        deep[\"a\"] = [:];\n        return count(deep);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tally\n{\n    public function put(): int\n    {\n        /** @var array<string, array<string, array<string, int>>> $deep */\n        $deep = [];\n        $deep['a']['b'] = [];\n        $deep['a'] = [];\n        return count($deep);\n    }\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        ["8:26 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
+    );
+    assert_eq!(issues(("src/Demo/Tally.php", php), &[]), Vec::<String>::new());
+}
+
+/// A value written into a `Map` takes only a literal of the collection its value type declares, so a `Map` of `List`s
+/// and a `Map` of `Set`s refuse `[:]`. PHP has one empty array, and its array of arrays takes `[]`.
+#[test]
+fn an_empty_map_literal_written_as_a_value_of_a_map_of_lists_or_of_sets_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put(Map<string, List<int>> lists, Map<string, Set<int>> sets)\n    {\n        lists[\"a\"] = [:];\n        lists[\"a\"] = [];\n        lists[\"a\"] = [1];\n        sets[\"a\"] = [:];\n        return count(lists) + count(sets);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tally\n{\n    /**\n     * @param array<string, list<int>> $lists\n     * @param array<string, array<int, int>> $sets\n     */\n    public function put(array $lists, array $sets): int\n    {\n        $lists['a'] = [];\n        $lists['a'] = [1];\n        $sets['a'] = [];\n        return count($lists) + count($sets);\n    }\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "7:22 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.",
+            "10:21 invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`.",
+        ]
+    );
+    assert_eq!(issues(("src/Demo/Tally.php", php), &[]), Vec::<String>::new());
+}
+
+/// Pin: a `List` is never written by index, so `[:]` written by index into a `List` of `List`s is refused once, by
+/// that rule, and its literal adds no second issue. PHP writes an array by index.
+#[test]
+fn a_map_literal_written_by_index_into_a_list_of_lists_is_refused_once_by_the_list_write_rule() {
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public int fill(List<List<int>> rows)\n    {\n        rows[0] = [:];\n        return count(rows);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Grid\n{\n    /** @param list<list<int>> $rows */\n    public function fill(array $rows): int\n    {\n        $rows[0] = [];\n        return count($rows);\n    }\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Grid.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        ["7:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys."]
+    );
+    assert_eq!(issues(("src/Demo/Grid.php", php), &[]), Vec::<String>::new());
 }
 
 /// Plain PHP receives a `Set` as the array it runs as, keyed by each element or its backing value, so a `Set` passes
