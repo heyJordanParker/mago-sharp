@@ -99,8 +99,8 @@ where
 }
 
 /// Runs `write`, the write of an assignment operation whose read reported `read`. A PHP# place is refused once, so the
-/// write reports no issue its read reported at the same place, as `+=` on an index of a `Set` or an `int` would. PHP
-/// reports both.
+/// write reports no issue its read already reported, with the same code and message at the same place, as `+=` on an
+/// index of a `Set` or an `int` would. A different refusal at that place still reports. PHP reports both.
 pub(crate) fn write_after_read<'ctx, 'arena, A, T>(
     context: &mut Context<'ctx, 'arena, A>,
     read: Option<&IssueCollection>,
@@ -115,7 +115,11 @@ where
 
     let (result, written) = context.record(write);
     context.collector.extend(written.into_iter().filter(|issue| {
-        !read.iter().any(|earlier| earlier.code == issue.code && earlier.primary_span() == issue.primary_span())
+        !read.iter().any(|earlier| {
+            earlier.code == issue.code
+                && earlier.message == issue.message
+                && earlier.primary_span() == issue.primary_span()
+        })
     }));
 
     result

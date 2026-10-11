@@ -122,11 +122,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
                     container_type.can_be_null() && expression_is_nullsafe(self.array),
                 )
             };
-            // An error of the PHP# index rules means the read never gives a value, as an index of a `Set` or an `int`
-            // never does. Such a read has the error type, so nothing that uses it reports the same mistake again, and it
-            // is judged again each time it runs. A bare `Map` read gives its value when the key is there, so
-            // `check_sharp_map_read` refuses it and keeps its type.
-            let access_type = if context.dialect.is_sharp() {
+            // A refused PHP# read of a container with no `List`, `Map` or `Set` member, such as an `int`, `null` or an
+            // object with no index, never gives a value. It has the error type, so nothing that uses it reports the same
+            // mistake again, and it is judged again each time it runs. A collection member gives its value type even when
+            // the key is refused, so a wrong use of that value is still reported.
+            let access_type = if context.dialect.is_sharp()
+                && !container_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_)))
+            {
                 let (access_type, issues) = context.record(read);
                 let refused = issues.iter().any(|issue| issue.level == Level::Error);
                 context.collector.extend(issues);

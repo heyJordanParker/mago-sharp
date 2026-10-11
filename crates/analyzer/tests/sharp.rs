@@ -5119,20 +5119,12 @@ fn a_local_that_may_be_a_map_or_a_set_takes_either_literal_and_keeps_its_kind() 
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
 
-/// Pin: a local that may be a `Set` or a `Map` takes a method both have, called on each with its own elements.
-#[test]
-fn a_method_every_collection_of_a_union_has_is_called_on_each() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        return tags.any(n => n > 0) ? tags.sumOf(n => n) : 0;\n    }\n}\n";
-
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), Vec::<String>::new());
-}
-
-/// A local that may be a `Set` or a `Map` takes only a method both have. A method one of them lacks is refused once,
-/// naming the collection that lacks it: a `Map` has no `add` and no `contains`, and a `Set` has no `get` and no
-/// `delete`.
+/// A local that may be a `Set` or a `Map` takes a method both have, called on each with its own elements. A method one
+/// of them lacks is refused once, naming the collection that lacks it: a `Map` has no `add` and no `contains`, and a
+/// `Set` has no `get` and no `delete`.
 #[test]
 fn a_method_one_collection_of_a_union_lacks_is_refused_once_naming_it() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags.add(1);\n        tags.contains(1);\n        tags.get(\"a\");\n        return 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags.add(1);\n        tags.contains(1);\n        tags.get(\"a\");\n        return tags.any(n => n > 0) ? tags.sumOf(n => n) : 0;\n    }\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tags.sharp", sharp), &[])
@@ -5176,55 +5168,34 @@ fn a_key_and_value_loop_over_a_local_that_may_be_a_set_or_a_map_is_refused_by_th
 }
 
 /// A local that may be a `Set` or a `Map` has no index, because a `Set` has none, so every write and read by index is
-/// refused once by the `Set`, handled with `??` or not. The `Map`'s rule for a bare read adds no second report, and a
-/// handled read stays `V?` after a write, so its `??` is not redundant. PHP writes and reads an index of either array,
-/// and knows a key it wrote, so its handled read is of another key.
+/// refused once by the `Set`, handled with `??` or not and whatever the key. The `Map` checks no key for an index that
+/// cannot exist, its rule for a bare read adds no second report, and a handled read stays `V?` after a write, so its
+/// `??` is not redundant. The local stays either after it is given the `Map`.
 #[test]
-fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags[\"a\"] = 1;\n        int handled = tags[\"a\"] ?? 0;\n        return tags[\"a\"] + handled;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<int, int> $ids\n     * @param array<string, int> $counts\n     */\n    public function run(bool $ready, array $ids, array $counts): int\n    {\n        $tags = $ready ? $ids : $counts;\n        $tags['a'] = 1;\n        $handled = $tags['b'] ?? 0;\n        return $tags['a'] + $handled;\n    }\n}\n";
+fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_refused_once_by_the_set() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int byName(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags[\"a\"] = 1;\n        int handled = tags[\"a\"] ?? 0;\n        return tags[\"a\"] + handled;\n    }\n\n    public int byInt(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        int handled = tags[0] ?? 0;\n        return tags[0] + handled;\n    }\n\n    public int afterTheMap(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags = counts;\n        tags[\"a\"] = 1;\n        int handled = tags[\"a\"] ?? 0;\n        return tags[\"a\"] + handled;\n    }\n}\n";
 
     let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
     assert_eq!(
         refusals(("src/Demo/Tags.sharp", sharp), &[]),
-        [format!("8:9 {no_index}"), format!("9:23 {no_index}"), format!("10:16 {no_index}")]
+        [
+            format!("8:9 {no_index}"),
+            format!("9:23 {no_index}"),
+            format!("10:16 {no_index}"),
+            format!("16:23 {no_index}"),
+            format!("17:16 {no_index}"),
+            format!("24:9 {no_index}"),
+            format!("25:23 {no_index}"),
+            format!("26:16 {no_index}"),
+        ]
     );
-    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
 
-/// A local that may be a `Set` or a `Map` stays either after it is given the `Map`, so its index is refused once by
-/// the `Set`, written, handled with `??` or read bare. PHP writes and reads an index of the array it holds.
-#[test]
-fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_an_error_after_it_holds_the_map() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags = counts;\n        tags[\"a\"] = 1;\n        int handled = tags[\"a\"] ?? 0;\n        return tags[\"a\"] + handled;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<int, int> $ids\n     * @param array<string, int> $counts\n     */\n    public function run(bool $ready, array $ids, array $counts): int\n    {\n        $tags = $ready ? $ids : $counts;\n        $tags = $counts;\n        $tags['a'] = 1;\n        $handled = $tags['b'] ?? 0;\n        return $tags['a'] + $handled;\n    }\n}\n";
-
-    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
-    assert_eq!(
-        refusals(("src/Demo/Tags.sharp", sharp), &[]),
-        [format!("9:9 {no_index}"), format!("10:23 {no_index}"), format!("11:16 {no_index}")]
-    );
-    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
-}
-
-/// A local that may be a `Set` or a `Map` is refused an index once by the `Set`, whatever the key: the `Map` checks no
-/// key for an index that cannot exist. PHP reads either array by any key.
-#[test]
-fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_refused_once_whatever_its_key() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        int handled = tags[0] ?? 0;\n        return tags[0] + handled;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<int, int> $ids\n     * @param array<string, int> $counts\n     */\n    public function run(bool $ready, array $ids, array $counts): int\n    {\n        $tags = $ready ? $ids : $counts;\n        $handled = $tags[0] ?? 0;\n        return ($tags[1] ?? 0) + $handled;\n    }\n}\n";
-
-    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
-    assert_eq!(refusals(("src/Demo/Tags.sharp", sharp), &[]), [format!("8:23 {no_index}"), format!("9:16 {no_index}")]);
-    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
-}
-
-/// Pin: a local that may be a `List` or a `Map` has an index, so it is read as the `Map`: a bare read is refused and a
-/// read handled with `??` compiles. PHP reads an index of either array.
+/// A local that may be a `List` or a `Map` has an index, so it is read as the `Map`: a bare read is refused and a read
+/// handled with `??` compiles.
 #[test]
 fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        int handled = rows[1] ?? 0;\n        return rows[0] + handled;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Sizes\n{\n    /**\n     * @param list<int> $sizes\n     * @param array<int, int> $counts\n     */\n    public function run(bool $ready, array $sizes, array $counts): int\n    {\n        $rows = $ready ? $sizes : $counts;\n        $handled = $rows[1] ?? 0;\n        return ($rows[0] ?? 0) + $handled;\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
@@ -5232,15 +5203,13 @@ fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
             "9:16 possibly-undefined-array-index A `Map` is not read by a bare index, because its key may be missing. | Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."
         ]
     );
-    assert_eq!(issues(("src/Demo/Sizes.php", php), &[]), Vec::<String>::new());
 }
 
 /// A local that may be a `List` or a `Map` stays either after it is given the `Map`, so the `List` refuses a write by
-/// index. PHP writes an index of the array it holds.
+/// index.
 #[test]
 fn a_local_that_may_be_a_list_or_a_map_is_not_written_by_index_after_it_holds_the_map() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        rows = counts;\n        rows[1] = 2;\n        return count(rows);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Sizes\n{\n    /**\n     * @param list<int> $sizes\n     * @param array<int, int> $counts\n     */\n    public function run(bool $ready, array $sizes, array $counts): int\n    {\n        $rows = $ready ? $sizes : $counts;\n        $rows = $counts;\n        $rows[1] = 2;\n        return count($rows);\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
@@ -5248,18 +5217,27 @@ fn a_local_that_may_be_a_list_or_a_map_is_not_written_by_index_after_it_holds_th
             "9:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys. | Change an element with `list.set(index, value)`, as `list.set(i, list[i] + 1)` replaces `+=`, `++` and `--`, and append one with `list.add(value)`."
         ]
     );
-    assert_eq!(issues(("src/Demo/Sizes.php", php), &[]), Vec::<String>::new());
 }
 
-/// Pin: a local that may be either of two `Map`s takes every `Map` method, loop and handled read, as one `Map` does.
-/// PHP reads either array the same way.
+/// A `+=` on a local that may be a `List` or a `Set` is refused as a write by index is: the `Set` has no index, and the
+/// `List` is not written by index. Its read reports the `Set`'s refusal, and its write keeps the `List`'s, which shares
+/// the read's code and place but not its message.
 #[test]
-fn a_local_that_may_be_either_of_two_maps_is_a_map() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Map<string, int> sizes, Map<string, string> names)\n    {\n        let tags = ready ? sizes : names;\n        tags.delete(\"a\");\n        let total = tags.get(\"b\") is int size ? size : 0;\n        for (const [key, value] of tags) {\n            total += strlen(key);\n        }\n        let last = tags[\"c\"] ?? 0;\n        return total + (last is int n ? n : 0);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<string, int> $sizes\n     * @param array<string, string> $names\n     */\n    public function run(bool $ready, array $sizes, array $names): int\n    {\n        $tags = $ready ? $sizes : $names;\n        unset($tags['a']);\n        $total = 0;\n        foreach ($tags as $key => $value) {\n            $total += strlen($key);\n        }\n        return $total + (is_int($tags['c'] ?? null) ? $tags['c'] : 0);\n    }\n}\n";
+fn a_compound_write_to_a_local_that_may_be_a_list_or_a_set_is_refused_as_a_write_is() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public void run(bool ready, List<int> sizes, Set<int> ids)\n    {\n        let x = ready ? sizes : ids;\n        x[0] = 1;\n        x[1] += 1;\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), Vec::<String>::new());
-    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "8:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys.",
+            "8:9 invalid-array-access A `Set<int>` has no index.",
+            "9:9 invalid-array-access A `Set<int>` has no index.",
+            "9:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys.",
+        ]
+    );
 }
 
 /// PHP has one empty array, so a typed PHP place takes `[]` wherever a `list<string>` is declared.
@@ -6443,51 +6421,27 @@ fn an_index_of_a_set_is_an_error() {
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
 
-/// `??=`, `+=` and `++` read an index, then write it, and a `Set` has no index, so each is refused once. PHP reads and
-/// writes the index of its array.
+/// `??=`, `+=` and `++` read an index, then write it, and a `Set` has no index, so each is refused once.
 #[test]
 fn a_compound_assignment_or_increment_on_an_index_of_a_set_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void bump(Set<int> ids, int times)\n    {\n        ids[1] ??= 1;\n        ids[2] += 1;\n        ids[3]++;\n        for (let i = 0; i < times; i++) {\n            ids[4] = 1;\n            ids[5] += 1;\n        }\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param array<int, int> $ids */\n    public function bump(array $ids, int $times): void\n    {\n        $ids[1] ??= 1;\n        $ids[2] += 1;\n        $ids[3]++;\n        for ($i = 0; $i < $times; $i++) {\n            $ids[4] = 1;\n            $ids[5] += 1;\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void bump(Set<int> ids)\n    {\n        ids[1] ??= 1;\n        ids[2] += 1;\n        ids[3]++;\n    }\n}\n";
 
     let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
     assert_eq!(
         refusals(("src/Demo/Tags.sharp", sharp), &[]),
-        [
-            format!("7:9 {no_index}"),
-            format!("8:9 {no_index}"),
-            format!("9:9 {no_index}"),
-            format!("11:13 {no_index}"),
-            format!("12:13 {no_index}"),
-        ]
-    );
-    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
-}
-
-/// `??=` writes the index it reads, and its read reports nothing about what it reads from, as `isset` does, so the
-/// write refuses an index of a scalar, as PHP does.
-#[test]
-fn a_coalescing_write_to_an_index_of_a_scalar_is_refused_as_in_php() {
-    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public void fill(int x, float y, bool z)\n    {\n        x[0] ??= 1;\n        y[0] ??= 1;\n        z[0] ??= 1;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function fill(int $x, float $y, bool $z): void\n    {\n        $x[0] ??= 1;\n        $y[0] ??= 1;\n        $z[0] ??= 1;\n    }\n}\n";
-
-    assert_eq!(
-        issues(("src/Demo/Scalars.sharp", sharp), &[]),
-        ["7:9 invalid-array-access", "8:9 invalid-array-access", "9:9 invalid-array-access"]
-    );
-    assert_eq!(
-        issues(("src/Demo/Scalars.php", php), &[]),
-        ["9:9 invalid-array-access", "10:9 invalid-array-access", "11:9 invalid-array-access"]
+        [format!("7:9 {no_index}"), format!("8:9 {no_index}"), format!("9:9 {no_index}")]
     );
 }
 
 /// `+=`, `++` and `??=` read an index of a scalar and write it, and the index is refused once, by the read, or by the
-/// write where the read is inside `??`. A refused read has no value, so the arithmetic on it reports nothing more. PHP
-/// reports `+=` and `++` twice, from its read and its write, and the arithmetic on the read's `mixed`.
+/// write where the read is inside `??`. A refused read of a scalar has no value, so the arithmetic on it reports
+/// nothing more, and nothing is remembered for a variable index, so a second read by it is refused again. PHP reports
+/// `+=` and `++` twice, from its read and its write, remembers the first read by a variable index, and reports what
+/// uses the read's `mixed`.
 #[test]
 fn a_compound_write_to_an_index_of_a_scalar_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public int bump(int z)\n    {\n        z[0] += 1;\n        z[1]++;\n        z[2] ??= 1;\n        let y = z[3] + 1;\n        return y;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function bump(int $z): int\n    {\n        $z[0] += 1;\n        $z[1]++;\n        $z[2] ??= 1;\n        $y = $z[3] + 1;\n        return $y;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public int bump(int z, int i)\n    {\n        z[0] += 1;\n        z[1]++;\n        z[2] ??= 1;\n        let y = z[3] + 1;\n        let a = z[i];\n        let b = z[i];\n        return y + a + b;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function bump(int $z, int $i): int\n    {\n        $z[0] += 1;\n        $z[1]++;\n        $z[2] ??= 1;\n        $y = $z[3] + 1;\n        $a = $z[$i];\n        $b = $z[$i];\n        return $y + $a + $b;\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Scalars.sharp", sharp), &[]),
@@ -6496,6 +6450,8 @@ fn a_compound_write_to_an_index_of_a_scalar_is_refused_once() {
             "8:9 invalid-array-access",
             "9:9 invalid-array-access",
             "10:17 invalid-array-access",
+            "11:17 invalid-array-access",
+            "12:17 invalid-array-access",
         ]
     );
     assert_eq!(
@@ -6511,62 +6467,64 @@ fn a_compound_write_to_an_index_of_a_scalar_is_refused_once() {
             "12:14 invalid-array-access",
             "12:14 mixed-operand",
             "12:9 mixed-assignment",
-            "13:16 mixed-return-statement",
+            "13:14 invalid-array-access",
+            "13:9 mixed-assignment",
+            "14:9 mixed-assignment",
+            "15:16 mixed-operand",
+            "15:21 mixed-operand",
+            "15:16 mixed-operand",
+            "15:26 mixed-operand",
+            "15:16 mixed-return-statement",
         ]
     );
 }
 
-/// A refused read gives no value to remember, so a second read by the same variable index is refused again. PHP
-/// remembers the first read's `mixed`, so it refuses only the first read and reports what uses the `mixed`.
+/// In a loop, a write by index of a `Set`, a `+=` on the same index and a plain read of it are each refused once: a
+/// place that may be a `Set` is judged on every read, whatever an earlier write of the index left behind.
 #[test]
-fn a_second_read_by_a_variable_index_of_a_scalar_is_refused_again() {
-    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public int twice(int z, int i)\n    {\n        let a = z[i];\n        let b = z[i];\n        return a + b;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function twice(int $z, int $i): int\n    {\n        $a = $z[$i];\n        $b = $z[$i];\n        return $a + $b;\n    }\n}\n";
-
-    assert_eq!(
-        issues(("src/Demo/Scalars.sharp", sharp), &[]),
-        ["7:17 invalid-array-access", "8:17 invalid-array-access"]
-    );
-    assert_eq!(
-        issues(("src/Demo/Scalars.php", php), &[]),
-        [
-            "9:14 invalid-array-access",
-            "9:9 mixed-assignment",
-            "10:9 mixed-assignment",
-            "11:16 mixed-operand",
-            "11:21 mixed-operand",
-            "11:16 mixed-return-statement",
-        ]
-    );
-}
-
-/// A write by index in a `for` loop's step runs on every pass, and is refused as one in the body is: a `Set` has no
-/// index, and an `int` is not written by index. PHP refuses the `int`.
-#[test]
-fn a_write_by_index_in_a_for_step_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Steps\n{\n    public void fill(Set<int> ids, int y, int times)\n    {\n        for (let i = 0; i < times; ids[i] = 1) {\n            i++;\n        }\n        for (let j = 0; j < times; y[j] = 1) {\n            j++;\n        }\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Steps\n{\n    /** @param array<int, int> $ids */\n    public function fill(array $ids, int $y, int $times): void\n    {\n        for ($i = 0; $i < $times; $ids[$i] = 1) {\n            $i++;\n        }\n        for ($j = 0; $j < $times; $y[$j] = 1) {\n            $j++;\n        }\n    }\n}\n";
-
-    assert_eq!(
-        issues(("src/Demo/Steps.sharp", sharp), &[]),
-        ["7:36 invalid-array-access", "10:36 invalid-array-access"]
-    );
-    assert_eq!(issues(("src/Demo/Steps.php", php), &[]), ["13:35 invalid-array-access"]);
-}
-
-/// In a loop, a write by index of a `Set` and a `+=` on the same index after it are each refused: the `+=` reads the
-/// index before it writes it, and the earlier write does not answer that read. PHP writes and reads the index.
-#[test]
-fn a_write_and_a_compound_write_to_an_index_of_a_set_in_a_loop_are_each_refused() {
-    let sharp = "namespace Demo;\n\nclass Marks\n{\n    public void mark(Set<int> ids, List<int> keys)\n    {\n        for (const n of keys) {\n            ids[n] = 1;\n            ids[n] += 1;\n        }\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Marks\n{\n    /**\n     * @param array<int, int> $ids\n     * @param list<int> $keys\n     */\n    public function mark(array $ids, array $keys): void\n    {\n        foreach ($keys as $n) {\n            $ids[$n] = 1;\n            $ids[$n] += 1;\n        }\n    }\n}\n";
+fn a_write_and_a_read_of_an_index_of_a_set_in_a_loop_are_each_refused() {
+    let sharp = "namespace Demo;\n\nclass Marks\n{\n    public int mark(Set<int> ids, List<int> keys)\n    {\n        let total = 0;\n        for (const n of keys) {\n            ids[n] = 1;\n            ids[n] += 1;\n            total += ids[n];\n        }\n        return total;\n    }\n}\n";
 
     let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
     assert_eq!(
         refusals(("src/Demo/Marks.sharp", sharp), &[]),
-        [format!("8:13 {no_index}"), format!("9:13 {no_index}")]
+        [format!("9:13 {no_index}"), format!("10:13 {no_index}"), format!("11:22 {no_index}")]
     );
-    assert_eq!(issues(("src/Demo/Marks.php", php), &[]), Vec::<String>::new());
+}
+
+/// A refused read gives its value when a collection member can: a `Map` read by a key outside its key type gives the
+/// `Map`'s value, and a local that may be a `Set` or a `Map` reads the `Map`'s value. So a wrong use of that value is
+/// still reported, after a compound write too, and no message names a type without its value.
+#[test]
+fn a_read_refused_by_its_key_or_a_set_still_gives_the_value_of_its_collection() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public string byNullableKey(Map<string, int> counts, string? name)\n    {\n        string s = counts[name] ?? 0;\n        return s;\n    }\n\n    public string byIntKey(Map<string, int> counts, int id)\n    {\n        return counts[id] ?? 0;\n    }\n\n    public string afterACompoundWrite(Map<string, int> counts, int id)\n    {\n        counts[id] += 1;\n        string s = counts[\"a\"] ?? 0;\n        return s;\n    }\n\n    public void afterASetRead(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags[\"a\"] += 1;\n        for (const n of tags) {\n            string s = n;\n        }\n    }\n\n    public void namesTheValue(Map<string, int> counts, string? name)\n    {\n        counts[0] += 1;\n        counts[name] ??= 1;\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[]);
+    let wrong_uses: Vec<String> = issues
+        .iter()
+        .filter(|issue| {
+            matches!(issue.code.as_deref(), Some("invalid-local-assignment-value" | "invalid-return-statement"))
+        })
+        .map(|issue| located(sharp, issue))
+        .collect();
+
+    assert_eq!(
+        wrong_uses,
+        [
+            "7:20 invalid-local-assignment-value",
+            "13:16 invalid-return-statement",
+            "19:20 invalid-local-assignment-value",
+            "28:24 invalid-local-assignment-value",
+        ]
+    );
+    assert_eq!(
+        issues
+            .iter()
+            .filter(|issue| located(sharp, issue) == "35:16 mismatched-array-index")
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>(),
+        ["`Map<0|string, int>` is keyed by `int|string`, but this key is `string?`."]
+    );
 }
 
 /// A `Set` is a collection, which `==` cannot compare by value yet. PHP keeps comparing its arrays.
