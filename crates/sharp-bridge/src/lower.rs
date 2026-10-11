@@ -1548,8 +1548,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
                 },
             },
-            // A link whose chain's conditional tests the receiver is the property call or the static call through a
-            // class value that `untested_link` found.
+            // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static call
+            // through a class value, the property call, or the plain method call.
             Expression::Call(Call::NullSafeMethod(call)) => {
                 if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, true) {
                     return lowered;
@@ -1563,32 +1563,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     return self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
                 }
 
+                let is_property_call = tested && self.is_property_call(expression, call.object);
                 let object = if tested { self.expression(call.object) } else { self.null_safe_object(call.object) };
                 let method = self.member(&call.method);
                 let keys = self.types.key_arguments(expression);
                 let arguments = self.arguments(&call.argument_list, &keys);
 
-                if tested {
+                if is_property_call {
                     let property = self.node(SHARP_AST_PROP, 0, line, &[object, method]);
 
                     self.node(SHARP_AST_CALL, 0, line, &[property, arguments])
+                } else if tested {
+                    self.node(SHARP_AST_METHOD_CALL, 0, line, &[object, method, arguments])
                 } else {
                     self.node(SHARP_AST_NULLSAFE_METHOD_CALL, 0, line, &[object, method, arguments])
                 }
             }
-            // A link whose chain's conditional tests the receiver is the method value or the static member read through
-            // a class value that `untested_link` found.
+            // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static member
+            // read through a class value, the method value, or the plain property read.
             Expression::Access(Access::NullSafeProperty(access)) => {
                 let tested = self.tested_links.contains(&expression.span());
                 if tested && let Some((class, classes)) = self.class_value(access.object) {
                     return self.static_member(line, class, &classes, &access.property);
                 }
 
+                let is_method = tested && self.is_method_value(access.object, &access.property);
                 let object = if tested { self.expression(access.object) } else { self.null_safe_object(access.object) };
                 let member = self.member(&access.property);
 
-                if tested {
+                if is_method {
                     self.method_value(line, object, member)
+                } else if tested {
+                    self.node(SHARP_AST_PROP, 0, line, &[object, member])
                 } else {
                     self.node(SHARP_AST_NULLSAFE_PROP, 0, line, &[object, member])
                 }
@@ -1923,14 +1929,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_METHOD_CALL, 0, line, &[object, member, callable])
     }
 
-    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value or a property call, with
-    /// its receiver, when `chain` is a member read, a call or an index whose chain holds one no conditional tests yet.
-    /// The walk stops at a receiver a hidden variable holds, whose links its own conditional tests.
+    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, or any
+    /// link below a collection method call that runs as PHP on the array, with its receiver, when `chain` is a member
+    /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
+    /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
+    /// holds, whose links its own conditional tests.
     fn untested_link<'chain, 'ast>(
         &self,
         chain: &'chain Expression<'ast>,
     ) -> Option<(&'chain Expression<'ast>, &'chain Expression<'ast>)> {
         let mut link = chain;
+        let mut below_php_call = false;
         loop {
             if self.null_safe_receivers.iter().any(|(span, _)| *span == link.span()) {
                 return None;
@@ -1938,11 +1947,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             link = match link {
                 Expression::Access(Access::Property(access)) => access.object,
-                Expression::Call(Call::Method(call)) => call.object,
+                Expression::Call(Call::Method(call)) => {
+                    below_php_call = below_php_call || self.php_collection_method(link).is_some();
+
+                    call.object
+                }
                 Expression::ArrayAccess(access) => access.array,
                 Expression::Access(Access::NullSafeProperty(access)) => {
                     if !self.tested_links.contains(&link.span())
-                        && (self.is_class_value(access.object) || self.is_method_value(access.object, &access.property))
+                        && (below_php_call
+                            || self.is_class_value(access.object)
+                            || self.is_method_value(access.object, &access.property))
                     {
                         return Some((link, access.object));
                     }
@@ -1951,7 +1966,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 Expression::Call(Call::NullSafeMethod(call)) => {
                     if !self.tested_links.contains(&link.span())
-                        && (self.is_class_value(call.object) || self.is_property_call(link, call.object))
+                        && (below_php_call
+                            || self.is_class_value(call.object)
+                            || self.is_property_call(link, call.object))
                     {
                         return Some((link, call.object));
                     }
@@ -2348,14 +2365,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         arguments: &ArgumentList,
         null_safe: bool,
     ) -> Option<u32> {
-        let (method, is_set) = self.types.collection_method(call)?;
-        let changes = match method.as_slice() {
-            b"count" => false,
-            _ if !is_set => return None,
-            b"add" | b"remove" => true,
-            b"contains" | b"clear" | b"tolist" | b"filter" => false,
-            _ => return None,
-        };
+        let (method, changes) = self.php_collection_method(call)?;
         let line = self.line(call);
         let element = || {
             arguments
@@ -2450,6 +2460,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             None => lowered,
         })
+    }
+
+    /// The collection method the method call `call` runs as PHP on the array, in lowercase, as [`Self::collection_call`]
+    /// lowers it, and whether it changes the collection. None for a call of any other method.
+    fn php_collection_method(&self, call: &Expression) -> Option<(Vec<u8>, bool)> {
+        let (method, is_set) = self.types.collection_method(call)?;
+        let changes = match method.as_slice() {
+            b"count" => false,
+            _ if !is_set => return None,
+            b"add" | b"remove" => true,
+            b"contains" | b"clear" | b"tolist" | b"filter" => false,
+            _ => return None,
+        };
+
+        Some((method, changes))
     }
 
     /// The receiver of a collection method call. A method that reads it `twice` holds a value or an object that runs

@@ -69,6 +69,8 @@ use crate::resolver::property::check_redundant_nullsafe;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
+use crate::utils::names::display_type;
+use crate::utils::names::sharp_collection_name;
 use crate::visibility::check_method_visibility;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodCall<'arena> {
@@ -318,6 +320,14 @@ where
     let mut method_resolution =
         resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)?;
 
+    if method_resolution
+        .resolved_methods
+        .iter()
+        .any(|method| sharp_collection_name(&TObject::new_named(method.classname)).is_some())
+    {
+        report_collection_method_on_object(context, artifacts, object, selector);
+    }
+
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
 
@@ -458,6 +468,41 @@ where
     }
 
     Ok(())
+}
+
+/// Reports a PHP# collection method called on `object` when its value can also be an object, as `List<int>|Box`. The
+/// engine runs a collection method by the collection's kind, so it cannot run one on a value that may instead hold an
+/// object whose method of the same name runs.
+fn report_collection_method_on_object<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'_>,
+    selector: &ClassLikeMemberSelector<'_>,
+) where
+    A: Arena,
+{
+    let (Some(object_type), ClassLikeMemberSelector::Identifier(method)) =
+        (artifacts.get_expression_type(object), selector)
+    else {
+        return;
+    };
+    let holds = |kind: fn(&TAtomic) -> bool| object_type.types.iter().any(kind);
+    if !holds(|atomic| matches!(atomic, TAtomic::Array(_)))
+        || !holds(|atomic| matches!(atomic, TAtomic::Object(_) | TAtomic::Callable(_)))
+    {
+        return;
+    }
+
+    let method = String::from_utf8_lossy(method.value);
+    let receiver = display_type(context, object_type);
+    context.collector.report_with_code(
+        IssueCode::NotSupportedYet,
+        Issue::error(format!("Calling `{method}` on `{receiver}` is not supported by the engine yet."))
+            .with_annotation(
+                Annotation::primary(selector.span()).with_message("The value can be a collection or an object."),
+            )
+            .with_help("Test which one the value is with `is` before the call."),
+    );
 }
 
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the

@@ -6064,10 +6064,24 @@ fn the_readme_cart_example_analyzes_with_no_issue() {
 #[test]
 fn every_collection_counts_its_elements() {
     let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public List<string> names { get; private set; } = [];\n\n    public int total(List<int> sizes, Map<string, int> counts, Set<string> tags)\n    {\n        return this.names.count() + sizes.count() + counts.count() + tags.count();\n    }\n\n    public string label(Map<string, int> counts) => match (counts.count()) {\n        0 => \"empty\",\n        default => \"full\",\n    };\n\n    public void wrong(List<int> sizes)\n    {\n        if (sizes.count()) { }\n        sizes.count(1);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n\n    /**\n     * @param ListMethods<int> $sizes\n     */\n    public function wrong(ListMethods $sizes): void\n    {\n        $sizes->count(1);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["19:13 invalid-operand", "20:21 too-many-arguments"]);
-    assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
+}
+
+/// The engine runs a collection method by the collection's kind, so it cannot run one on a value that can also be an
+/// object, where the object's method of the same name would run instead.
+#[test]
+fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Map<string, int>|Box counts, Set<int>|Box tags, (List<int>|Box)? maybe)\n    {\n        return items.count() + counts.count() + tags.count() + (maybe?.count() ?? 0);\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
+        ["12:22 not-supported-yet", "12:39 not-supported-yet", "12:54 not-supported-yet", "12:72 not-supported-yet"]
+    );
+    assert_eq!(issues[0].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
 }
 
 /// The analyzer checks a collection method against `Sharp\ListMethods` or `Sharp\MapMethods`, and every message names

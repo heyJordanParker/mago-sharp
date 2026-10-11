@@ -2747,6 +2747,116 @@ fn every_collection_counts_with_php_count() {
 }
 
 /// ```php
+/// $lines = ($holder === null) ? null : \count($holder->lines);
+/// $next = (($nullsafe#1 = $other->next) === null) ? null : \count($nullsafe#1->lines);
+/// $made = ($holder === null) ? null : \count($holder->make());
+/// $tags = ($holder === null) ? null : \count($holder->tags);
+/// $has = ($holder === null) ? null : isset($holder->tags[1]);
+/// ```
+///
+/// A collection method that runs as a PHP function after a `?.` link tests the link's receiver around the whole
+/// chain, as `?->` cannot skip a function call, and reads the link plainly inside it.
+#[test]
+fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const tags = holder?.tags.count();\n        const has = holder?.tags.contains(1);\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Set<int> tags { get; private set; } = [];\n    public Holder? next { get; private set; }\n\n    public List<int> make() => this.lines;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "lines"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "holder"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "holder"
+                        ZVAL "lines"
+              ASSIGN
+                VAR
+                  ZVAL "next"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    ASSIGN
+                      VAR
+                        ZVAL "nullsafe#1"
+                      PROP
+                        VAR
+                          ZVAL "other"
+                        ZVAL "next"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "nullsafe#1"
+                        ZVAL "lines"
+              ASSIGN
+                VAR
+                  ZVAL "made"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "holder"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      METHOD_CALL
+                        VAR
+                          ZVAL "holder"
+                        ZVAL "make"
+                        ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "holder"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "holder"
+                        ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "has"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "holder"
+                    ZVAL null
+                  ZVAL null
+                  ISSET
+                    DIM
+                      PROP
+                        VAR
+                          ZVAL "holder"
+                        ZVAL "tags"
+                      ZVAL 1
+        "#}
+    );
+}
+
+/// ```php
 /// !isset($this->tags["vip"]) && ($this->tags += ["vip" => "vip"]);
 /// isset(($receiver#1 = $this->next())->tags["old"]) && $receiver#1->tags->delete("old") === null;
 /// $this->next()->tags = [];
