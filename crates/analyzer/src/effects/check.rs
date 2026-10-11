@@ -10,6 +10,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Extern;
 use mago_word::Word;
 
@@ -19,6 +20,7 @@ use crate::effects::Body;
 use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
+use crate::effects::Runs;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_missing_imports;
@@ -40,6 +42,7 @@ pub(crate) fn getters_must_be_pure(
             impure(
                 IssueCode::ImpureGetter,
                 format!("Getter `{member}` {}. Getters must be pure.", impurity.describe(&class_name)),
+                impurity.span,
                 "getter",
                 &impurity,
                 &class_name,
@@ -70,6 +73,7 @@ pub(crate) fn laws_must_be_pure(
             impure(
                 IssueCode::ImpureLaw,
                 format!("Law `{member}` {}. Laws hold only over pure code.", impurity.describe(&class_name)),
+                impurity.span,
                 "law",
                 &impurity,
                 &class_name,
@@ -80,20 +84,66 @@ pub(crate) fn laws_must_be_pure(
         .collect()
 }
 
-/// The error on the call or write `impurity` names in the `body` it refuses, a getter or a law, with the `extern` to
-/// write when the callee has none, or how to call a plain PHP property's code from outside `body`. `class_name` names
-/// each class in prose, `code_class_name` names it in the `extern`, and `missing_import` names the import the `extern`
-/// needs when the body's file doesn't bind its class.
+/// Spec section 29: every implementation is held to what its declaration allows, so a lambda or a method value that a
+/// place's function type holds has only the effects that type lists. The refusal has the code a value of the wrong
+/// type gets in that place.
+pub(crate) fn function_values_must_fit_their_types(
+    effects: &Effects,
+    codebase: &CodebaseMetadata,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+) -> IssueCollection {
+    effects
+        .unfit_function_values()
+        .map(|(value, name, imports, scope, impurity)| {
+            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
+            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
+            let method = || format!("`{}`", display_sharp_member(class_name(name.0), name.1));
+            let reason = match (&value.runs, impurity.effect) {
+                (Runs::Body(Body::Lambda(_)), _) => format!("This lambda {}", impurity.describe(&class_name)),
+                (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name)),
+                (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
+                    format!("{} has the effect `{}`", method(), class_name(effect))
+                }
+                (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
+            };
+            let body = if matches!(value.runs, Runs::Body(Body::Lambda(_))) { "lambda" } else { "method" };
+
+            let issue = impure(
+                value.code,
+                format!("{reason}, so a `{}` cannot hold it.", value.declared),
+                value.span,
+                body,
+                &impurity,
+                &class_name,
+                &code_class_name,
+                &missing_import,
+            );
+
+            match value.runs {
+                Runs::Body(_) => issue.with_annotation(Annotation::secondary(impurity.span)),
+                Runs::Foreign { .. } => issue,
+            }
+        })
+        .collect()
+}
+
+/// The error at `span` on the `impurity` of the `body` it refuses, a getter, a law, a lambda or a method, with the
+/// `extern` to write when the callee has none, or how to call a plain PHP property's code from outside `body`.
+/// `class_name` names each class in prose, `code_class_name` names it in the `extern`, and `missing_import` names the
+/// import the `extern` needs when the body's file doesn't bind its class.
+#[allow(clippy::too_many_arguments)]
 fn impure(
     code: IssueCode,
     message: String,
+    span: Span,
     body: &str,
     impurity: &Impurity,
     class_name: &dyn Fn(Word) -> String,
     code_class_name: &dyn Fn(Word) -> String,
     missing_import: &dyn Fn(Word) -> Option<String>,
 ) -> Issue {
-    let issue = Issue::error(message).with_code(code.as_str()).with_annotation(Annotation::primary(impurity.span));
+    let issue = Issue::error(message).with_code(code.as_str()).with_annotation(Annotation::primary(span));
 
     match impurity.effect {
         Some(Effect::Unknown(Some((class, member)))) => {

@@ -247,7 +247,7 @@ where
                             span,
                             if context
                                 .codebase
-                                .get_function_like(&id)
+                                .get_function_like(&context.codebase.get_declaring_function_like_identifier(&id))
                                 .and_then(|metadata| metadata.return_type_metadata.as_ref())
                                 .is_some_and(|metadata| contains_parameter_variable(&metadata.type_union))
                             {

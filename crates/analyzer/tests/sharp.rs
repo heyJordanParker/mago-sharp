@@ -5478,6 +5478,127 @@ fn a_local_that_may_be_a_map_or_a_set_takes_either_literal_and_keeps_its_kind() 
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
 
+/// A local that may be a `Set` or a `Map` takes a method both have, called on each with its own elements. A method one
+/// of them lacks is refused once, naming the collection that lacks it: a `Map` has no `add` and no `contains`, and a
+/// `Set` has no `get` and no `delete`.
+#[test]
+fn a_method_one_collection_of_a_union_lacks_is_refused_once_naming_it() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags.add(1);\n        tags.contains(1);\n        tags.get(\"a\");\n        return tags.any(n => n > 0) ? tags.sumOf(n => n) : 0;\n    }\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tags.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "8:14 non-existent-method Method `add` does not exist on `Map<string, int>`.",
+            "9:14 non-existent-method Method `contains` does not exist on `Map<string, int>`.",
+            "10:14 non-existent-method Method `get` does not exist on `Set<int>`.",
+        ]
+    );
+}
+
+/// A method that changes a local that may be a `Set` or a `Map` leaves it either, as it was declared, so a `Map` local
+/// still refuses it.
+#[test]
+fn a_changed_local_that_may_be_a_set_or_a_map_stays_either() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags.delete(\"a\");\n        Map<string, int> named = tags;\n        return count(named);\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Tags.sharp", sharp), &[]),
+        ["8:14 non-existent-method", "9:34 invalid-local-assignment-value"]
+    );
+}
+
+/// A loop over a local that may be a `Set` or a `Map` reads its elements, as a loop over either does. A `Set` has no
+/// keys, so `[k, v]` is refused, naming the `Set`. PHP reads the keys of either array.
+#[test]
+fn a_key_and_value_loop_over_a_local_that_may_be_a_set_or_a_map_is_refused_by_the_set() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        let total = 0;\n        for (const n of tags) {\n            total += n;\n        }\n        for (const [key, n] of tags) {\n            total += n;\n        }\n        return total;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<int, int> $ids\n     * @param array<string, int> $counts\n     */\n    public function run(bool $ready, array $ids, array $counts): int\n    {\n        $tags = $ready ? $ids : $counts;\n        $total = 0;\n        foreach ($tags as $n) {\n            $total += $n;\n        }\n        foreach ($tags as $key => $n) {\n            $total += is_int($key) ? $n : 0;\n        }\n        return $total;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Tags.sharp", sharp), &[]),
+        [
+            "12:32 invalid-iterator `for (const [k, v] of x)` reads the keys of a `Map`, and this is a `Set`. | Loop over the elements alone, as in `for (const x of set)`."
+        ]
+    );
+    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+}
+
+/// A local that may be a `Set` or a `Map` has no index, because a `Set` has none, so every write and read by index is
+/// refused once by the `Set`, handled with `??` or not and whatever the key. The `Map` checks no key for an index that
+/// cannot exist, its rule for a bare read adds no second report, and a handled read stays `V?` after a write, so its
+/// `??` is not redundant. The local stays either after it is given the `Map`.
+#[test]
+fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_refused_once_by_the_set() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int byName(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags[\"a\"] = 1;\n        int handled = tags[\"a\"] ?? 0;\n        return tags[\"a\"] + handled;\n    }\n\n    public int byInt(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        int handled = tags[0] ?? 0;\n        return tags[0] + handled;\n    }\n\n    public int afterTheMap(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags = counts;\n        tags[\"a\"] = 1;\n        int handled = tags[\"a\"] ?? 0;\n        return tags[\"a\"] + handled;\n    }\n}\n";
+
+    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
+    assert_eq!(
+        refusals(("src/Demo/Tags.sharp", sharp), &[]),
+        [
+            format!("8:9 {no_index}"),
+            format!("9:23 {no_index}"),
+            format!("10:16 {no_index}"),
+            format!("16:23 {no_index}"),
+            format!("17:16 {no_index}"),
+            format!("24:9 {no_index}"),
+            format!("25:23 {no_index}"),
+            format!("26:16 {no_index}"),
+        ]
+    );
+}
+
+/// A local that may be a `List` or a `Map` has an index, so it is read as the `Map`: a bare read is refused and a read
+/// handled with `??` compiles.
+#[test]
+fn a_bare_index_read_of_a_local_that_may_be_a_list_or_a_map_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        int handled = rows[1] ?? 0;\n        return rows[0] + handled;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Sizes.sharp", sharp), &[]),
+        [
+            "9:16 possibly-undefined-array-index A `Map` is not read by a bare index, because its key may be missing. | Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."
+        ]
+    );
+}
+
+/// A local that may be a `List` or a `Map` stays either after it is given the `Map`, so the `List` refuses a write by
+/// index.
+#[test]
+fn a_local_that_may_be_a_list_or_a_map_is_not_written_by_index_after_it_holds_the_map() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int run(bool ready, List<int> sizes, Map<int, int> counts)\n    {\n        let rows = ready ? sizes : counts;\n        rows = counts;\n        rows[1] = 2;\n        return count(rows);\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Sizes.sharp", sharp), &[]),
+        [
+            "9:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys. | Change an element with `list.set(index, value)`, as `list.set(i, list[i] + 1)` replaces `+=`, `++` and `--`, and append one with `list.add(value)`."
+        ]
+    );
+}
+
+/// A `+=` on a local that may be a `List` or a `Set` is refused as a write by index is: the `Set` has no index, and the
+/// `List` is not written by index. Its read reports the `Set`'s refusal, and its write keeps the `List`'s, which shares
+/// the read's code and place but not its message.
+#[test]
+fn a_compound_write_to_a_local_that_may_be_a_list_or_a_set_is_refused_as_a_write_is() {
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public void run(bool ready, List<int> sizes, Set<int> ids)\n    {\n        let x = ready ? sizes : ids;\n        x[0] = 1;\n        x[1] += 1;\n    }\n}\n";
+
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "8:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys.",
+            "8:9 invalid-array-access A `Set<int>` has no index.",
+            "9:9 invalid-array-access A `Set<int>` has no index.",
+            "9:9 invalid-array-access A `List` is not written by index, because a write could leave a gap in its keys.",
+        ]
+    );
+}
+
 /// `["a"]` is a `List` literal, so it is an error wherever a `Map` is declared, even a `Map<int, string>` whose types
 /// it fits: a property default, a parameter default, a declaration, an assignment, an argument and a return.
 #[test]
@@ -5813,6 +5934,66 @@ fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() 
             "7:75 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post>` is none of them. | This is `Function<int(int) uses Http, Post>`. | Show a value taken from it instead, such as a property or the result of a method.",
         ]
     );
+}
+
+/// Spec section 29: a function type without `uses` is pure, so it holds no function value with an effect, whether the
+/// value is assigned, passed or returned, and a function type that uses `Mail` holds none that uses `Http`. PHP closures
+/// carry no effects, so the PHP twin is checked as before.
+#[test]
+fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing(Function<int(int) uses Http> fetch)\n    {\n        this.rate = fetch;\n        Function<int(int)> local = fetch;\n        Pricing.apply(fetch);\n        Pricing.mail(fetch);\n    }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static int mail(Function<int(int) uses Mail> step) => step(1);\n\n    public Function<int(int)> current(Function<int(int) uses Http> fetch) => fetch;\n\n    public int price() => this.rate(2);\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    /** @param \\Closure(int): int $fetch */\n    public function __construct(\\Closure $fetch)\n    {\n        $this->rate = $fetch;\n        self::apply($fetch);\n    }\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    /**\n     * @param \\Closure(int): int $fetch\n     * @return \\Closure(int): int\n     */\n    public function current(\\Closure $fetch): \\Closure { return $fetch; }\n\n    public function price(): int { return ($this->rate)(2); }\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Pricing.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "9:21 invalid-property-assignment-value Invalid type for property `Pricing.rate`: expected `Function<int(int)>`, but got `Function<int(int) uses Http>`.",
+            "10:36 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Function<int(int)>`.",
+            "11:23 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
+            "12:22 invalid-argument Invalid argument type for argument #1 of `Pricing.mail`: expected `Function<int(int) uses Mail>`, but found `Function<int(int) uses Http>`.",
+            "19:78 invalid-return-statement Invalid return type for method `Pricing.current`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
+        ]
+    );
+}
+
+/// A nullable function type holds `null` and no function value with an effect it does not list, so only a value that
+/// may be `null` possibly fits it.
+#[test]
+fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @param null|\\Closure(int): int $step */\n    public static function apply(?\\Closure $step): int { return $step === null ? 0 : $step(1); }\n\n    /**\n     * @param \\Closure(int): int $fetch\n     * @param null|\\Closure(int): int $maybe\n     */\n    public function run(\\Closure $fetch, ?\\Closure $maybe): int { return self::apply($fetch) + self::apply($maybe); }\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Pricing.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "7:110 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>?`, but found `Function<int(int) uses Http>`.",
+            "7:133 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Pricing.apply`: expected `Function<int(int)>?`, but possibly received `Function<int(int) uses Http>?`.",
+        ]
+    );
+}
+
+/// A function type that lists more effects than a function value uses holds it, as a wider type holds a narrower value.
+#[test]
+fn a_function_type_holds_a_function_value_whose_effects_it_lists() {
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http, Mail> rate;\n\n    public Pricing(Function<int(int) uses Http> fetch)\n    {\n        this.rate = fetch;\n    }\n\n    public Function<int(int) uses Mail, Http> current(Function<int(int) uses Http> fetch) => fetch;\n\n    public int price() => this.rate(2);\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Pricing.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A pure function value has no effect, so every function type holds it.
+#[test]
+fn a_function_type_with_an_effect_holds_a_pure_function_value() {
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate;\n\n    public Pricing(Function<int(int)> fixed)\n    {\n        this.rate = fixed;\n    }\n\n    public static int apply(Function<int(int) uses Http> step) => step(1);\n\n    public int run(Function<int(int)> fixed) => Pricing.apply(fixed);\n\n    public int price() => this.rate(2);\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Pricing.sharp", sharp), &[]), Vec::<String>::new());
 }
 
 /// A `Function` value keeps the collections its parameters declare when a `let` local copies it, when a template
@@ -6661,6 +6842,112 @@ fn an_index_of_a_set_is_an_error() {
         ]
     );
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+}
+
+/// `??=`, `+=` and `++` read an index, then write it, and a `Set` has no index, so each is refused once.
+#[test]
+fn a_compound_assignment_or_increment_on_an_index_of_a_set_is_refused_once() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void bump(Set<int> ids)\n    {\n        ids[1] ??= 1;\n        ids[2] += 1;\n        ids[3]++;\n    }\n}\n";
+
+    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
+    assert_eq!(
+        refusals(("src/Demo/Tags.sharp", sharp), &[]),
+        [format!("7:9 {no_index}"), format!("8:9 {no_index}"), format!("9:9 {no_index}")]
+    );
+}
+
+/// `+=`, `++` and `??=` read an index of a scalar and write it, and the index is refused once, by the read, or by the
+/// write where the read is inside `??`. A refused read of a scalar has no value, so the arithmetic on it reports
+/// nothing more, and nothing is remembered for a variable index, so a second read by it is refused again. PHP reports
+/// `+=` and `++` twice, from its read and its write, remembers the first read by a variable index, and reports what
+/// uses the read's `mixed`.
+#[test]
+fn a_compound_write_to_an_index_of_a_scalar_is_refused_once() {
+    let sharp = "namespace Demo;\n\nclass Scalars\n{\n    public int bump(int z, int i)\n    {\n        z[0] += 1;\n        z[1]++;\n        z[2] ??= 1;\n        let y = z[3] + 1;\n        let a = z[i];\n        let b = z[i];\n        return y + a + b;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Scalars\n{\n    public function bump(int $z, int $i): int\n    {\n        $z[0] += 1;\n        $z[1]++;\n        $z[2] ??= 1;\n        $y = $z[3] + 1;\n        $a = $z[$i];\n        $b = $z[$i];\n        return $y + $a + $b;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Scalars.sharp", sharp), &[]),
+        [
+            "7:9 invalid-array-access",
+            "8:9 invalid-array-access",
+            "9:9 invalid-array-access",
+            "10:17 invalid-array-access",
+            "11:17 invalid-array-access",
+            "12:17 invalid-array-access",
+        ]
+    );
+    assert_eq!(
+        issues(("src/Demo/Scalars.php", php), &[]),
+        [
+            "9:9 invalid-array-access",
+            "9:9 mixed-operand",
+            "9:9 invalid-array-access",
+            "10:9 invalid-array-access",
+            "10:9 mixed-operand",
+            "10:9 invalid-array-access",
+            "11:9 invalid-array-access",
+            "12:14 invalid-array-access",
+            "12:14 mixed-operand",
+            "12:9 mixed-assignment",
+            "13:14 invalid-array-access",
+            "13:9 mixed-assignment",
+            "14:9 mixed-assignment",
+            "15:16 mixed-operand",
+            "15:21 mixed-operand",
+            "15:16 mixed-operand",
+            "15:26 mixed-operand",
+            "15:16 mixed-return-statement",
+        ]
+    );
+}
+
+/// In a loop, a write by index of a `Set`, a `+=` on the same index and a plain read of it are each refused once: a
+/// place that may be a `Set` is judged on every read, whatever an earlier write of the index left behind.
+#[test]
+fn a_write_and_a_read_of_an_index_of_a_set_in_a_loop_are_each_refused() {
+    let sharp = "namespace Demo;\n\nclass Marks\n{\n    public int mark(Set<int> ids, List<int> keys)\n    {\n        let total = 0;\n        for (const n of keys) {\n            ids[n] = 1;\n            ids[n] += 1;\n            total += ids[n];\n        }\n        return total;\n    }\n}\n";
+
+    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
+    assert_eq!(
+        refusals(("src/Demo/Marks.sharp", sharp), &[]),
+        [format!("9:13 {no_index}"), format!("10:13 {no_index}"), format!("11:22 {no_index}")]
+    );
+}
+
+/// A refused read gives its value when a collection member can: a `Map` read by a key outside its key type gives the
+/// `Map`'s value, and a local that may be a `Set` or a `Map` reads the `Map`'s value. So a wrong use of that value is
+/// still reported, after a compound write too, and no message names a type without its value.
+#[test]
+fn a_read_refused_by_its_key_or_a_set_still_gives_the_value_of_its_collection() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public string byNullableKey(Map<string, int> counts, string? name)\n    {\n        string s = counts[name] ?? 0;\n        return s;\n    }\n\n    public string byIntKey(Map<string, int> counts, int id)\n    {\n        return counts[id] ?? 0;\n    }\n\n    public string afterACompoundWrite(Map<string, int> counts, int id)\n    {\n        counts[id] += 1;\n        string s = counts[\"a\"] ?? 0;\n        return s;\n    }\n\n    public void afterASetRead(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags[\"a\"] += 1;\n        for (const n of tags) {\n            string s = n;\n        }\n    }\n\n    public void namesTheValue(Map<string, int> counts, string? name)\n    {\n        counts[0] += 1;\n        counts[name] ??= 1;\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[]);
+    let wrong_uses: Vec<String> = issues
+        .iter()
+        .filter(|issue| {
+            matches!(issue.code.as_deref(), Some("invalid-local-assignment-value" | "invalid-return-statement"))
+        })
+        .map(|issue| located(sharp, issue))
+        .collect();
+
+    assert_eq!(
+        wrong_uses,
+        [
+            "7:20 invalid-local-assignment-value",
+            "13:16 invalid-return-statement",
+            "19:20 invalid-local-assignment-value",
+            "28:24 invalid-local-assignment-value",
+        ]
+    );
+    assert_eq!(
+        issues
+            .iter()
+            .filter(|issue| located(sharp, issue) == "35:16 mismatched-array-index")
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>(),
+        ["`Map<0|string, int>` is keyed by `int|string`, but this key is `string?`."]
+    );
 }
 
 /// A `Set` is a collection, which `==` cannot compare by value yet. PHP keeps comparing its arrays.
@@ -8988,6 +9275,322 @@ fn a_getter_calling_a_property_holding_a_function_type_passes() {
     );
 
     assert_eq!(effect_issues(&[pricing]), Vec::<String>::new());
+}
+
+/// A plain PHP `fetch`, which its `extern` gives the effect `Http`.
+const FETCH: (&str, &str) = ("src/fetch.php", "<?php\n\nfunction fetch(int $id): int\n{\n    return $id;\n}\n");
+
+const FETCH_STUB: (&str, &str) = ("app/Stubs/Fetch.sharp", "namespace App.Stubs;\n\nextern fetch uses Http;\n");
+
+/// Spec section 29: a call through a function value has the effects its function type lists, whether the value is a
+/// field, a parameter or a local, so a getter calling one that uses `Database` is refused and names `Database`.
+#[test]
+fn a_getter_calling_a_function_value_with_an_effect_is_refused_naming_the_effect() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Database> rate) { }\n\n    public int price => this.rate(2);\n\n    public int total => this.apply(this.rate);\n\n    public int stored\n    {\n        get\n        {\n            Function<int(int) uses Database> lookup = this.rate;\n            return lookup(3);\n        }\n    }\n\n    public int apply(Function<int(int) uses Database> step) => step(1);\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @param \\Closure(int): int $rate */\n    public function __construct(private \\Closure $rate) {}\n\n    public int $price { get => ($this->rate)(2); }\n\n    public int $total { get => $this->apply($this->rate); }\n\n    public int $stored\n    {\n        get\n        {\n            $lookup = $this->rate;\n            return $lookup(3);\n        }\n    }\n\n    /** @param \\Closure(int): int $step */\n    public function apply(\\Closure $step): int { return $step(1); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing]),
+        [
+            "app/Shop/Pricing.sharp:7:25 impure-getter: Getter `price` calls `Pricing.rate`, which has the effect `Database`. Getters must be pure.",
+            "app/Shop/Pricing.sharp:9:25 impure-getter: Getter `total` reaches `Pricing.apply`, which calls `step` with the effect `Database`. Getters must be pure.",
+            "app/Shop/Pricing.sharp:16:20 impure-getter: Getter `stored` calls `lookup`, which has the effect `Database`. Getters must be pure.",
+        ]
+    );
+}
+
+/// A law takes a function value as any parameter, and calling it has the effects its function type lists.
+#[test]
+fn a_law_calling_a_function_value_with_the_effect_clock_is_refused() {
+    let rule = (
+        "app/Shop/Rule.sharp",
+        "namespace App.Shop;\n\npublic class Rule\n{\n    law positive(Function<int() uses Clock> clock) => clock() > 0;\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[rule]),
+        [
+            "app/Shop/Rule.sharp:5:55 impure-law: Law `positive` calls `clock`, which has the effect `Clock`. Laws hold only over pure code."
+        ]
+    );
+}
+
+/// Spec section 29 holds every implementation to what its declaration allows, so a lambda stored where a pure function
+/// type is declared may have no effect. The solve knows a lambda's effects only after every file is analyzed, so the
+/// refusal names the call that has the effect. The PHP twin's closure carries no effects and is checked as before.
+#[test]
+fn a_lambda_with_an_effect_stored_in_a_pure_function_type_is_refused() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing()\n    {\n        this.rate = n => fetch(n);\n    }\n\n    public int price() => this.rate(2);\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    public function __construct()\n    {\n        $this->rate = fn (int $n): int => fetch($n);\n    }\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, FETCH]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/Pricing.sharp:9:21 invalid-property-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
+}
+
+/// A lambda returned where a pure function type is declared, or held in a typed local of one, is refused as a stored
+/// one is, with the code a value of the wrong type gets there.
+#[test]
+fn a_lambda_with_an_effect_returned_or_held_in_a_local_of_a_pure_function_type_is_refused() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Function<int(int)> rate() => n => fetch(n);\n\n    public int price()\n    {\n        Function<int(int)> live = n => fetch(n) + 1;\n        return live(2);\n    }\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @return \\Closure(int): int */\n    public function rate(): \\Closure { return fn (int $n): int => fetch($n); }\n\n    public function price(): int\n    {\n        $live = fn (int $n): int => fetch($n) + 1;\n        return $live(2);\n    }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, FETCH]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/Pricing.sharp:5:41 invalid-return-statement: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:9:35 invalid-local-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+        ]
+    );
+}
+
+#[test]
+fn a_lambda_with_an_effect_stored_in_a_function_type_that_lists_it_passes() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate;\n\n    public Pricing()\n    {\n        this.rate = n => fetch(n);\n    }\n\n    public int price() => this.rate(2);\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[pricing, FETCH, FETCH_STUB]), Vec::<String>::new());
+}
+
+/// A method value runs the method's body, so a function type holds it only when it lists the method's effects.
+#[test]
+fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_is_refused() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int live(int n) => fetch(n);\n\n    public int fixed(int n) => n;\n\n    public int run() => Pricing.apply(this.live) + Pricing.apply(this.fixed);\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function live(int $n): int { return fetch($n); }\n\n    public function fixed(int $n): int { return $n; }\n\n    public function run(): int { return self::apply($this->live(...)) + self::apply($this->fixed(...)); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, FETCH]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
+}
+
+/// A conditional may give either branch, so each lambda in it is held to the place's function type, whichever branch
+/// holds it and whatever the other branch holds.
+#[test]
+fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
+    let branch = (
+        "app/Shop/Branch.sharp",
+        "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live, Function<int(int)> fixed)\n    {\n        this.rate = live ? (int n) => fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => fetch(n) + 3;\n        this.rate = live ? (int n) => fetch(n) + 4 : fixed;\n        this.rate = live ? fixed : (int n) => fetch(n) + 5;\n        this.rate = live ? (int n) => fetch(n) + 6 : (int n) => fetch(n) + 7;\n    }\n\n    public int price() => this.rate(2);\n}\n",
+    );
+    let php = (
+        "app/Shop/Branch.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Branch\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    /** @param \\Closure(int): int $fixed */\n    public function __construct(bool $live, \\Closure $fixed)\n    {\n        $this->rate = $live ? fn (int $n): int => fetch($n) : fn (int $n): int => $n + 1;\n        $this->rate = $live ? $fixed : fn (int $n): int => fetch($n) + 5;\n    }\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(issues(branch, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    let message = "invalid-property-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
+    assert_eq!(
+        effect_issues(&[branch, FETCH, FETCH_STUB]),
+        [
+            format!("app/Shop/Branch.sharp:9:21 {message}"),
+            format!("app/Shop/Branch.sharp:10:21 {message}"),
+            format!("app/Shop/Branch.sharp:11:21 {message}"),
+            format!("app/Shop/Branch.sharp:12:21 {message}"),
+            format!("app/Shop/Branch.sharp:13:21 {message}"),
+        ]
+    );
+}
+
+/// `Client` is plain PHP that its `extern` gives the effect `Http`, `Cache` is plain PHP its `extern` declares pure, and
+/// `Store` is plain PHP with no `extern`.
+const SERVICES: (&str, &str) = (
+    "src/Lib/Services.php",
+    "<?php\n\nnamespace Lib;\n\nfinal class Client\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class Cache\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class Store\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n",
+);
+
+const SERVICES_STUB: (&str, &str) = (
+    "app/Stubs/Services.sharp",
+    "namespace App.Stubs;\n\nimport Lib.Cache;\nimport Lib.Client;\n\nextern Client uses Http;\nextern Cache;\n",
+);
+
+/// A plain PHP method value runs the method, so a function type holds it only when it lists every effect the method's
+/// `extern` declares, as a call of the method has them. A method with no `extern` has an unknown effect, and a method
+/// of `Sharp\Environment` has the effect `Environment`.
+#[test]
+fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static string? read(Function<string?(string)> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\Cache;\nuse Lib\\Client;\nuse Lib\\Store;\nuse Sharp\\Environment;\n\nclass Pricing\n{\n    public function __construct(private Client $client, private Cache $cache, private Store $store, private Environment $environment) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    /** @param \\Closure(string): ?string $lookup */\n    public static function read(\\Closure $lookup): ?string { return $lookup('HOME'); }\n\n    public function run(): int { return self::apply($this->client->get(...)) + self::apply($this->cache->get(...)) + self::apply($this->store->get(...)); }\n\n    public function home(): ?string { return self::read($this->environment->variable(...)); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[SERVICES]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, SERVICES]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, SERVICES, SERVICES_STUB]),
+        [
+            "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:16:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string)>` cannot hold it.",
+        ]
+    );
+}
+
+/// A method value and a call of the method find the same `extern`: the one on the class it is read through, before its
+/// parent's that declares the method, however the value reaches its place. `RemoteFeed`'s `extern` gives `get` the
+/// effect `Http` that `Feed`'s does not, and `QuietChild`'s declares the `get` of `Quiet`, which has none, pure.
+#[test]
+fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_extern() {
+    let feeds = (
+        "src/Lib/Feeds.php",
+        "<?php\n\nnamespace Lib;\n\nclass Feed\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class RemoteFeed extends Feed\n{\n}\n\nclass Quiet\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class QuietChild extends Quiet\n{\n}\n",
+    );
+    let stub = (
+        "app/Stubs/Feeds.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Feed;\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\nextern Feed;\nextern RemoteFeed uses Http;\nextern QuietChild;\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\nimport Lib.QuietChild;\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed, private QuietChild quiet) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get) + Pricing.apply((this.feed.get));\n\n    public int viaLocal()\n    {\n        let step = this.feed.get;\n        return Pricing.apply(step);\n    }\n\n    public int price => this.feed.get(1);\n\n    public int stepped\n    {\n        get\n        {\n            let step = this.feed.get;\n            return step(1);\n        }\n    }\n\n    public int calm() => Pricing.apply(this.quiet.get) + Pricing.apply((this.quiet.get));\n\n    public int calmViaLocal()\n    {\n        let step = this.quiet.get;\n        return Pricing.apply(step);\n    }\n\n    public int quietly\n    {\n        get\n        {\n            let step = this.quiet.get;\n            return step(1);\n        }\n    }\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\QuietChild;\nuse Lib\\RemoteFeed;\n\nclass Pricing\n{\n    public function __construct(private RemoteFeed $feed, private QuietChild $quiet) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function run(): int { return self::apply($this->feed->get(...)) + self::apply($this->quiet->get(...)); }\n\n    public int $price { get => $this->feed->get(1); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[feeds]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, feeds]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[feeds, stub]), Vec::<String>::new());
+    let message = "invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
+    assert_eq!(
+        effect_issues(&[pricing, feeds, stub]),
+        [
+            "app/Shop/Pricing.sharp:20:25 impure-getter: Getter `price` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.".to_owned(),
+            "app/Shop/Pricing.sharp:27:20 impure-getter: Getter `stepped` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.".to_owned(),
+            format!("app/Shop/Pricing.sharp:12:39 {message}"),
+            format!("app/Shop/Pricing.sharp:12:70 {message}"),
+            format!("app/Shop/Pricing.sharp:17:30 {message}"),
+        ]
+    );
+}
+
+/// A method value read through a subclass runs the method its parent declares: a call of it returns the type the
+/// method's parameters give and its unused result is reported for a `#[\NoDiscard]` method, a partial application of it
+/// has the method's type, and the value of a built-in method takes no argument the method does not list.
+#[test]
+fn a_method_value_read_through_a_subclass_is_the_method_its_parent_declares() {
+    let books = (
+        "src/Lib/Books.php",
+        "<?php\n\nnamespace Lib;\n\nclass Ledger\n{\n    #[\\NoDiscard]\n    public function total(int $n): int\n    {\n        return $n;\n    }\n\n    /** @return ($n is int ? int : string) */\n    public function pick(int|string $n): int|string\n    {\n        return $n;\n    }\n}\n\nfinal class BranchLedger extends Ledger\n{\n}\n\nfinal class Bag extends \\ArrayObject\n{\n}\n",
+    );
+    let closing = (
+        "app/Shop/Closing.sharp",
+        "namespace App.Shop;\n\nimport Lib.Bag;\nimport Lib.BranchLedger;\n\npublic class Closing\n{\n    public Closing(private BranchLedger ledger, private Bag bag) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public void close()\n    {\n        (this.ledger.total)(1);\n    }\n\n    public int count() => Closing.apply(this.bag.count);\n\n    public int picked() => (this.ledger.pick)(1);\n\n    public Function<int(int)> partial() => (this.ledger.total)(?);\n}\n",
+    );
+    let php = (
+        "app/Shop/Closing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\Bag;\nuse Lib\\BranchLedger;\n\nclass Closing\n{\n    public function __construct(private BranchLedger $ledger, private Bag $bag) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function close(): void\n    {\n        ($this->ledger->total(...))(1);\n    }\n\n    public function count(): int { return self::apply($this->bag->count(...)); }\n\n    public function picked(): int { return ($this->ledger->pick(...))(1); }\n\n    /** @return \\Closure(int): int */\n    public function partial(): \\Closure { return ($this->ledger->total(...))(?); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[books]), ["17:9 unused-method-call", "20:55 invalid-argument"]);
+    assert_eq!(issues(closing, &[books]), ["14:9 unused-method-call", "17:41 invalid-argument"]);
+}
+
+/// PHP's `Child::method(...)` names the class it is written with, which may inherit the method, so its closure is the
+/// method its parent declares: an unused result of a `#[\NoDiscard]` method is reported, a built-in method takes no
+/// argument it does not list, and a call returns the type the method's parameters give.
+#[test]
+fn a_php_static_method_closure_through_a_subclass_is_the_method_its_parent_declares() {
+    let probe = (
+        "src/App/Probe.php",
+        "<?php\n\nnamespace App;\n\nclass Ledger\n{\n    #[\\NoDiscard]\n    public static function total(int $n): int { return $n; }\n\n    /** @return ($n is int ? int : string) */\n    public static function pick(int|string $n): int|string { return $n; }\n}\n\nfinal class BranchLedger extends Ledger\n{\n}\n\nfinal class MyDate extends \\DateTime\n{\n}\n\nfinal class Probe\n{\n    /** @param \\Closure(int): mixed $step */\n    public static function apply(\\Closure $step): mixed { return $step(1); }\n\n    public function close(): void\n    {\n        (BranchLedger::total(...))(1);\n    }\n\n    public function picked(): int\n    {\n        return (BranchLedger::pick(...))(1);\n    }\n\n    public function errors(): mixed\n    {\n        return self::apply(MyDate::getLastErrors(...));\n    }\n}\n",
+    );
+
+    assert_eq!(issues(probe, &[]), ["29:9 unused-method-call", "39:28 invalid-argument"]);
+}
+
+/// An initial value that is not constant runs in the constructor, so a lambda in it is held to the property's function
+/// type, even in a class with no method. PHP 8.5, the version the tests analyze, accepts a `static function` default.
+#[test]
+fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refused() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate = (int n) => fetch(n);\n}\n",
+    );
+    let listed = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate = (int n) => fetch(n);\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate = static function (int $n): int { return fetch($n); };\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, FETCH]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/Pricing.sharp:5:39 invalid-property-default-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
+    assert_eq!(effect_issues(&[listed, FETCH, FETCH_STUB]), Vec::<String>::new());
+}
+
+/// A lambda of the wrong type is refused once, for its type: whether its effects fit a type it does not have is moot.
+#[test]
+fn a_lambda_argument_of_the_wrong_type_is_refused_once() {
+    let twice = (
+        "app/Shop/Twice.sharp",
+        "namespace App.Shop;\n\npublic class Twice\n{\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Twice.apply((string s) => fetch(1));\n}\n",
+    );
+    let php = (
+        "app/Shop/Twice.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Twice\n{\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function run(): int { return self::apply(fn (string $s): int => fetch(1)); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[FETCH]), ["10:53 invalid-argument"]);
+    assert_eq!(issues(twice, &[FETCH, FETCH_STUB]), ["7:37 invalid-argument"]);
+    assert_eq!(effect_issues(&[twice, FETCH, FETCH_STUB]), Vec::<String>::new());
 }
 
 const HOLDER: (&str, &str) = (

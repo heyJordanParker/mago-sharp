@@ -24,6 +24,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_empty_literal_type;
@@ -136,6 +137,17 @@ where
             false,
             &mut union_comparison_result,
         );
+
+        if type_match_found && let Some(value_span) = assigned_value_span {
+            record_function_values(
+                context,
+                artifacts,
+                assigned_value_type,
+                &resolved_property.property_type,
+                value_span,
+                IssueCode::InvalidPropertyAssignmentValue,
+            );
+        }
 
         if type_match_found && let Some(replacement) = union_comparison_result.replacement_union_type {
             widened_assigned_type = Some(match widened_assigned_type {

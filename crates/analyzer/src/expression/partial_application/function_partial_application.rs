@@ -96,7 +96,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionPartialApplication<'aren
                                 continue;
                             };
 
-                            (source_id, signature)
+                            (context.codebase.get_declaring_function_like_identifier(&source_id), signature)
                         } else {
                             continue;
                         }
