@@ -60,7 +60,7 @@ use crate::formula::get_formula;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::property::get_localized_property_type;
 use crate::resolver::static_property::StaticProperty;
-use crate::statement::function_like::expect_function_type;
+use crate::statement::function_like::expect_type;
 use crate::utils::docblock::check_docblock_type_incompatibility;
 use crate::utils::docblock::get_type_from_var_docblock;
 use crate::utils::expression::array::get_array_target_type_given_index;
@@ -157,7 +157,7 @@ where
             None => {
                 let declared_type =
                     declared_target_type(target_expression, target_variable_id.as_ref(), context, block_context);
-                expect_function_type(context, artifacts, source_expression, declared_type.as_deref());
+                expect_type(context, artifacts, source_expression, declared_type.as_deref());
 
                 source_expression.analyze(context, block_context, artifacts)?;
             }

@@ -61,12 +61,13 @@ use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
 use crate::invocation::resolver::resolve_invocation_type;
 use crate::invocation::template_inference::infer_parameter_templates_from_argument;
-use crate::invocation::template_inference::infer_parameter_templates_from_default;
+use crate::invocation::template_inference::infer_unfixed_templates;
 use crate::invocation::template_result::get_class_template_parameters_from_result;
 use crate::invocation::template_result::populate_template_result_from_invocation;
 use crate::invocation::template_result::refine_template_result_for_function_like;
 use crate::statement::function_like::is_member_read;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::names::display_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
 
@@ -227,9 +228,12 @@ where
         };
 
         let parameter = get_parameter_of_argument(&invocation.target, argument, *argument_offset);
-        // A PHP# method value takes its type arguments from its parameter's function type, as `pages.map(this.take)`.
-        let function_type = parameter
-            .filter(|_| context.dialect.is_sharp() && is_member_read(argument_expression))
+        // A PHP# method value takes its type arguments from its parameter's function type, as `pages.map(this.take)`,
+        // and a generic call those its parameter's type fixes, as `this.show(this.make())`, once that type holds no
+        // type parameter of this call that nothing has fixed yet.
+        let is_call = matches!(argument_expression.unparenthesized(), Expression::Call(_));
+        let expected_type = parameter
+            .filter(|_| context.dialect.is_sharp() && (is_member_read(argument_expression) || is_call))
             .map(|(_, parameter)| {
                 let parameter_type = get_parameter_type(
                     context,
@@ -241,7 +245,8 @@ where
                 );
 
                 inferred_type_replacer::replace(&parameter_type, template_result, context.codebase)
-            });
+            })
+            .filter(|parameter_type| !is_call || !holds_unfixed_template(parameter_type, template_result));
 
         analyze_and_store_argument_type(
             context,
@@ -252,7 +257,7 @@ where
             *argument_offset,
             &mut analyzed_argument_types,
             parameter.is_some_and(|p| p.1.is_by_reference()),
-            function_type.as_ref(),
+            expected_type.as_ref(),
         )?;
 
         if let Some((argument_type, span)) = analyzed_argument_types.get(argument_offset).cloned()
@@ -811,7 +816,7 @@ where
             let default_type =
                 unused_parameter.get_default_type().map_or_else(|| Cow::Owned(get_mixed()), Cow::Borrowed);
 
-            infer_parameter_templates_from_default(
+            infer_unfixed_templates(
                 context,
                 &parameter_type,
                 &default_type,
@@ -886,6 +891,32 @@ where
                 ));
             }
         }
+    }
+
+    // Spec section 11: a PHP# call takes the type arguments its arguments and the ones it writes leave unfixed from the
+    // declared type its result goes into, as Swift infers them from the contextual type of the result. A declared type
+    // outside a type parameter's bound fixes nothing, and the declared type's own check reports the call's result.
+    if context.dialect.is_sharp()
+        && let Some(expected_type) = artifacts.get_expected_type(&invocation.span)
+        && let Some(return_type) = invocation.target.get_return_type()
+    {
+        let return_type = resolve_type_in_class_context(
+            context,
+            return_type.clone(),
+            base_class_metadata,
+            calling_class_like_metadata,
+            calling_instance_type,
+            method_class_type,
+        );
+        let return_type = inferred_type_replacer::replace(&return_type, template_result, context.codebase);
+
+        violated_templates.extend(infer_unfixed_templates(
+            context,
+            &return_type,
+            expected_type,
+            template_result,
+            invocation.target.get_dialect(),
+        ));
     }
 
     let mut unbound_templates = WordSet::default();
@@ -1304,10 +1335,10 @@ where
     Ok(())
 }
 
-/// Spec section 11: a call of a PHP# generic method takes its type arguments from its arguments and from those it
-/// writes. A type argument neither fixes, `None` in `type_arguments`, is refused, as C#'s CS0411, instead of running
-/// with its bound. An argument outside the bound fixes one of `violated_templates`, whose own issue names the bound.
-/// Plain PHP's generics keep their fallback.
+/// Spec section 11: a call of a PHP# generic method takes its type arguments from its arguments, from those it writes
+/// and from the declared type its result goes into. A type argument none fixes, `None` in `type_arguments`, is refused,
+/// as C#'s CS0411, instead of running with its bound. An argument or declared type outside the bound fixes one of
+/// `violated_templates`, whose own issue names the bound. Plain PHP's generics keep their fallback.
 fn report_unfixed_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
@@ -1317,12 +1348,12 @@ fn report_unfixed_type_arguments<A>(
 ) where
     A: Arena,
 {
-    let unfixed: Vec<String> = metadata
+    let unfixed: Vec<_> = metadata
         .template_types
         .iter()
         .zip(type_arguments)
         .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
-        .map(|((name, _), _)| format!("`{name}`"))
+        .map(|(template, _)| template)
         .collect();
     if unfixed.is_empty() {
         return;
@@ -1330,20 +1361,39 @@ fn report_unfixed_type_arguments<A>(
 
     let method_name = invocation.target.guess_name(context);
     let unfixed_arguments = if unfixed.len() == 1 { "argument" } else { "arguments" };
+    let unfixed_names = unfixed.iter().map(|(name, _)| format!("`{name}`")).collect::<Vec<_>>().join(", ");
     let written_arguments = if metadata.template_types.len() == 1 { "argument" } else { "arguments" };
     let written = metadata.template_types.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>().join(", ");
+    let name = metadata.original_name;
+    let fixing_result_type =
+        metadata.return_type_metadata.as_ref().map(|metadata| &metadata.type_union).filter(|result| {
+            result.get_all_child_nodes().into_iter().any(|node| {
+                matches!(
+                    node,
+                    TypeRef::Atomic(TAtomic::GenericParameter(parameter)) if unfixed.iter().any(|(name, template)| {
+                        **name == parameter.parameter_name && template.defining_entity == parameter.defining_entity
+                    })
+                )
+            })
+        });
+    let help = match fixing_result_type {
+        Some(result_type) => format!(
+            "Write the type {written_arguments} on the call, as in `{name}<{written}>()`, or give the result a declared type, as in `{} result = {name}();`.",
+            display_type(context, result_type)
+        ),
+        None => format!("Write the type {written_arguments} on the call, as in `{name}<{written}>()`."),
+    };
+
     context.collector.report_with_code(
         IssueCode::MissingTemplateParameter,
-        Issue::error(format!(
-            "Nothing fixes the type {unfixed_arguments} {} of the call to `{method_name}`.",
-            unfixed.join(", ")
-        ))
-        .with_annotation(Annotation::primary(invocation.span).with_message(format!("`{method_name}` is called here")))
-        .with_note("A generic method call takes its type arguments from its arguments and from the ones it writes.")
-        .with_help(format!(
-            "Write the type {written_arguments} on the call, as in `{}<{written}>()`.",
-            metadata.original_name
-        )),
+        Issue::error(format!("Nothing fixes the type {unfixed_arguments} {unfixed_names} of the call to `{method_name}`."))
+            .with_annotation(
+                Annotation::primary(invocation.span).with_message(format!("`{method_name}` is called here")),
+            )
+            .with_note(
+                "A generic method call takes its type arguments from its arguments, from the ones it writes and from the declared type its result goes into.",
+            )
+            .with_help(help),
     );
 }
 
@@ -1596,6 +1646,19 @@ where
     );
 
     resolved_parameter_type
+}
+
+/// Whether `union` holds a type parameter of the call `template_result` is for that nothing has fixed yet.
+fn holds_unfixed_template(union: &TUnion, template_result: &TemplateResult) -> bool {
+    union.get_all_child_nodes().into_iter().any(|node| {
+        matches!(
+            node,
+            TypeRef::Atomic(TAtomic::GenericParameter(parameter))
+                if template_result.template_types.get(&parameter.parameter_name).is_some_and(|templates| {
+                    templates.iter().any(|template| template.defining_entity == parameter.defining_entity)
+                }) && !template_result.has_lower_bound(parameter.parameter_name, &parameter.defining_entity)
+        )
+    })
 }
 
 fn contains_parameter_variable(union: &TUnion) -> bool {

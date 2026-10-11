@@ -52,7 +52,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
     where
         A: Arena,
     {
-        let analyzed = match self {
+        match self {
             // As after an invalid call target, the read gets no type, so nothing reports again on what it reads.
             Access::Property(PropertyAccess {
                 object, property: ClassLikeMemberSelector::Identifier(name), ..
@@ -145,11 +145,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             }
             Access::StaticProperty(access) => access.analyze(context, block_context, artifacts),
             Access::ClassConstant(access) => access.analyze(context, block_context, artifacts),
-        };
-        // Only a method value takes the function type the read goes into, so a property read leaves it to no lambda.
-        artifacts.inferred_parameter_types = None;
-
-        analyzed
+        }
     }
 }
 

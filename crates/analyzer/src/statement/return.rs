@@ -38,7 +38,7 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::is_refused;
-use crate::statement::function_like::expect_function_type;
+use crate::statement::function_like::expect_type;
 use crate::statement::function_like::get_scope_static_class_type;
 use crate::utils::docblock::check_docblock_type_incompatibility;
 use crate::utils::docblock::get_type_from_var_docblock;
@@ -68,12 +68,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
             let return_type =
                 block_context.scope.get_function_like().and_then(|function| function.return_type_metadata.as_ref());
-            expect_function_type(
-                context,
-                artifacts,
-                return_value,
-                return_type.map(|return_type| &return_type.type_union),
-            );
+            expect_type(context, artifacts, return_value, return_type.map(|return_type| &return_type.type_union));
             if let Some(return_type) = return_type {
                 check_sharp_literal_kind(context, return_value, &return_type.type_union);
             }

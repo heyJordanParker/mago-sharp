@@ -8750,9 +8750,9 @@ fn a_generic_method_value_fixed_outside_its_bound_names_only_the_bound() {
     );
 }
 
-/// A call of a generic method whose type argument nothing fixes is refused, as C#'s CS0411 refuses it, instead of
-/// running with the type parameter's bound. Plain PHP's generics keep their fallback, so the PHP twin keeps Mago's
-/// issues.
+/// A call of a generic method whose type argument no argument, written type argument or declared type fixes is
+/// refused, as C#'s CS0411 refuses it, instead of running with the type parameter's bound. Its help names both fixes.
+/// Plain PHP's generics keep their fallback, so the PHP twin keeps Mago's issues.
 #[test]
 fn a_generic_call_nothing_fixes_is_refused() {
     let php = "<?php\n\nnamespace Demo;\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    public function run(): void\n    {\n        $box = $this->make();\n    }\n}\n";
@@ -8762,7 +8762,7 @@ fn a_generic_call_nothing_fixes_is_refused() {
     assert_eq!(
         explained(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "14:19 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.make`. Write the type argument on the call, as in `make<T>()`."
+            "14:19 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.make`. Write the type argument on the call, as in `make<T>()`, or give the result a declared type, as in `Box<T> result = make();`."
         ]
     );
 }
@@ -8778,7 +8778,7 @@ fn a_generic_static_call_nothing_fixes_is_refused() {
     assert_eq!(
         explained(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "16:20 missing-template-parameter Nothing fixes the type arguments `TFirst`, `TSecond` of the call to `Report.pair`. Write the type arguments on the call, as in `pair<TFirst, TSecond>()`."
+            "16:20 missing-template-parameter Nothing fixes the type arguments `TFirst`, `TSecond` of the call to `Report.pair`. Write the type arguments on the call, as in `pair<TFirst, TSecond>()`, or give the result a declared type, as in `Pair<TFirst, TSecond> result = pair();`."
         ]
     );
 }
@@ -8806,6 +8806,144 @@ fn a_generic_call_takes_the_type_argument_an_argument_fixes() {
     assert_eq!(
         recorded_type_arguments(("src/Demo/Report.sharp", sharp), "<?php\n", "this.wrap(order)"),
         ["Demo\\Order"]
+    );
+}
+
+/// Spec section 11's own example: a typed local fixes the type argument of the generic call its value is, as Swift
+/// infers a generic parameter from the contextual type of the result. The PHP twin keeps Mago's issues.
+#[test]
+fn the_declared_type_of_a_local_fixes_the_type_argument_of_a_call() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\ninterface Cache\n{\n    /**\n     * @template T\n     * @return T\n     */\n    public function get(string $key): mixed;\n}\n\nclass Report\n{\n    /** @return list<Order> */\n    public function run(Cache $cache): array\n    {\n        $orders = $cache->get('orders');\n        return $orders;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic interface Cache\n{\n    T get<T>(string key);\n}\n\npublic class Report\n{\n    public List<Order> run(Cache cache)\n    {\n        List<Order> orders = cache.get(\"orders\");\n        return orders;\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.php", php), &[]),
+        [
+            "23:9 mixed-assignment Assigning `mixed` type to a variable may lead to unexpected behavior. Consider using a more specific type to avoid potential issues.",
+            "24:16 mixed-return-statement Could not infer a precise return type for function `Demo\\Report::run`. Saw type `mixed`. Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the function signature to catch potential mismatches earlier.",
+        ]
+    );
+    assert_eq!(
+        recorded_type_arguments(("src/Demo/Report.sharp", sharp), "<?php\n", "cache.get(\"orders\")"),
+        ["list<Demo\\Order>"]
+    );
+}
+
+/// The declared type of a property fixes the type argument of the generic call written to it, a nullable one too.
+/// The PHP twin keeps Mago's issues.
+#[test]
+fn the_declared_type_of_a_property_fixes_the_type_argument_of_a_call() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /** @var Box<Order>|null */\n    public ?Box $box = null;\n\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    public function run(): void\n    {\n        $this->box = $this->make();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<Order>? box { get; set; }\n\n    public Box<T> make<T>() => new Box<T>();\n\n    public void run()\n    {\n        this.box = this.make();\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.php", php), &[]),
+        [
+            "35:22 mixed-property-type-coercion A value with a less specific type `Demo\\Box<mixed>` is being assigned to property `$box` (Demo\\Box<Demo\\Order>|null). Consider adding a type assertion to narrow the type of the value before the assignment."
+        ]
+    );
+    assert_eq!(recorded_type_arguments(("src/Demo/Report.sharp", sharp), "<?php\n", "this.make()"), ["Demo\\Order"]);
+}
+
+/// A method's return type fixes the type argument of the generic call it returns, from a `return` and from an
+/// expression body alike. The PHP twin keeps Mago's issues.
+#[test]
+fn the_return_type_fixes_the_type_argument_of_a_returned_call() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public static function make(): Box\n    {\n        return new Box();\n    }\n\n    /** @return Box<Order> */\n    public function run(): Box\n    {\n        return Report::make();\n    }\n\n    /** @return Box<Order> */\n    public function made(): Box\n    {\n        return self::make();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public static Box<T> make<T>() => new Box<T>();\n\n    public Box<Order> run()\n    {\n        return Report.make();\n    }\n\n    public Box<Order> made() => Self.make();\n}\n";
+    let analyzed = ("src/Demo/Report.sharp", sharp);
+
+    assert_eq!(
+        explained(("src/Demo/Report.php", php), &[]),
+        [
+            "33:16 less-specific-nested-return-statement Returned type `Demo\\Box<mixed>` is less specific than the declared return type `Demo\\Box<Demo\\Order>` for function `Demo\\Report::run` due to nested 'mixed'. Ensure the structure returned by `Demo\\Report::run` strictly adheres to the types specified in the `Demo\\Box<Demo\\Order>` return type declaration.",
+            "39:16 less-specific-nested-return-statement Returned type `Demo\\Box<mixed>` is less specific than the declared return type `Demo\\Box<Demo\\Order>` for function `Demo\\Report::made` due to nested 'mixed'. Ensure the structure returned by `Demo\\Report::made` strictly adheres to the types specified in the `Demo\\Box<Demo\\Order>` return type declaration.",
+        ]
+    );
+    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "Report.make()"), ["Demo\\Order"]);
+    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "Self.make()"), ["Demo\\Order"]);
+}
+
+/// A parameter's declared type is the declared type an argument's result goes into, so it fixes the type argument of
+/// a generic call passed to it, as Swift's contextual type does, the caller's own type parameter too. The PHP twin
+/// keeps Mago's issues.
+#[test]
+fn the_declared_type_of_a_parameter_fixes_the_type_argument_of_a_call_passed_to_it() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    /** @param Box<Order> $box */\n    public function show(Box $box): void\n    {\n    }\n\n    public function run(): void\n    {\n        $this->show($this->make());\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> make<T>() => new Box<T>();\n\n    public void show(Box<Order> box)\n    {\n    }\n\n    public void run()\n    {\n        this.show(this.make());\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public Box<T> fresh<T>() => new Box<T>();\n\n    public void stock(Box<TItem> box)\n    {\n    }\n\n    public void run()\n    {\n        this.stock(this.fresh());\n    }\n}\n";
+    let analyzed = ("src/Demo/Report.sharp", sharp);
+
+    assert_eq!(
+        explained(("src/Demo/Report.php", php), &[]),
+        [
+            "37:21 less-specific-nested-argument-type Argument type mismatch for argument #1 of `Demo\\Report::show`: expected `Demo\\Box<Demo\\Order>`, but provided type `Demo\\Box<mixed>` is less specific. Provide a value that more precisely matches `Demo\\Box<Demo\\Order>` or adjust the parameter type."
+        ]
+    );
+    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "this.make()"), ["Demo\\Order"]);
+    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "this.fresh()"), ["('TItem.demo\\shelf extends mixed)"]);
+}
+
+/// A declared type outside a type parameter's bound fixes nothing, so the call runs with the bound and the
+/// assignment's check reports it once, with no refusal for the type argument. The PHP twin keeps Mago's issues.
+#[test]
+fn a_declared_type_outside_the_bound_is_reported_once_by_the_assignment() {
+    let php = "<?php\n\nnamespace Demo;\n\nabstract class DatabaseEntity\n{\n}\n\ninterface Store\n{\n    /**\n     * @template T of DatabaseEntity\n     * @return T\n     */\n    public function load(): DatabaseEntity;\n}\n\nclass Report\n{\n    public function run(Store $store): int\n    {\n        return $store->load();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Store\n{\n    T load<T : DatabaseEntity>();\n}\n\npublic class Report\n{\n    public int run(Store store)\n    {\n        int count = store.load();\n        return count;\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.php", php), &[]),
+        [
+            "22:16 invalid-return-statement Invalid return type for function `Demo\\Report::run`: expected `int`, but found `Demo\\DatabaseEntity`. Change the return value to match `int`, or update the function's return type declaration."
+        ]
+    );
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "16:21 invalid-local-assignment-value Invalid assignment to `count`: it is declared as `int`. Assign a `int` value, or change the type `count` is declared with."
+        ]
+    );
+}
+
+/// A call whose result holds no type parameter nothing fixes can't take one from a declared type, so its refusal
+/// names only the written type argument. The PHP twin keeps Mago's issues.
+#[test]
+fn a_refused_call_whose_result_holds_no_unfixed_type_parameter_names_only_the_written_fix() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @template T */\n    public function size(): int\n    {\n        return 0;\n    }\n\n    public function run(): int\n    {\n        return $this->size();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public int size<T>() => 0;\n\n    public int run()\n    {\n        int size = this.size();\n        return size;\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.php", php), &[]),
+        [
+            "8:21 unused-template-parameter Template parameter `T` is never used in method `Demo\\Report::size`. Remove the unused `@template T` from the docblock, or use it in a parameter or return type."
+        ]
+    );
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:16 unused-template-parameter Type parameter `T` is never used in method `size`. Remove `T` from `size<…>`.",
+            "9:20 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.size`. Write the type argument on the call, as in `size<T>()`.",
+        ]
+    );
+}
+
+/// An argument fixes a type argument before the declared type does, so a declared type that conflicts with it is the
+/// assignment's one issue. The PHP twin keeps Mago's issues.
+#[test]
+fn an_argument_wins_over_the_declared_type_and_the_conflict_reports_once() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @param T $item\n     * @return Box<T>\n     */\n    public function wrap(mixed $item): Box\n    {\n        return new Box();\n    }\n\n    /** @return Box<Order> */\n    public function run(): Box\n    {\n        return $this->wrap(5);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> wrap<T>(T item) => new Box<T>();\n\n    public Box<Order> run()\n    {\n        Box<Order> box = this.wrap(5);\n        return box;\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.php", php), &[]),
+        [
+            "34:16 invalid-return-statement Invalid return type for function `Demo\\Report::run`: expected `Demo\\Box<Demo\\Order>`, but found `Demo\\Box<int(5)>`. Change the return value to match `Demo\\Box<Demo\\Order>`, or update the function's return type declaration."
+        ]
+    );
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "18:26 invalid-local-assignment-value Invalid assignment to `box`: it is declared as `Box<Order>`. Assign a `Box<Order>` value, or change the type `box` is declared with."
+        ]
     );
 }
 

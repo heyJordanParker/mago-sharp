@@ -40,7 +40,6 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::invocation::InvocationTarget;
 use crate::invocation::analyzer::adjust_offset_for_variadic;
-use crate::statement::function_like::closure_parameter_types;
 use crate::statement::function_like::rejected_nullable_parameter::writes_null;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
@@ -134,7 +133,7 @@ pub fn analyze_and_store_argument_type<'ctx, 'arena, A>(
     argument_offset: usize,
     analyzed_argument_types: &mut HashMap<usize, (TUnion, Span)>,
     referenced_parameter: bool,
-    closure_parameter_type: Option<&TUnion>,
+    expected_type: Option<&TUnion>,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -143,10 +142,8 @@ where
         return Ok(());
     }
 
-    let inferred_parameter_types =
-        closure_parameter_type.map(|closure_parameter_type| closure_parameter_types(context, closure_parameter_type));
-
-    let inferred_parameter_types = std::mem::replace(&mut artifacts.inferred_parameter_types, inferred_parameter_types);
+    let expected_type = expected_type.map(|expected| (argument_expression.unparenthesized().span(), expected.clone()));
+    let expected_type = std::mem::replace(&mut artifacts.expected_type, expected_type);
 
     let was_inside_general_use = block_context.flags.inside_general_use();
     let was_inside_call = block_context.flags.inside_call();
@@ -161,7 +158,7 @@ where
     block_context.flags.set_inside_general_use(was_inside_general_use);
     block_context.flags.set_inside_call(was_inside_call);
     block_context.flags.set_inside_variable_reference(was_inside_variable_reference);
-    artifacts.inferred_parameter_types = inferred_parameter_types;
+    artifacts.expected_type = expected_type;
 
     let argument_type = artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
 

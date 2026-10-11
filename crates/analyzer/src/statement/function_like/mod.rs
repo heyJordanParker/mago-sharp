@@ -238,11 +238,11 @@ where
     parameter_types
 }
 
-/// Spec section 14.2: a PHP# lambda's parameter types are optional where its function type is known. Before a
-/// lambda written for `expected`, such as the value of a typed local or property, or a returned value, this gives
-/// the lambda the parameter types of `expected`, as a call does for a lambda passed to a function type. A member read
-/// takes them too, because a method value of a generic method infers its type arguments from them (section 14.3).
-pub fn expect_function_type<A>(
+/// Gives `expression` the declared type `expected` its value goes into, such as a typed local's or property's, or a
+/// return type, as a call gives an argument its parameter's type. Spec section 14.2: a PHP# lambda takes its parameter
+/// types from it. A member read takes them too, because a method value of a generic method infers its type arguments
+/// from them (section 14.3), and a generic call infers the type arguments nothing else fixes from it (section 11).
+pub fn expect_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
     expression: &Expression<'_>,
@@ -251,11 +251,13 @@ pub fn expect_function_type<A>(
     A: Arena,
 {
     if context.dialect.is_sharp()
-        && (matches!(expression.unparenthesized(), Expression::ArrowFunction(_) | Expression::Closure(_))
-            || is_member_read(expression))
+        && (matches!(
+            expression.unparenthesized(),
+            Expression::ArrowFunction(_) | Expression::Closure(_) | Expression::Call(_)
+        ) || is_member_read(expression))
         && let Some(expected) = expected
     {
-        artifacts.inferred_parameter_types = Some(closure_parameter_types(context, expected));
+        artifacts.expected_type = Some((expression.unparenthesized().span(), expected.clone()));
     }
 }
 
@@ -426,12 +428,7 @@ where
             }
             FunctionLikeBody::Expression(value) => {
                 let return_type = function_like_metadata.return_type_metadata.as_ref();
-                expect_function_type(
-                    context,
-                    &mut artifacts,
-                    value,
-                    return_type.map(|return_type| &return_type.type_union),
-                );
+                expect_type(context, &mut artifacts, value, return_type.map(|return_type| &return_type.type_union));
                 if let Some(return_type) = return_type {
                     check_sharp_literal_kind(context, value, &return_type.type_union);
                 }

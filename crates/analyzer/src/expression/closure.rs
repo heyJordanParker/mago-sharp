@@ -21,6 +21,7 @@ use crate::error::AnalysisError;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::capture_lambda_locals;
+use crate::statement::function_like::closure_parameter_types;
 use crate::statement::function_like::merge_captured_references;
 use crate::statement::function_like::receiver_class;
 use crate::statement::function_like::resolve_closure_like_type;
@@ -193,7 +194,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Closure<'arena> {
             self.return_type_hint.as_ref(),
         );
 
-        let inferred_parameter_types = artifacts.inferred_parameter_types.take();
+        let inferred_parameter_types =
+            artifacts.get_expected_type(self).map(|expected| closure_parameter_types(context, expected));
         let inner_artifacts = analyze_function_like(
             context,
             artifacts,

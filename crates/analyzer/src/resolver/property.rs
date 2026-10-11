@@ -58,6 +58,7 @@ use crate::invocation::rename_trait_objects;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
+use crate::statement::function_like::closure_parameter_types;
 use crate::statement::function_like::get_this_type;
 use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::is_this;
@@ -1772,7 +1773,9 @@ where
         HashMap::default(),
     );
     let mut violated_templates = WordSet::default();
-    if let Some(function_type) = artifacts.inferred_parameter_types.clone() {
+    if let Some(function_type) =
+        artifacts.get_expected_type(&span).map(|expected| closure_parameter_types(context, expected))
+    {
         let signatures = value.types.iter().filter_map(|atomic| match atomic {
             TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
             _ => None,

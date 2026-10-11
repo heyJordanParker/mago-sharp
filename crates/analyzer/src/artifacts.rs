@@ -80,7 +80,9 @@ pub struct AnalysisArtifacts {
     pub loop_scope: Option<LoopScope>,
     pub case_scopes: Vec<CaseScope>,
     pub fully_matched_switch_offsets: HashSet<u32>,
-    pub inferred_parameter_types: Option<HashMap<usize, TUnion>>,
+    /// The declared type the value of the expression at the span goes into: a parameter type, and in PHP# a typed
+    /// local or property or a return type too. Read through [`Self::get_expected_type`].
+    pub(crate) expected_type: Option<(Span, TUnion)>,
     pub method_initialized_properties: HashMap<(Word, Word), WordSet>,
     pub method_calls_this_methods: HashMap<(Word, Word), HashSet<Word>>,
     pub method_calls_parent_constructor: HashMap<(Word, Word), bool>,
@@ -125,7 +127,7 @@ impl AnalysisArtifacts {
             case_scopes: Vec::new(),
             loop_scope: None,
             fully_matched_switch_offsets: HashSet::default(),
-            inferred_parameter_types: None,
+            expected_type: None,
             method_initialized_properties: HashMap::default(),
             method_calls_this_methods: HashMap::default(),
             method_calls_parent_constructor: HashMap::default(),
@@ -317,6 +319,12 @@ impl AnalysisArtifacts {
     /// class with type arguments. `None` for a class without type arguments.
     pub fn get_tested_type(&self, hint: &impl HasSpan) -> Option<&TUnion> {
         self.tested_types.get(&get_expression_range(hint))
+    }
+
+    /// The declared type the value of `expression` goes into, when the expression that set it is `expression` itself
+    /// and not one before or around it.
+    pub(crate) fn get_expected_type(&self, expression: &impl HasSpan) -> Option<&TUnion> {
+        self.expected_type.as_ref().filter(|(span, _)| *span == expression.span()).map(|(_, expected)| expected)
     }
 
     /// Get the type of expression `expression`.

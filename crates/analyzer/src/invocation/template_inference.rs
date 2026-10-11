@@ -1305,40 +1305,43 @@ where
     violated_templates
 }
 
-/// Infers template types for a parameter based on its **default value**.
-///
-/// This function is used when an argument for a generic parameter is omitted in a
-/// function call. It reconciles the parameter's declared type (which contains
-/// templates) with the known type of its default value to determine what the
-/// templates should resolve to.
+/// Infers the templates no argument fixed from a type that holds no argument: a parameter's **default value**, or the
+/// **declared type** a call's result goes into. A template that already has a bound keeps it.
 ///
 /// For example, if a function `add<A, B>(A $a, B $b = 1): A|B` is called as `add(2)`,
-/// this function would be used on parameter `$b` to infer that `T` is `int`.
+/// this function would be used on parameter `$b` to infer that `B` is `int`. In PHP#,
+/// `List<Order> orders = cache.get("orders")` against `T get<T>(string key)` infers that `T` is `List<Order>`.
+///
+/// Returns the templates `input_type` falls outside the bound of. They get no bound from it.
 ///
 /// # Arguments
 ///
 /// * `context`: The analysis context.
-/// * `parameter_type`: The declared type of the parameter (the "container").
-/// * `default_type`: The type of the parameter's default value (the "input").
+/// * `container_type`: The parameter's declared type, or the call's return type, which hold the templates.
+/// * `input_type`: The type of the parameter's default value, or the declared type the result goes into.
 /// * `template_result`: The map where inferred template types are stored.
-/// * `target_dialect`: The dialect the call's target is declared in, which `parameter_type` is read in.
-pub fn infer_parameter_templates_from_default<A>(
+/// * `target_dialect`: The dialect the call's target is declared in, which `container_type` is read in.
+pub fn infer_unfixed_templates<A>(
     context: &Context<'_, '_, A>,
-    parameter_type: &TUnion,
-    default_type: &TUnion,
+    container_type: &TUnion,
+    input_type: &TUnion,
     template_result: &mut TemplateResult,
     target_dialect: Dialect,
-) where
+) -> WordSet
+where
     A: Arena,
 {
+    let mut violations = Vec::new();
     infer_templates_from_input_and_container_types(
         context,
-        parameter_type,
-        default_type,
+        container_type,
+        input_type,
         template_result,
         InferenceOptions { infer_only_if_new: true, dialect: target_dialect, ..Default::default() },
-        &mut Vec::new(),
+        &mut violations,
     );
+
+    violations.into_iter().map(|violation| violation.template_name).collect()
 }
 
 /// Replaces unbound `GenericParameter` types with their constraint types.
