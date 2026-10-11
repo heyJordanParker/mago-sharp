@@ -14,6 +14,7 @@ use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Law;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
@@ -1490,31 +1491,32 @@ pub fn check_members<'ast, 'arena>(
                 }
                 constant_names.insert(case_name_bytes, (false, enum_case.item.name().span()));
             }
-            ClassLikeMember::Law(law) => {
-                for parameter in &law.parameter_list.parameters {
-                    let name = BytesDisplay(parameter.variable.name);
-                    let refusal = if let Some(default_value) = &parameter.default_value {
-                        Some((
-                            format!("so `{name}` cannot have a default"),
-                            default_value.span(),
-                            "Default written here.",
-                        ))
-                    } else {
-                        parameter.ellipsis.map(|ellipsis| {
-                            (format!("so `{name}` cannot be variadic"), ellipsis, "Variadic written here.")
-                        })
-                    };
-
-                    if let Some((reason, span, written)) = refusal {
-                        context.report(
-                            Issue::error(format!("A law's parameters range over every value, {reason}."))
-                                .with_annotation(Annotation::primary(span).with_message(written))
-                                .with_note("A law states a fact about every value of its parameters."),
-                        );
-                    }
-                }
-            }
+            ClassLikeMember::Law(law) => check_law_parameters(law, context),
             _ => {}
+        }
+    }
+}
+
+/// Reports a law parameter with a default or written variadic, spec section 28: a law's parameters range over every
+/// value.
+#[inline]
+pub fn check_law_parameters(law: &Law, context: &mut Context<'_, '_, '_>) {
+    for parameter in &law.parameter_list.parameters {
+        let name = BytesDisplay(parameter.variable.name);
+        let refusal = if let Some(default_value) = &parameter.default_value {
+            Some((format!("so `{name}` cannot have a default"), default_value.span(), "Default written here."))
+        } else {
+            parameter
+                .ellipsis
+                .map(|ellipsis| (format!("so `{name}` cannot be variadic"), ellipsis, "Variadic written here."))
+        };
+
+        if let Some((reason, span, written)) = refusal {
+            context.report(
+                Issue::error(format!("A law's parameters range over every value, {reason}."))
+                    .with_annotation(Annotation::primary(span).with_message(written))
+                    .with_note("A law states a fact about every value of its parameters."),
+            );
         }
     }
 }

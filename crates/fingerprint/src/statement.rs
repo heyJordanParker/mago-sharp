@@ -22,6 +22,7 @@ impl Fingerprintable for Statement<'_> {
             Statement::Inline(inline) => inline.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Namespace(namespace) => namespace.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Use(r#use) => r#use.fingerprint_with_hasher(hasher, resolved_names, options),
+            Statement::Module(module) => module.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Class(class) => class.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Interface(interface) => interface.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Trait(r#trait) => r#trait.fingerprint_with_hasher(hasher, resolved_names, options),

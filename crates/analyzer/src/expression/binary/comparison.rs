@@ -636,7 +636,7 @@ fn check_comparison_operand<A>(
             Issue::error(format!("{subject} is `{}`, which {reason}.", display_type(context, operand_type)))
                 .with_annotation(Annotation::primary(operand.span()))
                 .with_note(note)
-                .with_help("Narrow the value with `is` or `as` to a number or a string before comparing it.")
+                .with_help("Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.")
         } else {
             Issue::error(format!("{subject} has `mixed` type."))
                 .with_annotation(Annotation::primary(operand.span()).with_message("This has type `mixed`"))

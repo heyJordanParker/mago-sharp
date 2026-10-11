@@ -24,3 +24,4 @@ mago-database = { workspace = true }
 
 [dev-dependencies]
 mago-allocator = { workspace = true }
+regex = { workspace = true }

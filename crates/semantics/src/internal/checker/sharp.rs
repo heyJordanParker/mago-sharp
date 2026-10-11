@@ -61,6 +61,8 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
@@ -101,6 +103,7 @@ use mago_syntax::token::Precedence;
 use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
+use crate::internal::checker::class_like::check_law_parameters;
 use crate::internal::consts::RESERVED_CLASS_NAMES;
 use crate::internal::consts::RESERVED_KEYWORDS;
 use crate::internal::consts::SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED;
@@ -373,6 +376,8 @@ pub enum Place {
     Signature,
     /// An enum and its members.
     Enum,
+    /// A module and its members.
+    Module,
     /// A field or a property, both of which the CST calls a property: its modifiers, type and name.
     FieldOrProperty,
     /// A class constant: its modifiers, type and name.
@@ -458,6 +463,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
     }
 
     match (node, place) {
+        (Node::Statement(statement), File) if !is_module_file_statement(statement, context) => {
+            context.report(
+                Issue::error("Module.sharp holds only its folder's module.")
+                    .with_annotation(Annotation::primary(statement.span()).with_message("Declared in Module.sharp."))
+                    .with_note("A namespace's `Module.sharp` holds its namespace, its imports and one `module { … }`."),
+            );
+
+            None
+        }
         (Node::Statement(Statement::Namespace(namespace)), File) if !is_slice_namespace(namespace, context.program) => {
             report_not_supported(
                 namespace.r#namespace.span,
@@ -477,6 +491,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Statement::Namespace(_)
                 | Statement::Use(_)
                 | Statement::Extern(_)
+                | Statement::Module(_)
                 | Statement::Class(_)
                 | Statement::Interface(_)
                 | Statement::Enum(_),
@@ -507,6 +522,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // The walk checks a class's, an interface's and an enum's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
+        (Node::Module(module), File) => check_module_file_name(module, context),
+        (Node::ModuleMember(ModuleMember::Law(_)), Place::Module) => Some(Place::Module),
         (Node::FunctionLikeParameterList(parameters), Method | Signature) => {
             report_optional_before_required(parameters, context);
 
@@ -592,7 +609,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
         (Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Law(_)), Class | Enum) => Some(place),
         // A law's parameters and body are checked as a method's. `check_members` refuses a default and a variadic one.
-        (Node::Law(_), Class | Enum) => Some(Method),
+        (Node::Law(_), Class | Enum | Place::Module) => Some(Method),
         (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Class) => Some(Class),
         // An operator's parts are a method's, and `check_operator` decides its modifiers and its symbol, the one binary
         // operator a method's parts hold.
@@ -707,7 +724,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             context.report(
                 Issue::error("PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.")
                     .with_annotation(Annotation::primary(mixed.span).with_message("Written here."))
-                    .with_note("PHP# removes PHP's `mixed`: `Any` holds a value of any type but null, and `Any?` also allows null."),
+                    .with_note("`Any` holds a value of any type but null, and `Any?` also allows null."),
             );
 
             None
@@ -3011,6 +3028,7 @@ const fn supported(place: Place) -> &'static str {
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`."
         }
+        Place::Module => "A PHP# module states laws.",
         Place::FieldOrProperty => {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
@@ -3343,6 +3361,67 @@ pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) 
                 .with_help(rename),
             );
         }
+    }
+}
+
+/// Checks a module's laws, spec section 28: each law's parameters as a class law's, and no two laws of one name,
+/// compared ignoring case, as a class's methods and laws are.
+#[inline]
+pub fn check_module(module: &Module, context: &mut Context<'_, '_, '_>) {
+    let mut stated: Vec<&LocalIdentifier> = Vec::new();
+    for ModuleMember::Law(law) in &module.members {
+        check_law_parameters(law, context);
+
+        if let Some(earlier) = stated.iter().find(|earlier| earlier.value.eq_ignore_ascii_case(law.name.value)) {
+            context.report(
+                Issue::error(format!("The module already states a law named `{}`.", BytesDisplay(earlier.value)))
+                    .with_annotation(Annotation::primary(law.name.span).with_message("Stated again here."))
+                    .with_annotation(Annotation::secondary(earlier.span).with_message("First stated here."))
+                    .with_note("Law names are case-insensitive."),
+            );
+        } else {
+            stated.push(&law.name);
+        }
+    }
+}
+
+/// Decides a module by its file's name, spec section 32: the module of a folder is declared in its `Module.sharp`. An
+/// environment module, in `Module.<Environment>.sharp`, is not supported yet.
+fn check_module_file_name(module: &Module, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    if Module::is_declared_in(context.source_file) {
+        return Some(Place::Module);
+    }
+
+    let path: &[u8] = &context.source_file.name;
+    let name = path.rsplit(|&byte| byte == b'/').next().unwrap_or(path);
+    let issue = if name.starts_with(b"Module.") && name.ends_with(b".sharp") {
+        Issue::error("An environment module is not supported yet in PHP#.")
+            .with_annotation(Annotation::primary(module.module.span).with_message("Not supported yet."))
+    } else {
+        Issue::error("A module is declared in its folder's Module.sharp.")
+            .with_annotation(Annotation::primary(module.module.span).with_message("Declared here."))
+    };
+    context.report(issue);
+
+    None
+}
+
+/// Whether `statement` may stand at the top of the checked file: any statement outside `Module.sharp`, and in
+/// `Module.sharp` its namespace, its imports and its first module, spec section 32.
+fn is_module_file_statement(statement: &Statement, context: &Context<'_, '_, '_>) -> bool {
+    if !Module::is_declared_in(context.source_file) {
+        return true;
+    }
+
+    match statement {
+        Statement::Namespace(_) | Statement::Use(_) => true,
+        Statement::Module(module) => file_statements(context.program)
+            .find_map(|statement| match statement {
+                Statement::Module(first) => Some(first.span()),
+                _ => None,
+            })
+            .is_some_and(|first| first == module.span()),
+        _ => false,
     }
 }
 
