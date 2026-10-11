@@ -3688,7 +3688,7 @@ fn a_lambda_passed_to_php_takes_its_parameter_types_from_the_php_signature_as_in
 }
 
 #[test]
-fn a_function_type_is_a_closure_type_that_takes_lambdas_and_calls_as_in_php() {
+fn a_function_type_takes_lambdas_and_calls() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)> scale;\n\n    public Report(int factor)\n    {\n        this.scale = n => n * factor;\n    }\n\n    public Function<bool(int)> above(int floor) => n => n > floor;\n\n    public int run(int extra)\n    {\n        const scale = this.scale;\n        const check = this.above(extra);\n        Function<int(int)> twice = n => n * 2;\n        return check(twice(scale(extra))) ? 1 : 0;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
@@ -5769,7 +5769,7 @@ fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
 }
 
 #[test]
-fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
+fn a_nullable_field_of_a_function_type_with_an_effect_is_accepted() {
     let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
@@ -5777,14 +5777,14 @@ fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin
 
 /// `Http` and `Mail` are both effects of the map's value type, so the map takes two type arguments.
 #[test]
-fn a_map_of_function_types_with_two_effects_is_checked_as_its_php_twin() {
+fn a_map_of_function_types_with_two_effects_is_accepted() {
     let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n\n    public int size() => count(this.handlers);\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
 }
 
 #[test]
-fn a_function_type_taking_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
+fn a_function_type_taking_a_function_type_with_an_effect_is_accepted() {
     let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
