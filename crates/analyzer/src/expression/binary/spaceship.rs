@@ -204,7 +204,7 @@ fn check_spaceship_operand<'arena, A>(
             Issue::error(format!("{side} operand of `<=>` is `{}`, which has no order.", display_type(context, operand_type)))
                 .with_annotation(Annotation::primary(operand.span()))
                 .with_note("An `Any` may hold any value, and PHP# orders only numbers, strings and classes that declare `operator <=>`.")
-                .with_help("Narrow the value with `is` or `as` to a number or a string before comparing it.")
+                .with_help("Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.")
         } else {
             Issue::error(format!("{side} operand in spaceship comparison (`<=>`) has `mixed` type."))
                 .with_annotation(Annotation::primary(operand.span()).with_message("This has type `mixed`"))

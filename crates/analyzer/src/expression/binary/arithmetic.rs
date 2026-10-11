@@ -635,7 +635,9 @@ fn report_mixed_operand<A>(
         (
             display_operand(context, operand_type),
             "An `Any` may hold any value, so arithmetic on it is unsafe until it is checked.".to_owned(),
-            format!("Narrow the {side_name} operand with `is` or `as` to a number before using it."),
+            format!(
+                "Check the {side_name} operand with `is` or `match` first, as in `if (value is int n)`, and use `n`."
+            ),
         )
     } else {
         (

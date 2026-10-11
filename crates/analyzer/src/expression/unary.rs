@@ -326,7 +326,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
                                     .with_note(
                                         "An `Any` may hold any value, so negating it is unsafe until it is checked.",
                                     )
-                                    .with_help("Narrow the operand with `is` or `as` to a number before negating it.")
+                                    .with_help(
+                                        "Check the operand with `is` or `match` first, as in `if (value is int n)`, and negate `n`.",
+                                    )
                             } else {
                                 Issue::error("Cannot reliably negate a `mixed` operand.")
                                     .with_annotation(
@@ -829,7 +831,9 @@ where
                             Annotation::primary(operand.span()).with_message(format!("Operand is `{operand_name}`.")),
                         )
                         .with_note("An `Any` may hold any value, so incrementing it is unsafe until it is checked.")
-                        .with_help("Narrow the operand with `is` or `as` to a number before incrementing it.")
+                        .with_help(
+                            "Check the operand with `is` or `match` first, as in `if (value is int n)`, and increment `n`.",
+                        )
                 } else {
                     Issue::error("Cannot reliably increment a `mixed` operand.")
                         .with_annotation(
@@ -1074,7 +1078,9 @@ where
                             Annotation::primary(operand.span()).with_message(format!("Operand is `{operand_name}`.")),
                         )
                         .with_note("An `Any` may hold any value, so decrementing it is unsafe until it is checked.")
-                        .with_help("Narrow the operand with `is` or `as` to a number before decrementing it.")
+                        .with_help(
+                            "Check the operand with `is` or `match` first, as in `if (value is int n)`, and decrement `n`.",
+                        )
                 } else {
                     Issue::error("Cannot reliably decrement a `mixed` operand.")
                         .with_annotation(

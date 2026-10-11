@@ -35,6 +35,9 @@ use mago_syntax::parser::parse_file_with_dialect;
 use mago_syntax::settings::ParserSettings;
 use mago_word::WordSet;
 
+#[path = "../../../../tests/support/sharp_words.rs"]
+mod sharp_words;
+
 /// `Lib\Model`, a plain PHP parent whose accessors read and write an attribute by name, as Eloquent's do.
 pub const MODEL: (&str, &str) = (
     "src/Lib/Model.php",
@@ -122,7 +125,8 @@ pub fn checked_inlining<R>(
     checked_file(&file, library, forms, then)
 }
 
-/// [`checked_inlining`] of `file` as the test builds it, such as a file a workspace root holds.
+/// [`checked_inlining`] of `file` as the test builds it, such as a file a workspace root holds. Panics when an issue of
+/// the file names a word only PHP has, in its message, help, notes or annotations.
 pub fn checked_file<R>(
     file: &File,
     library: &[(&str, &str)],
@@ -152,6 +156,14 @@ pub fn checked_file<R>(
         .analyze_with_artifacts(program, &mut result)
         .expect("the analysis runs");
     let issues: Vec<Issue> = semantic_issues.into_iter().chain(result.issues).collect();
+    let leaks: Vec<String> = issues
+        .iter()
+        .filter_map(|issue| {
+            let (text, word) = sharp_words::banned_word(issue)?;
+            Some(format!("`{}` says {text:?}, which names {word}", issue.code.as_deref().unwrap_or("none")))
+        })
+        .collect();
+    assert!(leaks.is_empty(), "A `.sharp` message speaks PHP#.\n{}", leaks.join("\n"));
 
     match check(file, program, names, &artifacts, &metadata, forms, &issues) {
         Ok(checked) => Ok(then(&checked)),

@@ -86,8 +86,10 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
                         .with_annotation(
                             Annotation::primary(self.span()).with_message(format!("Constant `{name}` is not defined.")),
                         )
-                        .with_note("The constant might be misspelled, not defined, or not imported.")
-                        .with_help(format!("Check `{name}` for typos, and ensure the constant is defined.")),
+                        .with_note("The constant might be misspelled or not defined.")
+                        .with_help(format!(
+                            "Check `{name}` for typos. PHP# declares no global constant, so a bare name reads a constant declared in a `.php` file, and a class constant is read through its class, as in `Limits.MAX`."
+                        )),
                 );
             } else {
                 context.collector.report_with_code(

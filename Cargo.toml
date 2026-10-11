@@ -207,8 +207,6 @@ hashbrown = "0.17.1"
 serde_norway = "0.9.42"
 toml = "1.0.3"
 regex = "1.11.0"
-proc-macro2 = "1"
-syn = "2"
 indicatif = { version = "0.18.0" }
 paste = "1.0.15"
 criterion = { package = "codspeed-criterion-compat", version = "4.5.0" }
@@ -321,9 +319,6 @@ serde = { workspace = true }
 temp-env = { workspace = true }
 pretty_assertions = { workspace = true }
 serde_json = { workspace = true }
-proc-macro2 = { workspace = true }
-regex = { workspace = true }
-syn = { workspace = true }
 
 [build-dependencies]
 mago-prelude = { workspace = true, features = ["build"] }

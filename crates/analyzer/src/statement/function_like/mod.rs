@@ -1737,7 +1737,7 @@ where
 
         let issue = if context.dialect.is_sharp() {
             let name = display_class_like_name(context, *name);
-            Issue::error(format!("Cannot find class, interface or enum `{name}`."))
+            Issue::error(format!("Cannot find type `{name}`."))
                 .with_annotation(
                     Annotation::primary(type_metadata.span)
                         .with_message(format!("`{name}` is not defined in the current codebase")),
