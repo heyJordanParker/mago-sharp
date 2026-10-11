@@ -2056,17 +2056,99 @@ fn an_int_written_to_a_float_static_field_is_refused() {
 #[test]
 fn a_value_that_may_be_an_int_or_a_string_where_a_float_is_expected_keeps_the_wrong_type_message() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run(int|string value)\n    {\n        float total = value;\n        return total;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function run(int|string $value): float\n    {\n        $total = $value;\n        return $total;\n    }\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &[]),
         ["Invalid assignment to `total`: it is declared as `float`."]
     );
+    // PHP converts the `int` and refuses only the `string`, at the return.
+    assert_eq!(codes(&issues(("src/Demo/Report.php", php), &[])), ["invalid-return-statement"]);
+}
+
+/// A collection, an object or a function is no `int`, so one whose element, type argument or return type is an
+/// `int` where a `float` is expected keeps the message of any value of the wrong type for its place.
+#[test]
+fn a_collection_of_ints_where_one_of_floats_is_expected_keeps_the_wrong_type_message() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public List<float> run(List<int> ints)\n    {\n        List<float> prices = ints;\n        return prices;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /**\n     * @param list<int> $ints\n     * @return list<float>\n     */\n    public function run(array $ints): array\n    {\n        /** @var list<float> $prices */\n        $prices = $ints;\n        return $prices;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["Invalid assignment to `prices`: it is declared as `List<float>`."]
+    );
+}
+
+const BOXES: &str = "<?php\n\nnamespace Lib;\n\n/** @template-covariant T */\nfinal class Box\n{\n    /** @param T $item */\n    public function __construct(public readonly mixed $item) {}\n}\n\nfinal class Boxes\n{\n    /** @param Box<float> $box */\n    public static function unbox(Box $box): float\n    {\n        return $box->item;\n    }\n\n    /** @param iterable<float> $values */\n    public static function total(iterable $values): float\n    {\n        $sum = 0.0;\n        foreach ($values as $value) {\n            $sum += $value;\n        }\n\n        return $sum;\n    }\n}\n";
+
+#[test]
+fn an_object_whose_covariant_type_argument_is_int_where_float_is_expected_is_refused() {
+    let sharp = "namespace Demo;\n\nimport Lib.Box;\nimport Lib.Boxes;\n\nclass Report\n{\n    public float run()\n    {\n        const box = new Box(1);\n        return Boxes.unbox(box);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Box;\nuse Lib\\Boxes;\n\nclass Report\n{\n    public function run(): float\n    {\n        $box = new Box(1);\n        return Boxes::unbox($box);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Lib/Boxes.php", BOXES)]), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Boxes.php", BOXES)]),
+        ["11:28 possibly-invalid-argument"]
+    );
+}
+
+#[test]
+fn a_list_of_ints_passed_where_an_iterable_of_floats_is_expected_is_refused() {
+    let sharp = "namespace Demo;\n\nimport Lib.Boxes;\n\nclass Report\n{\n    public float run(List<int> ints) => Boxes.total(ints);\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Boxes;\n\nclass Report\n{\n    /** @param list<int> $ints */\n    public function run(array $ints): float\n    {\n        return Boxes::total($ints);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Lib/Boxes.php", BOXES)]), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Boxes.php", BOXES)]),
+        ["7:53 possibly-invalid-argument"]
+    );
+}
+
+#[test]
+fn a_lambda_returning_an_int_where_a_float_returning_function_is_expected_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run()\n    {\n        Function<float()> rate = () => 1;\n        return rate();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function run(): float\n    {\n        /** @var \\Closure(): float $rate */\n        $rate = fn() => 1;\n        return $rate();\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["Invalid assignment to `rate`: it is declared as `Function<float()>`."]
+    );
+}
+
+#[test]
+fn a_lambda_taking_a_float_where_a_function_passes_an_int_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run()\n    {\n        Function<float(int)> half = (float amount) => amount / 2.0;\n        return half(3);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function run(): float\n    {\n        /** @var \\Closure(int): float $half */\n        $half = fn(float $amount): float => $amount / 2.0;\n        return $half(3);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["Invalid assignment to `half`: it is declared as `Function<float(int)>`."]
+    );
+}
+
+#[test]
+fn an_int_written_by_key_into_a_float_map_field_is_refused_at_the_value() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private Map<string, float> rates = [:];\n\n    public Map<string, float> reset()\n    {\n        this.rates[\"a\"] = 2;\n        return this.rates;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @var array<string, float> */\n    private array $rates = [];\n\n    /** @return array<string, float> */\n    public function reset(): array\n    {\n        $this->rates['a'] = 2;\n        return $this->rates;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "9:27 invalid-property-assignment-value `int` is not `float`: write 2.0, or convert with (float) n | Declared `Map<string, float>`."
+        ]
+    );
 }
 
 #[test]
 fn a_float_a_written_conversion_and_mixed_arithmetic_land_where_a_float_is_expected() {
-    let sharp = "namespace Demo;\n\nimport Lib.Cell;\n\nclass Report\n{\n    public float run(int count, int n)\n    {\n        float total = 0.0;\n        float price = (float) count;\n        float half = count * 1.5;\n        int|float either = 1;\n        const cell = new Cell(2.0);\n        cell.put((float) n);\n        return total + price + half + either + cell.get();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Cell;\n\nclass Report\n{\n    public float run(int count, int n)\n    {\n        float total = 0.0;\n        float price = (float) count;\n        float half = count * 1.5;\n        int|float either = 1;\n        const cell = new Cell(2.0);\n        cell.put(2.0);\n        cell.put((float) n);\n        return total + price + half + either + cell.get();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Cell;\n\nclass Report\n{\n    public function run(int $count, int $n): float\n    {\n        $total = 0.0;\n        $price = (float) $count;\n        $half = $count * 1.5;\n        $either = 1;\n        $cell = new Cell(2.0);\n        $cell->put(2.0);\n        $cell->put((float) $n);\n        return $total + $price + $half + $either + $cell->get();\n    }\n}\n";
 
+    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Lib/Cell.php", CELL)]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Cell.php", CELL)]), Vec::<String>::new());
 }
 

@@ -179,7 +179,7 @@ pub fn is_contained_by(
             input_type_part,
             container_type_part,
             inside_assertion,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules),
         );
     }
 

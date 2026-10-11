@@ -91,7 +91,7 @@ pub(crate) fn is_contained_by(
             continue;
         };
 
-        let mut parameter_comparison_result = ComparisonResult::new();
+        let mut parameter_comparison_result = ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules);
 
         if !union_comparator::is_contained_by_with_erased_template_arguments(
             codebase,
@@ -129,11 +129,18 @@ pub(crate) fn is_contained_by(
         return false;
     };
 
-    union_comparator::is_return_type_contained_by(
+    let returns_fit = union_comparator::is_return_type_contained_by(
         codebase,
         input_return_type,
         container_return_type,
         input_return_type.ignore_falsable_issues(),
         atomic_comparison_result,
-    )
+    );
+
+    // A function is no `int`, so its return type never names the int a `float` refused.
+    if !returns_fit {
+        atomic_comparison_result.int_for_float = None;
+    }
+
+    returns_fit
 }

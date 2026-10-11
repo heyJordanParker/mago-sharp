@@ -89,9 +89,16 @@ mod tests {
     use crate::ttype::atomic::object::TObject;
     use crate::ttype::comparator::ComparisonResult;
     use crate::ttype::comparator::union_comparator::is_contained_by;
+    use std::sync::Arc;
+
+    use crate::misc::GenericParent;
+    use crate::ttype::atomic::generic::TGenericParameter;
+    use crate::ttype::atomic::scalar::int::TInteger;
+    use crate::ttype::get_float;
     use crate::ttype::get_int;
     use crate::ttype::get_named_object;
     use crate::ttype::get_null;
+    use crate::ttype::get_string;
     use crate::ttype::union::TUnion;
 
     pub(crate) fn create_test_codebase(code: &'static str) -> CodebaseMetadata {
@@ -308,5 +315,28 @@ mod tests {
             assert_is_contained_by(&codebase, &error, &other, true, &mut ComparisonResult::new());
             assert_is_contained_by(&codebase, &other, &error, true, &mut ComparisonResult::new());
         }
+    }
+
+    /// A template's value fits where its constraint fits, so the refused `int` is named only when every part of the
+    /// constraint that does not fit is that `int`, whichever part comes last.
+    #[test]
+    fn a_template_names_the_refused_int_only_when_its_whole_constraint_is_refused_for_it() {
+        let codebase = CodebaseMetadata::default();
+        let template = |constraint: TUnion| {
+            TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                word("T"),
+                Arc::new(constraint),
+                GenericParent::ClassLike(word("Box")),
+            )))
+        };
+        let string_or_int = TUnion::from_vec(vec![get_string().get_single().clone(), get_int().get_single().clone()]);
+
+        let mut int_result = ComparisonResult::with_sharp_rules(true);
+        assert_is_contained_by(&codebase, &template(get_int()), &get_float(), false, &mut int_result);
+        assert_eq!(int_result.int_for_float, Some(TInteger::Unspecified));
+
+        let mut string_or_int_result = ComparisonResult::with_sharp_rules(true);
+        assert_is_contained_by(&codebase, &template(string_or_int), &get_float(), false, &mut string_or_int_result);
+        assert_eq!(string_or_int_result.int_for_float, None);
     }
 }

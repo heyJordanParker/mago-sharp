@@ -34,22 +34,44 @@ pub fn is_contained_by(
     }
 
     let container_has_template = container_type.has_template_or_static();
+    let all_matched =
+        are_parts_contained_by(input_type.types.as_ref(), union_comparison_result, |input_type_part, result| {
+            is_contained_by_atomic(
+                codebase,
+                input_type,
+                input_type_part,
+                container_type,
+                container_has_template,
+                ignore_null,
+                ignore_false,
+                inside_assertion,
+                result,
+            )
+        });
+
+    if all_matched
+        && union_comparison_result.replacement_union_type.is_none()
+        && input_type.is_literal_of(container_type)
+    {
+        union_comparison_result.replacement_union_type = Some(container_type.clone());
+    }
+
+    all_matched
+}
+
+/// Whether every one of `parts` fits, by `is_part_contained_by`. A failed comparison names the refused `int` in
+/// `int_for_float` only when every part it refuses was refused for that `int`.
+fn are_parts_contained_by<'part>(
+    parts: impl IntoIterator<Item = &'part TAtomic>,
+    union_comparison_result: &mut ComparisonResult,
+    mut is_part_contained_by: impl FnMut(&TAtomic, &mut ComparisonResult) -> bool,
+) -> bool {
     let mut all_matched = true;
     let mut int_for_float = None;
     let mut refused_otherwise = false;
 
-    for input_type_part in input_type.types.as_ref() {
-        let matched = is_contained_by_atomic(
-            codebase,
-            input_type,
-            input_type_part,
-            container_type,
-            container_has_template,
-            ignore_null,
-            ignore_false,
-            inside_assertion,
-            union_comparison_result,
-        );
+    for part in parts {
+        let matched = is_part_contained_by(part, union_comparison_result);
 
         match (matched, union_comparison_result.int_for_float.take()) {
             (true, _) => {}
@@ -66,13 +88,6 @@ pub fn is_contained_by(
         union_comparison_result.int_for_float = int_for_float;
     }
 
-    if all_matched
-        && union_comparison_result.replacement_union_type.is_none()
-        && input_type.is_literal_of(container_type)
-    {
-        union_comparison_result.replacement_union_type = Some(container_type.clone());
-    }
-
     all_matched
 }
 
@@ -87,7 +102,7 @@ pub fn is_contained_by_with_erased_template_arguments(
     container_type: &TUnion,
     union_comparison_result: &mut ComparisonResult,
 ) -> bool {
-    let mut direct_result = ComparisonResult::new();
+    let mut direct_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
     if is_contained_by(codebase, input_type, container_type, false, false, false, &mut direct_result) {
         *union_comparison_result = direct_result;
         return true;
@@ -184,22 +199,23 @@ fn is_contained_by_atomic(
         TAtomic::GenericParameter(TGenericParameter { intersection_types: None, constraint, .. })
             if !container_has_template =>
         {
-            let mut all_matched = true;
-            for constraint_type_part in constraint.types.as_ref() {
-                all_matched &= is_contained_by_atomic(
-                    codebase,
-                    input_type,
-                    constraint_type_part,
-                    container_type,
-                    container_has_template,
-                    ignore_null,
-                    ignore_false,
-                    inside_assertion,
-                    union_comparison_result,
-                );
-            }
-
-            return all_matched;
+            return are_parts_contained_by(
+                constraint.types.as_ref(),
+                union_comparison_result,
+                |constraint_type_part, result| {
+                    is_contained_by_atomic(
+                        codebase,
+                        input_type,
+                        constraint_type_part,
+                        container_type,
+                        container_has_template,
+                        ignore_null,
+                        ignore_false,
+                        inside_assertion,
+                        result,
+                    )
+                },
+            );
         }
         _ => (),
     }

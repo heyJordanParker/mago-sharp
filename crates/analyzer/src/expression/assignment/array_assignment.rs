@@ -160,11 +160,11 @@ where
         root_array_type
     };
 
-    // A PHP# local, parameter or `field` is the collection it is declared as, so an element written into it must fit
-    // that type's elements, as one written into a property must, and the place keeps its type. Its key is the index
-    // checks' to report.
+    // A PHP# local, parameter, `field` or property is the collection it is declared as, so an element written into it
+    // must fit that type's elements, and the place keeps its type. An `int` written where the elements are `float` is
+    // reported at the value. A property's other mismatches are `property_assignment`'s to report, and its key is the
+    // index checks'.
     if context.dialect.is_sharp()
-        && let Expression::ConstantAccess(access) = root_array_expression.unparenthesized()
         && let Some(declared) = get_declared_collection(context, block_context, artifacts, root_array_expression)
     {
         let (_, declared_element) = get_array_parameters(&declared, context.codebase);
@@ -186,27 +186,43 @@ where
         });
         if !fits {
             let declared = TUnion::from_atomic(TAtomic::Array(declared));
-            if let Some(integer) = comparison_result.int_for_float {
-                let value_span = assign_value.map_or_else(|| array_target.span(), HasSpan::span);
-                report_int_for_float(context, IssueCode::InvalidLocalAssignmentValue, value_span, integer, &declared);
-            } else {
-                let name = String::from_utf8_lossy(access.name.value());
-                let declared_str = display_type(context, &declared);
-                let written_str = display_value_type(context, &root_array_type, &declared);
-                context.collector.report_with_code(
-                    IssueCode::InvalidLocalAssignmentValue,
-                    Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{declared_str}`."))
-                        .with_annotation(
-                            Annotation::primary(array_target.span())
-                                .with_message(format!("This makes it `{written_str}`.")),
-                        )
-                        .with_help(format!(
-                            "Write a value of `{declared_str}`'s element type, or change the type `{name}` is declared with."
-                        )),
-                );
-            }
+            let local = match root_array_expression.unparenthesized() {
+                Expression::ConstantAccess(access) => Some(access),
+                _ => None,
+            };
 
-            root_array_type = declared;
+            match (comparison_result.int_for_float, local) {
+                (Some(integer), _) => {
+                    let code = if local.is_some() {
+                        IssueCode::InvalidLocalAssignmentValue
+                    } else {
+                        IssueCode::InvalidPropertyAssignmentValue
+                    };
+                    let value_span = assign_value.map_or_else(|| array_target.span(), HasSpan::span);
+                    report_int_for_float(context, code, value_span, integer, &declared);
+
+                    root_array_type = declared;
+                }
+                (None, Some(access)) => {
+                    let name = String::from_utf8_lossy(access.name.value());
+                    let declared_str = display_type(context, &declared);
+                    let written_str = display_value_type(context, &root_array_type, &declared);
+                    context.collector.report_with_code(
+                        IssueCode::InvalidLocalAssignmentValue,
+                        Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{declared_str}`."))
+                            .with_annotation(
+                                Annotation::primary(array_target.span())
+                                    .with_message(format!("This makes it `{written_str}`.")),
+                            )
+                            .with_help(format!(
+                                "Write a value of `{declared_str}`'s element type, or change the type `{name}` is declared with."
+                            )),
+                    );
+
+                    root_array_type = declared;
+                }
+                (None, None) => {}
+            }
         }
     }
 
