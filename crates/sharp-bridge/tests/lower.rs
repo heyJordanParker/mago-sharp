@@ -17,6 +17,7 @@ use indoc::indoc;
 
 use mago_database::file::File;
 use mago_database::file::FileType;
+use mago_names::INLINED_COLLECTION_METHODS;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::Unit;
 use mago_sharp_bridge::inline_forms;
@@ -2717,6 +2718,168 @@ fn set_count_to_list_and_filter_are_the_php_that_reads_the_array() {
 }
 
 /// ```php
+/// return \count($this->lines) + \count($counts);
+/// ```
+///
+/// `count()` is PHP's `count` on the array, on a `List` and a `Map` as on a `Set`.
+#[test]
+fn every_collection_counts_with_php_count() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> lines { get; private set; } = [];\n\n    public int run(Map<string, int> counts)\n    {\n        return this.lines.count() + counts.count();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "this"
+                        ZVAL "lines"
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      VAR
+                        ZVAL "counts"
+        "#}
+    );
+}
+
+/// Each method `INLINED_COLLECTION_METHODS` names lowers to PHP on the array, never to a call of the method itself,
+/// which `Sharp\Collection` may not have. Only `filter` stays a method call, of `filterValues`, which keeps the keys.
+#[test]
+fn every_inlined_collection_method_lowers_to_php_on_the_array() {
+    for (collection, method) in INLINED_COLLECTION_METHODS {
+        let receiver = match collection {
+            "Map" => "Map<string, int>",
+            _ => &format!("{collection}<int>"),
+        };
+        let argument = match method {
+            "add" | "remove" | "contains" => "1",
+            "filter" => "value => value > 0",
+            _ => "",
+        };
+        let body = Lowered::new(&format!(
+            "namespace App.Tenant;\n\nclass Report\n{{\n    public void run({receiver} values)\n    {{\n        values.{method}({argument});\n    }}\n}}\n"
+        ))
+        .body();
+        // The call is the last statement, after a `Set` parameter becomes a `Set`.
+        let root = body
+            .lines()
+            .rfind(|line| line.starts_with("  ") && !line.starts_with("   "))
+            .expect("the call lowers to a statement")
+            .trim();
+
+        if method == "filter" {
+            assert_eq!(root, "METHOD_CALL", "{collection}.{method}:\n{body}");
+            assert!(body.contains("ZVAL \"filterValues\""), "{collection}.{method}:\n{body}");
+        } else {
+            assert_ne!(root, "METHOD_CALL", "{collection}.{method}:\n{body}");
+            assert!(!body.contains("filterValues"), "{collection}.{method}:\n{body}");
+        }
+    }
+}
+
+/// ```php
+/// $lines = ($holder === null) ? null : \count($holder->lines);
+/// $next = (($nullsafe#1 = $other->next) === null) ? null : \count($nullsafe#1->lines);
+/// $made = ($holder === null) ? null : \count($holder->make());
+/// $parenthesized = ($holder === null) ? null : \count($holder->lines);
+/// ```
+///
+/// A collection method that runs as a PHP function after a `?.` link tests the link's receiver around the whole
+/// chain, as `?->` cannot skip a function call, and reads the link plainly inside it. PHP's `?->` skips the chain
+/// past parentheses too, so a parenthesized link is tested the same way.
+#[test]
+fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const parenthesized = (holder?.lines).count();\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Holder? next { get; private set; }\n\n    public List<int> make() => this.lines;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "lines"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "holder"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "holder"
+                        ZVAL "lines"
+              ASSIGN
+                VAR
+                  ZVAL "next"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    ASSIGN
+                      VAR
+                        ZVAL "nullsafe#1"
+                      PROP
+                        VAR
+                          ZVAL "other"
+                        ZVAL "next"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "nullsafe#1"
+                        ZVAL "lines"
+              ASSIGN
+                VAR
+                  ZVAL "made"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "holder"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      METHOD_CALL
+                        VAR
+                          ZVAL "holder"
+                        ZVAL "make"
+                        ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "parenthesized"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "holder"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "holder"
+                        ZVAL "lines"
+        "#}
+    );
+}
+
+/// ```php
 /// !isset($this->tags["vip"]) && ($this->tags += ["vip" => "vip"]);
 /// isset(($receiver#1 = $this->next())->tags["old"]) && $receiver#1->tags->delete("old") === null;
 /// $this->next()->tags = [];
@@ -4974,8 +5137,9 @@ fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
     );
 }
 
-/// The engine reads no type arguments while the code runs yet, so a test of a class with type arguments or of a type
-/// parameter, and `typeof` of a type parameter, are refused before lowering.
+/// The engine reads no type arguments while the code runs yet, so `is`, `as` and a `match` arm of a type parameter or
+/// of a class with type arguments, and `typeof` of a type parameter, are refused before lowering. None runs as
+/// `instanceof` a class named for the type parameter, which no value is.
 #[test]
 fn a_test_and_typeof_of_a_type_with_type_arguments_are_refused_before_lowering() {
     let lowered = Lowered::with(
@@ -4995,6 +5159,10 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_are_refused_before_lowering()
 
             public bool kept<T>(Any value) => value is T;
 
+            public T? cast<T>(Any value) => value as T;
+
+            public int arm<T>(Any value) => match (value) { T => 1, default => 0 };
+
             public Class<T> kind<T>() => typeof(T);
         }
     "},
@@ -5003,15 +5171,16 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_are_refused_before_lowering()
             "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
         )],
     );
-    let because = "because type arguments don't reach the running program.";
 
     assert_eq!(
         lowered.diagnostics(),
         [
-            format!("7:46 compile error: `is TValue` can't be tested yet, {because}"),
-            format!("12:46 compile error: `is Box<Order>` can't be tested yet, {because}"),
-            format!("14:48 compile error: `is T` can't be tested yet, {because}"),
-            format!("16:34 compile error: `typeof(T)` can't run yet, {because}"),
+            "7:46 compile error: This type is not supported yet in PHP#.",
+            "12:46 compile error: This type is not supported yet in PHP#.",
+            "14:48 compile error: This type is not supported yet in PHP#.",
+            "16:46 compile error: This type is not supported yet in PHP#.",
+            "18:53 compile error: This type is not supported yet in PHP#.",
+            "20:34 compile error: `typeof(T)` can't run yet, because type arguments don't reach the running program.",
         ]
     );
 }
@@ -10209,6 +10378,29 @@ fn as_is_a_conditional_that_gives_the_value_or_null() {
                 VAR
                   ZVAL "extra"
         "#}
+    );
+}
+
+/// `as` to a collection type checks every element, which the engine has no test for yet, and `Any`, a function type
+/// and a union have none either. The checker refuses each, and a `match` without arms, before the lowering meets a
+/// form it has no PHP for.
+#[test]
+fn is_as_and_match_without_a_php_test_are_refused_before_lowering() {
+    let lowered = Lowered::new(&method_with(
+        "void run(Any? extra)",
+        "        const listed = extra as List<string>;\n        const any = extra as Any;\n        const call = extra as Function<int(int)>;\n        const either = extra as int|string;\n        const present = extra is Any;\n        match (extra) {}\n",
+    ));
+
+    assert_eq!(
+        lowered.diagnostics(),
+        [
+            "9:33 compile error: This type is not supported yet in PHP#.",
+            "10:30 compile error: This type is not supported yet in PHP#.",
+            "11:31 compile error: This type is not supported yet in PHP#.",
+            "12:33 compile error: This type is not supported yet in PHP#.",
+            "13:34 compile error: This type is not supported yet in PHP#.",
+            "14:9 compile error: A `match` needs a `default` arm.",
+        ]
     );
 }
 

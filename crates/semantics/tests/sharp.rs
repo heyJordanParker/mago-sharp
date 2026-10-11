@@ -3385,10 +3385,7 @@ fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_not_supp
 fn the_generics_examples_of_the_spec_are_in_the_slice_but_a_test_of_a_type_parameter() {
     let code = "namespace App.Tenant;\n\nimport Illuminate.Database.Eloquent.Model;\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    public TItem first(List<TItem> items) => items[0];\n}\n\npublic class Repository\n{\n    private Map<string, Class<Element>> elements = [:];\n\n    public PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query) => new PaginatedList<TItem>(query.rows());\n\n    public void share<TItem : DatabaseEntity & Shareable>(TItem item, Any body)\n    {\n        const page = new PaginatedList<Order>(this.rows());\n        const payload = Json.decode<WebhookPayload>(body);\n        const found = this?.find<Order>(1);\n    }\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n}\n\npublic interface Validator<in TItem>\n{\n    bool check(TItem item);\n}\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class Inbox\n{\n    public bool holds<TItem>(List<TItem> items, Any value) => value is TItem;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["42:72 `is TItem` can't be tested yet, because type arguments don't reach the running program."]
-    );
+    assert_eq!(issues(code), ["42:72 This type is not supported yet in PHP#."]);
 }
 
 /// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11.
@@ -3502,27 +3499,29 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
     );
 }
 
-/// The engine does not read type arguments while the code runs yet, so a type parameter is not supported yet where the
-/// code runs it: in a pattern, `as` or a catch clause, `typeof` of one and `new` of one. Each refusal names the test or
-/// the expression as the code writes it, and why it cannot run, with no note.
+/// The engine does not read type arguments while the code runs yet, so what needs one is not supported yet: `is`, `as`
+/// and a `match` arm of a type parameter or of a class with type arguments, which PHP has no test of, and `typeof`,
+/// `new` and a catch clause of a type parameter.
 #[test]
 fn what_needs_a_type_argument_while_the_code_runs_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public bool run<TItem>(Any value, List<TItem> items)\n    {\n        const a = value is TItem;\n        const b = value is TItem item;\n        const c = value as TItem;\n        const i = match (value) { TItem => 1, default => 0 };\n        const j = typeof(TItem);\n        const k = new TItem(value);\n        try {\n        } catch (TItem failure) {\n        }\n        return a;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public bool run<TItem>(Any value, List<TItem> items)\n    {\n        const a = value is TItem;\n        const b = value is TItem item;\n        const c = value as TItem;\n        const i = match (value) { TItem => 1, default => 0 };\n        const j = typeof(TItem);\n        const k = new TItem(value);\n        try {\n        } catch (TItem failure) {\n        }\n        const d = value is PaginatedList<Order> page;\n        const e = value as PaginatedList<Order>;\n        const f = match (value) { PaginatedList<Order> page => 1, default => 0 };\n        return a;\n    }\n}\n";
     let because = "because type arguments don't reach the running program.";
 
     assert_eq!(
         issues(code),
         [
-            format!("7:28 `is TItem` can't be tested yet, {because}"),
-            format!("8:28 `is TItem` can't be tested yet, {because}"),
-            format!("9:28 `as TItem` can't be tested yet, {because}"),
-            format!("10:35 `TItem` can't be tested yet, {because}"),
+            "7:28 This type is not supported yet in PHP#.".to_owned(),
+            "8:28 This type is not supported yet in PHP#.".to_owned(),
+            "9:28 This type is not supported yet in PHP#.".to_owned(),
+            "10:35 This type is not supported yet in PHP#.".to_owned(),
             format!("11:19 `typeof(TItem)` can't run yet, {because}"),
             format!("12:19 `new TItem` can't run yet, {because}"),
             format!("14:18 `catch (TItem)` can't be tested yet, {because}"),
+            "16:28 This type is not supported yet in PHP#.".to_owned(),
+            "17:28 This type is not supported yet in PHP#.".to_owned(),
+            "18:35 This type is not supported yet in PHP#.".to_owned(),
         ]
     );
-    assert!(check("src/Report.sharp", code).iter().all(|issue| issue.notes.is_empty()));
 }
 
 /// A static member reached through a type parameter, as in `TItem.make()`, needs the type argument while the code
@@ -3593,44 +3592,6 @@ fn a_static_member_of_a_generic_class_cannot_return_self() {
             "9:38 A static member can't use `Self`, because every `Box<…>` shares it and `Self` carries `TItem`.",
             "23:19 A static member can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
             "28:19 A static member can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
-        ]
-    );
-}
-
-/// The engine does not read type arguments while the code runs yet, so `is`, `as` and a `match` arm cannot test them:
-/// a `List` runs as a PHP array of any elements, and a generic class as its class. Each is refused once, at its type.
-#[test]
-fn a_type_test_with_type_arguments_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(Any? item)\n    {\n        const a = item is List<int> numbers ? count(numbers) : 0;\n        const b = item as List<int>;\n        const c = match (item) { List<int> numbers => count(numbers), default => 0 };\n        const d = item is PaginatedList<Order> page ? 1 : 0;\n        const e = item as PaginatedList<Order>;\n        const f = match (item) { PaginatedList<Order> page => 1, default => 0 };\n        return a;\n    }\n}\n";
-    let because = "because type arguments don't reach the running program.";
-
-    assert_eq!(
-        issues(code),
-        [
-            format!("7:27 `is List<int>` can't be tested yet, {because}"),
-            format!("8:27 `as List<int>` can't be tested yet, {because}"),
-            format!("9:34 `List<int>` can't be tested yet, {because}"),
-            format!("10:27 `is PaginatedList<Order>` can't be tested yet, {because}"),
-            format!("11:27 `as PaginatedList<Order>` can't be tested yet, {because}"),
-            format!("12:34 `PaginatedList<Order>` can't be tested yet, {because}"),
-        ]
-    );
-}
-
-/// A function type runs as a `Closure` of any signature, so `is`, `as` and a `match` arm cannot test its signature,
-/// and each is refused at its type with the reason a signature is erased.
-#[test]
-fn a_type_test_of_a_function_type_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(Any? value)\n    {\n        const a = value is Function<int(int)> f ? f(1) : 0;\n        const b = value as Function<int(int)>;\n        const c = match (value) { Function<int(int)> f => f(1), default => 0 };\n        const d = value as int|Function<int(int)>;\n        return a;\n    }\n}\n";
-    let because = "because a function's parameter and return types don't reach the running program.";
-
-    assert_eq!(
-        issues(code),
-        [
-            format!("7:28 `is Function<int(int)>` can't be tested yet, {because}"),
-            format!("8:28 `as Function<int(int)>` can't be tested yet, {because}"),
-            format!("9:35 `Function<int(int)>` can't be tested yet, {because}"),
-            format!("10:32 `as int|Function<int(int)>` can't be tested yet, {because}"),
         ]
     );
 }

@@ -34,6 +34,23 @@ mod internal;
 /// writes its local too, which captures it by reference, as harmless.
 pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "delete", "remove", "clear"];
 
+/// The methods of a PHP# `List`, `Map` or `Set` that run as PHP functions or operators on the array, not as
+/// `Sharp\Collection` methods, as `(collection, method)` pairs.
+///
+/// The bridge lowers each of them from the checker's types, so the checker refuses one on a value that can also be an
+/// object, whose own method would not run.
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 9] = [
+    ("List", "count"),
+    ("Map", "count"),
+    ("Set", "count"),
+    ("Set", "add"),
+    ("Set", "remove"),
+    ("Set", "contains"),
+    ("Set", "clear"),
+    ("Set", "toList"),
+    ("Set", "filter"),
+];
+
 /// The effects a PHP# `uses` takes, spec section 29, by the full names a bare effect name resolves to in a `.sharp`
 /// file: the standard library's ten, then `Events`, the effect of `emit`.
 pub const STANDARD_EFFECTS: [&str; 11] = [

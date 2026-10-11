@@ -201,15 +201,6 @@ impl<'analysis> Types<'analysis> {
         Some(self.argument_texts(arguments))
     }
 
-    /// The type a PHP# `is`, `as`, `match` arm or `typeof` reads while the code runs, a type parameter or a class with
-    /// type arguments, as the analysis records it for the name the test or `typeof` writes, written as
-    /// [`Self::type_arguments`] writes a type. None for a class without type arguments.
-    pub(crate) fn tested_type(&self, name: &impl HasSpan) -> Option<String> {
-        let tested = self.artifacts.get_tested_type(name)?;
-
-        Some(text(tested, self.codebase, Parameter::Index))
-    }
-
     fn argument_texts(&self, arguments: &[TUnion]) -> String {
         arguments.iter().map(|argument| text(argument, self.codebase, Parameter::Index)).collect::<Vec<_>>().join(", ")
     }
@@ -446,17 +437,23 @@ impl<'analysis> Types<'analysis> {
             .collect()
     }
 
-    /// The name of the `Sharp\SetMethods` method the analyzer checked the method call `call` against, null-safe or not,
-    /// in lowercase. None for a call of any other method.
-    pub(crate) fn set_method(&self, call: &Expression) -> Option<Vec<u8>> {
+    /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked
+    /// the method call `call` against, null-safe or not: a method of `Sharp\ListMethods`, `Sharp\MapMethods` or
+    /// `Sharp\SetMethods`. None for a call of any other method.
+    pub(crate) fn collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>)> {
         let mut callees = self.artifacts.get_callees(call);
         let (Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }), None) =
             (callees.next(), callees.next())
         else {
             return None;
         };
+        let methods: [(&str, &[u8]); 3] =
+            [("List", b"Sharp\\ListMethods"), ("Map", b"Sharp\\MapMethods"), ("Set", b"Sharp\\SetMethods")];
+        let collection = methods
+            .into_iter()
+            .find_map(|(collection, methods)| class.as_bytes().eq_ignore_ascii_case(methods).then_some(collection))?;
 
-        class.as_bytes().eq_ignore_ascii_case(b"Sharp\\SetMethods").then(|| method.as_bytes().to_ascii_lowercase())
+        Some((collection, method.as_bytes().to_ascii_lowercase()))
     }
 
     /// The property `class` declares or inherits by the name `property`, if any.

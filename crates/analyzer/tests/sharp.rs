@@ -32,6 +32,7 @@ use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_names::CHANGING_COLLECTION_METHODS;
+use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::resolver::NameResolver;
 use mago_prelude::Prelude;
 use mago_reporting::Issue;
@@ -201,6 +202,17 @@ fn the_binder_knows_every_changing_collection_method() {
         let known: Vec<&str> =
             changing.iter().copied().filter(|method| CHANGING_COLLECTION_METHODS.contains(method)).collect();
         assert_eq!(known, changing, "{class} changes the collection in a method CHANGING_COLLECTION_METHODS lacks");
+    }
+}
+
+/// The bridge and the checker read the methods that run as PHP on the array from one list, which must name methods the
+/// collection stubs declare, or neither would match a call.
+#[test]
+fn every_inlined_collection_method_is_a_method_of_its_collection() {
+    for (collection, method) in INLINED_COLLECTION_METHODS {
+        let class = format!("Sharp\\{collection}Methods");
+
+        assert!(PRELUDE.metadata.get_method(class.as_bytes(), method.as_bytes()).is_some(), "{class} has no {method}");
     }
 }
 
@@ -6257,6 +6269,34 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
     );
 }
 
+/// A `List` and a `Map` have `count()`, the number of elements they hold, as spec sections 21 and 24 call it. Its
+/// result is an `int`, so it is no condition on its own.
+#[test]
+fn every_collection_counts_its_elements() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int total(List<int> sizes, Map<string, int> counts)\n    {\n        return sizes.count() + counts.count();\n    }\n\n    public void wrong(List<int> sizes)\n    {\n        if (sizes.count()) { }\n        sizes.count(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n\n    /**\n     * @param ListMethods<int> $sizes\n     */\n    public function wrong(ListMethods $sizes): void\n    {\n        $sizes->count(1);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["12:13 invalid-operand", "13:21 too-many-arguments"]);
+    assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
+}
+
+/// A collection method the bridge lowers to PHP on the array, such as `count` or a `Set`'s `contains`, cannot run on a
+/// value that can also be an object, whose own method the PHP would skip. Any other collection method is a method call
+/// the engine sends to the object or the collection the value holds when it runs. A `.php` file has no PHP# collection.
+#[test]
+fn a_collection_method_on_a_value_that_can_also_be_an_object_is_not_supported_yet() {
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public int? get(int index) => index > 0 ? index : null;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1)) {\n            return items.get(0) ?? 0;\n        }\n        return items.count();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
+        ["16:18 not-supported-yet", "19:22 not-supported-yet"]
+    );
+    assert_eq!(issues[1].message, "Calling `count` on `List<int>|Box` is not supported by the engine yet.");
+    assert!(!codes(&self::issues(("src/Demo/Shelf.php", php), &[])).contains(&"not-supported-yet"));
+}
+
 /// The analyzer checks a collection method against `Sharp\ListMethods` or `Sharp\MapMethods`, and every message names
 /// the PHP# type the code wrote instead, as in "`add` doesn't exist on `Map<string, int>`".
 #[test]
@@ -7810,96 +7850,14 @@ fn a_variance_breaking_private_member_is_reachable_only_through_this() {
     );
 }
 
-/// `is`, `as` and a `match` arm of a type with type arguments, which `check_slice` refuses because type arguments
-/// don't reach the running program yet, add no analyzer issue: not the `is` test, the variable it declares nor its use.
+/// `is`, `as` and a `match` arm of a type with type arguments or of a type parameter, and `typeof` of a type parameter,
+/// which `check_slice` refuses because type arguments don't reach the running program yet, add no analyzer issue: not
+/// the `is` test, the variable it declares nor its use.
 #[test]
 fn a_type_test_with_type_arguments_adds_no_issue() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int counted(Any? item) => item is List<int> numbers ? count(numbers) : 0;\n\n    public static Any? kept(Any? item) => item as List<int>;\n\n    public static int matched(Any? item) => match (item) { List<int> numbers => count(numbers), default => 0 };\n\n    public static Any? paged(Any? item) => item is PaginatedList<Order> page ? page.first() : null;\n\n    public static Any? cast(Any? item) => item as PaginatedList<Order>;\n\n    public static Any? pageMatched(Any? item) => match (item) { PaginatedList<Order> page => page.first(), default => null };\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int counted(Any? item) => item is List<int> numbers ? count(numbers) : 0;\n\n    public static Any? kept(Any? item) => item as List<int>;\n\n    public static int matched(Any? item) => match (item) { List<int> numbers => count(numbers), default => 0 };\n\n    public static Any? paged(Any? item) => item is PaginatedList<Order> page ? page.first() : null;\n\n    public static Any? cast(Any? item) => item as PaginatedList<Order>;\n\n    public static Any? pageMatched(Any? item) => match (item) { PaginatedList<Order> page => page.first(), default => null };\n\n    public static int held<TItem>(List<TItem> items, Any item) => item is TItem found ? 1 : 0;\n\n    public static TItem? taken<TItem>(List<TItem> items, Any item) => item as TItem;\n\n    public static int named<TItem : DatabaseEntity>(List<TItem> items) => typeof(TItem);\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]), Vec::<String>::new());
-}
-
-/// `is` and `as` of a generic class test its type arguments while the code runs, so the value they narrow has the
-/// class's type with its type arguments. The plain PHP twin tests the class alone, so it narrows to the class with its
-/// bounds.
-#[test]
-fn is_and_as_of_a_generic_class_narrow_to_its_type_arguments() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int tested(Any? item)\n    {\n        if (item is PaginatedList<Order>) {\n            return item;\n        }\n        return 0;\n    }\n\n    public static int named(Any? item)\n    {\n        if (item is PaginatedList<Order> page) {\n            return page;\n        }\n        return 0;\n    }\n\n    public static int cast(Any? item) => item as PaginatedList<Order>;\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function tested(mixed $item): int\n    {\n        if ($item instanceof PaginatedList) {\n            return $item;\n        }\n        return 0;\n    }\n}\n";
-
-    assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "Invalid return type for method `Report.tested`: expected `int`, but found `PaginatedList<Order>`.",
-            "Invalid return type for method `Report.named`: expected `int`, but found `PaginatedList<Order>`.",
-            "Method `Report.cast` is declared to return `int` but possibly returns a nullable value (inferred as `PaginatedList<Order>?`).",
-            "Invalid return type for method `Report.cast`: expected `int`, but found `PaginatedList<Order>?`.",
-        ]
-    );
-    assert_eq!(
-        messages(("src/Demo/Report.php", php), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "Invalid return type for function `Demo\\Report::tested`: expected `int`, but found `Demo\\PaginatedList<Demo\\DatabaseEntity>`."
-        ]
-    );
-}
-
-/// Each `match` arm of a generic class tests its own type arguments, so an arm of `PaginatedList<SharedOrder>` after
-/// one of `PaginatedList<Order>` still matches, and each narrows its variable to its own type. The plain PHP twin tests
-/// the class alone, so its first arm takes every `PaginatedList` and its second narrows nothing.
-#[test]
-fn each_match_arm_of_a_generic_class_narrows_to_its_own_type_arguments() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int take(int count) => count;\n\n    public static int arms(Any? item) => match (item) {\n        PaginatedList<Order> orders => Report.take(orders),\n        PaginatedList<SharedOrder> shared => Report.take(shared),\n        default => 0,\n    };\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function take(int $count): int { return $count; }\n\n    public static function arms(mixed $item): int { return match (true) {\n        $item instanceof PaginatedList => self::take($item),\n        $item instanceof PaginatedList => self::take($item),\n        default => 0,\n    }; }\n}\n";
-
-    assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "Invalid argument type for argument #1 of `Report.take`: expected `int`, but found `PaginatedList<Order>`.",
-            "Invalid argument type for argument #1 of `Report.take`: expected `int`, but found `PaginatedList<SharedOrder>`.",
-        ]
-    );
-    assert_eq!(
-        messages(("src/Demo/Report.php", php), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "Invalid argument type for argument #1 of `Demo\\Report::take`: expected `int`, but found `Demo\\PaginatedList`.",
-            "Invalid argument type for argument #1 of `Demo\\Report::take`: expected `int`, but found `mixed`.",
-        ]
-    );
-}
-
-/// `value is TItem` tests the type argument `TItem` runs with, so it narrows the value to `TItem`. In the plain PHP
-/// twin `TItem` names a class, which does not exist.
-#[test]
-fn is_of_a_type_parameter_narrows_to_the_type_parameter() {
-    let sharp = "namespace Demo;\n\npublic class Inbox\n{\n    public static int held<TItem>(List<TItem> items, Any value)\n    {\n        if (value is TItem item) {\n            return item;\n        }\n        return 0;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Inbox\n{\n    /**\n     * @template TItem\n     * @param list<TItem> $items\n     */\n    public static function held(array $items, mixed $value): int\n    {\n        if (($item = $value) instanceof TItem) {\n            return $item;\n        }\n        return 0;\n    }\n}\n";
-
-    assert_eq!(
-        messages(("src/Demo/Inbox.sharp", sharp), &[]),
-        ["Invalid return type for method `Inbox.held`: expected `int`, but found `TItem`."]
-    );
-    assert_eq!(
-        codes(&issues(("src/Demo/Inbox.php", php), &[])),
-        ["mixed-assignment", "non-existent-class-like", "invalid-return-statement"]
-    );
-}
-
-/// `typeof(TItem)` is the class of the type argument `TItem` runs with, a `Class<TItem>`. In the plain PHP twin
-/// `TItem::class` names a class, which does not exist.
-#[test]
-fn typeof_of_a_type_parameter_is_the_class_of_the_type_parameter() {
-    let sharp = "namespace Demo;\n\npublic class Kinds\n{\n    public static int named<TItem : DatabaseEntity>(List<TItem> items) => typeof(TItem);\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Kinds\n{\n    /**\n     * @template TItem of DatabaseEntity\n     * @param list<TItem> $items\n     */\n    public static function named(array $items): int\n    {\n        return TItem::class;\n    }\n}\n";
-
-    assert_eq!(
-        messages(("src/Demo/Kinds.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        ["Invalid return type for method `Kinds.named`: expected `int`, but found `Class<TItem>`."]
-    );
-    assert_eq!(
-        codes(&issues(("src/Demo/Kinds.php", php), &[("src/Demo/Paging.sharp", PAGING)])),
-        ["non-existent-class-like", "invalid-return-statement"]
-    );
 }
 
 /// An override keeps the bounds of the type parameters it overrides, as C# keeps them, so one that changes a bound

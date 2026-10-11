@@ -51,38 +51,6 @@ fn source<'a>(code: &'a str, node: &impl HasSpan) -> &'a str {
     &code[span.start.offset as usize..span.end.offset as usize]
 }
 
-/// The erased part of a type is the part whose type arguments don't reach the running program: a built-in type with
-/// type arguments, a `Class`, a `List` or a `Map`, whatever its type arguments are, and a function type, which runs as
-/// a `Closure` of any signature. A class, a type parameter and a generic class, which carry theirs, have none.
-#[test]
-fn the_erased_part_of_a_type_is_a_built_in_type_with_type_arguments_or_a_function_type() {
-    const CODE: &str = "class Store<TItem>\n{\n    public void run(Any? value)\n    {\n        value as TItem;\n        value as TItem?;\n        value as (Order|TItem)?;\n        value as PaginatedList<Order>;\n        value as Class<Order>;\n        value as List<TItem>;\n        value as Map<string, List<TItem>>;\n        value as Order;\n        value as List<Order>;\n        value as List<PaginatedList<Order>>;\n        value as Function<int(int)>;\n    }\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Store.sharp", CODE);
-    assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let erased = Node::Program(program).filter_map(|node| match node {
-        Node::As(r#as) => Some(erased_type(r#as.hint).map(|erased| source(CODE, erased))),
-        _ => None,
-    });
-
-    assert_eq!(
-        erased,
-        [
-            None,
-            None,
-            None,
-            None,
-            Some("Class<Order>"),
-            Some("List<TItem>"),
-            Some("Map<string, List<TItem>>"),
-            None,
-            Some("List<Order>"),
-            Some("List<PaginatedList<Order>>"),
-            Some("Function<int(int)>"),
-        ]
-    );
-}
-
 #[test]
 fn namespace_and_import_take_dotted_names() {
     const CODE: &str = "namespace App.Tenant.Store;\n\nimport App.Shared.Money;\n";

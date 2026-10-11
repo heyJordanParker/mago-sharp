@@ -64,7 +64,8 @@ final class List
 
 /**
  * The methods a PHP# `List<T>` has. The analyzer checks a call on a list against them, and the engine runs them on
- * `Sharp\Collection`. A method without `@mutation-free` changes the list.
+ * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which run as PHP. A method
+ * without `@mutation-free` changes the list.
  *
  * @template T
  */
@@ -99,6 +100,13 @@ final class ListMethods
      * @mutation-free
      */
     public function entries(): array {}
+
+    /**
+     * @return int how many elements the list holds.
+     *
+     * @mutation-free
+     */
+    public function count(): int {}
 
     /**
      * @param \Closure(T): bool $predicate
@@ -187,7 +195,8 @@ final class ListMethods
 
 /**
  * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs them on
- * `Sharp\Collection`. A method without `@mutation-free` changes the map.
+ * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which run as PHP. A method
+ * without `@mutation-free` changes the map.
  *
  * @template K of array-key
  * @template V
@@ -209,6 +218,13 @@ final class MapMethods
      * @mutation-free
      */
     public function get(int|string $key): mixed {}
+
+    /**
+     * @return int how many entries the map holds.
+     *
+     * @mutation-free
+     */
+    public function count(): int {}
 
     /**
      * @param \Closure(V): bool $predicate

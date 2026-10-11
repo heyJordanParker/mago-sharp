@@ -74,7 +74,6 @@ pub enum sharp_kind {
     SHARP_AST_BREAK = 285,
     SHARP_AST_CONTINUE = 286,
     SHARP_AST_PROPERTY_HOOK_SHORT_BODY = 287,
-    SHARP_AST_SHARP_TYPE_OF = 288,
     SHARP_AST_DIM = 512,
     SHARP_AST_PROP = 513,
     SHARP_AST_NULLSAFE_PROP = 514,
@@ -116,7 +115,6 @@ pub enum sharp_kind {
     SHARP_AST_PARENT_PROPERTY_HOOK_CALL = 550,
     SHARP_AST_PIPE = 551,
     SHARP_AST_SHARP_TYPE_ARGS = 552,
-    SHARP_AST_SHARP_IS_TYPE = 553,
     SHARP_AST_METHOD_CALL = 768,
     SHARP_AST_NULLSAFE_METHOD_CALL = 769,
     SHARP_AST_STATIC_CALL = 770,
@@ -141,4 +139,4 @@ pub const SHARP_T_FILE: u32 = 347;
 /// The hash of the kind table, the tokens and the layouts of the compiled file's structs.
 /// An engine reads only a compiled file written for its own value.
 #[allow(clippy::unreadable_literal, clippy::big_endian_bytes)]
-pub const SHARP_UNIT_ABI: [u8; 16] = 0x7beafa12470cd8c15b8b7373b01331e3u128.to_be_bytes();
+pub const SHARP_UNIT_ABI: [u8; 16] = 0xff670e4b2c6643b1c2091f47ca97a415u128.to_be_bytes();

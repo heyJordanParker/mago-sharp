@@ -239,7 +239,6 @@ pub use crate::cst::cst::type_hint::TypeParameterBound;
 pub use crate::cst::cst::type_hint::TypeParameterList;
 pub use crate::cst::cst::type_hint::UnionHint;
 pub use crate::cst::cst::type_hint::built_in_generic_arity;
-pub use crate::cst::cst::type_hint::erased_type;
 pub use crate::cst::cst::type_of::TypeOf;
 pub use crate::cst::cst::unary::UnaryPostfix;
 pub use crate::cst::cst::unary::UnaryPostfixOperator;

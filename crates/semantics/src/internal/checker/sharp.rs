@@ -101,6 +101,7 @@ use mago_syntax::cst::WhileBody;
 use mago_syntax::cst::built_in_generic_arity;
 use mago_syntax::token::GetPrecedence;
 use mago_syntax::token::Precedence;
+use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::internal::consts::RESERVED_CLASS_NAMES;
@@ -962,9 +963,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Block(_), Method | Body) => Some(Body),
         (Node::MethodExpressionBody(_), Method) => Some(Body),
         (Node::TryCatchClause(_), Body) => Some(TryCatchClause),
-        (Node::Hint(hint), TryCatchClause) if let Some(erased) = untested_type(hint, context) => {
-            let test = format!("catch ({})", BytesDisplay(context.get_code_snippet(hint)));
-            report_erased_test(&test, erased, context);
+        (Node::Hint(hint), TryCatchClause) if let Some(untested) = untested_catch_name(hint, context) => {
+            let refused = format!("`catch ({})` can't be tested yet", BytesDisplay(context.get_code_snippet(hint)));
+            report_erased(untested.span(), &refused, context);
 
             None
         }
@@ -1136,15 +1137,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
                 None
             }
-            hint => match untested_type(hint, context) {
-                Some(erased) => {
-                    let test = format!("as {}", BytesDisplay(context.get_code_snippet(hint)));
-                    report_erased_test(&test, erased, context);
+            // A type outside the slice, and `Self`, are refused by the walk, as anywhere in a body.
+            hint if !is_tested(hint, context) && (is_slice_type(hint) || matches!(hint, Hint::Union(_))) => {
+                report_not_supported(
+                    hint.span(),
+                    "type",
+                    "`as` converts to `int`, `float`, `string`, `bool` or a class.",
+                    context,
+                );
 
-                    None
-                }
-                None => Some(Body),
-            },
+                None
+            }
+            _ => Some(Body),
         },
         (
             Node::Expression(Expression::Is(_) | Expression::As(_))
@@ -1165,19 +1169,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::Hint(hint), Place::Pattern) if let Some(erased) = untested_type(hint, context) => {
-            let keyword = match context.ancestors.last() {
-                Some(Node::Expression(Expression::Is(_))) => "is ",
-                _ => "",
-            };
-            let test = format!("{keyword}{}", BytesDisplay(context.get_code_snippet(hint)));
-            report_erased_test(&test, erased, context);
-
-            None
-        }
-        (Node::Hint(hint), Place::Pattern) if is_slice_type(hint) && !matches!(hint, Hint::Void(_)) => {
-            Some(Place::Pattern)
-        }
+        (Node::Hint(hint), Place::Pattern) if is_slice_type(hint) && is_tested(hint, context) => Some(Place::Pattern),
         (Node::BinaryPattern(binary), Place::Pattern)
             if !binary.is_and() && [binary.left, binary.right].iter().any(|side| matches!(side, Pattern::Not(_))) =>
         {
@@ -1266,14 +1258,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Expression(Expression::ArrayAccess(_)) | Node::ArrayAccess(_), Body) => Some(Body),
         (Node::ConstantAccess(access), Body) if context.names.is_type_parameter(&access.name) => {
             let refused = format!("A static member of `{}` can't be used yet", BytesDisplay(context.get_code_snippet(access)));
-            report_erased(access.span(), &refused, false, context);
+            report_erased(access.span(), &refused, context);
 
             None
         }
         (Node::ConstantAccess(_), Body) => Some(Body),
         (Node::TypeOf(type_of), Body | Constant) if context.names.is_type_parameter(&type_of.class) => {
             let refused = format!("`{}` can't run yet", BytesDisplay(context.get_code_snippet(type_of)));
-            report_erased(type_of.span(), &refused, false, context);
+            report_erased(type_of.span(), &refused, context);
 
             None
         }
@@ -2437,12 +2429,14 @@ fn has_braces(statement: &Statement) -> bool {
 /// Checks the arms of a `match`, and returns whether its children can be checked. Spec section 21 needs a `default`
 /// arm on a value that is not an enum, and section 20 lets a `match` on an enum leave it out when its arms cover every
 /// case. Only the analyzer knows the value's type, so a `match` whose arms all name `Class.y` values or `null` may
-/// leave out `default`, and the analyzer reports the cases it misses. A block arm is only in a `match` statement. The
-/// engine takes one `default` arm, as PHP's `match` does.
+/// leave out `default`, and the analyzer reports the cases it misses. A `match` without arms covers no case, so it needs
+/// `default`. A block arm is only in a `match` statement. The engine takes one `default` arm, as PHP's `match` does.
 fn check_pattern_match(pattern_match: &PatternMatch, is_expression: bool, context: &mut Context<'_, '_, '_>) -> bool {
     let mut defaults = pattern_match.arms.iter().filter(|arm| arm.is_default());
     match defaults.next() {
-        None if !pattern_match.arms.iter().all(|arm| names_class_values(arm, context)) => {
+        None if pattern_match.arms.is_empty()
+            || !pattern_match.arms.iter().all(|arm| names_class_values(arm, context)) =>
+        {
             context.report(
                 Issue::error("A `match` needs a `default` arm.")
                     .with_annotation(
@@ -2584,40 +2578,31 @@ fn is_slice_type(hint: &Hint) -> bool {
     }
 }
 
-/// Refuses `refused`, a type test or an expression as the code writes it and what it can't do yet, because what it
-/// needs while the code runs does not reach it: a function type's parameter and return types when `function_type`, and
-/// a type argument otherwise. G1 checks generics and erases them.
-fn report_erased(span: Span, refused: &str, function_type: bool, context: &mut Context<'_, '_, '_>) {
-    let erased = if function_type { "a function's parameter and return types" } else { "type arguments" };
-
+/// Refuses `refused`, a type test or an expression as the code writes it and what it can't do yet, because the type
+/// arguments it needs while the code runs don't reach it. G1 checks generics and erases them.
+fn report_erased(span: Span, refused: &str, context: &mut Context<'_, '_, '_>) {
     context.report(
-        Issue::error(format!("{refused}, because {erased} don't reach the running program."))
+        Issue::error(format!("{refused}, because type arguments don't reach the running program."))
             .with_annotation(Annotation::primary(span).with_message("Not supported yet.")),
     );
 }
 
-/// The part of the type of a catch clause, a pattern or `as` that no test runs yet: a type parameter, a type with type
-/// arguments or a function type, alone, nullable, in parentheses or in a union. The engine tests none of them until it
-/// reads type arguments while the code runs.
-fn untested_type<'ast>(hint: &'ast Hint<'ast>, context: &Context<'_, '_, '_>) -> Option<&'ast Hint<'ast>> {
-    match hint {
-        Hint::Identifier(name) if context.names.is_type_parameter(name) => Some(hint),
-        Hint::Generic(_) | Hint::Function(_) => Some(hint),
-        Hint::Nullable(nullable) => untested_type(nullable.hint, context),
-        Hint::Parenthesized(parenthesized) => untested_type(parenthesized.hint, context),
-        Hint::Union(union) => untested_type(union.left, context).or_else(|| untested_type(union.right, context)),
-        _ => None,
-    }
+/// Whether PHP tests a value against `hint`, as [`has_type_test`] decides for `is`, `as`, a `match` arm and the
+/// bridge alike. A type parameter has no test until the engine reads type arguments while the code runs.
+fn is_tested(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> bool {
+    has_type_test(hint, &|span| context.names.is_type_parameter(&span))
 }
 
-/// Refuses the type test `test`, whose part `erased` needs what G1 erases, as [`untested_type`] finds it.
-fn report_erased_test(test: &str, erased: &Hint, context: &mut Context<'_, '_, '_>) {
-    report_erased(
-        erased.span(),
-        &format!("`{test}` can't be tested yet"),
-        matches!(erased, Hint::Function(_)),
-        context,
-    );
+/// The name in a catch clause's type, alone or in a union, that PHP's `catch` can't test yet, as [`is_tested`]
+/// decides: a type parameter. `check_try` reports any type that is not a name.
+fn untested_catch_name<'ast>(hint: &'ast Hint<'ast>, context: &Context<'_, '_, '_>) -> Option<&'ast Hint<'ast>> {
+    match hint {
+        Hint::Identifier(_) => (!is_tested(hint, context)).then_some(hint),
+        Hint::Union(union) => {
+            untested_catch_name(union.left, context).or_else(|| untested_catch_name(union.right, context))
+        }
+        _ => None,
+    }
 }
 
 /// The refusal of `hint` in a constant or static field, property or method of its class, when `hint` names one of the
@@ -2987,7 +2972,7 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
         }
         Expression::Identifier(class) if context.names.is_type_parameter(class) => {
             let refused = format!("`new {}` can't run yet", BytesDisplay(context.get_code_snippet(class)));
-            report_erased(instantiation.span(), &refused, false, context);
+            report_erased(instantiation.span(), &refused, context);
 
             return None;
         }
@@ -3440,7 +3425,7 @@ const fn supported(place: Place) -> &'static str {
             "A parameter default, an attribute argument, a constant's value or an enum case's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool` or a class with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }

@@ -45,8 +45,9 @@ where
     {
         let names = self.resolved_names;
         let is_local = |span: Span| matches!(names.binding(&span), Some(Binding::Local(_)));
+        let is_type_parameter = |span: Span| names.is_type_parameter(&span);
 
-        php_shape(self.arena, node, self.temporaries, &is_local)
+        php_shape(self.arena, node, self.temporaries, &is_local, &is_type_parameter)
     }
 }
 

@@ -73,7 +73,6 @@ use crate::cst::TypePattern;
 use crate::cst::UnaryPrefix;
 use crate::cst::UnaryPrefixOperator;
 use crate::cst::Variable;
-use crate::cst::built_in_generic_arity;
 use crate::cst::sequence::Sequence;
 use crate::cst::sequence::TokenSeparatedSequence;
 
@@ -92,18 +91,21 @@ pub struct PhpShape<'arena> {
 /// Builds, in `arena`, the PHP a PHP# `is`, `as` or `match` runs as.
 ///
 /// Returns `None` for any other node, and for a form the slice refuses, such as a nullable type pattern.
-/// `is_local` says whether the bare name at a span is a local or a parameter. `temporaries` is how many hidden
-/// variables the forms around this one hold, so the new ones are numbered after them.
+/// `is_local` says whether the bare name at a span is a local or a parameter, and `is_type_parameter` whether it is a
+/// type parameter. `temporaries` is how many hidden variables the forms around this one hold, so the new ones are
+/// numbered after them.
 pub fn php_shape<'arena, A>(
     arena: &'arena A,
     node: Node<'_, 'arena>,
     temporaries: u32,
     is_local: &dyn Fn(Span) -> bool,
+    is_type_parameter: &dyn Fn(Span) -> bool,
 ) -> Option<PhpShape<'arena>>
 where
     A: Arena,
 {
-    let mut shape = Shape { arena, is_local, temporaries, first: temporaries, tests: std::vec::Vec::new() };
+    let mut shape =
+        Shape { arena, is_local, is_type_parameter, temporaries, first: temporaries, tests: std::vec::Vec::new() };
     let php = match node {
         Node::Expression(Expression::Is(is)) => Node::Expression(shape.is(is)?),
         Node::Expression(Expression::As(r#as)) => Node::Expression(shape.r#as(r#as)?),
@@ -132,6 +134,33 @@ pub fn called_function(node: Node<'_, '_>) -> Option<LocalIdentifier<'static>> {
     }
 }
 
+/// Whether a type pattern or an `as` has PHP that tests a value against `hint`.
+///
+/// A scalar type has `is_int`, `is_float`, `is_string` or `is_bool`, and a class has `instanceof`. `php_shape` builds no
+/// PHP for a form that tests any other type, so the semantic check refuses it. `is_type_parameter` says whether the
+/// name at a span is a type parameter, which no PHP tests until the engine reads type arguments.
+#[must_use]
+pub fn has_type_test(hint: &Hint<'_>, is_type_parameter: &dyn Fn(Span) -> bool) -> bool {
+    type_test_of(hint, is_type_parameter).is_some()
+}
+
+/// The PHP that tests a value against a type.
+enum TypeTest<'arena> {
+    /// A call to the function that tests a scalar type.
+    Scalar(LocalIdentifier<'static>),
+    /// `instanceof` the class.
+    Class(Identifier<'arena>),
+}
+
+/// The PHP test of `hint`, which both `has_type_test` and `php_shape` read, so the checker accepts exactly the types
+/// the bridge lowers.
+fn type_test_of<'arena>(hint: &Hint<'arena>, is_type_parameter: &dyn Fn(Span) -> bool) -> Option<TypeTest<'arena>> {
+    match hint {
+        Hint::Identifier(class) if !is_type_parameter(class.span()) => Some(TypeTest::Class(*class)),
+        hint => scalar_test(hint).map(TypeTest::Scalar),
+    }
+}
+
 /// The function that tests a value against a scalar type, at the type's span.
 fn scalar_test(hint: &Hint<'_>) -> Option<LocalIdentifier<'static>> {
     let value: &'static [u8] = match hint {
@@ -148,6 +177,7 @@ fn scalar_test(hint: &Hint<'_>) -> Option<LocalIdentifier<'static>> {
 struct Shape<'shape, 'arena, A> {
     arena: &'arena A,
     is_local: &'shape dyn Fn(Span) -> bool,
+    is_type_parameter: &'shape dyn Fn(Span) -> bool,
     /// The number of the last hidden variable.
     temporaries: u32,
     first: u32,
@@ -448,31 +478,20 @@ where
         })
     }
 
-    /// `instanceof` for a class or a type parameter, and the scalar test for a scalar type. A class with type arguments
-    /// is `instanceof` its name, spanning the whole type, where the analyzer records the type it tests.
+    /// `instanceof` for a class, and the scalar test for a scalar type.
     fn type_test(
         &self,
         hint: &'arena Hint<'arena>,
         operand: &'arena Expression<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
-        if let Some(function) = scalar_test(hint) {
-            return Some(self.call(function, operand));
-        }
-
-        let class = match hint {
-            Hint::Identifier(class) => *class,
-            Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none() => {
-                Identifier::Local(LocalIdentifier { span: hint.span(), value: generic.name.value })
-            }
-            _ => return None,
-        };
-        let class = self.alloc(Expression::Identifier(class));
-
-        Some(self.binary(
-            operand,
-            BinaryOperator::Instanceof(Keyword { span: start_of(hint.span()), value: b"instanceof" }),
-            class,
-        ))
+        Some(match type_test_of(hint, self.is_type_parameter)? {
+            TypeTest::Scalar(function) => self.call(function, operand),
+            TypeTest::Class(class) => self.binary(
+                operand,
+                BinaryOperator::Instanceof(Keyword { span: start_of(hint.span()), value: b"instanceof" }),
+                self.alloc(Expression::Identifier(class)),
+            ),
+        })
     }
 
     /// A tested value: itself when it is a local or a parameter, and a hidden `$match#N` otherwise.

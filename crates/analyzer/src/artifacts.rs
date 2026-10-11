@@ -96,10 +96,6 @@ pub struct AnalysisArtifacts {
     pub effect_summaries: Vec<EffectSummary>,
     /// What each PHP# call runs, keyed by the call's span.
     pub(crate) call_targets: HashMap<(u32, u32), Vec<CallTarget>>,
-    /// The type each PHP# `is`, `as`, `match` arm or `typeof` reads while the code runs, a type parameter or a class with
-    /// type arguments, keyed by the span of the type it writes. Apart from `expression_types`, because the `instanceof`
-    /// a test runs as spans that type too when nothing the code writes stands before it.
-    pub(crate) tested_types: HashMap<(u32, u32), TUnion>,
     /// The function values the analysis gave places whose function types list effects, until the body that gives them
     /// records its summary.
     pub(crate) function_values: Vec<FunctionValue>,
@@ -141,7 +137,6 @@ impl AnalysisArtifacts {
             body_returns: HashMap::default(),
             effect_summaries: Vec::new(),
             call_targets: HashMap::default(),
-            tested_types: HashMap::default(),
             function_values: Vec::new(),
             variable_definedness: HashMap::default(),
             variable_definedness_targets: None,
@@ -313,17 +308,6 @@ impl AnalysisArtifacts {
         if !recorded.contains(&target) {
             recorded.push(target);
         }
-    }
-
-    /// Records that the PHP# test or `typeof` that writes the type `hint` reads `tested` while the code runs.
-    pub(crate) fn record_tested_type(&mut self, hint: &impl HasSpan, tested: TUnion) {
-        self.tested_types.insert(get_expression_range(hint), tested);
-    }
-
-    /// The type the PHP# test or `typeof` that writes the type `hint` reads while the code runs, a type parameter or a
-    /// class with type arguments. `None` for a class without type arguments.
-    pub fn get_tested_type(&self, hint: &impl HasSpan) -> Option<&TUnion> {
-        self.tested_types.get(&get_expression_range(hint))
     }
 
     /// The declared type the value of `expression` goes into, when the expression that set it is `expression` itself

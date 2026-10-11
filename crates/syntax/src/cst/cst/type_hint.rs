@@ -74,27 +74,6 @@ pub fn built_in_generic_arity(name: &[u8]) -> Option<usize> {
     }
 }
 
-/// Returns the part of a PHP# type whose type arguments don't reach the running program.
-///
-/// That is a built-in type with type arguments, as in `List<int>` or `Class<Order>`, which runs as a PHP array or a
-/// class-name string, or a function type, which runs as a `Closure` of any signature. A type parameter and a class with
-/// type arguments, as in `PaginatedList<Order>`, carry theirs. Returns `None` for a type that needs none, and for every
-/// type in a PHP file.
-///
-/// The checker refuses such a type in a pattern, `as` or a catch clause, and the analyzer reads this to skip what the
-/// checker refused, so they never disagree on an erased type.
-#[must_use]
-pub fn erased_type<'ast>(hint: &'ast Hint<'ast>) -> Option<&'ast Hint<'ast>> {
-    match hint {
-        Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_some() => Some(hint),
-        Hint::Function(_) => Some(hint),
-        Hint::Nullable(nullable) => erased_type(nullable.hint),
-        Hint::Parenthesized(parenthesized) => erased_type(parenthesized.hint),
-        Hint::Union(union) => erased_type(union.left).or_else(|| erased_type(union.right)),
-        _ => None,
-    }
-}
-
 /// Represents the PHP# type arguments of a type, a `new` or a call, as spec section 11 writes them.
 ///
 /// # Examples

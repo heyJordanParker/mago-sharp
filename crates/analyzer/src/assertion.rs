@@ -1792,13 +1792,6 @@ where
 
     if let Some(counter_variable_id) = variable_id {
         match right {
-            // A PHP# test of a type parameter or of a class with type arguments narrows to the type it reads.
-            Expression::Identifier(_) if let Some(tested) = artifacts.get_tested_type(right) => {
-                if_types.insert(
-                    counter_variable_id,
-                    vec![tested.types.iter().map(|atomic| Assertion::IsType(atomic.clone())).collect()],
-                );
-            }
             Expression::Identifier(identifier) => {
                 let resolved_name = context.resolved_names.get(identifier);
 
