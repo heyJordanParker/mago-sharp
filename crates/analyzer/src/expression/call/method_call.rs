@@ -16,6 +16,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
+use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -320,10 +321,15 @@ where
     let mut method_resolution =
         resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)?;
 
-    if method_resolution
-        .resolved_methods
-        .iter()
-        .any(|method| sharp_collection_name(&TObject::new_named(method.classname)).is_some())
+    if context.dialect.is_sharp()
+        && method_resolution.resolved_methods.iter().any(|method| {
+            let collection = sharp_collection_name(&TObject::new_named(method.classname));
+            let name = method.method_identifier.get_method_name();
+
+            INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
+                collection == Some(*inlined_collection) && inlined.as_bytes().eq_ignore_ascii_case(name.as_bytes())
+            })
+        })
     {
         report_collection_method_on_object(context, artifacts, object, selector);
     }
@@ -470,9 +476,9 @@ where
     Ok(())
 }
 
-/// Reports a PHP# collection method called on `object` when its value can also be an object, as `List<int>|Box`. The
-/// engine runs a collection method by the collection's kind, so it cannot run one on a value that may instead hold an
-/// object whose method of the same name runs.
+/// Reports one of the [`INLINED_COLLECTION_METHODS`] called on `object` when its value can also be an object, as
+/// `List<int>|Box`. The bridge lowers such a call to PHP on the array from the checker's types, so an object the value
+/// holds when the call runs never reaches its own method of that name.
 fn report_collection_method_on_object<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,

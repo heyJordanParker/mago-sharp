@@ -2700,14 +2700,14 @@ fn set_count_to_list_and_filter_are_the_php_that_reads_the_array() {
 }
 
 /// ```php
-/// return \count($this->lines) + \count($counts) + ((($maybe === null) ? null : \count($maybe)) ?? 0);
+/// return \count($this->lines) + \count($counts);
 /// ```
 ///
 /// `count()` is PHP's `count` on the array, on a `List` and a `Map` as on a `Set`.
 #[test]
 fn every_collection_counts_with_php_count() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> lines { get; private set; } = [];\n\n    public int run(Map<string, int> counts, List<int>? maybe)\n    {\n        return this.lines.count() + counts.count() + (maybe?.count() ?? 0);\n    }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> lines { get; private set; } = [];\n\n    public int run(Map<string, int> counts)\n    {\n        return this.lines.count() + counts.count();\n    }\n}\n",
     );
 
     assert_eq!(
@@ -2716,32 +2716,18 @@ fn every_collection_counts_with_php_count() {
             STMT_LIST
               RETURN
                 BINARY_OP [1]
-                  BINARY_OP [1]
-                    CALL
-                      ZVAL "count"
-                      ARG_LIST
-                        PROP
-                          VAR
-                            ZVAL "this"
-                          ZVAL "lines"
-                    CALL
-                      ZVAL "count"
-                      ARG_LIST
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      PROP
                         VAR
-                          ZVAL "counts"
-                  COALESCE
-                    CONDITIONAL [1]
-                      BINARY_OP [16]
-                        VAR
-                          ZVAL "maybe"
-                        ZVAL null
-                      ZVAL null
-                      CALL
-                        ZVAL "count"
-                        ARG_LIST
-                          VAR
-                            ZVAL "maybe"
-                    ZVAL 0
+                          ZVAL "this"
+                        ZVAL "lines"
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      VAR
+                        ZVAL "counts"
         "#}
     );
 }
@@ -2750,16 +2736,16 @@ fn every_collection_counts_with_php_count() {
 /// $lines = ($holder === null) ? null : \count($holder->lines);
 /// $next = (($nullsafe#1 = $other->next) === null) ? null : \count($nullsafe#1->lines);
 /// $made = ($holder === null) ? null : \count($holder->make());
-/// $tags = ($holder === null) ? null : \count($holder->tags);
-/// $has = ($holder === null) ? null : isset($holder->tags[1]);
+/// $parenthesized = ($holder === null) ? null : \count($holder->lines);
 /// ```
 ///
 /// A collection method that runs as a PHP function after a `?.` link tests the link's receiver around the whole
-/// chain, as `?->` cannot skip a function call, and reads the link plainly inside it.
+/// chain, as `?->` cannot skip a function call, and reads the link plainly inside it. PHP's `?->` skips the chain
+/// past parentheses too, so a parenthesized link is tested the same way.
 #[test]
 fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const tags = holder?.tags.count();\n        const has = holder?.tags.contains(1);\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Set<int> tags { get; private set; } = [];\n    public Holder? next { get; private set; }\n\n    public List<int> make() => this.lines;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Holder? holder, Holder other)\n    {\n        const lines = holder?.lines.count();\n        const next = other.next?.lines.count();\n        const made = holder?.make().count();\n        const parenthesized = (holder?.lines).count();\n    }\n}\n\nclass Holder\n{\n    public List<int> lines { get; private set; } = [];\n    public Holder? next { get; private set; }\n\n    public List<int> make() => this.lines;\n}\n",
     );
 
     assert_eq!(
@@ -2822,7 +2808,7 @@ fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function
                         ARG_LIST
               ASSIGN
                 VAR
-                  ZVAL "tags"
+                  ZVAL "parenthesized"
                 CONDITIONAL [1]
                   BINARY_OP [16]
                     VAR
@@ -2835,23 +2821,7 @@ fn a_collection_method_after_a_null_safe_link_tests_the_link_around_the_function
                       PROP
                         VAR
                           ZVAL "holder"
-                        ZVAL "tags"
-              ASSIGN
-                VAR
-                  ZVAL "has"
-                CONDITIONAL [1]
-                  BINARY_OP [16]
-                    VAR
-                      ZVAL "holder"
-                    ZVAL null
-                  ZVAL null
-                  ISSET
-                    DIM
-                      PROP
-                        VAR
-                          ZVAL "holder"
-                        ZVAL "tags"
-                      ZVAL 1
+                        ZVAL "lines"
         "#}
     );
 }

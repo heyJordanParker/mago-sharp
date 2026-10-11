@@ -4,6 +4,7 @@ use mago_allocator::LocalArena;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::union::TUnion;
+use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::php_method_name;
@@ -1953,6 +1954,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     call.object
                 }
                 Expression::ArrayAccess(access) => access.array,
+                Expression::Parenthesized(parenthesized) => parenthesized.expression,
                 Expression::Access(Access::NullSafeProperty(access)) => {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
@@ -2462,17 +2464,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// The collection method the method call `call` runs as PHP on the array, in lowercase, as [`Self::collection_call`]
-    /// lowers it, and whether it changes the collection. None for a call of any other method.
+    /// The collection method the method call `call` runs as PHP on the array, one of the
+    /// [`INLINED_COLLECTION_METHODS`], in lowercase, and whether it changes the collection. None for a call of any other
+    /// method.
     fn php_collection_method(&self, call: &Expression) -> Option<(Vec<u8>, bool)> {
-        let (method, is_set) = self.types.collection_method(call)?;
-        let changes = match method.as_slice() {
-            b"count" => false,
-            _ if !is_set => return None,
-            b"add" | b"remove" => true,
-            b"contains" | b"clear" | b"tolist" | b"filter" => false,
-            _ => return None,
-        };
+        let (collection, method) = self.types.collection_method(call)?;
+        if !INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
+            *inlined_collection == collection && inlined.as_bytes().eq_ignore_ascii_case(&method)
+        }) {
+            return None;
+        }
+        let changes = matches!(method.as_slice(), b"add" | b"remove");
 
         Some((method, changes))
     }
