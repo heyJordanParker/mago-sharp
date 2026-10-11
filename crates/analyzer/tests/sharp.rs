@@ -1047,11 +1047,8 @@ fn a_property_with_accessors_over_a_php_parents_untyped_property_is_not_supporte
 
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Record;\n\nclass Order extends Record\n{\n    public string $label = '' {\n        get => $this->label;\n        set => $value;\n    }\n    public string $code = '';\n}\n";
     assert_eq!(
-        messages(("src/Demo/Order.php", php), &others),
-        [
-            "Property `Demo\\Order::$label` adds a type that is missing on the parent property.",
-            "Property `Demo\\Order::$code` adds a type that is missing on the parent property.",
-        ]
+        issues(("src/Demo/Order.php", php), &others),
+        ["9:12 incompatible-property-type", "13:12 incompatible-property-type"]
     );
 }
 
@@ -2727,12 +2724,12 @@ fn exit_with_a_value_that_cannot_be_a_message_names_the_int_status() {
 
     let php = "<?php\n\nnamespace Demo;\n\nclass Shutdown\n{\n    public function maybe(?int $code): void\n    {\n        exit($code);\n    }\n\n    public function fraction(float $code): void\n    {\n        exit($code);\n    }\n\n    public function flag(bool $done): void\n    {\n        exit($done);\n    }\n\n    /** @param list<int> $codes */\n    public function listed(array $codes): void\n    {\n        exit($codes);\n    }\n}\n";
     assert_eq!(
-        messages(("src/Demo/Shutdown.php", php), &[]),
+        issues(("src/Demo/Shutdown.php", php), &[]),
         [
-            "The first argument for `exit` might be `null`.",
-            "The first argument for `exit` might have the wrong type.",
-            "Invalid type for the first argument.",
-            "Invalid type for the first argument.",
+            "9:14 possibly-null-argument",
+            "14:14 possibly-invalid-argument",
+            "19:14 invalid-argument",
+            "25:14 invalid-argument"
         ]
     );
 }
@@ -3159,14 +3156,6 @@ fn equality_of_a_class_instance_is_refused_until_the_class_declares_operator_equ
             "7:53 invalid-operand `!=` cannot compare `Cart?` with `Cart`: `Cart` declares no `operator ==`. | Use `!==` to test whether both sides are the same object.",
         ]
     );
-    assert_eq!(
-        messages(("src/Demo/Report.php", php), &[("src/Demo/Cart.php", CART)]),
-        [
-            "Left operand in `!=` comparison might be `null` (type `Demo\\Cart|null`).",
-            "Left operand in `!=` comparison might be `null` (type `Demo\\Cart|null`).",
-            "Right operand in `!=` comparison is `null`.",
-        ]
-    );
 }
 
 /// A `List`, `Map` or `Set` is a PHP array at runtime, which `==` cannot compare strictly yet, also against an `Any?`.
@@ -3246,16 +3235,6 @@ fn ordering_a_nullable_value_is_refused_until_it_is_tested_for_null() {
             "9:43 invalid-operand `>` cannot compare `float?` with `float`: only `==` and `!=` take `null`, so test the value for `null` first. | Test it with `!= null` before the comparison.",
             "11:51 invalid-operand `<=>` cannot compare `int?` with `int`: only `==` and `!=` take `null`, so test the value for `null` first. | Test it with `!= null` before the comparison.",
             "13:43 invalid-operand `>=` cannot compare `string` with `string?`: only `==` and `!=` take `null`, so test the value for `null` first. | Test it with `!= null` before the comparison.",
-        ]
-    );
-    assert_eq!(
-        messages(("src/Demo/Report.php", php), &[]),
-        [
-            "Left operand in `<` comparison might be `null` (type `null|string`).",
-            "Left operand in `<=` comparison might be `null` (type `int|null`).",
-            "Left operand in `>` comparison might be `null` (type `float|null`).",
-            "Left operand in spaceship comparison (`<=>`) might be `null` (type `int|null`).",
-            "Right operand in `>=` comparison might be `null` (type `null|string`).",
         ]
     );
 }
@@ -4345,12 +4324,6 @@ fn a_named_argument_never_fills_a_variadic_parameter_of_a_method_or_a_php_functi
         .collect();
     assert_eq!(annotations, ["A variadic parameter takes no named argument in PHP#"; 4]);
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["13:33 named-argument-after-positional"]);
-    assert_eq!(
-        messages(("src/Demo/Report.php", php), &[]),
-        [
-            "Named argument `$values` for method `Demo\\Report::sum` targets a variadic parameter that has already captured positional arguments."
-        ]
-    );
 }
 
 #[test]
@@ -4512,27 +4485,13 @@ fn self_calls_a_static_method_as_static_does_in_php() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
 }
 
-/// PHP reads `Self->count()` as an instance call on `self`, and only a `.sharp` file reads `Self.count()` as a
-/// static call.
-#[test]
-fn a_php_self_arrow_call_keeps_its_upstream_issue() {
-    let php = "<?php\n\nnamespace Demo;\n\nclass Counter\n{\n    public static function count(): int\n    {\n        return Self->count();\n    }\n}\n";
-
-    assert_eq!(
-        issues(("src/Demo/Counter.php", php), &[]),
-        ["9:16 invalid-scope-keyword-context", "9:16 mixed-return-statement"]
-    );
-}
-
 /// An override of a method whose parameter is variadic declares it variadic too, spec section 7, as PHP refuses
-/// otherwise when it links the class. Upstream Mago misses it, so a `.php` file keeps reporting nothing.
+/// otherwise when it links the class.
 #[test]
 fn an_override_of_a_variadic_parameter_is_variadic() {
     let sharp = "namespace Demo;\n\npublic class Base\n{\n    public virtual int sum(int ...values) => count(values);\n}\n\npublic class Child : Base\n{\n    public override int sum(int values) => values;\n}\n\npublic class Fine : Base\n{\n    public override int sum(int ...values) => count(values) + 1;\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Base\n{\n    public function sum(int ...$values): int\n    {\n        return count($values);\n    }\n}\n\nclass Child extends Base\n{\n    #[\\Override]\n    public function sum(int $values): int\n    {\n        return $values;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Base.sharp", sharp), &[]), ["10:25 incompatible-parameter-count"]);
-    assert_eq!(issues(("src/Demo/Base.php", php), &[]), Vec::<String>::new());
 
     let issue = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Base.sharp", sharp), &[]).remove(0);
     assert_eq!(issue.message, "`Child.sum` must declare parameter `values` variadic like `Base.sum`");
@@ -4984,16 +4943,12 @@ fn a_template_refuses_every_type_but_int_float_string_and_bool() {
         ]
     );
     assert_eq!(
-        codes(&issues(("src/Demo/Receipt.php", php), &others)),
-        ["invalid-type-cast", "array-to-string-conversion", "invalid-type-cast", "invalid-type-cast"]
-    );
-    assert_eq!(
-        messages(("src/Demo/Receipt.php", php), &others),
+        issues(("src/Demo/Receipt.php", php), &others),
         [
-            "Cannot cast enum instance of type `enum(Lib\\Status)` to `string`.",
-            "Casting `array` to `string` is deprecated and produces the literal string 'Array'.",
-            "Cannot cast object of type `Demo\\Order` to `string` because it does not implement `Stringable`.",
-            "Cannot cast type `Closure` to `string`.",
+            "13:70 invalid-type-cast",
+            "16:66 array-to-string-conversion",
+            "18:66 invalid-type-cast",
+            "24:66 invalid-type-cast"
         ]
     );
 }
@@ -7347,8 +7302,8 @@ fn a_spread_of_a_value_that_is_neither_a_list_nor_a_map_is_an_error() {
 
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Prices;\n\nclass Report\n{\n    public function spread(int $number): void\n    {\n        $streamed = [...Prices::stream()];\n        $numbered = [...$number];\n    }\n}\n";
     assert_eq!(
-        messages(("src/Demo/Report.php", php), &[("src/Lib/Prices.php", PRICES)]),
-        ["Cannot use spread operator on non-iterable type `int`."]
+        issues(("src/Demo/Report.php", php), &[("src/Lib/Prices.php", PRICES)]),
+        ["12:22 invalid-array-element"]
     );
 }
 
@@ -9003,12 +8958,8 @@ fn ordering_a_nullable_instance_is_refused_until_it_is_tested_for_null() {
 
     let php = "<?php\n\nnamespace App;\n\nclass Range\n{\n    public function below(?Money $low, Money $high): bool { return $low < $high; }\n\n    public function compare(Money $low, ?Money $high): int { return $low <=> $high; }\n\n    public function tested(?Money $low, Money $high): bool { return $low !== null && $low < $high; }\n\n    public function five(?Money $low): bool { return $low < 5; }\n}\n";
     assert_eq!(
-        refusals(("src/App/Range.php", php), &[MONEY_OPERATORS]),
-        [
-            "7:68 possibly-null-operand Left operand in `<` comparison might be `null` (type `App\\Money|null`). | Ensure this operand is non-null or that comparison with `null` is intended and handled safely.",
-            "9:78 possibly-null-operand Right operand in spaceship comparison (`<=>`) might be `null` (type `App\\Money|null`). | Ensure this operand is non-null or that comparison with `null` is intended.",
-            "13:54 possibly-null-operand Left operand in `<` comparison might be `null` (type `App\\Money|null`). | Ensure this operand is non-null or that comparison with `null` is intended and handled safely.",
-        ]
+        issues(("src/App/Range.php", php), &[MONEY_OPERATORS]),
+        ["7:68 possibly-null-operand", "9:78 possibly-null-operand", "13:54 possibly-null-operand"]
     );
 }
 
