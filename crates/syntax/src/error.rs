@@ -83,6 +83,9 @@ pub enum ParseError {
     /// A member other than a law written in a PHP# module, such as a method, at the member. Spec section 32: a module
     /// holds no statements, branches, loops or methods.
     NonLawInSharpModule(Span),
+    /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
+    /// property has no incoming value to receive.
+    ComputedParameterInSharp(Span),
     /// A word other than `super` or `this` after a PHP# constructor's `:`, as in `: parent(row)`, at the `:` and the
     /// word.
     ConstructorInitializerInSharp(Span),
@@ -121,6 +124,7 @@ impl HasFileId for ParseError {
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
             | ParseError::NonLawInSharpModule(span)
+            | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span) => span.file_id,
         }
     }
@@ -161,6 +165,7 @@ impl HasSpan for ParseError {
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
             | ParseError::NonLawInSharpModule(span)
+            | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span) => *span,
         }
     }
@@ -273,6 +278,9 @@ impl std::fmt::Display for ParseError {
                     .to_string()
             }
             ParseError::NonLawInSharpModule(_) => "A module states only laws.".to_string(),
+            ParseError::ComputedParameterInSharp(_) => {
+                "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
+            }
             ParseError::ConstructorInitializerInSharp(_) => {
                 "A constructor passes control with `: super(…)` or `: this(…)`.".to_string()
             }
@@ -327,6 +335,7 @@ impl From<&ParseError> for Issue {
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
             | ParseError::NonLawInSharpModule(..)
+            | ParseError::ComputedParameterInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),

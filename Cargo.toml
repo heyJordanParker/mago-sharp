@@ -23,6 +23,7 @@ exclude = ["crates/syntax/fuzz", "crates/twig-syntax/fuzz"]
 
 [workspace.lints.rust]
 unknown_lints = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)"] }
 
 [workspace.lints.clippy]
 large_enum_variant = { level = "deny" }

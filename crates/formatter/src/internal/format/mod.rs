@@ -1745,6 +1745,7 @@ where
                 Modifier::Override(keyword) => keyword.format(f),
                 Modifier::Required(keyword) => keyword.format(f),
                 Modifier::Extern(keyword) => keyword.format(f),
+                Modifier::Lazy(keyword) => keyword.format(f),
             }
         })
     }
