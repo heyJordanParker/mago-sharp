@@ -151,8 +151,9 @@ where
         }))
     }
 
-    /// Parses a PHP# constructor's `: super(…)` or `: this(…)`, spec section 9.1. Any other word after `:` is one
-    /// error, and its arguments parse with it, so the constructor and the class parse on.
+    /// Parses a PHP# constructor's `: super(…)` or `: this(…)`, spec section 9.1. Anything else after `:`, such as
+    /// `: base(row)`, `: super` without arguments or `: ?Type`, is one error up to the body, so the constructor and the
+    /// class parse on.
     fn parse_optional_constructor_initializer(&mut self) -> Result<Option<ConstructorInitializer<'arena>>, ParseError> {
         if !self.dialect.is_sharp() || !self.stream.is_at(T![":"])? {
             return Ok(None);
@@ -166,14 +167,23 @@ where
         }
 
         let keyword = self.expect_any_keyword()?;
-        if !matches!(keyword.value, b"super" | b"this") {
-            self.errors.push(ParseError::ConstructorInitializerInSharp(colon.join(keyword.span)));
-            self.parse_optional_argument_list()?;
-
-            return Ok(None);
+        if matches!(keyword.value, b"super" | b"this") && self.stream.is_at(T!["("])? {
+            return Ok(Some(ConstructorInitializer { colon, keyword, argument_list: self.parse_argument_list()? }));
         }
 
-        Ok(Some(ConstructorInitializer { colon, keyword, argument_list: self.parse_argument_list()? }))
+        let mut span = colon.join(keyword.span);
+        loop {
+            if let Some(argument_list) = self.parse_optional_argument_list()? {
+                span = span.join(argument_list.span());
+            }
+            if matches!(self.stream.peek_kind(0)?, None | Some(T!["{" | "=>" | ";"])) {
+                break;
+            }
+            span = span.join(self.expect_any_keyword()?.span);
+        }
+        self.errors.push(ParseError::ConstructorInitializerInSharp(span));
+
+        Ok(None)
     }
 
     /// Parses a method's body. A PHP# method may also have an expression body, `=> expr;`, as spec section 7 writes it.

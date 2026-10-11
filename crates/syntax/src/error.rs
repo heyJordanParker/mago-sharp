@@ -86,8 +86,8 @@ pub enum ParseError {
     /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
     /// property has no incoming value to receive.
     ComputedParameterInSharp(Span),
-    /// A word other than `super` or `this` after a PHP# constructor's `:`, as in `: parent(row)`, at the `:` and the
-    /// word.
+    /// Anything but `super(…)` or `this(…)` after a PHP# constructor's `:`, as in `: parent(row)`, `: super { }` or
+    /// `: ?Type`, from the `:` up to the body.
     ConstructorInitializerInSharp(Span),
 }
 
@@ -282,7 +282,7 @@ impl std::fmt::Display for ParseError {
                 "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
             }
             ParseError::ConstructorInitializerInSharp(_) => {
-                "A constructor passes control with `: super(…)` or `: this(…)`.".to_string()
+                "A constructor passes control to its base class with `: super(…)`.".to_string()
             }
         };
 

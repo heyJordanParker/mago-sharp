@@ -1726,6 +1726,27 @@ fn the_constructor_for_initial_values_calls_the_base_class_constructor() {
     );
 }
 
+/// The base class's constructor `parent::__construct` calls can be one it inherits, for `: super(…)` and for the
+/// constructor that runs the initial values.
+#[test]
+fn the_base_class_constructor_can_be_inherited() {
+    let model = "<?php namespace Lib; class Model { public function __construct(int $id) {} } class Entity extends Model {} class Plain { public function __construct() {} } class Record extends Plain {}";
+    for (code, body) in [
+        (
+            "namespace App.Tenant;\n\nimport Lib.Entity;\n\nclass Report : Entity\n{\n    public Report(int id) : super(id) { }\n}\n",
+            "STMT_LIST\n  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n      VAR\n        ZVAL \"id\"\n",
+        ),
+        (
+            "namespace App.Tenant;\n\nimport Lib.Record;\n\nclass Report : Record\n{\n    private string label = strtoupper(\"x\");\n}\n",
+            "STMT_LIST\n  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"label\"\n    CALL\n      ZVAL \"strtoupper\"\n      ARG_LIST\n        ZVAL \"x\"\n  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n",
+        ),
+    ] {
+        let lowered = Lowered::with(code, &[("src/Lib/Model.php", model)]);
+
+        assert_eq!(lowered.render(lowered.child(lowered.method_named("__construct"), 2)), body, "{code}");
+    }
+}
+
 /// `: super()` with no constructor above the class does nothing, as C#'s `: base()` on `object`.
 #[test]
 fn super_with_no_constructor_above_lowers_to_nothing() {

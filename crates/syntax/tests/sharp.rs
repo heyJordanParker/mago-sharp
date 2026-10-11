@@ -241,10 +241,16 @@ fn a_constructor_passes_control_with_super_or_this_before_its_body() {
     }
 }
 
-/// Any other word after a constructor's `:` is one error, and the constructor and the class parse on.
+/// Anything but `super(…)` or `this(…)` after a constructor's `:` is one error, and the constructor and the class parse
+/// on.
 #[test]
 fn any_other_word_after_a_constructor_colon_is_one_error() {
-    for (member, start) in [("public Order(Row row) : base(row) {}", ": base"), ("public Order(Row row) : {}", ":")] {
+    for (member, start) in [
+        ("public Order(Row row) : base(row) {}", ": base(row)"),
+        ("public Order(Row row) : {}", ":"),
+        ("public Order() : super {}", ": super"),
+        ("public Order() : ?Order {}", ": ?Order"),
+    ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
             format!("class Order\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
@@ -254,7 +260,7 @@ fn any_other_word_after_a_constructor_colon_is_one_error() {
         let [error] = program.errors else {
             panic!("expected one error for `{member}`, got {:#?}", program.errors);
         };
-        assert_eq!(error.to_string(), "A constructor passes control with `: super(…)` or `: this(…)`.", "{member}");
+        assert_eq!(error.to_string(), "A constructor passes control to its base class with `: super(…)`.", "{member}");
         assert_eq!(source(code, error), start, "{member}");
         let [ClassLikeMember::Method(constructor), ClassLikeMember::Method(run)] = class_members(program).as_slice()
         else {

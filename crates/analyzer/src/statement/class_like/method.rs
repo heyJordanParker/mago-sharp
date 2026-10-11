@@ -317,7 +317,7 @@ where
         return Ok(());
     }
 
-    if base_constructor(context, class).is_some() {
+    if context.codebase.get_parent_constructor(class.name.as_bytes()).is_some() {
         let parent = Expression::Parent(initializer.keyword);
         let method = ClassLikeMemberSelector::Identifier(LocalIdentifier {
             span: initializer.keyword.span,
@@ -368,7 +368,9 @@ pub(super) fn check_super_call<A>(
 ) where
     A: Arena,
 {
-    let Some((base, constructor_of_base)) = base_constructor(context, class) else {
+    let (Some(base), Some(constructor_of_base)) =
+        (class.direct_parent_class, context.codebase.get_parent_constructor(class.name.as_bytes()))
+    else {
         return;
     };
     let constructor = members.iter().find_map(|member| match member {
@@ -376,7 +378,7 @@ pub(super) fn check_super_call<A>(
         _ => None,
     });
     let class_name = display_class_like_name(context, class.original_name);
-    let base_name = display_class_like_name(context, base.original_name);
+    let base_name = display_class_like_name(context, base);
 
     match constructor {
         Some(constructor) if constructor.initializer.is_none() => {
@@ -402,20 +404,6 @@ pub(super) fn check_super_call<A>(
         }
         _ => {}
     }
-}
-
-/// The constructor `class`'s base class declares or inherits, with that base class.
-fn base_constructor<'ctx, A>(
-    context: &Context<'ctx, '_, A>,
-    class: &ClassLikeMetadata,
-) -> Option<(&'ctx ClassLikeMetadata, &'ctx FunctionLikeMetadata)>
-where
-    A: Arena,
-{
-    let base = context.codebase.get_class_like(class.direct_parent_class?.as_bytes())?;
-    let constructor = base.declaring_method_ids.get(&word("__construct"))?;
-
-    Some((base, context.codebase.get_method_by_id(constructor)?))
 }
 
 /// Reports `class`'s `operator ==`, declared at `operator`, when neither `class` nor a parent declares a

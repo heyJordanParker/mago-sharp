@@ -4610,7 +4610,7 @@ fn super_without_a_constructor_above_takes_no_arguments() {
 #[test]
 fn a_constructor_without_super_under_a_base_class_constructor_is_missing_super_call() {
     let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function __construct()\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(int id) { }\n}\n\nclass Shipment : Order\n{\n    public Shipment() { }\n}\n\nclass Saved : Model\n{\n    public Saved() { }\n}\n\nclass Plain\n{\n}\n\nclass Leaf : Plain\n{\n    public Leaf() { }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(int id) { }\n}\n\nclass Shipment : Order\n{\n    public Shipment() { }\n}\n\nclass Saved : Model\n{\n    public Saved() { }\n}\n\nclass Middle : Entity\n{\n}\n\nclass Leaf : Middle\n{\n    public Leaf() { }\n}\n\nclass Plain\n{\n}\n\nclass Free : Plain\n{\n    public Free() { }\n}\n";
 
     assert_messages(
         sharp,
@@ -4619,6 +4619,7 @@ fn a_constructor_without_super_under_a_base_class_constructor_is_missing_super_c
             "12:12 missing-super-call: `Order`'s constructor must call `Entity`'s with `: super(…)`.",
             "17:12 missing-super-call: `Shipment`'s constructor must call `Order`'s with `: super(…)`.",
             "22:12 missing-super-call: `Saved`'s constructor must call `Model`'s with `: super(…)`.",
+            "31:12 missing-super-call: `Leaf`'s constructor must call `Middle`'s with `: super(…)`.",
         ],
     );
 }

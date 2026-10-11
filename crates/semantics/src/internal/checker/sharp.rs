@@ -60,6 +60,7 @@ use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
+use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Module;
@@ -67,6 +68,7 @@ use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
+use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::PartialArgument;
@@ -200,7 +202,8 @@ const ANY: &[u8] = b"Any";
 ///   lazy property computes its own value, and `lazy` anywhere else is not supported yet. The constructor passes
 ///   control to its base class with `: super(…)`, whose arguments are a method body's expressions without `this`,
 ///   because they run before the object exists, as C#'s CS0027 says. `: this(…)` belongs to a named constructor, so on
-///   the main one it is an error. The analyzer checks the arguments against the base class's constructor.
+///   the main one it is an error. The analyzer checks the arguments against the base class's constructor. A
+///   constructor runs once, when `new` creates the object, so a call of a member named `__construct` is an error.
 /// - A parameter: always a type, a name and an optional default, and never by reference. The parser reports a
 ///   parameter written as a computed property, because a parameter receives its value. A default is a constant
 ///   expression: a literal, a constant, `typeof(X)`, a list or map literal of them, or the operators below on them,
@@ -1356,6 +1359,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ArgumentList(_), Instantiation) => Some(Body),
         (Node::AssignmentOperator(operator), Body) if is_slice_assignment_operator(operator) => Some(Body),
         (Node::PositionalArgument(_), Body) => Some(Body),
+        // A constructor runs once, when `new` creates the object, so no code calls one as a method, as in C#.
+        (Node::MethodCall(MethodCall { method, .. }) | Node::NullSafeMethodCall(NullSafeMethodCall { method, .. }), Body)
+            if matches!(method, ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"__construct")) =>
+        {
+            context.report(
+                Issue::error(
+                    "A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+                )
+                .with_annotation(Annotation::primary(method.span()).with_message("Called here.")),
+            );
+
+            None
+        }
         // `super.label()` calls the parent's method, spec section 22. `super` is no value of its own.
         (Node::MethodCall(call), Body) if matches!(call.object, Expression::Parent(_)) => Some(SuperCall),
         // `Self.make()` calls a static method of the class a static method is called on, spec section 25.

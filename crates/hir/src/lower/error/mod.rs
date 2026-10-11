@@ -16,8 +16,8 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         // PHP syntax in a PHP# file, such as a `fn` lambda, a PHP# parameter or field without its type, `in` in a PHP#
         // loop, PHP# syntax not supported yet, an escape a PHP# template refuses, an operator symbol a class cannot
         // declare, effects after a function type's `>`, a module member that is no law, a computed property's body after
-        // a parameter, or a word other than `super` or `this` after a constructor's `:`, is a token the PHP# grammar does
-        // not expect there.
+        // a parameter, or anything but `super(…)` or `this(…)` after a constructor's `:`, is a token the PHP# grammar
+        // does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::PhpSyntaxInSharp(..)
         | ParseError::PhpLambdaInSharp(..)

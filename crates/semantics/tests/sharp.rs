@@ -816,7 +816,7 @@ fn super_calls_the_parent_method() {
 /// method body's expressions without `this`. Only a named constructor calls `: this(…)`.
 #[test]
 fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_this() {
-    let code = "namespace App.Tenant;\n\npublic class Order : Entity\n{\n    public Order(Row row, int count) : super(row, count + 1) { }\n}\n\npublic class Copy : Entity\n{\n    public Copy(Row row) : this(row) { }\n}\n\npublic class Early : Entity\n{\n    public Early(Row row) : super(this, this.row) { }\n}\n\npublic class Late : Entity\n{\n    public Late(Row row) : super(super.row) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Order : Entity\n{\n    public Order(Row row, int count) : super(row, count + 1) { }\n}\n\npublic class Copy : Entity\n{\n    public Copy(Row row) : this(row) { }\n}\n\npublic class Early : Entity\n{\n    public Early(Row row) : super(this, this.row) { }\n}\n\npublic class Late : Entity\n{\n    public Late(Row row) : super(super.row) { }\n}\n\npublic class Lambda : Entity\n{\n    public Lambda(Row row) : super(Rows.call(() => this.row), Rows.call(() => { return this.row; })) { }\n}\n\npublic class Named : Entity\n{\n    public Named(Row row) : super(row: this.row) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -825,6 +825,27 @@ fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_t
             "15:35 `this` is not available before the constructor runs: pass a parameter instead.",
             "15:41 `this` is not available before the constructor runs: pass a parameter instead.",
             "20:34 This expression is not supported yet in PHP#.",
+            "25:52 `this` is not available before the constructor runs: pass a parameter instead.",
+            "25:88 `this` is not available before the constructor runs: pass a parameter instead.",
+            "30:40 `this` is not available before the constructor runs: pass a parameter instead.",
+        ]
+    );
+}
+
+/// Spec section 9.1: a constructor runs once, when `new` creates the object, so no code calls a member named
+/// `__construct`. The base class's arguments go in `: super(…)`.
+#[test]
+fn a_constructor_runs_once_so_no_code_calls_it_as_a_member() {
+    let code = "namespace App.Tenant;\n\npublic class Base\n{\n    public Base(public int id { get; }) { }\n}\n\npublic class Once : Base\n{\n    public Once(int id) : super(id) { }\n}\n\npublic class Twice : Base\n{\n    public Twice(int id) : super(id)\n    {\n        super.__construct(id + 1);\n    }\n}\n\npublic class Again : Base\n{\n    public Again(int id) : super(id) { }\n\n    public void reset(Base other, Base? maybe)\n    {\n        super.__construct(2);\n        this.__construct(3);\n        other.__construct(4);\n        maybe?.__CONSTRUCT(5);\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "17:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            "27:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            "28:14 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            "29:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            "30:16 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
         ]
     );
 }
