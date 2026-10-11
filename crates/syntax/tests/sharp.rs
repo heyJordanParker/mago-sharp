@@ -2438,8 +2438,8 @@ fn lazy_is_a_modifier_and_stays_a_name_elsewhere() {
     assert_eq!(source(CODE, call.function), "lazy");
 }
 
-/// Spec section 9: a parameter has no computed property, because it receives its value. Its `=>` and expression are
-/// one error, and the parameter list and the class parse on.
+/// Spec section 9: a parameter has no computed property, because it receives its value. It is one error at its `=>`,
+/// and the parameter list and the class parse on.
 #[test]
 fn a_computed_parameter_is_one_error_and_the_class_parses_on() {
     const CODE: &str = "class Store\n{\n    public Store(public string slug => trim(\"x\"), int count) {}\n\n    public int total() => 1;\n}\n";
@@ -2451,9 +2451,9 @@ fn a_computed_parameter_is_one_error_and_the_class_parses_on() {
     };
     assert_eq!(
         error.to_string(),
-        "A parameter cannot be a computed property: a computed property has no incoming value to receive."
+        "A constructor parameter cannot be a computed property: a computed property has no incoming value to receive."
     );
-    assert_eq!(source(CODE, error), "=> trim(\"x\")");
+    assert_eq!(source(CODE, error), "=>");
     let [ClassLikeMember::Method(constructor), ClassLikeMember::Method(total)] = class_members(program).as_slice()
     else {
         panic!("expected two methods, got {:#?}", class_members(program));

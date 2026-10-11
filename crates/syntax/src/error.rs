@@ -80,8 +80,8 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
-    /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>` and expression.
-    /// A computed property has no incoming value to receive.
+    /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
+    /// property has no incoming value to receive.
     ComputedParameterInSharp(Span),
 }
 
@@ -268,7 +268,8 @@ impl std::fmt::Display for ParseError {
                     .to_string()
             }
             ParseError::ComputedParameterInSharp(_) => {
-                "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
+                "A constructor parameter cannot be a computed property: a computed property has no incoming value to receive."
+                    .to_string()
             }
         };
 
