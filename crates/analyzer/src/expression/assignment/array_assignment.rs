@@ -218,6 +218,7 @@ where
             block_context,
             artifacts,
             property_access,
+            false,
             &root_array_type,
             Some(root_array_expression),
             if root_is_array_access_object {

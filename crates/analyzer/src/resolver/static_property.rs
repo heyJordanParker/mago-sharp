@@ -29,10 +29,12 @@ use crate::expression::unary::cast_type_to_string;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::property::PropertyResolutionResult;
 use crate::resolver::property::ResolvedProperty;
+use crate::resolver::property::resolve_declared_property;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_variable_id;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::visibility::check_resolved_property_write_visibility;
 use crate::visibility::check_static_property_read_visibility;
 
 /// The parts of a static property access.
@@ -99,12 +101,14 @@ impl HasSpan for StaticPropertyName<'_, '_> {
     }
 }
 
-/// Resolves all possible static properties of a static property access.
+/// Resolves all possible static properties of a static property access, checking that the scope may write each one
+/// when `for_assignment` is set.
 pub fn resolve_static_properties<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     access: StaticProperty<'_, 'arena>,
+    for_assignment: bool,
 ) -> Result<PropertyResolutionResult, AnalysisError>
 where
     A: Arena,
@@ -205,6 +209,7 @@ where
                 *property_name,
                 access.name.span(),
                 class_expression,
+                for_assignment,
                 &mut result,
             ) {
                 result.properties.push(resolved_property);
@@ -223,6 +228,7 @@ fn find_static_property_in_class<'ctx, 'arena, A>(
     property_name: Word,
     name_span: Span,
     class_expr: &Expression<'arena>,
+    for_assignment: bool,
     result: &mut PropertyResolutionResult,
 ) -> Option<ResolvedProperty>
 where
@@ -344,6 +350,26 @@ where
         class_expr.span(),
         Some(name_span),
     ) {
+        result.has_error_path = true;
+        return None;
+    }
+
+    if for_assignment
+        && let Some(resolution) = resolve_declared_property(
+            context.codebase,
+            declaring_class_metadata,
+            property_name,
+            false,
+            block_context.scope.get_class_like_name(),
+        )
+        && !check_resolved_property_write_visibility(
+            context,
+            block_context,
+            &resolution,
+            class_expr.span(),
+            Some(name_span),
+        )
+    {
         result.has_error_path = true;
         return None;
     }

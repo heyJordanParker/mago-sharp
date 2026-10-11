@@ -237,8 +237,8 @@ impl<'ctx> InvocationTarget<'ctx> {
             )
     }
 
-    /// Returns the `Sharp\ListMethods` or `Sharp\MapMethods` object a PHP# `List` or `Map` method is called on, typed
-    /// by the elements of the collection.
+    /// Returns the `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods` object a PHP# `List`, `Map` or `Set`
+    /// method is called on, typed by the elements of the collection.
     pub fn get_sharp_collection_receiver(&self) -> Option<&TObject> {
         match self {
             InvocationTarget::FunctionLike {

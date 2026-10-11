@@ -6363,6 +6363,107 @@ fn a_changing_collection_method_may_run_on_a_property_with_a_set_hook() {
     assert_eq!(issues(("src/Demo/Shop.sharp", sharp), &[("src/Lib/Box.php", box_class)]), Vec::<String>::new());
 }
 
+/// `add`, `remove` and `clear` change a `Set` and write it back where it lives, as a `List`'s or a `Map`'s changing
+/// methods do, so they are refused on a value with no place, such as a call's result. A method that only reads the
+/// `Set` runs on any value.
+#[test]
+fn a_changing_set_method_needs_a_place_and_a_reading_one_runs_on_a_value() {
+    let sharp = "namespace Demo;\n\nclass Shop\n{\n    public int change()\n    {\n        this.ids().add(1);\n        this.ids().remove(1);\n        this.ids().clear();\n        bool held = this.ids().contains(1) && this.ids().any(id => id > 0);\n        List<int> listed = this.ids().toList();\n        Set<int> kept = this.ids().filter(id => id > 0);\n        List<int> doubled = this.ids().map(id => id * 2);\n        List<int> sorted = this.ids().sortedBy(id => id);\n        return this.ids().count() + this.ids().sumOf(id => id) + this.ids().first(id => id > 0) + count(listed) + count(kept) + count(doubled) + count(sorted) + (held ? 1 : 0);\n    }\n\n    public Set<int> ids()\n    {\n        return [];\n    }\n}\n";
+
+    let refused = "This method changes the collection, which has no place to be written back to. | Store the collection in a local or a property, then call the method on it.";
+    assert_eq!(
+        refusals(("src/Demo/Shop.sharp", sharp), &[]),
+        [
+            format!("7:9 invalid-pass-by-reference {refused}"),
+            format!("8:9 invalid-pass-by-reference {refused}"),
+            format!("9:9 invalid-pass-by-reference {refused}"),
+        ]
+    );
+}
+
+/// `order?.ids?.add(1)` changes `order.ids` when `order` is an object, so a property reached with `?.` is a place as
+/// it is with `.`, for a `List`, a `Map` and a `Set` alike, and its `set` decides whether the caller may change it.
+#[test]
+fn a_changing_collection_method_writes_back_through_a_null_safe_property() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<int>? lines { get; set; } = null;\n    public Map<string, int>? counts { get; set; } = null;\n    public Set<int>? ids { get; set; } = null;\n    public Set<int>? fixed { get; } = null;\n}\n\nclass Shop\n{\n    public void change(Order? order)\n    {\n        order?.lines?.add(1);\n        order?.counts?.delete(\"a\");\n        order?.ids?.add(1);\n        order?.fixed?.add(1);\n    }\n\n    public void known(Order order)\n    {\n        order?.ids?.add(1);\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Shop.sharp", sharp), &[]),
+        ["18:16 invalid-property-write", "23:14 redundant-nullsafe-operator"]
+    );
+}
+
+/// Writing a changed collection back is a PHP# rule. A `.php` file that names a collection's methods class in a
+/// docblock calls its changing methods on a variable as on any other object.
+#[test]
+fn a_changing_collection_method_called_from_php_needs_no_place() {
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\nuse Sharp\\SetMethods;\n\nfinal class Shop\n{\n    /**\n     * @param ListMethods<int> $lines\n     * @param MapMethods<string, int> $counts\n     * @param SetMethods<int> $ids\n     */\n    public function change(ListMethods $lines, MapMethods $counts, SetMethods $ids): bool\n    {\n        $lines->add(1);\n        $counts->delete('a');\n\n        return $ids->add(1);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Shop.php", php), &[]), Vec::<String>::new());
+}
+
+/// A changing method writes a `Set` back through its property's `set`, so a `Set` property without one refuses the
+/// change, as a `List` property does.
+#[test]
+fn a_set_property_without_a_set_refuses_a_changing_method() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public Set<int> fixed { get; } = [];\n}\n\nclass Tags\n{\n    public void run(Order order)\n    {\n        order.fixed.add(3);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["12:15 invalid-property-write"]);
+}
+
+/// A changing method called on a value that may be one of several collections is refused once, by the first rule it
+/// breaks. `delete` on a `Map|Set` and `add` on a `Map|Set` are refused by the collection that lacks them, and not again
+/// for writing to no place. A method the engine runs as PHP on the array, such as a `Set`'s `add` or `filter`, is not
+/// supported on a value that may be another collection or an object, because the engine would run the other
+/// collection's method on the `Set`: `List|Set` and `Set|Box`.
+#[test]
+fn a_changing_method_of_a_union_of_collections_is_refused_once() {
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).delete(\"a\");\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        return count(tags.filter(tag => tag > 0));\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Shop.sharp", sharp), &[]),
+        [
+            "12:31 not-supported-yet",
+            "13:32 non-existent-method",
+            "14:32 non-existent-method",
+            "15:29 not-supported-yet",
+            "17:14 not-supported-yet",
+            "18:27 not-supported-yet"
+        ]
+    );
+}
+
+/// `Registry.ids.add(1)` changes the static property `Registry.ids` through its `set`, as `Registry.ids = [1]` writes
+/// it, for a `List`, a `Map` and a `Set` alike. A static property whose `set` is `private` refuses both from another
+/// class, as an instance property does.
+#[test]
+fn a_changing_collection_method_writes_back_through_a_static_property() {
+    let sharp = "namespace Demo;\n\nclass Registry\n{\n    public static Set<int> ids { get; set; } = [];\n    public static List<int> lines { get; set; } = [];\n    public static Map<string, int> counts { get; set; } = [:];\n\n    public static int run()\n    {\n        Registry.ids.add(1);\n        Registry.lines.add(2);\n        Registry.counts.delete(\"a\");\n        return count(Registry.ids) + count(Registry.lines) + count(Registry.counts);\n    }\n}\n\nclass Hidden\n{\n    public static Set<int> tags { get; private set; } = [];\n}\n\nclass Outside\n{\n    public static void change()\n    {\n        Hidden.tags = [5];\n        Hidden.tags.add(5);\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Registry.sharp", sharp), &[]),
+        ["27:16 invalid-property-write", "28:16 invalid-property-write"]
+    );
+}
+
+/// `(maybe ??= []).add(1)` changes the value `??=` gives, which is not the place `maybe`, so it is refused as a call
+/// on a value with no place, for a `Set` as for a `List`. The value is the collection `maybe` is declared as, so the
+/// `Set`'s `add` checks its element too.
+#[test]
+fn a_changing_method_on_a_null_coalescing_assignment_needs_a_place() {
+    let sharp = "namespace Demo;\n\nclass Maybe\n{\n    public void run(Set<int>? ids, Set<int>? tags, List<int>? lines)\n    {\n        (ids ??= []).add(1);\n        (tags ??= []).add(\"x\");\n        (lines ??= []).add(1);\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Maybe.sharp", sharp), &[]),
+        [
+            "7:9 invalid-pass-by-reference",
+            "8:9 invalid-pass-by-reference",
+            "8:27 invalid-argument",
+            "9:9 invalid-pass-by-reference"
+        ]
+    );
+}
+
 /// `+=`, `++` and `--` read an index, then write it. On a `Map` the read is bare, and on a `List` the write is, so
 /// both are refused, as Kotlin refuses `map[k] += 1`, and the help writes the form that compiles.
 #[test]

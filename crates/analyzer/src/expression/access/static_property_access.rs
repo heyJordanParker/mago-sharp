@@ -64,7 +64,7 @@ where
         return Ok(());
     }
 
-    let resolution_result = resolve_static_properties(context, block_context, artifacts, access)?;
+    let resolution_result = resolve_static_properties(context, block_context, artifacts, access, false)?;
 
     let mut resulting_expression_type = None;
     if !resolution_result.has_error_path {
