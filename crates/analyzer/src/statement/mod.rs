@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
-use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::scanner::get_union_from_hint;
 use mago_codex::ttype::atomic::TAtomic;
@@ -743,13 +742,9 @@ where
         let callable = cast_atomic_to_callable(atomic, context.codebase, None)?;
         let identifier = match callable.as_ref() {
             TCallable::Alias(identifier) => *identifier,
-            // A method value's `source` names the class it is read through, which may inherit the method.
-            TCallable::Signature(signature) => match signature.get_source()? {
-                FunctionLikeIdentifier::Method(class, method) => {
-                    context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(class, method)).into()
-                }
-                source => source,
-            },
+            TCallable::Signature(signature) => {
+                context.codebase.get_declaring_function_like_identifier(&signature.get_source()?)
+            }
         };
 
         check_target(identifier)

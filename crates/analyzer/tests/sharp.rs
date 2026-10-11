@@ -8899,6 +8899,19 @@ fn a_method_value_read_through_a_subclass_is_the_method_its_parent_declares() {
     assert_eq!(issues(closing, &[books]), ["14:9 unused-method-call", "17:41 invalid-argument"]);
 }
 
+/// PHP's `Child::method(...)` names the class it is written with, which may inherit the method, so its closure is the
+/// method its parent declares: an unused result of a `#[\NoDiscard]` method is reported, a built-in method takes no
+/// argument it does not list, and a call returns the type the method's parameters give.
+#[test]
+fn a_php_static_method_closure_through_a_subclass_is_the_method_its_parent_declares() {
+    let probe = (
+        "src/App/Probe.php",
+        "<?php\n\nnamespace App;\n\nclass Ledger\n{\n    #[\\NoDiscard]\n    public static function total(int $n): int { return $n; }\n\n    /** @return ($n is int ? int : string) */\n    public static function pick(int|string $n): int|string { return $n; }\n}\n\nfinal class BranchLedger extends Ledger\n{\n}\n\nfinal class MyDate extends \\DateTime\n{\n}\n\nfinal class Probe\n{\n    /** @param \\Closure(int): mixed $step */\n    public static function apply(\\Closure $step): mixed { return $step(1); }\n\n    public function close(): void\n    {\n        (BranchLedger::total(...))(1);\n    }\n\n    public function picked(): int\n    {\n        return (BranchLedger::pick(...))(1);\n    }\n\n    public function errors(): mixed\n    {\n        return self::apply(MyDate::getLastErrors(...));\n    }\n}\n",
+    );
+
+    assert_eq!(issues(probe, &[]), ["29:9 unused-method-call", "39:28 invalid-argument"]);
+}
+
 /// An initial value that is not constant runs in the constructor, so a lambda in it is held to the property's function
 /// type, even in a class with no method. PHP 8.5, the version the tests analyze, accepts a `static function` default.
 #[test]
