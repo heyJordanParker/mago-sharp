@@ -1553,17 +1553,52 @@ where
     let mut value_type = None;
     let mut has_valid_iterable_type = false;
     let mut invalid_atomic_ids = Vec::with_capacity(iterator_type.types.len());
+    let iterator_atomics: Vec<&TAtomic> = iterator_type
+        .types
+        .iter()
+        .flat_map(|atomic| match atomic {
+            TAtomic::Derived(TDerived::Intersection(intersection)) => intersection.get_base_type().types.as_ref(),
+            _ => std::slice::from_ref(atomic),
+        })
+        .map(|atomic| match atomic {
+            TAtomic::GenericParameter(generic_parameter) => generic_parameter.get_constraint().get_single(),
+            atomic => atomic,
+        })
+        .collect();
 
-    for iterator_atomic_original in iterator_type.types.iter().flat_map(|atomic| match atomic {
-        TAtomic::Derived(TDerived::Intersection(intersection)) => intersection.get_base_type().types.as_ref(),
-        _ => std::slice::from_ref(atomic),
-    }) {
-        let iterator_atomic = if let TAtomic::GenericParameter(generic_parameter) = iterator_atomic_original {
-            generic_parameter.get_constraint().get_single()
-        } else {
-            iterator_atomic_original
+    // Spec section 12 reads a PHP# `List`'s indexes from `entries()`, and a `Set` has no keys of its own, so `[k, v]`
+    // reads a `Map`. A place is every collection it is declared as, whatever literal it holds, so each of them must be
+    // a `Map`, and the first that is not is reported. A `Map`'s key reads back as its key type: the lowering casts a
+    // `string` key PHP stored as an `int`.
+    if context.dialect.is_sharp()
+        && let Some(key) = foreach.target.key()
+    {
+        let keyless = |atomic: &TAtomic| match atomic {
+            TAtomic::Array(TArray::List(_)) => {
+                Some(("List", "Loop over `list.entries()` to read each index with its value."))
+            }
+            TAtomic::Array(TArray::Set(_)) => {
+                Some(("Set", "Loop over the elements alone, as in `for (const x of set)`."))
+            }
+            _ => None,
+        };
+        let refused = match get_declared_collection(context, block_context, artifacts, iterator) {
+            Some(declared) => declared.types.iter().find_map(keyless),
+            None => iterator_atomics.iter().copied().find_map(keyless),
         };
 
+        if let Some((kind, help)) = refused {
+            context.collector.report_with_code(
+                IssueCode::InvalidIterator,
+                Issue::error(format!("`for (const [k, v] of x)` reads the keys of a `Map`, and this is a `{kind}`."))
+                    .with_annotation(Annotation::primary(iterator.span()).with_message(format!("This is a `{kind}`.")))
+                    .with_annotation(Annotation::secondary(key.span()).with_message("Its key is read here."))
+                    .with_help(help),
+            );
+        }
+    }
+
+    for iterator_atomic in iterator_atomics {
         match iterator_atomic {
             TAtomic::Null | TAtomic::Scalar(TScalar::Bool(TBool { value: Some(false) })) => {
                 always_enters_loop = false;
@@ -1575,38 +1610,6 @@ where
                 }
 
                 let (k, v) = get_array_parameters(array, context.codebase);
-
-                // Spec section 12 reads a PHP# `List`'s indexes from `entries()`, and a `Set` has no keys of its own, so
-                // `[k, v]` reads a `Map`, which a place is when it is declared one, whatever literal it holds. A `Map`'s
-                // key reads back as its key type: the lowering casts a `string` key PHP stored as an `int`.
-                if context.dialect.is_sharp()
-                    && let Some(key) = foreach.target.key()
-                    && let Some((kind, help)) =
-                        match get_declared_collection(context, block_context, artifacts, iterator)
-                            .as_ref()
-                            .unwrap_or(array)
-                        {
-                            TArray::List(_) => {
-                                Some(("List", "Loop over `list.entries()` to read each index with its value."))
-                            }
-                            TArray::Set(_) => {
-                                Some(("Set", "Loop over the elements alone, as in `for (const x of set)`."))
-                            }
-                            TArray::Keyed(_) => None,
-                        }
-                {
-                    context.collector.report_with_code(
-                        IssueCode::InvalidIterator,
-                        Issue::error(format!(
-                            "`for (const [k, v] of x)` reads the keys of a `Map`, and this is a `{kind}`."
-                        ))
-                        .with_annotation(
-                            Annotation::primary(iterator.span()).with_message(format!("This is a `{kind}`.")),
-                        )
-                        .with_annotation(Annotation::secondary(key.span()).with_message("Its key is read here."))
-                        .with_help(help),
-                    );
-                }
 
                 key_type = Some(add_optional_union_type(k, key_type.as_ref(), context.codebase));
                 value_type = Some(add_optional_union_type(v, value_type.as_ref(), context.codebase));

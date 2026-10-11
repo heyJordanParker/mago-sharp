@@ -464,7 +464,7 @@ where
 /// collection is a place the caller can write: a local or a parameter, `field`, which its accessor writes as the
 /// storage, or a property whose `set` the caller reaches, which the property write check decides as it does for an
 /// index write. The change may fill the collection past any literal the analyzer saw in it, so the place holds the
-/// collection it is declared as from then on, beside whatever else, such as `null`, it held.
+/// collections it is declared as from then on, beside whatever else, such as `null`, it held.
 fn check_changed_collection<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -477,7 +477,7 @@ where
     let mut changed_type = artifacts.get_expression_type(collection).cloned().unwrap_or_else(get_mixed);
     if let Some(declared) = get_declared_collection(context, block_context, artifacts, collection) {
         let others = changed_type.types.iter().filter(|atomic| !matches!(atomic, TAtomic::Array(_))).cloned();
-        changed_type = changed_type.clone_with_types(others.chain([TAtomic::Array(declared)]).collect());
+        changed_type = changed_type.clone_with_types(others.chain(declared.types.iter().cloned()).collect());
     }
 
     match collection.unparenthesized() {
