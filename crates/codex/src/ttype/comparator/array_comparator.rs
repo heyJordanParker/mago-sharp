@@ -58,7 +58,7 @@ fn known_items_view(array: &TArray) -> Option<Cow<'_, BTreeMap<ArrayKey, (bool, 
 }
 
 /// Whether a collection's element or key type fits, as [`union_comparator::is_contained_by`] decides. A type of
-/// elements is no single value, so a refusal names no `int` in `int_for_float`. Only an element a literal writes does.
+/// elements is no single value, so its refusal never sets `int_for_float`. Only an element a literal writes does.
 fn is_element_type_contained_by(
     codebase: &CodebaseMetadata,
     input_type: &TUnion,
@@ -78,7 +78,7 @@ fn is_element_type_contained_by(
     );
 
     if !fits {
-        atomic_comparison_result.int_for_float = None;
+        atomic_comparison_result.int_for_float = false;
     }
 
     fits

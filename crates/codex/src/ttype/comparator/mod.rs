@@ -1,7 +1,6 @@
 use mago_word::Word;
 
 use crate::ttype::atomic::TAtomic;
-use crate::ttype::atomic::scalar::int::TInteger;
 use crate::ttype::template::TemplateBound;
 use crate::ttype::union::TUnion;
 
@@ -33,8 +32,8 @@ pub struct ComparisonResult {
     /// `Any` does, and a `float` container refuses an `int`. The caller sets it for a `.sharp` file. A PHP file keeps
     /// upstream's rules, which let any `mixed` into `nonnull` and an `int` into a `float`.
     pub sharp_rules: bool,
-    /// The `int` a failed comparison refused only because a `float` was expected, under `sharp_rules`.
-    pub int_for_float: Option<TInteger>,
+    /// Whether a failed comparison refused an `int` only because a `float` was expected, under `sharp_rules`.
+    pub int_for_float: bool,
 }
 
 impl Default for ComparisonResult {
@@ -55,7 +54,7 @@ impl ComparisonResult {
             type_variable_lower_bounds: vec![],
             type_variable_upper_bounds: vec![],
             sharp_rules: false,
-            int_for_float: None,
+            int_for_float: false,
         }
     }
 
@@ -93,7 +92,6 @@ mod tests {
 
     use crate::misc::GenericParent;
     use crate::ttype::atomic::generic::TGenericParameter;
-    use crate::ttype::atomic::scalar::int::TInteger;
     use crate::ttype::get_float;
     use crate::ttype::get_int;
     use crate::ttype::get_named_object;
@@ -317,10 +315,10 @@ mod tests {
         }
     }
 
-    /// A template's value fits where its constraint fits, so the refused `int` is named only when every part of the
-    /// constraint that does not fit is that `int`, whichever part comes last.
+    /// A template's value fits where its constraint fits, so it is refused only for an `int` when every part of the
+    /// constraint that does not fit is an `int`, whichever part comes last.
     #[test]
-    fn a_template_names_the_refused_int_only_when_its_whole_constraint_is_refused_for_it() {
+    fn a_template_is_refused_only_for_an_int_when_its_whole_constraint_is() {
         let codebase = CodebaseMetadata::default();
         let template = |constraint: TUnion| {
             TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter::new(
@@ -334,7 +332,7 @@ mod tests {
 
         let mut int_result = ComparisonResult::with_sharp_rules(true);
         assert_is_contained_by(&codebase, &template(get_int()), &get_float(), false, &mut int_result);
-        assert_eq!(int_result.int_for_float, Some(TInteger::Unspecified));
+        assert!(int_result.int_for_float, "an `int` constraint is refused only for its `int`");
 
         for constraint in [vec![string.clone(), int.clone()], vec![int, string]] {
             let mut result = ComparisonResult::with_sharp_rules(true);
@@ -345,7 +343,7 @@ mod tests {
                 false,
                 &mut result,
             );
-            assert_eq!(result.int_for_float, None);
+            assert!(!result.int_for_float, "a `string` part is refused for more than an `int`");
         }
     }
 }

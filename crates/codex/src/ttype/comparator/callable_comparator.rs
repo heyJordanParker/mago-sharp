@@ -137,9 +137,9 @@ pub(crate) fn is_contained_by(
         atomic_comparison_result,
     );
 
-    // A function is no `int`, so its return type never names the int a `float` refused.
+    // A function is no `int`, so its return type never makes it one a `float` refused.
     if !returns_fit {
-        atomic_comparison_result.int_for_float = None;
+        atomic_comparison_result.int_for_float = false;
     }
 
     returns_fit

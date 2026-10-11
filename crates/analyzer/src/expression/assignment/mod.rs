@@ -69,6 +69,7 @@ use crate::utils::expression::get_non_nullsafe_expression_id;
 use crate::utils::expression::get_nullsafe_base_expressions;
 use crate::utils::expression::get_root_expression_id;
 use crate::utils::expression::is_variable;
+use crate::utils::int_refused_for_float;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
@@ -704,10 +705,12 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
             &mut comparison_result,
         )
     {
-        let value_span = source_expression.map_or(variable_span, HasSpan::span);
-        if let Some(integer) = comparison_result.int_for_float {
-            report_int_for_float(context, IssueCode::InvalidLocalAssignmentValue, value_span, integer, &local_type);
+        if let Some(value) =
+            source_expression.and_then(|value| int_refused_for_float(&comparison_result, artifacts, value))
+        {
+            report_int_for_float(context, IssueCode::InvalidLocalAssignmentValue, value, &local_type);
         } else {
+            let value_span = source_expression.map_or(variable_span, HasSpan::span);
             let name = display_variable_name(context, variable_id.as_bytes());
             let local_type_str = display_type(context, &local_type);
             let assigned_type_str = display_value_type(context, &assigned_type, &local_type);

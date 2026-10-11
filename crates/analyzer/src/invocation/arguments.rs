@@ -41,6 +41,7 @@ use crate::invocation::analyzer::adjust_offset_for_variadic;
 use crate::statement::function_like::closure_parameter_types;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_type;
@@ -177,6 +178,7 @@ where
 /// Verifies an argument's type against the expected parameter type.
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
     input_type: &TUnion,
     parameter_type: &TUnion,
     argument_offset: usize,
@@ -345,8 +347,8 @@ pub fn verify_argument_type<'arena, A>(
         return;
     }
 
-    if let Some(integer) = union_comparison_result.int_for_float {
-        report_int_for_float(context, IssueCode::InvalidArgument, input_expression.span(), integer, parameter_type);
+    if let Some(value) = int_refused_for_float(&union_comparison_result, artifacts, input_expression) {
+        report_int_for_float(context, IssueCode::InvalidArgument, value, parameter_type);
 
         return;
     }

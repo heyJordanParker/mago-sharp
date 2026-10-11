@@ -79,6 +79,7 @@ use crate::statement::class_like::property::analyze_property_hook;
 use crate::statement::r#return::handle_return_value;
 use crate::statement::r#static::infer_static_local_types;
 use crate::utils::expression::get_variable_id;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_nullable_type;
@@ -1696,14 +1697,8 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
         return;
     }
 
-    if let Some(integer) = comparison_result.int_for_float {
-        report_int_for_float(
-            context,
-            IssueCode::InvalidParameterDefaultValue,
-            default_expression.span(),
-            integer,
-            declared_type,
-        );
+    if let Some(value) = int_refused_for_float(&comparison_result, artifacts, default_expression) {
+        report_int_for_float(context, IssueCode::InvalidParameterDefaultValue, value, declared_type);
 
         return;
     }

@@ -19,6 +19,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_member;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
@@ -111,14 +112,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                     false,
                     &mut comparison_result,
                 ) {
-                    if let Some(integer) = comparison_result.int_for_float {
-                        report_int_for_float(
-                            context,
-                            IssueCode::InvalidConstantValue,
-                            self.value.span(),
-                            integer,
-                            &declared_type,
-                        );
+                    if let Some(value) = int_refused_for_float(&comparison_result, artifacts, self.value) {
+                        report_int_for_float(context, IssueCode::InvalidConstantValue, value, &declared_type);
 
                         return Ok(());
                     }

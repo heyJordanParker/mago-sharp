@@ -52,6 +52,7 @@ use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_index_id;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
@@ -191,15 +192,14 @@ where
                 _ => None,
             };
 
-            match (comparison_result.int_for_float, local) {
-                (Some(integer), _) => {
+            match (assign_value.and_then(|value| int_refused_for_float(&comparison_result, artifacts, value)), local) {
+                (Some(value), _) => {
                     let code = if local.is_some() {
                         IssueCode::InvalidLocalAssignmentValue
                     } else {
                         IssueCode::InvalidPropertyAssignmentValue
                     };
-                    let value_span = assign_value.map_or_else(|| array_target.span(), HasSpan::span);
-                    report_int_for_float(context, code, value_span, integer, &declared);
+                    report_int_for_float(context, code, value, &declared);
 
                     root_array_type = declared;
                 }

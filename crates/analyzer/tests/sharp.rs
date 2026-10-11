@@ -1813,7 +1813,7 @@ fn division_with_a_float_operand_gives_a_float_in_php_sharp() {
 const CELL: &str = "<?php\n\nnamespace Lib;\n\n/** @template T */\nfinal class Cell\n{\n    /** @param T $item */\n    public function __construct(private mixed $item) {}\n\n    /** @param T $item */\n    public function put(mixed $item): void\n    {\n        $this->item = $item;\n    }\n\n    /** @return T */\n    public function get(): mixed\n    {\n        return $this->item;\n    }\n}\n";
 
 /// Spec section 24 refuses an `int` where a `float` is expected in PHP# code, wherever the value lands, and the
-/// refusal names the float form of an int literal. Plain PHP keeps PHP's conversion, so each `.php` twin is silent.
+/// refusal quotes the one fix for the code written. Plain PHP keeps PHP's conversion, so each `.php` twin is silent.
 fn int_for_float_refusals(sharp: &'static str, php: &'static str) -> Vec<String> {
     assert_eq!(
         issues(("src/Demo/Report.php", php), &[("src/Lib/Cell.php", CELL)]),
@@ -1831,9 +1831,7 @@ fn an_int_literal_in_a_float_local_is_refused_with_its_float_form() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "7:23 invalid-local-assignment-value `int` is not `float`: write 0.0, or convert with (float) n | Declared `float`."
-        ]
+        ["7:23 invalid-local-assignment-value `int` is not `float`: write 0.0 | Declared `float`."]
     );
 }
 
@@ -1844,9 +1842,7 @@ fn an_int_value_in_a_float_local_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "7:23 invalid-local-assignment-value `int` is not `float`: write 0.0, or convert with (float) n | Declared `float`."
-        ]
+        ["7:23 invalid-local-assignment-value `int` is not `float`: convert with (float) count | Declared `float`."]
     );
 }
 
@@ -1857,9 +1853,7 @@ fn an_int_assigned_to_a_float_local_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "8:17 invalid-local-assignment-value `int` is not `float`: write 3.0, or convert with (float) n | Declared `float`."
-        ]
+        ["8:17 invalid-local-assignment-value `int` is not `float`: write 3.0 | Declared `float`."]
     );
 }
 
@@ -1870,9 +1864,7 @@ fn an_int_default_of_a_float_property_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "5:25 invalid-property-default-value `int` is not `float`: write 5.0, or convert with (float) n | Declared `float`."
-        ]
+        ["5:25 invalid-property-default-value `int` is not `float`: write 5.0 | Declared `float`."]
     );
 }
 
@@ -1883,9 +1875,7 @@ fn an_int_written_to_a_float_property_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "9:21 invalid-property-assignment-value `int` is not `float`: write 2.0, or convert with (float) n | Declared `float`."
-        ]
+        ["9:21 invalid-property-assignment-value `int` is not `float`: write 2.0 | Declared `float`."]
     );
 }
 
@@ -1896,9 +1886,7 @@ fn an_int_default_of_a_float_parameter_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "5:35 invalid-parameter-default-value `int` is not `float`: write 2.0, or convert with (float) n | Declared `float`."
-        ]
+        ["5:35 invalid-parameter-default-value `int` is not `float`: write 2.0 | Declared `float`."]
     );
 }
 
@@ -1909,20 +1897,20 @@ fn an_int_argument_to_a_float_parameter_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        ["7:38 invalid-argument `int` is not `float`: write 3.0, or convert with (float) n | Declared `float`."]
+        ["7:38 invalid-argument `int` is not `float`: write 3.0 | Declared `float`."]
     );
 }
 
 #[test]
 fn an_int_returned_where_a_float_is_declared_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float zero()\n    {\n        return 0;\n    }\n\n    public float count(int n) => n;\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function zero(): float\n    {\n        return 0;\n    }\n\n    public function count(int $n): float\n    {\n        return $n;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float zero()\n    {\n        return 0;\n    }\n\n    public float count(int items) => items;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function zero(): float\n    {\n        return 0;\n    }\n\n    public function count(int $items): float\n    {\n        return $items;\n    }\n}\n";
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
         [
-            "7:16 invalid-return-statement `int` is not `float`: write 0.0, or convert with (float) n | Declared `float`.",
-            "10:34 invalid-return-statement `int` is not `float`: write 0.0, or convert with (float) n | Declared `float`.",
+            "7:16 invalid-return-statement `int` is not `float`: write 0.0 | Declared `float`.",
+            "10:38 invalid-return-statement `int` is not `float`: convert with (float) items | Declared `float`.",
         ]
     );
 }
@@ -1934,9 +1922,7 @@ fn an_int_element_of_a_float_list_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "7:30 invalid-local-assignment-value `int` is not `float`: write 1.0, or convert with (float) n | Declared `List<float>`."
-        ]
+        ["7:31 invalid-local-assignment-value `int` is not `float`: write 1.0 | Declared `List<float>`."]
     );
 }
 
@@ -1947,9 +1933,7 @@ fn an_int_value_of_a_float_map_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "7:37 invalid-local-assignment-value `int` is not `float`: write 4.0, or convert with (float) n | Declared `Map<string, float>`."
-        ]
+        ["7:45 invalid-local-assignment-value `int` is not `float`: write 4.0 | Declared `Map<string, float>`."]
     );
 }
 
@@ -1960,9 +1944,7 @@ fn an_int_in_a_nullable_float_local_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "7:27 invalid-local-assignment-value `int` is not `float`: write 1.0, or convert with (float) n | Declared `float?`."
-        ]
+        ["7:27 invalid-local-assignment-value `int` is not `float`: write 1.0 | Declared `float?`."]
     );
 }
 
@@ -1973,9 +1955,7 @@ fn an_int_in_a_float_or_string_local_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "7:30 invalid-local-assignment-value `int` is not `float`: write 7.0, or convert with (float) n | Declared `float|string`."
-        ]
+        ["7:30 invalid-local-assignment-value `int` is not `float`: write 7.0 | Declared `float|string`."]
     );
 }
 
@@ -1986,7 +1966,7 @@ fn an_int_argument_where_a_template_is_float_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        ["10:18 invalid-argument `int` is not `float`: write 2.0, or convert with (float) n | Declared `float`."]
+        ["10:18 invalid-argument `int` is not `float`: write 2.0 | Declared `float`."]
     );
 }
 
@@ -1997,7 +1977,7 @@ fn an_int_added_to_a_float_list_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        ["8:20 invalid-argument `int` is not `float`: write 6.0, or convert with (float) n | Declared `float`."]
+        ["8:20 invalid-argument `int` is not `float`: write 6.0 | Declared `float`."]
     );
 }
 
@@ -2008,9 +1988,7 @@ fn an_int_written_by_key_into_a_float_map_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "8:25 invalid-local-assignment-value `int` is not `float`: write 8.0, or convert with (float) n | Declared `Map<string, float>`."
-        ]
+        ["8:25 invalid-local-assignment-value `int` is not `float`: write 8.0 | Declared `Map<string, float>`."]
     );
 }
 
@@ -2021,9 +1999,7 @@ fn an_int_returned_by_a_float_computed_property_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "5:26 invalid-return-statement `int` is not `float`: write 9.0, or convert with (float) n | Declared `float`."
-        ]
+        ["5:26 invalid-return-statement `int` is not `float`: write 9.0 | Declared `float`."]
     );
 }
 
@@ -2034,7 +2010,7 @@ fn an_int_value_of_a_float_constant_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        ["5:31 invalid-constant-value `int` is not `float`: write 10.0, or convert with (float) n | Declared `float`."]
+        ["5:31 invalid-constant-value `int` is not `float`: write 10.0 | Declared `float`."]
     );
 }
 
@@ -2045,8 +2021,57 @@ fn an_int_written_to_a_float_static_field_is_refused() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
+        ["9:23 invalid-property-assignment-value `int` is not `float`: write 11.0 | Declared `float`."]
+    );
+}
+
+#[test]
+fn a_negative_int_literal_where_a_float_is_expected_is_refused_with_its_float_form() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float floor()\n    {\n        float floor = -3;\n        return floor;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function floor(): float\n    {\n        $floor = -3;\n        return $floor;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        ["7:23 invalid-local-assignment-value `int` is not `float`: write -3.0 | Declared `float`."]
+    );
+}
+
+#[test]
+fn an_int_property_chain_where_a_float_is_expected_is_refused_with_a_cast_around_it() {
+    let sharp = "namespace Demo;\n\nclass Line\n{\n    public int quantity = 1;\n}\n\nclass Order\n{\n    private Line line;\n\n    public Order(Line line)\n    {\n        this.line = line;\n    }\n\n    public float weight() => this.line.quantity;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Line\n{\n    public int $quantity = 1;\n}\n\nclass Order\n{\n    public function __construct(private Line $line) {}\n\n    public function weight(): float\n    {\n        return $this->line->quantity;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
         [
-            "9:23 invalid-property-assignment-value `int` is not `float`: write 11.0, or convert with (float) n | Declared `float`."
+            "17:30 invalid-return-statement `int` is not `float`: convert with (float) this.line.quantity | Declared `float`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_method_call_where_a_float_is_expected_is_refused_with_a_cast_around_it() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int size() => 4;\n\n    public float scale(float by) => by;\n\n    public float run() => this.scale(this.size());\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function size(): int\n    {\n        return 4;\n    }\n\n    public function scale(float $by): float\n    {\n        return $by;\n    }\n\n    public function run(): float\n    {\n        return $this->scale($this->size());\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        ["9:38 invalid-argument `int` is not `float`: convert with (float) this.size() | Declared `float`."]
+    );
+}
+
+/// A cast binds tighter than a binary operator, so the quoted fix wraps a binary expression in parentheses, unless
+/// the code already does.
+#[test]
+fn an_int_binary_expression_where_a_float_is_expected_is_refused_with_a_cast_around_all_of_it() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float total = 0.5;\n\n    public void add(int a, int b)\n    {\n        this.total = a + b;\n        this.total = (a - b);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public float $total = 0.5;\n\n    public function add(int $a, int $b): void\n    {\n        $this->total = $a + $b;\n        $this->total = ($a - $b);\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "9:22 invalid-property-assignment-value `int` is not `float`: convert with (float) (a + b) | Declared `float`.",
+            "10:22 invalid-property-assignment-value `int` is not `float`: convert with (float) (a - b) | Declared `float`.",
         ]
     );
 }
@@ -2137,9 +2162,7 @@ fn an_int_written_by_key_into_a_float_map_field_is_refused_at_the_value() {
 
     assert_eq!(
         int_for_float_refusals(sharp, php),
-        [
-            "9:27 invalid-property-assignment-value `int` is not `float`: write 2.0, or convert with (float) n | Declared `Map<string, float>`."
-        ]
+        ["9:27 invalid-property-assignment-value `int` is not `float`: write 2.0 | Declared `Map<string, float>`."]
     );
 }
 

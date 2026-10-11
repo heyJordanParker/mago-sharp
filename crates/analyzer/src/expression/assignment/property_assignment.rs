@@ -34,6 +34,7 @@ use crate::resolver::property::resolve_instance_properties;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
@@ -138,7 +139,7 @@ where
             &mut union_comparison_result,
         );
 
-        if type_match_found && let Some(replacement) = union_comparison_result.replacement_union_type {
+        if type_match_found && let Some(replacement) = union_comparison_result.replacement_union_type.take() {
             widened_assigned_type = Some(match widened_assigned_type {
                 Some(existing) => add_union_type(existing, &replacement, context.codebase, CombinerOptions::default()),
                 None => replacement,
@@ -157,12 +158,13 @@ where
 
             let mut issue;
 
-            if let Some(integer) = union_comparison_result.int_for_float {
+            if let Some(value) =
+                assigned_value.and_then(|value| int_refused_for_float(&union_comparison_result, artifacts, value))
+            {
                 report_int_for_float(
                     context,
                     IssueCode::InvalidPropertyAssignmentValue,
-                    assigned_value_span.unwrap_or_else(|| property_access.span()),
-                    integer,
+                    value,
                     &resolved_property.property_type,
                 );
             } else if union_comparison_result.type_coerced == Some(true) {

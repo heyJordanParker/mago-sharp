@@ -48,6 +48,7 @@ use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::report_missing_return;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::r#return::handle_return_value;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_member;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_type;
@@ -186,14 +187,8 @@ where
                 false,
                 &mut comparison_result,
             ) {
-                if let Some(integer) = comparison_result.int_for_float {
-                    report_int_for_float(
-                        context,
-                        IssueCode::InvalidPropertyDefaultValue,
-                        value.span(),
-                        integer,
-                        &declared_type,
-                    );
+                if let Some(value) = int_refused_for_float(&comparison_result, artifacts, value) {
+                    report_int_for_float(context, IssueCode::InvalidPropertyDefaultValue, value, &declared_type);
 
                     return Ok(());
                 }

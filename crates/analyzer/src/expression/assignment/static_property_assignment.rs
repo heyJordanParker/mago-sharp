@@ -24,6 +24,7 @@ use crate::error::AnalysisError;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::resolve_static_properties;
 use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
@@ -77,12 +78,13 @@ where
                 _ => php,
             };
 
-        if let Some(integer) = union_comparison_result.int_for_float {
+        if let Some(value) =
+            assigned_value.and_then(|value| int_refused_for_float(&union_comparison_result, artifacts, value))
+        {
             report_int_for_float(
                 context,
                 IssueCode::InvalidPropertyAssignmentValue,
-                assigned_value.map_or_else(|| property_access.class.span(), HasSpan::span),
-                integer,
+                value,
                 &resolved_property.property_type,
             );
         } else if !type_match_found && union_comparison_result.type_coerced.is_none() {
