@@ -3129,16 +3129,23 @@ fn ordering_a_collection_is_refused() {
 }
 
 /// An `Any` or `Any?` ordered against a number keeps its own report, as it must be checked with `is` first. Against a
-/// `bool` the ordering is refused, as no check makes a `bool` ordered.
+/// `bool` the ordering is refused, as no check makes a `bool` ordered. PHP keeps its report on `mixed`.
 #[test]
 fn ordering_an_any_keeps_its_report_unless_the_other_side_has_no_order() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool a(Any value) => value < 1;\n\n    public static bool b(Any? value) => value <= 1;\n\n    public static bool c(Any value) => value < true;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function a(mixed $value): bool { return $value < 1; }\n\n    public static function b(mixed $value): bool { return $value <= 1; }\n}\n";
+    let mixed = |at: &str, op: &str| {
+        format!(
+            "{at} mixed-operand Left operand in `{op}` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `{op}` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
+        )
+    };
 
+    assert_eq!(worded(("src/Demo/Report.php", php), &[]), [mixed("7:59", "<"), mixed("9:59", "<=")]);
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "5:40 mixed-operand Left operand in `<` comparison has `mixed` type. | Ensure this operand has a known, comparable type before using this comparison operator.",
-            "7:41 mixed-operand Left operand in `<=` comparison has `mixed` type. | Ensure this operand has a known, comparable type before using this comparison operator.",
+            "5:40 mixed-operand Left operand of `<` is `Any`, which has no order. | Narrow the value with `is` or `as` to a number or a string before comparing it.",
+            "7:41 mixed-operand Left operand of `<=` is `Any?`, which has no order. | Narrow the value with `is` or `as` to a number or a string before comparing it.",
             "9:40 invalid-operand `<` orders numbers, strings and classes that declare `operator <=>`, and `bool` is none of them. | Order a number or a string taken from the value instead.",
         ]
     );
@@ -3196,12 +3203,66 @@ fn sorted_by_in_a_loop_is_refused_once() {
 }
 
 /// `sortedBy` by a number, a string or an instance of a class that declares `operator <=>` still orders, and so does a
-/// key that may be `null`.
+/// key of each that may be `null`, as a `null` key sorts first. A `.php` call of the same method keeps PHP's report.
 #[test]
 fn sorted_by_a_number_a_string_or_a_class_declaring_operator_spaceship_still_orders() {
-    let sharp = "namespace App;\n\npublic class Ranking\n{\n    public List<int> a(List<int> numbers) => numbers.sortedBy(n => -n);\n\n    public List<float> b(List<float> ratios) => ratios.sortedBy(r => r);\n\n    public List<string> c(List<string> names) => names.sortedBy(n => n);\n\n    public List<int?> d(List<int?> counts) => counts.sortedBy(c => c);\n\n    public List<Money> e(List<Money> prices) => prices.sortedBy(p => p);\n}\n";
+    let sharp = "namespace App;\n\npublic class Ranking\n{\n    public List<int> a(List<int> numbers) => numbers.sortedBy(n => -n);\n\n    public List<float> b(List<float> ratios) => ratios.sortedBy(r => r);\n\n    public List<string> c(List<string> names) => names.sortedBy(n => n);\n\n    public List<int?> d(List<int?> counts) => counts.sortedBy(c => c);\n\n    public List<Money> e(List<Money> prices) => prices.sortedBy(p => p);\n\n    public List<string?> f(List<string?> names) => names.sortedBy(n => n);\n\n    public List<Money?> g(List<Money?> prices) => prices.sortedBy(p => p);\n}\n";
+    let php = "<?php\n\nnamespace App;\n\nuse Sharp\\ListMethods;\n\nfinal class Ranking\n{\n    /**\n     * @param ListMethods<?int> $counts\n     *\n     * @return list<?int>\n     */\n    public function d(ListMethods $counts): array\n    {\n        return $counts->sortedBy(fn (?int $c): ?int => $c);\n    }\n\n    /**\n     * @param ListMethods<?string> $names\n     *\n     * @return list<?string>\n     */\n    public function f(ListMethods $names): array\n    {\n        return $names->sortedBy(fn (?string $n): ?string => $n);\n    }\n\n    /**\n     * @param ListMethods<?Money> $prices\n     *\n     * @return list<?Money>\n     */\n    public function g(ListMethods $prices): array\n    {\n        return $prices->sortedBy(fn (?Money $p): ?Money => $p);\n    }\n}\n";
 
+    assert_eq!(worded(("src/App/Ranking.php", php), &[MONEY_OPERATORS]), Vec::<String>::new());
     assert_eq!(errors(("src/App/Ranking.sharp", sharp), &[MONEY_OPERATORS]), Vec::<String>::new());
+}
+
+/// A key that may be one of two types that never match has no order, so `sortedBy` refuses it as `<` refuses two such
+/// values, a `null` key aside. A `.php` call of the same method keeps PHP's report.
+#[test]
+fn sorted_by_a_key_of_two_types_that_never_match_is_refused_as_less_than_refuses_it() {
+    let row = "<?php\n\nnamespace Demo;\n\nfinal class Row\n{\n    public int|string $code = 0;\n\n    public int|string|null $label = null;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public List<Row> a(List<Row> rows) => rows.sortedBy(r => r.code);\n\n    public List<Row> b(List<Row> rows) => rows.sortedBy(r => r.label);\n\n    public bool c(Row left, Row right) => left.code < right.code;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Report\n{\n    /**\n     * @param ListMethods<Row> $rows\n     *\n     * @return list<Row>\n     */\n    public function a(ListMethods $rows): array\n    {\n        return $rows->sortedBy(fn (Row $r): int|string => $r->code);\n    }\n\n    public function c(Row $left, Row $right): bool\n    {\n        return $left->code < $right->code;\n    }\n}\n";
+    let others = [("src/Demo/Row.php", row)];
+
+    assert_eq!(worded(("src/Demo/Report.php", php), &others), Vec::<String>::new());
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &others),
+        [
+            "5:57 invalid-argument `sortedBy` cannot compare two keys of `int|string`. | This returns `int|string`. | PHP# compares values strictly, so values of two different types never match. | Convert the key so every key has the same type.",
+            "7:57 invalid-argument `sortedBy` cannot compare two keys of `int|string`. | This returns `(int|string)?`. | PHP# compares values strictly, so values of two different types never match. | Convert the key so every key has the same type.",
+            "9:43 invalid-operand `<` cannot compare `int|string` with `int|string`. | This is `int|string`. | This is `int|string`. | PHP# compares values strictly, so values of two different types never match. | Convert one side so both sides have the same type.",
+        ]
+    );
+}
+
+/// `<` on two `Any` or two `Any?` values reports each side, as an `Any` must be checked with `is` first, so a `sortedBy`
+/// key of `Any` or `Any?` gets the same report, a `null` key aside. Each names `Any` as PHP# writes it. A `.php` call of
+/// the same method keeps PHP's report.
+#[test]
+fn sorted_by_an_any_key_reports_what_less_than_reports_on_two_any_values() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool a(Any left, Any right) => left < right;\n\n    public bool b(Any? left, Any? right) => left < right;\n\n    public List<Any> c(List<Any> values) => values.sortedBy(v => v);\n\n    public List<Any?> d(List<Any?> values) => values.sortedBy(v => v);\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param ListMethods<mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(ListMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
+    let mixed = |at: &str, side: &str| {
+        format!(
+            "{at} mixed-operand {side} operand in `<` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `<` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
+        )
+    };
+    let any = |at: &str, subject: &str, any: &str| {
+        format!(
+            "{at} mixed-operand {subject} is `{any}`, which has no order. | An `Any` may hold any value, and PHP# orders only numbers, strings and classes that declare `operator <=>`. | Narrow the value with `is` or `as` to a number or a string before comparing it."
+        )
+    };
+
+    assert_eq!(worded(("src/Demo/Report.php", php), &[]), [mixed("11:16", "Left"), mixed("11:24", "Right")]);
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            any("5:43", "Left operand of `<`", "Any"),
+            any("5:50", "Right operand of `<`", "Any"),
+            any("7:45", "Left operand of `<`", "Any?"),
+            any("7:52", "Right operand of `<`", "Any?"),
+            any("9:61", "The `sortedBy` key", "Any"),
+            any("11:63", "The `sortedBy` key", "Any"),
+        ]
+    );
 }
 
 /// Spec section 19: `==` and `!=` on a nullable type are lifted, so null equals only null, and an `Any?` compares by
@@ -4694,14 +4755,29 @@ fn a_php_non_null_mixed_keeps_accepting_a_value_that_may_be_null() {
     assert_eq!(issues(("src/Demo/Inbox.php", php), &[]), Vec::<String>::new());
 }
 
+/// An `Any?` compares by value with a string or a number. Against another `Any?` each side is reported, naming `Any?` as
+/// PHP# writes it. PHP keeps its report on `mixed`.
 #[test]
 fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_value() {
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public bool same(Any? value, Any? other, Inbox inbox)\n    {\n        const a = value == \"1\";\n        const b = value != 2;\n        const c = 1.5 == value;\n        const d = value == other;\n        const e = value == inbox;\n        return a && b && c && d && e;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Inbox\n{\n    public function same(mixed $value, mixed $other): bool { return $value == $other; }\n}\n";
+    let mixed = |at: &str, side: &str| {
+        format!(
+            "{at} mixed-operand {side} operand in `==` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `==` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
+        )
+    };
+    let any = |at: &str, side: &str| {
+        format!(
+            "{at} mixed-operand {side} operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | An `Any` may hold any value, so `==` cannot compare it strictly until it is checked. | Narrow the value with `is` or `as` to a number or a string before comparing it."
+        )
+    };
 
+    assert_eq!(worded(("src/Demo/Inbox.php", php), &[]), [mixed("7:69", "Left"), mixed("7:79", "Right")]);
     assert_eq!(
         issues(("src/Demo/Inbox.sharp", sharp), &[]),
         ["10:19 mixed-operand", "10:28 mixed-operand", "11:19 invalid-operand"]
     );
+    assert_eq!(worded(("src/Demo/Inbox.sharp", sharp), &[])[..2], [any("10:19", "Left"), any("10:28", "Right")]);
 }
 
 /// `?.` reads a missing key as null, as `??` does, because `x[k]?.name` runs as `($x[$k] ?? null)?->name`.
@@ -5385,7 +5461,7 @@ const SHOP: (&str, &str) =
 /// closure type it runs as.
 #[test]
 fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n\n    public Charge pay(Cart cart) => this.charge(cart);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n\n    public Charge pay(Cart cart) => this.charge(cart);\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n\n    /** @param \\Closure(Cart): Charge $charge */\n    public function __construct(\\Closure $charge)\n    {\n        $this->charge = $charge;\n    }\n\n    public function pay(Cart $cart): Charge { return ($this->charge)($cart); }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
@@ -5394,7 +5470,7 @@ fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
 
 #[test]
 fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n\n    /** @return null|\\Closure(Cart): Charge */\n    public function current(): ?\\Closure { return $this->fallback; }\n\n    /** @param \\Closure(Cart): Charge $next */\n    public function replace(\\Closure $next): void\n    {\n        $this->fallback = $next;\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
@@ -5404,7 +5480,7 @@ fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin
 /// `Http` and `Mail` are both effects of the map's value type, so the map takes two type arguments.
 #[test]
 fn a_map_of_function_types_with_two_effects_is_checked_as_its_php_twin() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n\n    public int size() => count(this.handlers);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n\n    public int size() => count(this.handlers);\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers;\n\n    /** @param array<string, \\Closure(Cart): Charge> $handlers */\n    public function __construct(array $handlers)\n    {\n        $this->handlers = $handlers;\n    }\n\n    public function size(): int { return count($this->handlers); }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
@@ -5413,11 +5489,50 @@ fn a_map_of_function_types_with_two_effects_is_checked_as_its_php_twin() {
 
 #[test]
 fn a_function_type_taking_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /** @param \\Closure(\\Closure(int): int): int $apply */\n    public function __construct(\\Closure $apply)\n    {\n        $this->apply = $apply;\n    }\n\n    /** @param \\Closure(int): int $step */\n    public function run(\\Closure $step): int { return ($this->apply)($step); }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
+}
+
+/// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, so an
+/// unused one is reported, and another class reading one is refused, as for the PHP twin's `private` properties.
+#[test]
+fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
+    let offers = (
+        "src/App/Shop/Offers.php",
+        "<?php\n\nnamespace App\\Shop;\n\nfinal class Plan\n{\n}\n\nfinal class Money\n{\n}\n\nfinal class Offer\n{\n}\n",
+    );
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n    Function<int(Function<int(int) uses Http>)> apply;\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers;\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n}\n";
+    let sharp_reader = "namespace App.Shop;\n\npublic class Receipt\n{\n    public static int size(Checkout checkout) => count(checkout.cache);\n}\n";
+    let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Receipt\n{\n    public static function size(Checkout $checkout): int { return count($checkout->cache); }\n}\n";
+
+    let sharp_issues = issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP, offers]);
+    let php_issues = issues(("src/App/Shop/Checkout.php", php), &[SHOP, offers]);
+    assert_eq!(
+        sharp_issues,
+        [
+            "8:39 unused-property",
+            "9:57 unused-property",
+            "10:49 unused-property",
+            "5:23 unused-property",
+            "6:28 unused-property",
+            "7:38 unused-property",
+        ]
+    );
+    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+
+    let sharp_issues =
+        issues(("src/App/Shop/Receipt.sharp", sharp_reader), &[("src/App/Shop/Checkout.sharp", sharp), SHOP, offers]);
+    let php_issues =
+        issues(("src/App/Shop/Receipt.php", php_reader), &[("src/App/Shop/Checkout.php", php), SHOP, offers]);
+    assert_eq!(sharp_issues, ["5:65 invalid-property-read", "5:56 no-value"]);
+    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    let refused =
+        refusals(("src/App/Shop/Receipt.sharp", sharp_reader), &[("src/App/Shop/Checkout.sharp", sharp), SHOP, offers]);
+    assert!(refused[0].starts_with("5:65 invalid-property-read Cannot read private property `Checkout.cache`."));
 }
 
 /// A `.sharp` message writes a function type's effects inside its brackets, each named as the file names the class:

@@ -303,12 +303,7 @@ jobs:
         id: bin
         shell: bash
         run: |
-          EXE_suffix=""
-          case ${{ matrix.job.target }} in
-            *-pc-windows-*) EXE_suffix=".exe" ;;
-          esac;
-
-          BIN_NAME="${{ needs.crate_metadata.outputs.bin-name }}${EXE_suffix}"
+          BIN_NAME="${{ needs.crate_metadata.outputs.bin-name }}"
           BIN_PATH="target/${{ matrix.job.target }}/release/${BIN_NAME}"
 
           echo "BIN_PATH=${BIN_PATH}" >> "$GITHUB_OUTPUT"
@@ -356,12 +351,7 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           TARGET="${{ matrix.job.target }}"
-          PKG_SUFFIX=".tar.gz"
-          case "$TARGET" in
-            *-pc-windows-msvc) PKG_SUFFIX=".zip" ;;
-          esac
-
-          PKG_NAME="mago-${VERSION}-${TARGET}${PKG_SUFFIX}"
+          PKG_NAME="mago-${VERSION}-${TARGET}.tar.gz"
           echo "PKG_NAME=${PKG_NAME}" >> "$GITHUB_OUTPUT"
 
           PKG_STAGING="${{ env.CICD_INTERMEDIATES_DIR }}/package"
@@ -375,14 +365,7 @@ jobs:
           cp "README.md" "LICENSE-MIT" "LICENSE-APACHE" "$ARCHIVE_DIR" || true
 
           pushd "${PKG_STAGING}/" >/dev/null
-          case "$PKG_SUFFIX" in
-            .zip)
-              7z -y a "${PKG_NAME}" "mago-${VERSION}-${TARGET}/*"
-              ;;
-            .tar.gz)
-              tar czf "${PKG_NAME}" "mago-${VERSION}-${TARGET}"/*
-              ;;
-          esac
+          tar czf "${PKG_NAME}" "mago-${VERSION}-${TARGET}"/*
           popd >/dev/null
 
           echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> "$GITHUB_OUTPUT"
