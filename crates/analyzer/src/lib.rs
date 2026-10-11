@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::wildcard_imports)]
 #![allow(clippy::exhaustive_enums)]
