@@ -1679,7 +1679,8 @@ fn report_optional_before_required(parameters: &FunctionLikeParameterList, conte
 }
 
 /// Whether the slice has a field or a property, with the refusal when it does not. Spec section 6 makes a field
-/// storage, which is `private` or `protected`, and a property the API, whose accessors `check_accessors` decides.
+/// storage, which is `private` or `protected`, `private` when it has no modifier, and a property the API, whose
+/// accessors `check_accessors` decides.
 ///
 /// A static member takes only a constant initial value, which PHP stores as its default, because any other runs in
 /// the constructor. A static property has `set`, because PHP has no `readonly` static property.
@@ -1768,12 +1769,6 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
                     .with_annotation(Annotation::primary(value.span()).with_message("Not constant."))
                     .with_help("Write a constant value, such as a literal or a list of literals."),
                 ))
-            } else if !field.modifiers.contains_visibility() {
-                Err(Box::new(not_supported(
-                    property.first_variable().span,
-                    "A field without `private` or `protected` is not supported yet in PHP#.",
-                    no_access_modifier,
-                )))
             } else if field.items.len() > 1 {
                 Err(Box::new(not_supported(
                     field.span(),
