@@ -12,6 +12,7 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateResult;
@@ -23,6 +24,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -42,6 +44,7 @@ use crate::error::AnalysisError;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
+use crate::expression::binary::comparison::check_element_equality;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
@@ -341,6 +344,14 @@ where
             })
         })
         && report_collection_method_on_object(context, artifacts, object, selector, on_several_collections);
+    let searches_list = context.dialect.is_sharp()
+        && !refused_on_object
+        && method_resolution.resolved_methods.iter().any(|method| {
+            let name = method.method_identifier.get_method_name();
+
+            sharp_collection_name(&TObject::new_named(method.classname)) == Some("List")
+                && ["contains", "indexOf"].iter().any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        });
 
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
@@ -393,6 +404,23 @@ where
 
     if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target && !refused_on_object {
         check_changed_collection(context, block_context, artifacts, object)?;
+    }
+
+    if searches_list
+        && let ClassLikeMemberSelector::Identifier(method) = selector
+        && let Some(value) = argument_list.arguments.first().map(Argument::value)
+        && let Some(element_type) = artifacts.get_expression_type(object).and_then(|list_type| {
+            list_type.types.iter().fold(None, |element_type, atomic| match atomic {
+                TAtomic::Array(list) => Some(add_optional_union_type(
+                    get_array_parameters(list, context.codebase).1,
+                    element_type.as_ref(),
+                    context.codebase,
+                )),
+                _ => element_type,
+            })
+        })
+    {
+        check_element_equality(context, &String::from_utf8_lossy(method.value), object, value, &element_type);
     }
 
     if !method_resolution.unresolved_methods.is_empty() {

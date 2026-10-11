@@ -2754,7 +2754,7 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
             _ => &format!("{collection}<int>"),
         };
         let argument = match method {
-            "add" | "remove" | "contains" => "1",
+            "add" | "remove" | "contains" | "indexOf" => "1",
             "filter" => "value => value > 0",
             _ => "",
         };
@@ -2777,6 +2777,338 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
             assert!(!body.contains("filterValues"), "{collection}.{method}:\n{body}");
         }
     }
+}
+
+/// ```php
+/// $held = \in_array($tag, $tags, true);
+/// $at = ((${'index#1'} = \array_search('vip', $tags, true)) === false) ? null : ${'index#1'};
+/// return \in_array($ratio, $ratios, true);
+/// ```
+///
+/// Spec section 12's `contains` and `indexOf` compare by section 19's `==`, which is `===` on a string and on two floats,
+/// so they are PHP's strict `in_array` and `array_search`. `indexOf` gives null where `array_search` gives false, and
+/// its hidden `$index#N` holds the index, since index 0 is falsy.
+#[test]
+fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
+    assert_eq!(
+        body_in(
+            "bool run(List<string> tags, string tag, List<float> ratios, float ratio)",
+            "        const held = tags.contains(tag);\n        const at = tags.indexOf(\"vip\");\n        return held && at != null && ratios.contains(ratio);\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "held"
+                CALL
+                  ZVAL "in_array"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tag"
+                    VAR
+                      ZVAL "tags"
+                    ZVAL true
+              ASSIGN
+                VAR
+                  ZVAL "at"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    ASSIGN
+                      VAR
+                        ZVAL "index#1"
+                      CALL
+                        ZVAL "array_search"
+                        ARG_LIST
+                          ZVAL "vip"
+                          VAR
+                            ZVAL "tags"
+                          ZVAL true
+                    ZVAL false
+                  ZVAL null
+                  VAR
+                    ZVAL "index#1"
+              RETURN
+                AND
+                  AND
+                    VAR
+                      ZVAL "held"
+                    BINARY_OP [17]
+                      VAR
+                        ZVAL "at"
+                      ZVAL null
+                  CALL
+                    ZVAL "in_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "ratio"
+                      VAR
+                        ZVAL "ratios"
+                      ZVAL true
+        "#}
+    );
+}
+
+/// ```php
+/// return \array_find_key($prices, (fn (${'value#1'}) => fn (${'element#2'}) => \App\Money::op_Equality(${'element#2'}, ${'value#1'}))($price)) !== null
+///     && \array_find_key($amounts, (fn (${'value#1'}) => fn (${'element#2'}) =>
+///         ((${'operand#3'} = ${'element#2'}) === null) === ((${'operand#4'} = ${'value#1'}) === null)
+///         && (${'operand#3'} === null || (float) ${'operand#3'} === (float) ${'operand#4'}))(1)) === 0;
+/// ```
+///
+/// Where section 19's `==` is not `===`, a search runs the `==` the bridge lowers for each element: the `op_Equality`
+/// the element's class declares, or an int compared with a float as two floats, where a null element equals only null.
+/// The outer function takes the value
+/// once, as an argument, after the receiver, and the inner one compares an element with it. `contains` is whether
+/// `\array_find_key` found a key.
+#[test]
+fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
+    assert_eq!(
+        ledger_body(
+            "bool run(List<Money> prices, Money price, List<(int|float)?> amounts)",
+            "        return prices.contains(price) && amounts.indexOf(1) == 0;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                AND
+                  BINARY_OP [17]
+                    CALL
+                      ZVAL "array_find_key"
+                      ARG_LIST
+                        VAR
+                          ZVAL "prices"
+                        CALL
+                          ARROW_FUNC "" @16-16
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "value#1"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            ARROW_FUNC "" @16-16
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "element#2"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              STATIC_CALL
+                                ZVAL "App\\Money"
+                                ZVAL "op_Equality"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "element#2"
+                                  VAR
+                                    ZVAL "value#1"
+                              null
+                              null
+                            null
+                            null
+                          ARG_LIST
+                            VAR
+                              ZVAL "price"
+                    ZVAL null
+                  BINARY_OP [16]
+                    CALL
+                      ZVAL "array_find_key"
+                      ARG_LIST
+                        VAR
+                          ZVAL "amounts"
+                        CALL
+                          ARROW_FUNC "" @16-16
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "value#1"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            ARROW_FUNC "" @16-16
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "element#2"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              AND
+                                BINARY_OP [16]
+                                  BINARY_OP [16]
+                                    ASSIGN
+                                      VAR
+                                        ZVAL "operand#3"
+                                      VAR
+                                        ZVAL "element#2"
+                                    ZVAL null
+                                  BINARY_OP [16]
+                                    ASSIGN
+                                      VAR
+                                        ZVAL "operand#4"
+                                      VAR
+                                        ZVAL "value#1"
+                                    ZVAL null
+                                OR
+                                  BINARY_OP [16]
+                                    VAR
+                                      ZVAL "operand#3"
+                                    ZVAL null
+                                  BINARY_OP [16]
+                                    CAST [5]
+                                      VAR
+                                        ZVAL "operand#3"
+                                    CAST [5]
+                                      VAR
+                                        ZVAL "operand#4"
+                              null
+                              null
+                            null
+                            null
+                          ARG_LIST
+                            ZVAL 1
+                    ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// return \array_find_key($this->make(), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($this->next())) !== null;
+/// ```
+///
+/// PHP's `in_array` reads its value before its array, so a search whose receiver and value both run code takes the
+/// form that runs the receiver first, as the call `this.make().contains(this.next())` runs it.
+#[test]
+fn a_list_search_runs_its_receiver_before_its_value() {
+    assert_eq!(
+        Lowered::new(
+            "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> make() => [1];\n\n    public int next() => 1;\n\n    public bool run()\n    {\n        return this.make().contains(this.next());\n    }\n}\n"
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [17]
+                  CALL
+                    ZVAL "array_find_key"
+                    ARG_LIST
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "make"
+                        ARG_LIST
+                      CALL
+                        ARROW_FUNC "" @11-11
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "value#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          ARROW_FUNC "" @11-11
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "element#2"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            BINARY_OP [16]
+                              VAR
+                                ZVAL "element#2"
+                              VAR
+                                ZVAL "value#1"
+                            null
+                            null
+                          null
+                          null
+                        ARG_LIST
+                          METHOD_CALL
+                            VAR
+                              ZVAL "this"
+                            ZVAL "next"
+                            ARG_LIST
+                  ZVAL null
+        "#}
+    );
+}
+
+/// ```php
+/// $last = ($sizes === []) ? throw new \OutOfRangeException('The list is empty.') : \array_last($sizes);
+/// return ((${'receiver#1'} = $this->make()) === []) ? throw new \OutOfRangeException('The list is empty.') : \array_last(${'receiver#1'});
+/// ```
+///
+/// `last()` is the last element, and throws `OutOfRangeException` on an empty list, as Kotlin's `last()` throws. It
+/// tests the list for `[]` rather than `\array_last` for null, which a `List<int?>` may hold last, so it reads the
+/// receiver twice, a receiver that runs code through a hidden `$receiver#N`.
+#[test]
+fn last_is_the_last_element_and_throws_on_an_empty_list() {
+    assert_eq!(
+        Lowered::new(
+            "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> make() => [1];\n\n    public int run(List<int> sizes)\n    {\n        const last = sizes.last();\n        return last + this.make().last();\n    }\n}\n"
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "last"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "sizes"
+                    ARRAY [3]
+                  THROW
+                    NEW
+                      ZVAL "OutOfRangeException"
+                      ARG_LIST
+                        ZVAL "The list is empty."
+                  CALL
+                    ZVAL "array_last"
+                    ARG_LIST
+                      VAR
+                        ZVAL "sizes"
+              RETURN
+                BINARY_OP [1]
+                  VAR
+                    ZVAL "last"
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      ASSIGN
+                        VAR
+                          ZVAL "receiver#1"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "make"
+                          ARG_LIST
+                      ARRAY [3]
+                    THROW
+                      NEW
+                        ZVAL "OutOfRangeException"
+                        ARG_LIST
+                          ZVAL "The list is empty."
+                    CALL
+                      ZVAL "array_last"
+                      ARG_LIST
+                        VAR
+                          ZVAL "receiver#1"
+        "#}
+    );
 }
 
 /// ```php

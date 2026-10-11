@@ -256,8 +256,6 @@ const NULL: u32 = u32::MAX;
 enum Operands {
     Strings,
     Ints,
-    /// An int and a float, which spec section 19 compares by value as two floats.
-    Numbers,
     Other,
 }
 
@@ -326,6 +324,13 @@ enum CollectionReceiver<'receiver, 'ast> {
     Property(Reread<'receiver, 'ast>, &'receiver ClassLikeMemberSelector<'ast>),
     /// Any other value, which lives nowhere, so a change changes a copy.
     Value(Reread<'receiver, 'ast>),
+}
+
+/// One side of an `==` the lowering writes: an expression of the source, or the hidden variable `name` holding a value
+/// of `r#type`, read on the line of `span`, as the element and the value a collection search compares.
+enum Side<'side, 'ast> {
+    Expression(&'side Expression<'ast>),
+    Hidden { span: Span, name: Vec<u8>, r#type: &'side TUnion },
 }
 
 /// Lowers one checked file. Every node is pushed after its children, and each node's children are contiguous.
@@ -1382,6 +1387,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // orders two strings by their bytes and compares an int with a float as two floats, and an operator on
             // instances runs the one their class declares.
             Expression::Binary(binary) => {
+                if matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)) {
+                    let negated = binary.operator.is_negated_equality();
+
+                    return self.equality(line, Side::Expression(binary.lhs), Side::Expression(binary.rhs), negated);
+                }
                 if let Some(call) = self.declared_operator(line, binary) {
                     return call;
                 }
@@ -1389,9 +1399,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let operands = match binary.operator {
                     BinaryOperator::Addition(_) | BinaryOperator::Division(_) => {
                         self.operand_types(binary.lhs, binary.rhs)
-                    }
-                    BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) if self.mixes_numbers(binary) => {
-                        Operands::Numbers
                     }
                     BinaryOperator::LessThan(_)
                     | BinaryOperator::LessThanOrEqual(_)
@@ -1404,9 +1411,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
                     _ => Operands::Other,
                 };
-                if matches!(operands, Operands::Numbers) {
-                    return self.float_equality(binary, line);
-                }
 
                 let lhs = self.expression(binary.lhs);
                 let rhs = self.expression(binary.rhs);
@@ -1427,7 +1431,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::UnaryPrefix(unary) => {
                 if let UnaryPrefixOperator::Negation(operator) = unary.operator
                     && let Some(name) = php_operator_name(&BinaryOperator::Subtraction(operator), 1)
-                    && let Some(class) = self.types.operator_class(name, &[unary.operand])
+                    && let Some(class) = self.types.operator_class(name, &[self.types.expression_type(unary.operand)])
                 {
                     let operand = self.expression(unary.operand);
 
@@ -1456,7 +1460,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 // A compound assignment to an instance assigns what the operator its class declares returns.
                 if let Some(operator) = compound_operator(&assignment.operator)
                     && let Some(name) = php_operator_name(&operator, 2)
-                    && let Some(class) = self.types.operator_class(name, &[assignment.lhs, assignment.rhs])
+                    && let Some(class) = self.types.operator_class(
+                        name,
+                        &[self.types.expression_type(assignment.lhs), self.types.expression_type(assignment.rhs)],
+                    )
                 {
                     return self.compound_assignment(line, assignment, |this, target, value| {
                         this.operator_call(line, class, name, &[target, value])
@@ -1731,16 +1738,65 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(kind, attr, line, &[comparison, zero])
     }
 
-    /// Whether `==` or `!=` compares an int with a float: both sides are numbers, `null` aside, and one may hold an
-    /// int where one may hold a float. The checker refuses every other pair of two different number kinds.
-    fn mixes_numbers(&self, binary: &Binary) -> bool {
-        let [Some([lhs_int, lhs_float]), Some([rhs_int, rhs_float])] =
-            [binary.lhs, binary.rhs].map(|operand| number_kinds(self.types.expression_type(operand)))
-        else {
-            return false;
-        };
+    /// `lhs == rhs`, or `lhs != rhs` when `negated`, as spec section 19 compares a value of `lhs`'s type with one of
+    /// `rhs`'s: the `op_Equality` the class of an instance side declares, which lifts a null side itself, an int and a
+    /// float as two floats, and `===` otherwise. `== null` tests for null and runs no operator. A collection search
+    /// compares each element with its value through it, so a search never compares differently from `==`.
+    fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
+        let (lhs_type, rhs_type) = (self.side_type(&lhs), self.side_type(&rhs));
+        if let Some((class, name)) = self.declared_equality(lhs_type, rhs_type) {
+            let lhs = self.side(&lhs);
+            let rhs = self.side(&rhs);
+            let call = self.operator_call(line, class, name, &[lhs, rhs]);
 
-        (lhs_int || rhs_int) && (lhs_float || rhs_float)
+            return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
+        }
+        if mixes_numbers(lhs_type, rhs_type) {
+            return self.float_equality(line, &lhs, &rhs, negated);
+        }
+
+        let lhs = self.side(&lhs);
+        let rhs = self.side(&rhs);
+        let attr = if negated { ZEND_IS_NOT_IDENTICAL } else { ZEND_IS_IDENTICAL };
+
+        self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs])
+    }
+
+    /// The class whose `op_Equality` `==` runs on a value of `lhs_type` and one of `rhs_type`, as the checker chose it,
+    /// with the method's name, or none when `==` on them is `===` or two floats. `== null` runs none.
+    fn declared_equality(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<(Word, &'static [u8])> {
+        if lhs_type.is_null() || rhs_type.is_null() {
+            return None;
+        }
+        let name = php_operator_name(&BinaryOperator::Equal(Span::zero()), 2)?;
+
+        Some((self.types.operator_class(name, &[lhs_type, rhs_type])?, name))
+    }
+
+    /// The type of the value `side` holds.
+    fn side_type<'side>(&self, side: &Side<'side, '_>) -> &'side TUnion
+    where
+        'lowering: 'side,
+    {
+        match side {
+            Side::Expression(expression) => self.types.expression_type(expression),
+            Side::Hidden { r#type, .. } => r#type,
+        }
+    }
+
+    /// A read of `side`: the expression, lowered, or its hidden variable.
+    fn side(&mut self, side: &Side) -> u32 {
+        match side {
+            Side::Expression(expression) => self.expression(expression),
+            Side::Hidden { span, name, .. } => self.variable(*span, name),
+        }
+    }
+
+    fn side_span(side: &Side) -> Span {
+        match side {
+            Side::Expression(expression) => expression.span(),
+            Side::Hidden { span, .. } => *span,
+        }
     }
 
     /// `lhs == rhs` of an int and a float as two floats, `(float) $count === $ratio`, as spec section 19 compares
@@ -1749,50 +1805,46 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `(($operand#1 = lhs) === null) === (($operand#2 = rhs) === null) && ($operand#1 === null || (float) $operand#1
     /// === $operand#2)`, so `(float) null`, which is `0.0`, never compares. `!=` is its `!`. The names are taken
     /// before the operands are lowered, so an equality inside an operand takes the next ones.
-    fn float_equality(&mut self, binary: &Binary, line: u32) -> u32 {
-        let types = self.types;
-        let (lhs_type, rhs_type) = (types.expression_type(binary.lhs), types.expression_type(binary.rhs));
+    fn float_equality(&mut self, line: u32, lhs: &Side, rhs: &Side, negated: bool) -> u32 {
+        let (lhs_type, rhs_type) = (self.side_type(lhs), self.side_type(rhs));
         let [cast_lhs, cast_rhs] = [lhs_type, rhs_type].map(|r#type| number_kinds(r#type).is_some_and(|[int, _]| int));
         if !lhs_type.is_nullable() && !rhs_type.is_nullable() {
-            let lhs = self.expression(binary.lhs);
+            let lhs = self.side(lhs);
             let lhs = self.float(line, lhs, cast_lhs);
-            let rhs = self.expression(binary.rhs);
+            let rhs = self.side(rhs);
             let rhs = self.float(line, rhs, cast_rhs);
-            let (kind, attr) = binary_kind(binary);
+            let attr = if negated { ZEND_IS_NOT_IDENTICAL } else { ZEND_IS_IDENTICAL };
 
-            return self.node(kind, attr, line, &[lhs, rhs]);
+            return self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs]);
         }
 
         self.temporaries += 2;
         let lhs_name = format!("operand#{}", self.temporaries - 1).into_bytes();
         let rhs_name = format!("operand#{}", self.temporaries).into_bytes();
-        let lhs = self.expression(binary.lhs);
-        let rhs = self.expression(binary.rhs);
+        let (lhs_span, rhs_span) = (Self::side_span(lhs), Self::side_span(rhs));
+        let lhs = self.side(lhs);
+        let rhs = self.side(rhs);
 
-        let lhs_variable = self.variable(binary.lhs.span(), &lhs_name);
+        let lhs_variable = self.variable(lhs_span, &lhs_name);
         let lhs_stored = self.node(SHARP_AST_ASSIGN, 0, line, &[lhs_variable, lhs]);
         let lhs_is_null = self.is_null(line, lhs_stored);
-        let rhs_variable = self.variable(binary.rhs.span(), &rhs_name);
+        let rhs_variable = self.variable(rhs_span, &rhs_name);
         let rhs_stored = self.node(SHARP_AST_ASSIGN, 0, line, &[rhs_variable, rhs]);
         let rhs_is_null = self.is_null(line, rhs_stored);
         let same_nulls = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[lhs_is_null, rhs_is_null]);
 
-        let lhs_read = self.variable(binary.lhs.span(), &lhs_name);
+        let lhs_read = self.variable(lhs_span, &lhs_name);
         let both_null = self.is_null(line, lhs_read);
-        let lhs_read = self.variable(binary.lhs.span(), &lhs_name);
+        let lhs_read = self.variable(lhs_span, &lhs_name);
         let lhs_float = self.float(line, lhs_read, cast_lhs);
-        let rhs_read = self.variable(binary.rhs.span(), &rhs_name);
+        let rhs_read = self.variable(rhs_span, &rhs_name);
         let rhs_float = self.float(line, rhs_read, cast_rhs);
         let same_floats = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[lhs_float, rhs_float]);
         let same_values = self.node(SHARP_AST_OR, 0, line, &[both_null, same_floats]);
         let equality = self.node(SHARP_AST_AND, 0, line, &[same_nulls, same_values]);
         self.temporaries -= 2;
 
-        if binary.operator.is_negated_equality() {
-            self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[equality])
-        } else {
-            equality
-        }
+        if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[equality]) } else { equality }
     }
 
     /// `value === null`.
@@ -1864,18 +1916,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The call of the static method a PHP# operator on instances runs, as `\App\Money::op_Addition($a, $b)` for
-    /// `a + b`: `!=` is the `!` of `op_Equality`, and an ordering compares what `op_Comparison` returns with 0. `== null`
-    /// and operands with no instance run none.
+    /// `a + b`: an ordering compares what `op_Comparison` returns with 0, and `==` and `!=` are [`Self::equality`]'s.
+    /// Operands with no instance run none.
     fn declared_operator(&mut self, line: u32, binary: &Binary) -> Option<u32> {
         let declared = match binary.operator {
-            BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)
-                if [binary.lhs, binary.rhs]
-                    .into_iter()
-                    .any(|operand| self.types.expression_type(operand).is_null()) =>
-            {
-                return None;
-            }
-            BinaryOperator::Equal(span) | BinaryOperator::NotEqual(span) => BinaryOperator::Equal(span),
             BinaryOperator::LessThan(span)
             | BinaryOperator::LessThanOrEqual(span)
             | BinaryOperator::GreaterThan(span)
@@ -1885,14 +1929,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => return None,
         };
         let name = php_operator_name(&declared, 2)?;
-        let class = self.types.operator_class(name, &[binary.lhs, binary.rhs])?;
+        let types = self.types;
+        let class =
+            types.operator_class(name, &[types.expression_type(binary.lhs), types.expression_type(binary.rhs)])?;
 
         let lhs = self.expression(binary.lhs);
         let rhs = self.expression(binary.rhs);
         let call = self.operator_call(line, class, name, &[lhs, rhs]);
 
         Some(match binary.operator {
-            BinaryOperator::NotEqual(_) => self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]),
             BinaryOperator::LessThan(_)
             | BinaryOperator::LessThanOrEqual(_)
             | BinaryOperator::GreaterThan(_)
@@ -2370,7 +2415,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 .arguments
                 .first()
                 .map(Argument::value)
-                .unwrap_or_else(|| unreachable!("the checker refuses a `Set` method call without its element"))
+                .unwrap_or_else(|| unreachable!("the checker refuses a collection method call without its element"))
         };
 
         let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
@@ -2379,15 +2424,36 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             self.is_null(line, receiver)
         });
-        let lowered = match method.as_slice() {
-            b"contains" => {
+        let lowered = match (collection_name, method.as_slice()) {
+            ("List", b"contains" | b"indexof") => {
+                let element_type = self.types.element_type(self.types.expression_type(receiver));
+
+                self.element_search(call.span(), &mut collection, &element_type, element(), method == b"indexof")
+            }
+            ("List", b"last") => {
+                let list = self.read_collection(&mut collection, line, false);
+                let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
+                let is_empty = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[list, empty]);
+                let class = self.string(ZEND_NAME_FQ, line, b"OutOfRangeException");
+                let message = self.string(0, line, b"The list is empty.");
+                let message = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
+                let exception = self.node(SHARP_AST_NEW, 0, line, &[class, message]);
+                let throw = self.node(SHARP_AST_THROW, 0, line, &[exception]);
+                let list = self.read_collection(&mut collection, line, false);
+                let function = self.string(ZEND_NAME_FQ, line, b"array_last");
+                let list = self.node(SHARP_AST_ARG_LIST, 0, line, &[list]);
+                let element = self.node(SHARP_AST_CALL, 0, line, &[function, list]);
+
+                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_empty, throw, element])
+            }
+            ("Set", b"contains") => {
                 let set = self.read_collection(&mut collection, line, false);
                 let key = self.key(element());
                 let entry = self.node(SHARP_AST_DIM, 0, line, &[set, key]);
 
                 self.node(SHARP_AST_ISSET, 0, line, &[entry])
             }
-            b"add" => {
+            ("Set", b"add") => {
                 let mut element = self.reread(element(), "element");
                 let held = self.read_collection(&mut collection, line, false);
                 let key = self.set_key(&mut element);
@@ -2404,7 +2470,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_AND, 0, line, &[absent, added])
             }
-            b"remove" => {
+            ("Set", b"remove") => {
                 let mut element = self.reread(element(), "element");
                 let held = self.read_collection(&mut collection, line, false);
                 let key = self.set_key(&mut element);
@@ -2421,7 +2487,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_AND, 0, line, &[held, deleted])
             }
-            b"clear" => {
+            ("Set", b"clear") => {
                 let place = self.read_collection(&mut collection, line, false);
                 if matches!(collection, CollectionReceiver::Value(Reread { hidden: None, .. })) {
                     // The receiver lives nowhere, so clearing it changes nothing anyone reads.
@@ -2432,7 +2498,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.node(SHARP_AST_ASSIGN, 0, line, &[place, empty])
                 }
             }
-            b"count" | b"tolist" => {
+            (_, b"count") | ("Set", b"tolist") => {
                 let function = if method == b"count" { b"count".as_slice() } else { b"array_values" };
                 let array = self.read_collection(&mut collection, line, false);
                 let function = self.string(ZEND_NAME_FQ, line, function);
@@ -2440,7 +2506,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
-            b"filter" => {
+            ("Set", b"filter") => {
                 let set = self.read_collection(&mut collection, line, false);
                 let filter = self.string(0, line, b"filterValues");
                 let arguments = self.arguments(arguments, &[]);
@@ -2464,6 +2530,88 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
+    /// A `List`'s `contains(value)`, or its `indexOf(value)` when `index` holds: whether an element of `element_type`
+    /// equals `value` by spec section 19's `==`, or the index of the first one that does, or null. Where `==` on them is
+    /// `===` and the value runs nothing, so it may run before the receiver, it is PHP's strict search,
+    /// `\in_array($value, $list, true)`, or `\array_search` with its false read as null through a hidden `$index#N`,
+    /// since index 0 is falsy. Otherwise it runs [`Self::equality`] on each element:
+    /// `\array_find_key($list, (fn ($value#N) => fn ($element#M) => $element#M == $value#N)($value))`, which reads
+    /// the receiver before the value, as the call does, and the value once.
+    fn element_search(
+        &mut self,
+        call: Span,
+        collection: &mut CollectionReceiver,
+        element_type: &TUnion,
+        value: &Expression,
+        index: bool,
+    ) -> u32 {
+        let line = self.line(call);
+        let value_type = self.types.expression_type(value);
+        let identical =
+            self.declared_equality(element_type, value_type).is_none() && !mixes_numbers(element_type, value_type);
+        if identical && (self.is_pure(value) || value.is_constant(&PHPVersion::PHP85, false)) {
+            let hidden = index.then(|| {
+                self.temporaries += 1;
+
+                format!("index#{}", self.temporaries).into_bytes()
+            });
+            let value = self.expression(value);
+            let list = self.read_collection(collection, line, false);
+            let strict = self.zval(line, sharp_value::SHARP_TRUE, |_| {});
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value, list, strict]);
+            let Some(hidden) = hidden else {
+                let function = self.string(ZEND_NAME_FQ, line, b"in_array");
+
+                return self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+            };
+            let function = self.string(ZEND_NAME_FQ, line, b"array_search");
+            let found = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+            let variable = self.variable(call, &hidden);
+            let found = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, found]);
+            let missed = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+            let missed = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[found, missed]);
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+            let index = self.variable(call, &hidden);
+            self.temporaries -= 1;
+
+            return self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[missed, null, index]);
+        }
+
+        self.temporaries += 2;
+        let value_name = format!("value#{}", self.temporaries - 1).into_bytes();
+        let element_name = format!("element#{}", self.temporaries).into_bytes();
+        let list = self.read_collection(collection, line, false);
+        let element = Side::Hidden { span: call, name: element_name.clone(), r#type: element_type };
+        let held = Side::Hidden { span: call, name: value_name.clone(), r#type: value_type };
+        let equality = self.equality(line, element, held, false);
+        let compare = self.hidden_arrow_function(call, &element_name, equality);
+        let compare_with = self.hidden_arrow_function(call, &value_name, compare);
+        let value = self.expression(value);
+        let value = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+        let predicate = self.node(SHARP_AST_CALL, 0, line, &[compare_with, value]);
+        self.temporaries -= 2;
+
+        let function = self.string(ZEND_NAME_FQ, line, b"array_find_key");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[list, predicate]);
+        let found = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+        if index {
+            return found;
+        }
+        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+        self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, null])
+    }
+
+    /// `fn ($parameter) => body`, an arrow function of one untyped hidden parameter, on the line of `span`.
+    fn hidden_arrow_function(&mut self, span: Span, parameter: &[u8], body: u32) -> u32 {
+        let line = self.line(span);
+        let name = self.string(0, line, parameter);
+        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[NULL, name, NULL, NULL, NULL, NULL]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+
+        self.declaration(SHARP_AST_ARROW_FUNC, 0, span, span, b"", &[parameters, NULL, body, NULL, NULL])
+    }
+
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the method the method call `call` runs as
     /// PHP on the array, one of the [`INLINED_COLLECTION_METHODS`], and whether that PHP reads the receiver twice. None
     /// for a call of any other method.
@@ -2474,7 +2622,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }) {
             return None;
         }
-        let reads_twice = matches!(method.as_slice(), b"add" | b"remove");
+        let reads_twice = matches!((collection, method.as_slice()), ("Set", b"add" | b"remove") | ("List", b"last"));
 
         Some((collection, method, reads_twice))
     }
@@ -3073,6 +3221,16 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
     } else {
         flags
     }
+}
+
+/// Whether `==` compares a value of `lhs` with one of `rhs` as an int and a float: both are numbers, `null` aside, and
+/// one may hold an int where one may hold a float. The checker refuses every other pair of two different number kinds.
+fn mixes_numbers(lhs: &TUnion, rhs: &TUnion) -> bool {
+    let [Some([lhs_int, lhs_float]), Some([rhs_int, rhs_float])] = [lhs, rhs].map(number_kinds) else {
+        return false;
+    };
+
+    (lhs_int || rhs_int) && (lhs_float || rhs_float)
 }
 
 /// The kinds of number the values of `union` are, `null` aside, as `[may hold an int, may hold a float]`, or `None`
