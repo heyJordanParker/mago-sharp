@@ -16,6 +16,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
+use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -70,6 +71,7 @@ use crate::resolver::property::check_redundant_nullsafe;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
+use crate::utils::names::display_type;
 use crate::utils::names::sharp_collection_name;
 use crate::visibility::check_method_visibility;
 
@@ -320,6 +322,17 @@ where
     let mut method_resolution =
         resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)?;
 
+    let refused_on_object = context.dialect.is_sharp()
+        && method_resolution.resolved_methods.iter().any(|method| {
+            let collection = sharp_collection_name(&TObject::new_named(method.classname));
+            let name = method.method_identifier.get_method_name();
+
+            INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
+                collection == Some(*inlined_collection) && inlined.as_bytes().eq_ignore_ascii_case(name.as_bytes())
+            })
+        })
+        && report_collection_method_on_object(context, artifacts, object, selector);
+
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
 
@@ -369,7 +382,7 @@ where
         });
     }
 
-    if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target {
+    if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target && !refused_on_object {
         check_changed_collection(context, block_context, artifacts, object)?;
     }
 
@@ -463,6 +476,44 @@ where
     }
 
     Ok(())
+}
+
+/// Reports one of the [`INLINED_COLLECTION_METHODS`] called on `object` when its value can also be an object, as
+/// `List<int>|Box`. The bridge lowers such a call to PHP on the array from the checker's types, so an object the value
+/// holds when the call runs never reaches its own method of that name. Returns whether it reported the call.
+fn report_collection_method_on_object<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    object: &Expression<'_>,
+    selector: &ClassLikeMemberSelector<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    let (Some(object_type), ClassLikeMemberSelector::Identifier(method)) =
+        (artifacts.get_expression_type(object), selector)
+    else {
+        return false;
+    };
+    let holds = |kind: fn(&TAtomic) -> bool| object_type.types.iter().any(kind);
+    if !holds(|atomic| matches!(atomic, TAtomic::Array(_)))
+        || !holds(|atomic| matches!(atomic, TAtomic::Object(_) | TAtomic::Callable(_)))
+    {
+        return false;
+    }
+
+    let method = String::from_utf8_lossy(method.value);
+    let receiver = display_type(context, object_type);
+    context.collector.report_with_code(
+        IssueCode::NotSupportedYet,
+        Issue::error(format!("Calling `{method}` on `{receiver}` is not supported by the engine yet."))
+            .with_annotation(
+                Annotation::primary(selector.span()).with_message("The value can be a collection or an object."),
+            )
+            .with_help("Test which one the value is with `is` before the call."),
+    );
+
+    true
 }
 
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the
