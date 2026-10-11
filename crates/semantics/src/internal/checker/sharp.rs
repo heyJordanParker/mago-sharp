@@ -671,6 +671,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::EnumCaseBackedItem(_), Enum) => Some(Constant),
         (Node::ClassLikeMember(ClassLikeMember::Property(property)), Class) => {
             match is_slice_property(property, &context.version, context.names) {
+                // Each type argument has its own statics, spec section 11, which the engine does not keep yet. The
+                // property is skipped, so the refusal of its type parameters in a static member does not repeat it.
+                Ok(()) if let Some(refusal) = generic_static_property(property, context) => {
+                    context.report(refusal);
+
+                    None
+                }
                 Ok(()) => {
                     let variable = property.first_variable();
                     check_declared_name(variable.name, variable.span, context);
@@ -2670,6 +2677,23 @@ fn static_member_class<'ast, 'arena>(
     in_static_member.then_some(class)
 }
 
+/// The refusal of `property` when it is static and its class has type parameters: each type argument has its own
+/// statics, as in C#, and the engine keeps one for every type argument, so it is not supported yet.
+fn generic_static_property(property: &Property, context: &Context<'_, '_, '_>) -> Option<Issue> {
+    let modifier = property.modifiers().get_static()?;
+    let class = enclosing_class(context.program, property.span())?;
+    class.type_parameters?;
+
+    Some(
+        Issue::error(format!(
+            "A static property is not supported yet in a generic class, because every `{}<…>` shares it.",
+            BytesDisplay(class.name.value)
+        ))
+        .with_annotation(Annotation::primary(modifier.span()).with_message("Not supported yet."))
+        .with_note("A static method and a constant are supported."),
+    )
+}
+
 /// Reports `refusal`, which `static_member_use` or `static_self_use` words, at `span`.
 fn report_static_member_use(span: Span, refusal: String, context: &mut Context<'_, '_, '_>) {
     context.report(
@@ -2679,7 +2703,8 @@ fn report_static_member_use(span: Span, refusal: String, context: &mut Context<'
 
 /// Reports each type parameter of a list whose name is not `T`, or `T` and an uppercase letter, as C# names them, a
 /// name the list declares twice, and `in` or `out` on a method's, because only a class or an interface declares
-/// variance, spec section 11.1.
+/// variance, spec section 11.1. `in` and `out` on a class's or an interface's are not supported yet: the engine checks
+/// a generic object's type arguments exactly where the code runs, so the checker does too.
 fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut Context<'_, '_, '_>) {
     for (index, parameter) in list.parameters.iter().enumerate() {
         let name = parameter.name.value;
@@ -2698,15 +2723,22 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
             );
         }
 
-        if matches!(place, Place::Method | Place::Signature)
-            && let Some(variance) = parameter.variance
-        {
+        let Some(variance) = parameter.variance else {
+            continue;
+        };
+        let marker = BytesDisplay(variance.value);
+        if matches!(place, Place::Method | Place::Signature) {
             context.report(
                 Issue::error(format!(
-                    "A method's type parameter takes no `{}`: only a class or an interface declares variance, so remove it.",
-                    BytesDisplay(variance.value)
+                    "A method's type parameter takes no `{marker}`: only a class or an interface declares variance, so remove it."
                 ))
                 .with_annotation(Annotation::primary(variance.span).with_message("Written here.")),
+            );
+        } else {
+            context.report(
+                Issue::error(format!("An `{marker}` type parameter is not supported yet in PHP#."))
+                    .with_annotation(Annotation::primary(variance.span).with_message("Not supported yet."))
+                    .with_note("Without `in` or `out`, a generic class takes only its own type arguments, so a `Box<Order>` is not a `Box<DatabaseEntity>`."),
             );
         }
     }

@@ -7908,23 +7908,40 @@ fn a_generic_type_without_type_arguments_names_them() {
 /// Invariant type parameters of `Checks`: `Validator` only takes `TItem` in, and `Slot` takes it in and returns it.
 const CHECKS: &str = "namespace Checks;\n\npublic interface Validator<TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Slot<TItem>\n{\n    TItem get();\n\n    void put(TItem item);\n}\n";
 
-/// A substitution that only a missing `out` or `in` blocks names the marker to add, spec section 11.1, by where the
-/// class uses the type parameter, and keeps its code: as an argument, a returned value, a typed local and a property.
+/// A generic class without a marker takes only its own type arguments, as the engine checks them, so a `Feed<Order>`
+/// is refused where a `Feed<Entity>` is expected, worded as spec section 11.1 words it, with the issue's code: as an
+/// argument, a returned value, a typed local and a property. Its help names no marker, which is not supported yet.
 #[test]
-fn a_substitution_a_missing_marker_blocks_names_the_marker() {
+fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
     let sharp = "namespace App;\n\nimport Checks.Slot;\nimport Checks.Validator;\nimport Demo.DatabaseEntity;\nimport Demo.Order;\nimport Demo.PaginatedList;\n\npublic class Report\n{\n    public PaginatedList<DatabaseEntity>? shelf { get; set; }\n\n    public static Any wide(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any narrow(Validator<Order> validator) => validator;\n\n    public static Any slot(Slot<DatabaseEntity> slot) => slot;\n\n    public static Any passed(PaginatedList<Order> page) => Report.wide(page);\n\n    public static Any checked(Validator<DatabaseEntity> validator) => Report.narrow(validator);\n\n    public static Any slotted(Slot<Order> slot) => Report.slot(slot);\n\n    public static PaginatedList<DatabaseEntity> returned(PaginatedList<Order> page) => page;\n\n    public static PaginatedList<DatabaseEntity> assigned(PaginatedList<Order> page)\n    {\n        PaginatedList<DatabaseEntity> wide = page;\n        return wide;\n    }\n\n    public void kept(PaginatedList<Order> page)\n    {\n        this.shelf = page;\n    }\n}\n";
-    let out = "PaginatedList<Order> cannot be used as PaginatedList<DatabaseEntity>. TItem is only returned by PaginatedList, so declare it `out TItem`.";
+    let others = [("src/Demo/Paging.sharp", PAGING), ("src/Checks/Checks.sharp", CHECKS)];
+    let wide = "PaginatedList<Order> cannot be used as PaginatedList<DatabaseEntity>.";
 
     assert_eq!(
-        explained(("src/App/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING), ("src/Checks/Checks.sharp", CHECKS)]),
+        issues(("src/App/Report.sharp", sharp), &others),
         [
-            format!("19:72 less-specific-argument {out}"),
-            "21:85 less-specific-argument Validator<DatabaseEntity> cannot be used as Validator<Order>. TItem is only taken in by Validator, so declare it `in TItem`.".to_string(),
-            "23:64 less-specific-argument Slot<Order> cannot be used as Slot<DatabaseEntity>. TItem is both taken in and returned by Slot, so neither marker fits.".to_string(),
-            format!("25:88 less-specific-return-statement {out}"),
-            format!("29:46 invalid-local-assignment-value {out}"),
-            format!("35:22 property-type-coercion {out}"),
+            "19:72 less-specific-argument",
+            "21:85 less-specific-argument",
+            "23:64 less-specific-argument",
+            "25:88 less-specific-return-statement",
+            "29:46 invalid-local-assignment-value",
+            "35:22 property-type-coercion",
         ]
+    );
+    assert_eq!(
+        messages(("src/App/Report.sharp", sharp), &others),
+        [
+            wide,
+            "Validator<DatabaseEntity> cannot be used as Validator<Order>.",
+            "Slot<Order> cannot be used as Slot<DatabaseEntity>.",
+            wide,
+            wide,
+            wide,
+        ]
+    );
+    assert!(
+        explained(("src/App/Report.sharp", sharp), &others).iter().all(|issue| !issue.contains("declare it")),
+        "no help names a marker"
     );
 }
 
@@ -8532,31 +8549,6 @@ fn an_override_keeps_a_bound_that_names_the_parents_type_parameter() {
         explained(("src/Demo/Repository.sharp", sharp), &[]),
         [
             "32:25 incompatible-parameter-type `LineRepository.count<TQuery>` must keep the bound `Query<Order>` of `Repository.count<TQuery>`. Bound `TQuery` by `Query<Order>`, as `Repository.count<TQuery>` does."
-        ]
-    );
-}
-
-/// A substitution that the missing marker would not let through keeps the help of its issue: `Shelf<TItem>` only
-/// returns `TItem`, so `out TItem` lets a `Shelf<Order>` pass as a `Shelf<DatabaseEntity>` and never the other way,
-/// and `Sink<TItem>` only takes `TItem` in, so `in TItem` never lets a `Sink<Order>` pass as a `Sink<DatabaseEntity>`.
-/// The PHP twin keeps Mago's issues.
-#[test]
-fn a_substitution_the_missing_marker_would_still_block_keeps_its_help() {
-    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic abstract class Shelf<TItem>\n{\n    public abstract TItem top();\n}\n\npublic abstract class Sink<TItem>\n{\n    public abstract void put(TItem item);\n}\n\npublic class Report\n{\n    public static Shelf<Order> narrowed(Shelf<DatabaseEntity> shelf)\n    {\n        Shelf<Order> orders = shelf;\n        return orders;\n    }\n\n    public static Sink<DatabaseEntity> widened(Sink<Order> sink)\n    {\n        Sink<DatabaseEntity> entities = sink;\n        return entities;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nabstract class DatabaseEntity\n{\n}\n\nclass Order extends DatabaseEntity\n{\n}\n\n/** @template TItem */\nabstract class Shelf\n{\n    /** @return TItem */\n    abstract public function top(): mixed;\n}\n\n/** @template TItem */\nabstract class Sink\n{\n    /** @param TItem $item */\n    abstract public function put(mixed $item): void;\n}\n\nclass Report\n{\n    /**\n     * @param Shelf<DatabaseEntity> $shelf\n     * @return Shelf<Order>\n     */\n    public static function narrowed(Shelf $shelf): Shelf\n    {\n        return $shelf;\n    }\n\n    /**\n     * @param Sink<Order> $sink\n     * @return Sink<DatabaseEntity>\n     */\n    public static function widened(Sink $sink): Sink\n    {\n        return $sink;\n    }\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Report.php", php), &[]),
-        [
-            "35:16 less-specific-return-statement Returned type `Demo\\Shelf<Demo\\DatabaseEntity>` is less specific than the declared return type `Demo\\Shelf<Demo\\Order>` for function `Demo\\Report::narrowed`. Consider returning a value that more precisely matches the declared `Demo\\Shelf<Demo\\Order>` type, or adjust the function's return type declaration if the broader type is intended.",
-            "44:16 less-specific-return-statement Returned type `Demo\\Sink<Demo\\Order>` is less specific than the declared return type `Demo\\Sink<Demo\\DatabaseEntity>` for function `Demo\\Report::widened`. Consider returning a value that more precisely matches the declared `Demo\\Sink<Demo\\DatabaseEntity>` type, or adjust the function's return type declaration if the broader type is intended.",
-        ]
-    );
-    assert_eq!(
-        explained(("src/Demo/Report.sharp", sharp), &[]),
-        [
-            "25:31 invalid-local-assignment-value Shelf<DatabaseEntity> cannot be used as Shelf<Order>. Assign a `Shelf<Order>` value, or change the type `orders` is declared with.",
-            "31:41 invalid-local-assignment-value Sink<Order> cannot be used as Sink<DatabaseEntity>. Assign a `Sink<DatabaseEntity>` value, or change the type `entities` is declared with.",
         ]
     );
 }

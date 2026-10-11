@@ -564,9 +564,8 @@ fn find_atomic_template_positions(
 /// Rewrites `issue`, which reports `input` where `expected` is required, when only a missing `out` or `in` blocks the
 /// substitution in a PHP# file: `C<A>` given where `C<B>` is expected, `C` a PHP# class, and the one type argument that
 /// differs belongs to an invariant type parameter whose `out` (`A` within `B`) or `in` (`B` within `A`) would accept
-/// it. The message is spec section 11.1's, and the help names the marker by where `C` uses the type parameter, unless
-/// that marker allows only the opposite substitution, as `out` lets `C<B>` take a `C<A>` but never the other way, where
-/// the issue keeps its help. The issue keeps its code.
+/// it. The message is spec section 11.1's. The issue keeps its help, which names no marker until the engine checks
+/// variance, and its code.
 pub(crate) fn explain_blocked_substitution<A>(
     context: &Context<'_, '_, A>,
     input: &TUnion,
@@ -619,7 +618,7 @@ where
         )
     };
 
-    let mut blocked = None;
+    let mut blocked = false;
     for (index, (given_argument, wanted_argument)) in given_arguments.iter().zip(wanted_arguments).enumerate() {
         let widens = contains(given_argument, wanted_argument);
         let narrows = contains(wanted_argument, given_argument);
@@ -628,45 +627,22 @@ where
         }
 
         let is_invariant = class.template_variance.get(index).is_none_or(Variance::is_invariant);
-        if blocked.is_some() || !is_invariant || !(widens || narrows) {
+        if blocked || !is_invariant || !(widens || narrows) {
             return issue;
         }
 
-        blocked = Some((index, widens));
+        blocked = true;
     }
 
-    let Some((template, widens)) =
-        blocked.and_then(|(index, widens)| Some((*class.template_types.get_index(index)?.0, widens)))
-    else {
+    if !blocked {
         return issue;
-    };
-
-    let class_name = short_name(class.original_name);
-    let position = find_template_uses(context, class, &WordMap::default())
-        .into_iter()
-        .filter(|template_use| template_use.template == template)
-        .map(|template_use| template_use.position)
-        .reduce(join_positions);
+    }
 
     issue.message = format!(
         "{} cannot be used as {}.",
         display_sharp_type(context, input),
         display_sharp_type(context, &wrap_atomic(wanted.clone()))
     );
-    issue.help = match position {
-        Some(Variance::Covariant) if widens => {
-            Some(format!("{template} is only returned by {class_name}, so declare it `out {template}`."))
-        }
-        Some(Variance::Contravariant) if !widens => {
-            Some(format!("{template} is only taken in by {class_name}, so declare it `in {template}`."))
-        }
-        Some(Variance::Covariant | Variance::Contravariant) => issue.help,
-        Some(_) => Some(format!("{template} is both taken in and returned by {class_name}, so neither marker fits.")),
-        None => Some(format!(
-            "{template} is neither taken in nor returned by {class_name}, so declare it `{} {template}`.",
-            if widens { "out" } else { "in" }
-        )),
-    };
 
     issue
 }

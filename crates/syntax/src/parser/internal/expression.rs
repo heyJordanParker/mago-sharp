@@ -159,6 +159,21 @@ where
                 left = self.arena.alloc(Expression::ConstantAccess(ConstantAccess { name: *identifier }));
             }
 
+            // `Counter<Order>.count` reads a static member of one type argument's class, spec section 11, which the
+            // engine does not keep yet. A `.` after the `>` makes the `<` a type argument list, as in C#. The class
+            // with its type arguments parses whole as one error, so the member read after it adds nothing.
+            if self.dialect.is_sharp()
+                && kind == T!["<"]
+                && let Expression::ConstantAccess(class) = left
+                && self.stream.peek_kind_after_type_arguments()? == Some(T!["."])
+            {
+                let span = class.name.span().join(self.parse_type_argument_list()?.span());
+                self.errors
+                    .push(ParseError::NotSupportedYetInSharp("A static member of a class with type arguments", span));
+                left = self.arena.alloc(Expression::Error(span));
+                continue;
+            }
+
             // Stop parsing if the next token is a terminator.
             if matches!(kind, T![";" | "?>"]) {
                 break;

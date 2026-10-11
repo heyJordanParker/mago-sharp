@@ -3379,13 +3379,20 @@ fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_not_supp
 }
 
 /// Every example of spec sections 11 and 25 is in the slice: type parameters on a class, an interface and a method,
-/// bounds, variance, generic types, `Class<T>`, and type arguments on `new` and on a call. Section 11's `value is
-/// TItem` needs `TItem`'s type argument while the code runs, which the engine does not read yet.
+/// bounds, generic types, `Class<T>`, and type arguments on `new` and on a call. Section 11.1's `in` and `out`, and
+/// section 11's `value is TItem`, which needs `TItem`'s type argument while the code runs, are not supported yet.
 #[test]
-fn the_generics_examples_of_the_spec_are_in_the_slice_but_a_test_of_a_type_parameter() {
+fn the_generics_examples_of_the_spec_are_in_the_slice_but_variance_and_a_test_of_a_type_parameter() {
     let code = "namespace App.Tenant;\n\nimport Illuminate.Database.Eloquent.Model;\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    public TItem first(List<TItem> items) => items[0];\n}\n\npublic class Repository\n{\n    private Map<string, Class<Element>> elements = [:];\n\n    public PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query) => new PaginatedList<TItem>(query.rows());\n\n    public void share<TItem : DatabaseEntity & Shareable>(TItem item, Any body)\n    {\n        const page = new PaginatedList<Order>(this.rows());\n        const payload = Json.decode<WebhookPayload>(body);\n        const found = this?.find<Order>(1);\n    }\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n}\n\npublic interface Validator<in TItem>\n{\n    bool check(TItem item);\n}\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class Inbox\n{\n    public bool holds<TItem>(List<TItem> items, Any value) => value is TItem;\n}\n";
 
-    assert_eq!(issues(code), ["42:72 This type is not supported yet in PHP#."]);
+    assert_eq!(
+        issues(code),
+        [
+            "26:28 An `in` type parameter is not supported yet in PHP#.",
+            "31:25 An `out` type parameter is not supported yet in PHP#.",
+            "42:72 This type is not supported yet in PHP#.",
+        ]
+    );
 }
 
 /// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11.
@@ -3433,16 +3440,20 @@ fn a_type_parameter_list_that_declares_a_name_twice_is_an_error() {
 }
 
 /// Only a class or an interface declares variance, spec section 11.1, so `in` or `out` on a method's type parameter
-/// is an error.
+/// is an error. On a class's or an interface's, it is not supported yet: the engine checks a generic object's type
+/// arguments exactly, so a marker would let the checker accept a call the engine refuses.
 #[test]
-fn in_or_out_on_a_method_type_parameter_is_an_error() {
+fn in_or_out_is_not_supported_yet_and_an_error_on_a_method_type_parameter() {
     let code = "namespace App.Tenant;\n\npublic class Box<out TItem, in TOther>\n{\n    public void run<out T, in TKey, TValue>() { }\n}\n\npublic interface Source<out TItem>\n{\n    TItem next<in T>();\n}\n";
 
     assert_eq!(
         issues(code),
         [
+            "3:18 An `out` type parameter is not supported yet in PHP#.",
+            "3:29 An `in` type parameter is not supported yet in PHP#.",
             "5:21 A method's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
             "5:28 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it.",
+            "8:25 An `out` type parameter is not supported yet in PHP#.",
             "10:16 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it.",
         ]
     );
@@ -3542,23 +3553,26 @@ fn a_static_member_of_a_type_parameter_is_not_supported_yet() {
     );
 }
 
-/// G1 erases type arguments, so every `Box<…>` shares one static member, and a static member uses none of its class's
-/// type parameters: not in a static field's or property's type, nor in a static method's signature or body.
+/// G1 erases type arguments, so every `Box<…>` shares one static member, and a static method uses none of its class's
+/// type parameters: not in its signature nor in its body.
 #[test]
 fn a_static_member_cannot_use_its_class_type_parameters() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    private static TItem? last = null;\n\n    public static TItem? current { get; set; }\n\n    public static List<TItem> wrap(TItem item) => [item];\n\n    public static int count()\n    {\n        List<TItem> items = [];\n        return items.count();\n    }\n\n    public TItem? first(TItem item) => item;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public static List<TItem> wrap(TItem item) => [item];\n\n    public static int count()\n    {\n        List<TItem> items = [];\n        return items.count();\n    }\n\n    public TItem? first(TItem item) => item;\n}\n";
     let refusal = "A static member can't use `TItem`, because every `Box<…>` shares it.";
 
-    assert_eq!(
-        issues(code),
-        [
-            format!("5:20 {refusal}"),
-            format!("7:19 {refusal}"),
-            format!("9:24 {refusal}"),
-            format!("9:36 {refusal}"),
-            format!("13:14 {refusal}"),
-        ]
-    );
+    assert_eq!(issues(code), [format!("5:24 {refusal}"), format!("5:36 {refusal}"), format!("9:14 {refusal}")]);
+}
+
+/// Spec section 11 gives each type argument its own statics, as C# does, and the engine keeps one for every type
+/// argument, so a static field or property of a generic class is not supported yet, whatever its type. A static
+/// method and a constant run the same for every type argument, so they stay, and a class without type parameters
+/// keeps its static properties.
+#[test]
+fn a_static_property_of_a_generic_class_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\npublic class Counter<TItem>\n{\n    private static int count = 0;\n\n    public static int total { get; set; }\n\n    private static TItem? last = null;\n\n    public const int LIMIT = 3;\n\n    public static int limit() => Counter.LIMIT;\n}\n\npublic class Plain\n{\n    private static int count = 0;\n\n    public static int total { get; set; }\n}\n";
+    let refusal = "A static property is not supported yet in a generic class, because every `Counter<…>` shares it.";
+
+    assert_eq!(issues(code), [format!("5:13 {refusal}"), format!("7:12 {refusal}"), format!("9:13 {refusal}")]);
 }
 
 /// A class constant is a static member too, so its type uses none of its class's type parameters.
