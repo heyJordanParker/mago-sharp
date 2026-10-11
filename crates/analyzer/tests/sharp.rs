@@ -9033,6 +9033,50 @@ fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters
     );
 }
 
+/// A call runs the member the declaring class wrote, so the declaring class decides whether the call is PHP#, whatever
+/// class the call goes through. A plain PHP parent's method keeps its docblock type through a PHP# subclass, a PHP#
+/// method keeps its PHP declaration through a plain PHP subclass, and `new` runs the constructor its declaring class
+/// wrote.
+#[test]
+fn a_call_is_checked_by_the_class_that_declares_the_member_not_the_class_it_goes_through() {
+    let store = (
+        "src/Lib/Store.php",
+        "<?php\n\nnamespace Lib;\n\nclass Store\n{\n    public function __construct()\n    {\n    }\n\n    /** @param list<int> $rows */\n    public function keep(array $rows): int\n    {\n        return count($rows);\n    }\n}\n",
+    );
+    let rows = ("src/Demo/Rows.sharp", "namespace Demo;\n\nimport Lib.Store;\n\npublic class Rows : Store\n{\n}\n");
+    let coin = ("src/App/Coin.php", "<?php\n\nnamespace App;\n\nclass Coin extends Money\n{\n}\n");
+    let through_store = "<?php\n\nnamespace App;\n\nuse Lib\\Store;\n\nfinal class Check\n{\n    public function run(Store $store): int\n    {\n        return $store->keep(['a' => 'b']);\n    }\n}\n";
+    let through_rows = "<?php\n\nnamespace App;\n\nuse Demo\\Rows;\n\nfinal class Check\n{\n    public function run(Rows $rows): int\n    {\n        return $rows->keep(['a' => 'b']);\n    }\n}\n";
+    let through_money = "<?php\n\nnamespace App;\n\nfinal class Check\n{\n    public function run(Money $money): bool\n    {\n        return Money::op_Equality($money, null);\n    }\n}\n";
+    let through_coin = "<?php\n\nnamespace App;\n\nfinal class Check\n{\n    public function run(Coin $coin): bool\n    {\n        return Coin::op_Equality($coin, null);\n    }\n}\n";
+    let shelf = (
+        "src/App/Shelf.sharp",
+        "namespace App;\n\nimport Demo.Rows;\nimport Lib.Store;\n\npublic class Shelf\n{\n    public Store store => new Store();\n\n    public Rows rows => new Rows();\n\n    public Money money => new Money(5);\n\n    public Coin coin => new Coin(5);\n}\n",
+    );
+
+    assert_eq!(
+        messages(("src/App/Check.php", through_store), &[store, rows]),
+        [
+            "Invalid argument type for argument #1 of `Lib\\Store::keep`: expected `list<int>`, but found `array{'a': string('b')}`."
+        ]
+    );
+    assert_eq!(
+        messages(("src/App/Check.php", through_rows), &[store, rows]),
+        [
+            "Invalid argument type for argument #1 of `Lib\\Store::keep`: expected `list<int>`, but found `array{'a': string('b')}`."
+        ]
+    );
+    assert_eq!(issues(("src/App/Check.php", through_money), &[MONEY_OPERATORS, coin]), Vec::<String>::new());
+    assert_eq!(issues(("src/App/Check.php", through_coin), &[MONEY_OPERATORS, coin]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[shelf, store, rows, MONEY_OPERATORS, coin]),
+        [
+            "src/App/Shelf.sharp:8:27 impure-getter: Getter `store` calls `Store`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
+            "src/App/Shelf.sharp:10:25 impure-getter: Getter `rows` calls `Store`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern Store;` when it has no effect, or name its effects after `uses`.",
+        ]
+    );
+}
+
 /// `<=>` orders two numbers as PHP does and two strings by their bytes. A string against a number is refused as `<`
 /// refuses it. PHP keeps its loose `<=>`.
 #[test]

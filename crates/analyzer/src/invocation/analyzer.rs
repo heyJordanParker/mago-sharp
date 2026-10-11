@@ -251,6 +251,7 @@ where
         {
             let parameter_type = get_parameter_type(
                 context,
+                &invocation.target,
                 Some(parameter_ref),
                 base_class_metadata,
                 calling_class_like_metadata,
@@ -317,6 +318,7 @@ where
         let parameter_type = if let Some((_, parameter_ref)) = parameter {
             let base_parameter_type = get_parameter_type(
                 context,
+                &invocation.target,
                 Some(parameter_ref),
                 base_class_metadata,
                 calling_class_like_metadata,
@@ -631,6 +633,7 @@ where
 
             let base_parameter_type = get_parameter_type(
                 context,
+                &invocation.target,
                 Some(parameter_ref),
                 base_class_metadata,
                 calling_class_like_metadata,
@@ -788,6 +791,7 @@ where
 
             let parameter_type = get_parameter_type(
                 context,
+                &invocation.target,
                 Some(unused_parameter),
                 base_class_metadata,
                 calling_class_like_metadata,
@@ -819,6 +823,7 @@ where
     {
         let base_variadic_parameter_type = get_parameter_type(
             context,
+            &invocation.target,
             Some(last_parameter_ref),
             base_class_metadata,
             calling_class_like_metadata,
@@ -939,6 +944,7 @@ where
             if last_parameter_ref.is_variadic() {
                 let base_variadic_parameter_type = get_parameter_type(
                     context,
+                    &invocation.target,
                     Some(last_parameter_ref),
                     base_class_metadata,
                     calling_class_like_metadata,
@@ -1333,6 +1339,7 @@ fn infer_generic_callable_arguments<'ctx, 'arena, A>(
 
         let base_parameter_type = get_parameter_type(
             context,
+            &invocation.target,
             Some(parameter),
             base_class_metadata,
             calling_class_like_metadata,
@@ -1444,6 +1451,7 @@ fn remove_template_bounds_from_argument(template_result: &mut TemplateResult, ar
 /// Gets the effective parameter type, expanding class-relative types based on call context.
 fn get_parameter_type<'ctx, A>(
     context: &Context<'ctx, '_, A>,
+    invocation_target: &InvocationTarget<'_>,
     invocation_target_parameter: Option<InvocationTargetParameter<'_>>,
     base_class_metadata: Option<&'ctx ClassLikeMetadata>,
     calling_class_like_metadata: Option<&'ctx ClassLikeMetadata>,
@@ -1458,10 +1466,11 @@ where
     };
 
     // A PHP caller calls the PHP method a PHP# method runs as, whose declaration may differ from what PHP# code sees:
-    // `op_Equality` takes `null`, which it lifts itself.
+    // `op_Equality` takes `null`, which it lifts itself. The method decides, whatever class the call goes through.
     let parameter_type = match invocation_target_parameter {
         InvocationTargetParameter::FunctionLike(parameter)
-            if !context.dialect.is_sharp() && base_class_metadata.is_some_and(|class| class.flags.is_sharp()) =>
+            if !context.dialect.is_sharp()
+                && invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) =>
         {
             parameter.get_type_declaration_metadata().map(|declaration| &declaration.type_union)
         }
@@ -1752,6 +1761,7 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
                         if let Some(parameter_ref) = invocation_target.get_parameter(parameter_position) {
                             let base_parameter_type = get_parameter_type(
                                 context,
+                                invocation_target,
                                 Some(parameter_ref),
                                 base_class_metadata,
                                 calling_class_like_metadata,
@@ -1792,6 +1802,7 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
                         if let Some(parameter_ref) = invocation_target.get_parameter(parameter_position) {
                             let base_parameter_type = get_parameter_type(
                                 context,
+                                invocation_target,
                                 Some(parameter_ref),
                                 base_class_metadata,
                                 calling_class_like_metadata,
@@ -1898,6 +1909,7 @@ fn validate_keyed_array_elements<'ctx, 'arena, A>(
         {
             let base_parameter_type = get_parameter_type(
                 context,
+                invocation_target,
                 Some(parameter_ref),
                 base_class_metadata,
                 calling_class_like_metadata,
