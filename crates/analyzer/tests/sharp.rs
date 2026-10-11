@@ -673,11 +673,15 @@ const REGEX: (&str, &str) = (
     "<?php\n\nnamespace Sharp\\Text;\n\nfinal class Regex\n{\n    public static function matches(string $pattern, string $text): bool\n    {\n        return preg_match($pattern, $text) === 1;\n    }\n}\n",
 );
 
-/// The issues of the PHP twin of a `.sharp` file that calls `Sharp\Text\Regex` through `import … as Rx`.
-fn renamed_regex_call_issues() -> Vec<String> {
-    let php = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nuse Sharp\\Text\\Regex as Rx;\n\nclass Report\n{\n    public static function run(string $text): bool\n    {\n        return Rx::matches('/a/', $text) && Rx::matches(1, $text);\n    }\n}\n";
+/// The PHP twin of a `.sharp` file that calls `Sharp\Text\Regex` through `import … as Rx`.
+const RENAMED_REGEX_CALL: (&str, &str) = (
+    "src/Demo/Report.php",
+    "<?php\n\ndeclare(strict_types=1);\n\nnamespace Demo;\n\nuse Sharp\\Text\\Regex as Rx;\n\nclass Report\n{\n    public static function run(string $text): bool\n    {\n        return Rx::matches('/a/', $text) && Rx::matches(1, $text);\n    }\n}\n",
+);
 
-    issues(("src/Demo/Report.php", php), &[REGEX])
+/// The issues of `RENAMED_REGEX_CALL`.
+fn renamed_regex_call_issues() -> Vec<String> {
+    issues(RENAMED_REGEX_CALL, &[REGEX])
 }
 
 #[test]
@@ -697,6 +701,12 @@ fn a_call_through_a_renamed_import_is_checked_as_the_imported_class_as_in_php() 
     assert_eq!(located_issues, ["7:82 invalid-argument"]);
     assert_eq!(codes(&located_issues), codes(&renamed_regex_call_issues()));
     assert!(sharp_issues[0].message.contains("`Rx.matches`"), "{}", sharp_issues[0].message);
+    assert_eq!(
+        messages(RENAMED_REGEX_CALL, &[REGEX]),
+        [
+            "Invalid argument type for argument #1 of `Sharp\\Text\\Regex::matches`: expected `string`, but found `int(1)`."
+        ]
+    );
 }
 
 /// A message names a class the file renames by the name the file imports it as.
@@ -708,6 +718,9 @@ fn a_type_in_a_message_names_a_renamed_class_by_its_new_name() {
 
     assert_eq!(issues.iter().map(|issue| issue.code.as_deref()).collect::<Vec<_>>(), [Some("mismatched-array-index")]);
     assert!(issues[0].message.contains("`List<Tool>`"), "{}", issues[0].message);
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Calc as Tool;\n\nclass Report\n{\n    /** @param list<Tool> $tools */\n    public static function pick(array $tools, int|string $key): Tool\n    {\n        return $tools[$key];\n    }\n}\n";
+    assert_eq!(messages(("src/Demo/Report.php", php), &[("src/Lib/Calc.php", CALC)]), Vec::<String>::new());
 }
 
 /// Spec section 23: a renamed import of a class that does not exist reports what the plain import of it reports.
@@ -726,9 +739,13 @@ fn an_unknown_class_imported_under_another_name_is_reported_as_its_plain_import_
 
     assert_eq!(
         plain,
-        ["3:8 non-existent-use-import Imported class, interface, trait, or enum `Nope\\Thing` does not exist."]
+        ["3:8 non-existent-use-import Imported class, interface, trait, or enum `Nope.Thing` does not exist."]
     );
     assert_eq!(renamed, plain);
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", "<?php\n\nnamespace Demo;\n\nuse Nope\\Thing as T;\n"), &[]),
+        ["Imported class, interface, trait, or enum `Nope\\Thing` does not exist."]
+    );
 }
 
 #[test]
@@ -960,6 +977,15 @@ fn a_property_with_accessors_over_a_php_parents_untyped_property_is_not_supporte
             ),
         ]
     );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Record;\n\nclass Order extends Record\n{\n    public string $label = '' {\n        get => $this->label;\n        set => $value;\n    }\n    public string $code = '';\n}\n";
+    assert_eq!(
+        messages(("src/Demo/Order.php", php), &others),
+        [
+            "Property `Demo\\Order::$label` adds a type that is missing on the parent property.",
+            "Property `Demo\\Order::$code` adds a type that is missing on the parent property.",
+        ]
+    );
 }
 
 /// A property over a plain PHP parent's attributes has no storage. A `get` body that returns the `mixed` that
@@ -1136,6 +1162,15 @@ fn virtual_and_override_are_checked_as_final_and_the_override_attribute_in_php()
 
     let missing = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Base.sharp", sharp), &others).remove(1);
     assert_eq!(missing.message, "Missing `override` modifier on overriding method `Child.size`.");
+    assert_eq!(
+        messages_with(Settings { check_missing_override: true, ..settings() }, ("src/Demo/Base.php", php), &others),
+        [
+            "Cannot override final method `Demo\\Base::label()`",
+            "Missing `#[Override]` attribute on overriding method `Demo\\Child::size`.",
+            "Invalid `#[Override]` attribute on `Demo\\Child::width`.",
+            "Cannot override final method `Demo\\Child::depth()`",
+        ]
+    );
 }
 
 /// A plain PHP base class with untyped properties typed by `@var`, one declared in a trait, typed properties, and
@@ -1187,6 +1222,15 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
         assert!(reported.contains(&expected), "{expected:?} is missing from {reported:#?}");
     }
     assert_eq!(reported.len(), 7, "{reported:#?}");
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    #[\\Override]\n    public $fillable = ['number'];\n    #[\\Override]\n    protected $table = 5;\n    #[\\Override]\n    public $timestamps = 0;\n    #[\\Override]\n    protected array $appends = [];\n    protected $with = 'customer';\n    #[\\Override]\n    protected $missing = 'none';\n    #[\\Override]\n    protected $secret = 'order';\n}\n";
+    assert_eq!(
+        messages(("src/Demo/Order.php", php), &[("src/Lib/Model.php", MODEL)]),
+        [
+            "Default value for property `Demo\\Order::$table` is not assignable to its declared type.",
+            "Default value for property `Demo\\Order::$timestamps` is not assignable to its declared type.",
+        ]
+    );
 }
 
 /// An override keeps its written type instead of inheriting the parent's `@var` type, so a type that does not fit is
@@ -1207,6 +1251,16 @@ fn an_override_whose_type_does_not_fit_the_parent_is_reported_once() {
             "incompatible-property-type",
             "The override `Order.table` has type `int`, which does not fit `string?`, the type of `Model.table`.",
         )]
+    );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    #[\\Override]\n    protected int $table = 5;\n}\n";
+    assert_eq!(
+        messages(("src/Demo/Order.php", php), &[("src/Lib/Model.php", MODEL)]),
+        [
+            "Property `Demo\\Order::$table` adds a type that is missing on the parent property.",
+            "Docblock property type `null|string` is incompatible with native property type `int`.",
+            "Default value for property `Demo\\Order::$table` is not assignable to its declared type.",
+        ]
     );
 }
 
@@ -1288,6 +1342,40 @@ fn an_override_that_does_not_match_the_sharp_field_is_an_error() {
             "A property that replaces the untyped PHP property `Model.table` is not supported yet."
         )
     );
+
+    let php_order = "<?php\n\nnamespace Demo;\n\nuse Lib\\Model;\n\nclass Order extends Model\n{\n    #[\\Override]\n    protected $table = 'orders';\n}\n";
+    let php_overrides = [
+        "<?php\n\nnamespace Demo;\n\nclass RushOrder extends Order\n{\n    #[\\Override]\n    protected string $table = 'rush_orders';\n}\n",
+        "<?php\n\nnamespace Demo;\n\nclass RushOrder extends Order\n{\n    #[\\Override]\n    protected int $table = 5;\n}\n",
+        "<?php\n\nnamespace Demo;\n\nclass RushOrder extends Order\n{\n    #[\\Override]\n    public $table = 'rush_orders';\n}\n",
+        "<?php\n\nnamespace Demo;\n\nclass RushOrder extends Order\n{\n    protected $table = 'rush_orders';\n}\n",
+        "<?php\n\nnamespace Demo;\n\nclass RushOrder extends Order\n{\n    #[\\Override]\n    protected ?string $table = 'rush_orders';\n}\n",
+    ];
+    assert_eq!(
+        php_overrides.map(|php| messages_with(
+            Settings { check_missing_override: true, ..settings() },
+            ("src/Demo/RushOrder.php", php),
+            &[("src/Demo/Order.php", php_order), ("src/Lib/Model.php", MODEL)]
+        )),
+        [
+            vec![
+                "Property `Demo\\RushOrder::$table` adds a type that is missing on the parent property.",
+                "Property `Demo\\RushOrder::$table` adds a type that is missing on the parent property.",
+            ],
+            vec![
+                "Property `Demo\\RushOrder::$table` adds a type that is missing on the parent property.",
+                "Property `Demo\\RushOrder::$table` adds a type that is missing on the parent property.",
+                "Docblock property type `null|string` is incompatible with native property type `int`.",
+                "Default value for property `Demo\\RushOrder::$table` is not assignable to its declared type.",
+            ],
+            vec![],
+            vec![],
+            vec![
+                "Property `Demo\\RushOrder::$table` adds a type that is missing on the parent property.",
+                "Property `Demo\\RushOrder::$table` adds a type that is missing on the parent property.",
+            ],
+        ]
+    );
 }
 
 /// PHP makes a property whose `set` is private final, so a field cannot override one, whether a PHP# parent writes it
@@ -1307,6 +1395,9 @@ fn a_field_cannot_override_a_property_whose_set_is_private() {
             ("override-final-property".to_owned(), "Cannot override final property `Tally.views`.".to_owned()),
         ]
     );
+
+    let php_twin = "<?php\n\nnamespace Demo;\n\nuse Lib\\Tally;\n\nclass Counter\n{\n    public private(set) int $views = 0;\n    public int $likes = 0;\n}\n\nclass PageCounter extends Counter\n{\n    #[\\Override]\n    public int $views = 1;\n    #[\\Override]\n    public int $likes = 1;\n}\n\nclass PageTally extends Tally\n{\n    #[\\Override]\n    public int $views = 1;\n}\n";
+    assert_eq!(messages(("src/Demo/Counter.php", php_twin), &[("src/Lib/Tally.php", php)]), Vec::<String>::new());
 }
 
 /// A field cannot override a PHP# parent's property with accessor bodies yet: spec section 6.1 overrides it as a
@@ -1322,6 +1413,9 @@ fn overriding_a_sharp_property_with_accessor_bodies_is_not_supported_yet() {
             .collect::<Vec<_>>(),
         [("not-supported-yet".to_owned(), "Overriding the PHP# property `Base.slug` is not supported yet.".to_owned())]
     );
+
+    let php = "<?php\n\nnamespace Demo;\n\nclass Base\n{\n    public string $slug {\n        get => 'base';\n    }\n    protected string $label = 'base';\n}\n\nclass Child extends Base\n{\n    #[\\Override]\n    public string $slug = 'child';\n    #[\\Override]\n    protected string $label = 'child';\n}\n";
+    assert_eq!(messages(("src/Demo/Base.php", php), &[]), Vec::<String>::new());
 }
 
 /// A PHP class that implements a class reports it, and keeps the metadata upstream Mago builds: only a PHP# header
@@ -1372,6 +1466,16 @@ fn replacing_a_php_method_follows_php_rules_with_override_required() {
         renamed[0].message,
         "Parameter #1 of `RenamedReport.resize` is named `w` but parent `Report.resize` names it `width`"
     );
+    assert_eq!(
+        messages_with(Settings { check_missing_override: true, ..settings() }, ("src/Demo/Report.php", php), &others),
+        [
+            "Missing `#[Override]` attribute on overriding method `Demo\\PlainReport::title`.",
+            "Cannot override final method `Lib\\Report::id()`",
+            "Invalid `#[Override]` attribute on `Demo\\StrayReport::footer`.",
+            "Parameter #1 of `Demo\\RenamedReport::resize()` is named `$w` but parent `Lib\\Report::resize()` names it `$width`",
+            "Parameter #2 of `Demo\\RenamedReport::resize()` is named `$h` but parent `Lib\\Report::resize()` names it `$height`",
+        ]
+    );
 }
 
 /// A plain PHP parent whose methods type a native `array` return and parameter in their docblocks.
@@ -1390,6 +1494,12 @@ fn an_override_of_a_plain_php_method_returns_the_type_it_writes() {
     let others = [("src/Lib/Counter.php", COUNTER)];
 
     assert_eq!(issues(("src/Demo/Tally.php", php), &others), ["12:16 invalid-return-statement"]);
+    assert_eq!(
+        messages(("src/Demo/Tally.php", php), &others),
+        [
+            "Invalid return type for function `Demo\\Tally::counts`: expected `list<int>`, but found `array{'a': int(1)}`."
+        ]
+    );
     assert_eq!(
         messages(("src/Demo/Tally.sharp", TALLY), &others),
         [
@@ -1454,6 +1564,13 @@ fn an_implementation_of_a_plain_php_interface_method_keeps_the_types_it_writes()
     let others = [("src/Lib/Source.php", library)];
 
     assert_eq!(issues(("src/Demo/Feed.php", php), &others), ["11:16 invalid-return-statement", "16:26 psalm-trace"]);
+    assert_eq!(
+        messages(("src/Demo/Feed.php", php), &others),
+        [
+            "Invalid return type for function `Demo\\Feed::counts`: expected `list<int>`, but found `array{'a': int(1)}`.",
+            "Trace: Type of `$tags` is `list<string>`",
+        ]
+    );
     assert_eq!(
         messages(("src/Demo/Feed.sharp", sharp), &others),
         [
@@ -1652,6 +1769,10 @@ fn a_member_read_through_a_class_value_that_may_be_null_is_an_error() {
         ["Attempting static access on a possibly `null` value."]
     );
     assert_eq!(sharp_issues.len(), 1, "{sharp_issues:?}");
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[]),
+        ["Attempting static access on a possibly `null` value."]
+    );
 }
 
 #[test]
@@ -1762,6 +1883,17 @@ fn a_bare_call_of_a_method_that_no_function_shares_names_the_member_to_write() {
             "7:32 mixed-return-statement",
             "11:29 non-existent-function",
             "11:29 mixed-return-statement",
+        ]
+    );
+
+    let php = "<?php\n\nnamespace Demo;\n\nclass Calc\n{\n    public static function total(): int { return 1; }\n\n    public static function run(): int { return total(); }\n\n    public function size(): int { return 1; }\n\n    public function measure(): int { return Size(); }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Calc.php", php), &[]),
+        [
+            "Could not find definition for function `Demo\\total` (also tried as `total` in a broader scope).",
+            "Could not infer a precise return type for function `Demo\\Calc::run`. Saw type `mixed`.",
+            "Could not find definition for function `Demo\\Size` (also tried as `Size` in a broader scope).",
+            "Could not infer a precise return type for function `Demo\\Calc::measure`. Saw type `mixed`.",
         ]
     );
 }
@@ -1890,6 +2022,9 @@ fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_rep
             .collect();
 
     assert_eq!(issues, ["10:14 invalid-operand `!` takes a `bool`, but this is `int`."]);
+
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(mixed $entity, int $done): bool\n    {\n        if (!$entity instanceof HasDesign) {\n            return true;\n        }\n        if (!$done) {\n            return false;\n        }\n        return true;\n    }\n}\n";
+    assert_eq!(messages(("src/Demo/Report.php", php), &[("src/Demo/HasDesign.php", design)]), Vec::<String>::new());
 }
 
 /// Spec section 19's flags: ints joined with `|`, tested with `&`, and `&` binds tighter than `!=` in PHP#. The `.php`
@@ -2190,7 +2325,7 @@ fn a_fallback_on_a_missing_key_speaks_of_its_bool() {
     assert_eq!(
         checks(("src/Demo/Report.sharp", sharp)),
         [
-            "7:69 impossible-nonnull-entry-check Impossible `isset` check on key `'b'` accessed on `Map<\"a\", int>`. | `isset` on key `'b'` will always be `false` here. | The analysis determined that the key `'b'` definitely does not exist in this array, so checking `isset` is unnecessary. | Remove the redundant `isset` check.",
+            "7:69 impossible-nonnull-entry-check Impossible check on key `'b'` accessed on `Map<\"a\", int>`. | A check on key `'b'` will always be `false` here. | The analysis determined that the key `'b'` definitely does not exist in this array, so checking it is unnecessary. | Remove the redundant check.",
         ]
     );
 }
@@ -2355,10 +2490,10 @@ fn a_loop_over_a_value_that_may_be_false_asks_for_a_check_of_false() {
     );
 }
 
-/// A PHP method's `@psalm-assert non-empty-mixed` is named by the type its docblock writes. PHP# has no name for it,
-/// and `Any` would drop the non-empty that makes the assertion hold. PHP keeps Mago's `truthy-mixed`.
+/// A PHP method's `@psalm-assert non-empty-mixed` is named `Any`, the PHP# type that holds it, as every refinement PHP#
+/// cannot write is named, so the message names no `mixed`. PHP keeps Mago's `truthy-mixed`.
 #[test]
-fn an_assertion_of_non_empty_mixed_names_the_type_its_docblock_writes() {
+fn an_assertion_of_non_empty_mixed_names_the_any_that_holds_it() {
     let check = (
         "src/Lib/Check.php",
         "<?php\n\nnamespace Lib;\n\nfinal class Check\n{\n    /**\n     * @psalm-pure\n     *\n     * @psalm-assert non-empty-mixed $value\n     */\n    public static function filled(mixed $value): void {}\n}\n",
@@ -2372,7 +2507,7 @@ fn an_assertion_of_non_empty_mixed_names_the_type_its_docblock_writes() {
     assert_eq!(
         redundant(("src/Demo/Report.sharp", sharp)),
         [
-            "7:47 redundant-type-comparison Redundant type assertion: `one` is already `1`. | Argument `one` already has type `1` | The assertion against `non-empty-mixed` always holds because `one` is `1`. | Consider removing this assertion or replacing it with `default` if used in a `match` arm.",
+            "7:47 redundant-type-comparison Redundant type assertion: `one` is already `1`. | Argument `one` already has type `1` | The assertion against `Any` always holds because `one` is `1`. | Consider removing this assertion or replacing it with `default` if used in a `match` arm.",
         ]
     );
     assert_eq!(
@@ -2470,6 +2605,18 @@ fn a_bitwise_operator_on_a_value_that_is_not_an_int_is_refused_by_its_type() {
             "13:16 mixed-return-statement",
         ]
     );
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[]),
+        [
+            "Invalid type for left operand.",
+            "Assigning `mixed` type to a variable may lead to unexpected behavior.",
+            "Left operand in arithmetic operation might be `null` (type `int|null`).",
+            "Right operand in binary operation has type `mixed`.",
+            "Left operand in binary operation has type `mixed`.",
+            "Left operand in binary operation has type `mixed`.",
+            "Could not infer a precise return type for function `Demo\\Report::pack`. Saw type `mixed`.",
+        ]
+    );
 }
 
 #[test]
@@ -2563,6 +2710,17 @@ fn exit_with_a_value_that_cannot_be_a_message_names_the_int_status() {
         );
         assert!(refusal.notes.is_empty(), "{:?}", refusal.notes);
     }
+
+    let php = "<?php\n\nnamespace Demo;\n\nclass Shutdown\n{\n    public function maybe(?int $code): void\n    {\n        exit($code);\n    }\n\n    public function fraction(float $code): void\n    {\n        exit($code);\n    }\n\n    public function flag(bool $done): void\n    {\n        exit($done);\n    }\n\n    /** @param list<int> $codes */\n    public function listed(array $codes): void\n    {\n        exit($codes);\n    }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Shutdown.php", php), &[]),
+        [
+            "The first argument for `exit` might be `null`.",
+            "The first argument for `exit` might have the wrong type.",
+            "Invalid type for the first argument.",
+            "Invalid type for the first argument.",
+        ]
+    );
 }
 
 #[test]
@@ -2630,6 +2788,16 @@ fn a_type_class_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
             "3:13 reserved-name-outside-library Cannot use `Int` as a class name: it is reserved.",
         ]
     );
+
+    let php_class = "<?php\n\nnamespace Sharp;\n\nfinal class Bool\n{\n    public static function tryParse(mixed $value): ?bool { return null; }\n}\n";
+    let php_enum = "<?php\n\nnamespace Sharp;\n\nenum Int\n{\n    case One;\n}\n";
+    assert_eq!(
+        [
+            messages_with(settings(), ("src/Sharp/Bool.php", php_class), &[]),
+            messages_with(settings(), ("src/Sharp/Int.php", php_enum), &[])
+        ],
+        [Vec::<String>::new(), Vec::new()]
+    );
 }
 
 #[test]
@@ -2679,6 +2847,15 @@ fn the_environment_arguments_and_current_directory_are_read_only() {
         [
             "Cannot initialize readonly property `Environment.arguments` from within `Deploy`.",
             "Cannot initialize readonly property `Environment.currentDirectory` from within `Deploy`.",
+        ]
+    );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n        $this->environment->currentDirectory = '/tmp';\n    }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Deploy.php", php), &[]),
+        [
+            "Cannot initialize readonly property `Sharp\\Environment::$arguments` from within `Demo\\Deploy`.",
+            "Cannot initialize readonly property `Sharp\\Environment::$currentDirectory` from within `Demo\\Deploy`.",
         ]
     );
 }
@@ -2986,6 +3163,14 @@ fn equality_of_a_class_instance_is_refused_until_the_class_declares_operator_equ
             "7:53 invalid-operand `!=` cannot compare `Cart?` with `Cart`: `Cart` declares no `operator ==`. | Use `!==` to test whether both sides are the same object.",
         ]
     );
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[("src/Demo/Cart.php", CART)]),
+        [
+            "Left operand in `!=` comparison might be `null` (type `Demo\\Cart|null`).",
+            "Left operand in `!=` comparison might be `null` (type `Demo\\Cart|null`).",
+            "Right operand in `!=` comparison is `null`.",
+        ]
+    );
 }
 
 /// A `List`, `Map` or `Set` is a PHP array at runtime, which `==` cannot compare strictly yet, also against an `Any?`.
@@ -3065,6 +3250,16 @@ fn ordering_a_nullable_value_is_refused_until_it_is_tested_for_null() {
             "9:43 invalid-operand `>` cannot compare `float?` with `float`: only `==` and `!=` take `null`, so test the value for `null` first. | Test it with `!= null` before the comparison.",
             "11:51 invalid-operand `<=>` cannot compare `int?` with `int`: only `==` and `!=` take `null`, so test the value for `null` first. | Test it with `!= null` before the comparison.",
             "13:43 invalid-operand `>=` cannot compare `string` with `string?`: only `==` and `!=` take `null`, so test the value for `null` first. | Test it with `!= null` before the comparison.",
+        ]
+    );
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[]),
+        [
+            "Left operand in `<` comparison might be `null` (type `null|string`).",
+            "Left operand in `<=` comparison might be `null` (type `int|null`).",
+            "Left operand in `>` comparison might be `null` (type `float|null`).",
+            "Left operand in spaceship comparison (`<=>`) might be `null` (type `int|null`).",
+            "Right operand in `>=` comparison might be `null` (type `null|string`).",
         ]
     );
 }
@@ -3394,6 +3589,10 @@ fn a_nullable_parameter_the_method_rejects_on_every_path_is_an_error() {
     .find(|issue| issue.code.as_deref() == Some("rejected-nullable-parameter"))
     .and_then(|issue| issue.help);
     assert_eq!(help.as_deref(), Some("Declare `customer` as `Customer`, and check for null where the value enters."));
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Billing.php", php), &[("src/Demo/Customer.sharp", CUSTOMER)]),
+        ["Potentially unhandled exception `RuntimeException` in `Demo\\Billing::notify`."]
+    );
 }
 
 /// Each hook event, with the spans of the call's class, method, arguments and whole call.
@@ -3749,6 +3948,19 @@ fn a_pattern_that_can_never_match_is_an_error_at_the_pattern() {
             "\"none\" impossible-type-comparison This pattern never matches the value it tests.",
         ]
     );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Circle;\nuse Lib\\Square;\n\nclass Report\n{\n    public static function square(Circle $circle): bool { return $circle instanceof Square; }\n\n    public static function text(int $count): bool { return is_string($count); }\n\n    public static function named(int $count): bool { return $count === 'none'; }\n\n    public static function converted(Circle $circle): ?Square { return $circle instanceof Square ? $circle : null; }\n\n    public static function arm(Circle $circle): int\n    {\n        return match (true) {\n            $circle instanceof Square => 1,\n            default => 0,\n        };\n    }\n\n    public static function value(int $count): int\n    {\n        return match ($count) {\n            1 => 1,\n            'none' => 0,\n            default => 2,\n        };\n    }\n\n    public static function possible(?int $count): bool { return is_int($count) && $count > 0; }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[("src/Lib/Shapes.php", SHAPES)]),
+        [
+            "Impossible type assertion: `$count` of type `int` can never be `string`.",
+            "Redundant `===` comparison: left-hand side is never identical to right-hand side.",
+            "Redundant ternary operator: condition is always falsy.",
+            "This match arm is unreachable.",
+            "This default arm is always executed because no other arms can match.",
+            "This match arm is unreachable.",
+        ]
+    );
 }
 
 /// `is` and `match` check an `Any?`, so the value they narrow is used as its checked type, spec section 24.
@@ -3870,6 +4082,19 @@ fn a_match_without_default_names_the_enum_cases_it_misses() {
             "match match-not-exhaustive A `match` needs a `default` arm.",
         ]
     );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Limits;\nuse Lib\\Status;\n\nclass Report\n{\n    public static function label(Status $status): string\n    {\n        return match ($status) {\n            Status::Open => 'open',\n            Status::Closed => 'closed',\n        };\n    }\n\n    public static function close(?Status $status, bool $forced): void\n    {\n        match (true) {\n            $status === Status::Open && $forced => null,\n            $status === Status::Closed => null,\n        };\n    }\n\n    public static function level(int $count): int\n    {\n        return match ($count) {\n            Limits::LOW => 1,\n            Limits::HIGH => 2,\n        };\n    }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[("src/Lib/Status.php", TICKETS)]),
+        [
+            "Non-exhaustive `match` expression: subject of type `enum(Lib\\Status)` is not fully handled.",
+            "Potentially unhandled exception `UnhandledMatchError` in `Demo\\Report::label`.",
+            "Non-exhaustive `match` expression: subject of type `true` is not fully handled.",
+            "Potentially unhandled exception `UnhandledMatchError` in `Demo\\Report::close`.",
+            "Non-exhaustive `match` expression: subject of type `int` is not fully handled.",
+            "Potentially unhandled exception `UnhandledMatchError` in `Demo\\Report::level`.",
+        ]
+    );
 }
 
 #[test]
@@ -3895,6 +4120,15 @@ fn a_match_without_default_over_a_sharp_enum_names_the_cases_it_misses() {
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Orders.sharp", sharp), &[]);
 
     assert_eq!(written_errors(sharp, &issues), ["match match-not-exhaustive This `match` misses `Stage.Closed`."]);
+
+    let php = "<?php\n\nnamespace Demo;\n\nenum Stage: string\n{\n    case Open = 'o';\n    case Paid = 'p';\n    case Closed = 'c';\n\n    public function label(): string\n    {\n        return match ($this) {\n            Stage::Open => 'open',\n            Stage::Paid, Stage::Closed => 'done',\n        };\n    }\n}\n\nclass Orders\n{\n    public static function missing(Stage $stage): string\n    {\n        return match ($stage) {\n            Stage::Open => 'open',\n            Stage::Paid => 'paid',\n        };\n    }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Orders.php", php), &[]),
+        [
+            "Non-exhaustive `match` expression: subject of type `enum(Demo\\Stage)` is not fully handled.",
+            "Potentially unhandled exception `UnhandledMatchError` in `Demo\\Orders::missing`.",
+        ]
+    );
 }
 
 /// Only the last arm of a `match` takes what the arms before it leave, as `default` does. An arm before it that is
@@ -4044,6 +4278,17 @@ fn a_spread_of_a_value_that_is_not_iterable_is_one_invalid_argument() {
 
         assert_eq!(messages, ["Cannot spread a value of type `int`: PHP# spreads only a list."], "{sharp}");
     }
+
+    let php_into_defaults = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function part(int $first = 1, int $second = 2): int { return $first + $second; }\n\n    public static function run(int $number): int { return Report::part(...$number); }\n}\n";
+    let php_into_variadic = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function sum(int ...$values): int { return count($values); }\n\n    public static function run(int $number): int { return Report::sum(...$number); }\n}\n";
+    assert_eq!(messages_with(settings(), ("src/Demo/Report.php", php_into_defaults), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php_into_variadic), &[]),
+        [
+            "Cannot unpack argument of type `int` because it is not an iterable type.",
+            "Invalid argument type for argument #1 of `Demo\\Report::sum`: expected `int`, but found `mixed`.",
+        ]
+    );
 }
 
 #[test]
@@ -4066,6 +4311,12 @@ fn a_named_argument_never_fills_a_variadic_parameter_of_a_method_or_a_php_functi
         .collect();
     assert_eq!(annotations, ["A variadic parameter takes no named argument in PHP#"; 4]);
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["13:33 named-argument-after-positional"]);
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[]),
+        [
+            "Named argument `$values` for method `Demo\\Report::sum` targets a variadic parameter that has already captured positional arguments."
+        ]
+    );
 }
 
 #[test]
@@ -4345,7 +4596,16 @@ const MONEY: &str = "<?php\n\nnamespace App\\Shared;\n\nfinal class Money\n{\n  
 
 /// The messages of every issue in `analyzed`, analyzed together with `others`.
 fn messages(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
-    analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().map(|issue| issue.message).collect()
+    messages_with(settings(), analyzed, others)
+}
+
+/// The messages of every issue in `analyzed`, analyzed together with `others` under `settings`.
+fn messages_with(
+    settings: Settings,
+    analyzed: (&'static str, &'static str),
+    others: &[(&'static str, &'static str)],
+) -> Vec<String> {
+    analyze(&PLUGIN_REGISTRY, settings, analyzed, others).into_iter().map(|issue| issue.message).collect()
 }
 
 /// The issues of `analyzed` as `line:column code message`, each followed by every annotation, note and help it
@@ -4382,6 +4642,9 @@ fn a_full_name_inside_code_names_the_import_to_add() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        return App.Shared.Money.of(extra);\n    }\n}\n";
     let analyzed = ("src/App/Tenant/Report.sharp", code);
     let others = [("src/App/Shared/Money.php", MONEY)];
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function run(int $extra): int\n    {\n        return \\App\\Shared\\Money::of($extra);\n    }\n}\n";
+
+    assert_eq!(messages_with(settings(), ("src/App/Tenant/Report.php", php), &others), Vec::<String>::new());
 
     assert_eq!(
         messages(analyzed, &others),
@@ -4398,6 +4661,9 @@ fn a_member_read_through_a_full_name_names_the_import_to_add() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run()\n    {\n        return App.Shared.Money.MAX;\n    }\n}\n";
     let analyzed = ("src/App/Tenant/Report.sharp", code);
     let others = [("src/App/Shared/Money.php", MONEY)];
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function run(): int\n    {\n        return \\App\\Shared\\Money::MAX;\n    }\n}\n";
+
+    assert_eq!(messages_with(settings(), ("src/App/Tenant/Report.php", php), &others), Vec::<String>::new());
 
     assert_eq!(
         messages(analyzed, &others),
@@ -4693,6 +4959,15 @@ fn a_template_refuses_every_type_but_int_float_string_and_bool() {
         codes(&issues(("src/Demo/Receipt.php", php), &others)),
         ["invalid-type-cast", "array-to-string-conversion", "invalid-type-cast", "invalid-type-cast"]
     );
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Receipt.php", php), &others),
+        [
+            "Cannot cast enum instance of type `enum(Lib\\Status)` to `string`.",
+            "Casting `array` to `string` is deprecated and produces the literal string 'Array'.",
+            "Cannot cast object of type `Demo\\Order` to `string` because it does not implement `Stringable`.",
+            "Cannot cast type `Closure` to `string`.",
+        ]
+    );
 }
 
 /// A literal or a narrowed type counts by its scalar type, so `1|2` is an `int` and `true` is a `bool`, and a template
@@ -4816,6 +5091,13 @@ fn a_list_read_with_an_index_that_may_not_be_an_int_is_an_error() {
         issues(("src/Demo/Lookup.php", php), &[]),
         ["15:21 possibly-null-array-index", "16:21 mismatched-array-index"]
     );
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Lookup.php", php), &[]),
+        [
+            "Possibly using `null` as an array index to access elementof variable $items.",
+            "Invalid array key type: `string` is not a valid key for this array.",
+        ]
+    );
 
     let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Lookup.sharp", sharp), &[]);
     let located_issues: Vec<String> = sharp_issues.iter().map(|issue| located(sharp, issue)).collect();
@@ -4885,6 +5167,13 @@ fn a_map_read_with_a_key_outside_its_key_type_is_an_error() {
         issues(("src/Demo/Tally.php", php), &[]),
         ["12:22 possibly-null-array-index", "15:28 possibly-null-array-index"]
     );
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Tally.php", php), &[]),
+        [
+            "Possibly using `null` as an array index to access elementof variable $counts.",
+            "Possibly using `null` as an array index to access elementof variable $counts.",
+        ]
+    );
 
     let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[]);
     let located_issues: Vec<String> = sharp_issues.iter().map(|issue| located(sharp, issue)).collect();
@@ -4947,6 +5236,13 @@ fn a_bare_map_read_with_a_key_outside_its_key_type_is_an_error() {
     assert_eq!(
         issues(("src/Demo/Tally.php", php), &[]),
         ["12:24 possibly-null-array-index", "12:41 mismatched-array-index"]
+    );
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Tally.php", php), &[]),
+        [
+            "Possibly using `null` as an array index to access elementof variable $counts.",
+            "Invalid array key type: `int` is not a valid key for this array.",
+        ]
     );
 
     let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[]);
@@ -5533,6 +5829,17 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
     let refused =
         refusals(("src/App/Shop/Receipt.sharp", sharp_reader), &[("src/App/Shop/Checkout.sharp", sharp), SHOP, offers]);
     assert!(refused[0].starts_with("5:65 invalid-property-read Cannot read private property `Checkout.cache`."));
+    assert_eq!(
+        messages_with(
+            settings(),
+            ("src/App/Shop/Receipt.php", php_reader),
+            &[("src/App/Shop/Checkout.php", php), SHOP, offers]
+        ),
+        [
+            "Cannot read private property `$cache` from class `App\\Shop\\Checkout`.",
+            "Argument #1 passed to function `count` has type `never`, meaning it cannot produce a value.",
+        ]
+    );
 }
 
 /// A `.sharp` message writes a function type's effects inside its brackets, each named as the file names the class:
@@ -6769,6 +7076,12 @@ fn a_spread_of_a_value_that_is_neither_a_list_nor_a_map_is_an_error() {
             "Cannot use spread operator on non-iterable type `int`.",
         ]
     );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Prices;\n\nclass Report\n{\n    public function spread(int $number): void\n    {\n        $streamed = [...Prices::stream()];\n        $numbered = [...$number];\n    }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[("src/Lib/Prices.php", PRICES)]),
+        ["Cannot use spread operator on non-iterable type `int`."]
+    );
 }
 
 /// The checker's types reach the running program, inferred ones too (decision 029), so the analysis records the type
@@ -6831,9 +7144,9 @@ fn a_member_whose_kind_differs_across_the_receivers_classes_is_an_error() {
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &[("src/Lib/Order.php", library)]),
         [
-            "`doc.total` is a method on `Lib\\Order` but a property on `Lib\\Invoice`, so PHP# cannot tell how to read it.",
-            "`three.total` is a method on `Lib\\Order` and `Lib\\Quote` but a property on `Lib\\Invoice`, so PHP# cannot tell how to read it.",
-            "`doc.total()` calls a method on `Lib\\Order` but a function in a property on `Lib\\Invoice`, so PHP# cannot tell how to call it.",
+            "`doc.total` is a method on `Order` but a property on `Invoice`, so PHP# cannot tell how to read it.",
+            "`three.total` is a method on `Order` and `Quote` but a property on `Invoice`, so PHP# cannot tell how to read it.",
+            "`doc.total()` calls a method on `Order` but a function in a property on `Invoice`, so PHP# cannot tell how to call it.",
         ]
     );
 }
@@ -7074,13 +7387,13 @@ fn a_refused_argument_names_its_types_as_sharp_writes_them() {
 /// PHP twin keeps Mago's text.
 #[test]
 fn a_refused_value_names_its_types_as_sharp_writes_them() {
-    let sharp = "namespace Demo;\n\npublic class Box\n{\n    public int count = 0;\n\n    public int mixed(Any? value) => value;\n\n    public int nullable(int? value) => value;\n\n    public int empty()\n    {\n        return;\n    }\n\n    public int first(bool found)\n    {\n        if (found) {\n            return 1;\n        }\n    }\n\n    public int total => \"text\";\n\n    public int written(string text)\n    {\n        this.count = text;\n        int local = text;\n        return local;\n    }\n\n    public List<int> counts(List<Any?> values) => values;\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Box\n{\n    public int $count = 0;\n\n    public function mixed(mixed $value): int\n    {\n        return $value;\n    }\n\n    public function nullable(?int $value): int\n    {\n        return $value;\n    }\n\n    public function empty(): int\n    {\n        return;\n    }\n\n    public function first(bool $found): int\n    {\n        if ($found) {\n            return 1;\n        }\n    }\n\n    public int $total {\n        get => 'text';\n    }\n\n    public function written(string $text): int\n    {\n        $this->count = $text;\n        return 1;\n    }\n\n    /**\n     * @param list<mixed> $values\n     * @return list<int>\n     */\n    public function counts(array $values): array\n    {\n        return $values;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box\n{\n    public int count = 0;\n\n    public int untyped(Any? value) => value;\n\n    public int nullable(int? value) => value;\n\n    public int empty()\n    {\n        return;\n    }\n\n    public int first(bool found)\n    {\n        if (found) {\n            return 1;\n        }\n    }\n\n    public int total => \"text\";\n\n    public int written(string text)\n    {\n        this.count = text;\n        int local = text;\n        return local;\n    }\n\n    public List<int> counts(List<Any?> values) => values;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Box\n{\n    public int $count = 0;\n\n    public function untyped(mixed $value): int\n    {\n        return $value;\n    }\n\n    public function nullable(?int $value): int\n    {\n        return $value;\n    }\n\n    public function empty(): int\n    {\n        return;\n    }\n\n    public function first(bool $found): int\n    {\n        if ($found) {\n            return 1;\n        }\n    }\n\n    public int $total {\n        get => 'text';\n    }\n\n    public function written(string $text): int\n    {\n        $this->count = $text;\n        return 1;\n    }\n\n    /**\n     * @param list<mixed> $values\n     * @return list<int>\n     */\n    public function counts(array $values): array\n    {\n        return $values;\n    }\n}\n";
 
     assert_eq!(
         worded(("src/Demo/Box.php", php), &[]),
         [
-            "11:16 mixed-return-statement Could not infer a precise return type for function `Demo\\Box::mixed`. Saw type `mixed`. | Type inferred as `mixed` here. | The analysis could not determine a specific type for the value returned here, resulting in `mixed`. This can happen with complex code paths or unannotated data. | Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the function signature to catch potential mismatches earlier.",
+            "11:16 mixed-return-statement Could not infer a precise return type for function `Demo\\Box::untyped`. Saw type `mixed`. | Type inferred as `mixed` here. | The analysis could not determine a specific type for the value returned here, resulting in `mixed`. This can happen with complex code paths or unannotated data. | Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the function signature to catch potential mismatches earlier.",
             "16:16 nullable-return-statement Function `Demo\\Box::nullable` is declared to return `int` but possibly returns a nullable value (inferred as `int|null`). | Nullable value returned here. | Return type declared as non-nullable `int` here. | The declared return type does not permit null, but the analysis indicates that 'null' or a nullable type could be returned from this path. | You can either change the return type declaration of `Demo\\Box::nullable` to be nullable (e.g., '?int'), or ensure that this function path always returns a non-null value.",
             "16:16 invalid-return-statement Invalid return type for function `Demo\\Box::nullable`: expected `int`, but found `int|null`. | This has type `int|null` | The type `int|null` returned here is not compatible with the declared return type `int`. | Change the return value to match `int`, or update the function's return type declaration.",
             "21:9 invalid-return-statement Function `Demo\\Box::empty` is declared to return `int` but no return value was specified. | No return value specified here. | Return type declared as `int` here. | The declared return type does not permit 'void', but the analysis indicates that this function path does not return a value. | You can either change the return type declaration of `Demo\\Box::empty` to be 'void', or ensure that this function path always returns a value.",
@@ -7093,7 +7406,7 @@ fn a_refused_value_names_its_types_as_sharp_writes_them() {
     assert_eq!(
         worded(("src/Demo/Box.sharp", sharp), &[]),
         [
-            "7:37 mixed-return-statement Could not infer a precise return type for method `Box.mixed`. Saw type `Any?`. | Type inferred as `Any?` here. | The analysis could not determine a specific type for the value returned here, resulting in `Any?`. This can happen with complex code paths or unannotated data. | Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the method signature to catch potential mismatches earlier.",
+            "7:39 mixed-return-statement Could not infer a precise return type for method `Box.untyped`. Saw type `Any?`. | Type inferred as `Any?` here. | The analysis could not determine a specific type for the value returned here, resulting in `Any?`. This can happen with complex code paths or unannotated data. | Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the method signature to catch potential mismatches earlier.",
             "9:40 nullable-return-statement Method `Box.nullable` is declared to return `int` but possibly returns a nullable value (inferred as `int?`). | Nullable value returned here. | Return type declared as non-nullable `int` here. | The declared return type does not permit null, but the analysis indicates that 'null' or a nullable type could be returned from this path. | You can either change the return type declaration of `Box.nullable` to be nullable (e.g., 'int?'), or ensure that this method path always returns a non-null value.",
             "9:40 invalid-return-statement Invalid return type for method `Box.nullable`: expected `int`, but found `int?`. | This has type `int?` | The type `int?` returned here is not compatible with the declared return type `int`. | Change the return value to match `int`, or update the method's return type declaration.",
             "13:9 invalid-return-statement Method `Box.empty` is declared to return `int` but no return value was specified. | No return value specified here. | Return type declared as `int` here. | The declared return type does not permit 'void', but the analysis indicates that this method path does not return a value. | You can either change the return type declaration of `Box.empty` to be 'void', or ensure that this method path always returns a value.",
@@ -7566,7 +7879,7 @@ fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
         attribute_issues(("src/Demo/Report.sharp", sharp)),
         [
             "5:2 invalid-attribute-target Attribute `Field` cannot be used on a class, interface, enum, or trait. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: properties. | Remove the `[Field]` attribute from this location, or update the `#[Attribute]` declaration on the `Field` class to include `a class, interface, enum, or trait` as a valid target.",
-            "9:6 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared with `Attribute::IS_REPEATABLE` in its `#[Attribute]` flags. Non-repeatable attributes can only be applied once to a given target (e.g., a class, method, property). | Remove this duplicate `Field` attribute, or if multiple instances are intended and valid, modify the attribute class `Field` to include `Attribute::IS_REPEATABLE` in its `#[Attribute]` declaration (e.g., `#[Attribute(Attribute::TARGET_ALL | Attribute::IS_REPEATABLE)]`).",
+            "9:6 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
         ]
     );
 }
@@ -8089,6 +8402,16 @@ fn a_match_that_misses_cases_of_an_unimported_enum_names_the_import() {
             "match (ticket.status()) {\n    } empty-match-expression Match expression cannot be empty.",
         ]
     );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Ticket;\n\nclass Report\n{\n    public static function state(Ticket $ticket): string\n    {\n        return match ($ticket->status()) {\n        };\n    }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[("src/Lib/Status.php", TICKETS)]),
+        [
+            "Match expression cannot be empty.",
+            "Cannot return value with type 'never' from this function.",
+            "Potentially unhandled exception `UnhandledMatchError` in `Demo\\Report::state`.",
+        ]
+    );
 }
 
 /// An import under another name binds its enum, so the missing arms are written with that name and need no import.
@@ -8104,6 +8427,16 @@ fn a_match_that_misses_cases_of_an_enum_imported_under_another_name_writes_them_
         [
             "match match-not-exhaustive This `match` misses `State.Open`, `State.Closed` and `State.Archived`.",
             "match (ticket.status()) {\n    } empty-match-expression Match expression cannot be empty.",
+        ]
+    );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Ticket;\nuse Lib\\Status as State;\n\nclass Report\n{\n    public static function state(Ticket $ticket): string\n    {\n        return match ($ticket->status()) {\n        };\n    }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[("src/Lib/Status.php", TICKETS)]),
+        [
+            "Match expression cannot be empty.",
+            "Cannot return value with type 'never' from this function.",
+            "Potentially unhandled exception `UnhandledMatchError` in `Demo\\Report::state`.",
         ]
     );
 }
@@ -8128,6 +8461,16 @@ fn a_match_that_misses_cases_of_an_enum_whose_short_name_the_file_imports_writes
         [
             "match match-not-exhaustive This `match` misses `LibStatus.Open`, `LibStatus.Closed` and `LibStatus.Archived`. Add `import Lib.Status as LibStatus;` to the file.",
             "match (ticket.status()) {\n    } empty-match-expression Match expression cannot be empty.",
+        ]
+    );
+
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Ticket;\nuse Billing\\Status;\n\nclass Report\n{\n    public static function state(Ticket $ticket): string\n    {\n        return match ($ticket->status()) {\n        };\n    }\n}\n";
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &[("src/Lib/Status.php", TICKETS), billing_status]),
+        [
+            "Match expression cannot be empty.",
+            "Cannot return value with type 'never' from this function.",
+            "Potentially unhandled exception `UnhandledMatchError` in `Demo\\Report::state`.",
         ]
     );
 }

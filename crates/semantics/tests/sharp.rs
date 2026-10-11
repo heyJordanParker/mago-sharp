@@ -193,6 +193,9 @@ fn every_construct_outside_the_slice_is_not_supported_yet() {
             "23:22 This expression is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\n$top = 1;\necho 1;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public function run(int $extra): int\n    {\n        switch ($extra) {\n            default: return 1;\n        }\n        $made = new Report;\n        $partial = $this->run(...);\n        $text = <<<TEXT\ntotal\nTEXT;\n        return $extra;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// The bridge writes every class type by its full name, so the engine never sees a `parent` type in a class whose
@@ -208,6 +211,9 @@ fn a_parent_type_is_not_supported_yet_and_a_self_type_is_an_error() {
             "7:24 PHP# has no `self`: write the class's own name, `Report`, for the declaring class.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Entity;\n\nclass Report extends Entity\n{\n    public function copy(self $other): parent\n    {\n        return $other;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -222,6 +228,9 @@ fn a_final_enum_or_a_public_trait_is_not_supported_yet_where_it_starts() {
             "11:1 This statement is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ntrait Bare\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -246,6 +255,9 @@ fn an_interpolation_outside_the_slice_is_not_supported_yet() {
     let code = leak(method("        const label = `made ${this.run(...)}`;\n        return extra;\n"));
 
     assert_eq!(issues(code), ["7:31 This expression is not supported yet in PHP#."]);
+
+    let php = leak(php_method("        $label = \"made {$this->run(...)}\";\n        return $extra;\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -276,6 +288,14 @@ fn a_catch_type_that_is_not_a_class_reports_only_the_php_error() {
         issues(code),
         ["9:18 Invalid type hint in `catch` clause.", "10:28 Invalid type hint in `catch` clause."]
     );
+
+    let php = leak(php_method(
+        "        try {\n            $extra += 1;\n        } catch (int $failure) {\n        } catch (Missing | string $failure) {\n        }\n        return $extra;\n",
+    ));
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["9:18 Invalid type hint in `catch` clause.", "10:28 Invalid type hint in `catch` clause."]
+    );
 }
 
 #[test]
@@ -291,6 +311,11 @@ fn a_catch_variable_named_this_or_a_superglobal_is_an_error() {
             "9:25 `_GET` is the name of a PHP superglobal: rename this catch variable.",
         ]
     );
+
+    let php = leak(php_method(
+        "        try {\n        } catch (Missing $this) {\n        } catch (Broken $_GET) {\n        }\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -313,6 +338,11 @@ fn an_if_or_else_without_braces_is_not_supported_yet() {
             "8:9 This statement without braces is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(php_method(
+        "        if ($extra > 1) return 1;\n        if ($extra > 2) {\n            return 2;\n        } else return 3;\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -325,6 +355,11 @@ fn elseif_and_a_colon_delimited_if_are_not_supported_yet() {
         issues(code),
         ["9:11 This `elseif` is not supported yet in PHP#.", "12:23 This construct is not supported yet in PHP#."]
     );
+
+    let php = leak(php_method(
+        "        if ($extra > 1) {\n            return 1;\n        } elseif ($extra > 2) {\n            return 2;\n        }\n        if ($extra > 3):\n            return 3;\n        endif;\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -359,6 +394,11 @@ fn a_loop_without_braces_or_with_a_colon_body_is_not_supported_yet() {
             "9:26 This construct is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(php_method(
+        "        while ($extra > 0) $extra -= 1;\n        do $extra += 1; while ($extra < 3);\n        while ($extra > 1):\n            $extra -= 1;\n        endwhile;\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -389,6 +429,11 @@ fn break_and_continue_with_a_level_are_not_supported_yet() {
         issues(code),
         ["9:17 This statement is not supported yet in PHP#.", "11:13 This statement is not supported yet in PHP#."]
     );
+
+    let php = leak(php_method(
+        "        while ($extra > 0) {\n            while ($extra > 1) {\n                break 2;\n            }\n            continue 1;\n        }\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -426,6 +471,11 @@ fn a_for_loop_without_braces_or_with_a_colon_body_is_not_supported_yet() {
             "8:17 This construct is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(php_method(
+        "        for ($step = 0; $step < 3; $step++) $extra++;\n        for (;;):\n            break;\n        endfor;\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -465,6 +515,11 @@ fn a_loop_variable_named_this_or_a_superglobal_is_an_error() {
             "9:21 `_GET` is the name of a PHP superglobal: rename this loop variable.",
         ]
     );
+
+    let php = leak(php_method(
+        "        foreach (Store::values() as $this) {\n        }\n        foreach (Store::values() as $_GET => $value) {\n        }\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -472,6 +527,10 @@ fn a_for_of_loop_without_braces_is_not_supported_yet() {
     let code = leak(method("        for (const value of Store.values()) extra += value;\n        return extra;\n"));
 
     assert_eq!(issues(code), ["7:9 This statement without braces is not supported yet in PHP#."]);
+
+    let php =
+        leak(php_method("        foreach (Store::values() as $value) $extra += $value;\n        return $extra;\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -547,6 +606,9 @@ fn a_top_level_function_is_an_error() {
     let code = "namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n";
 
     assert_eq!(issues(code), ["3:10 PHP# has no top-level functions: move `total` into a class as a static method."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nfunction total(int $extra) { return $extra; }\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -557,6 +619,9 @@ fn dollar_variables_are_errors() {
         issues(code),
         ["7:9 PHP# variables have no `$`: write `total`.", "8:9 Variable variables are not part of PHP#.",]
     );
+
+    let php = leak(php_method("        $total = 1;\n        $$total;\n        return 1;\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -564,6 +629,9 @@ fn a_dollar_parameter_is_an_error() {
     let code = "class Report\n{\n    public int run(int $extra) { return 1; }\n}\n";
 
     assert_eq!(issues(code), ["3:24 PHP# variables have no `$`: write `extra`."]);
+
+    let php = "<?php\n\nclass Report\n{\n    public function run(int $extra): int { return 1; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -585,6 +653,11 @@ fn a_construct_outside_the_slice_is_not_supported_yet_in_a_catch_block_or_a_call
         issues(code),
         ["9:27 This operator is not supported yet in PHP#.", "11:22 This expression is not supported yet in PHP#."]
     );
+
+    let php = leak(php_method(
+        "        try {\n        } catch (Missing $failure) {\n            $extra = $extra <> 1;\n        }\n        return count($this->run(...));\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -592,6 +665,9 @@ fn a_function_called_through_an_expression_is_not_supported_yet() {
     let code = leak(method("        return this.callback()(extra);\n"));
 
     assert_eq!(issues(code), ["7:16 This expression is not supported yet in PHP#."]);
+
+    let php = leak(php_method("        return $this->callback()($extra);\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -607,6 +683,11 @@ fn compact_extract_and_global_are_errors() {
             "9:9 `global` is not part of PHP#.",
         ]
     );
+
+    let php = leak(php_method(
+        "        compact(\"extra\");\n        extract([]);\n        global $config;\n        return 1;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 8 removes `echo` and `print`: output goes through `printf` or `fwrite`.
@@ -826,6 +907,9 @@ fn self_names_the_class_and_self_where_it_goes() {
             "22:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private static int $count = 0;\n    private self $other;\n\n    public function __construct(self $copy)\n    {\n    }\n\n    public static function make(): self\n    {\n        self::$count = 1;\n        $made = self::make();\n        return new self(self::$count);\n    }\n}\n\ninterface Copyable\n{\n    public function copy(): self;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -844,6 +928,9 @@ fn static_is_written_self() {
             format!("15:27 {message}"),
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private static int $count = 0;\n\n    public static function make(): int|static\n    {\n        $count = static::$count;\n        $made = static::make();\n        return new static(static::$count);\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -863,6 +950,10 @@ fn an_optional_parameter_before_a_required_one_is_an_error() {
             "5:20 The optional parameter `first` comes before the required parameter `extra`: PHP would make it required."
         ]
     );
+
+    let php =
+        leak(php_method("        return $extra;\n").replace("int $extra", "int $first = 1, int $extra, int $last = 2"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -891,6 +982,9 @@ fn a_modifier_on_an_interface_member_is_an_error() {
             "7:5 An interface method takes no modifier: every interface method is public."
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Measured\n{\n    public function area(): float;\n\n    static function unit(): float;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -901,6 +995,9 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
         issues(code),
         ["3:1 This modifier is not supported yet in PHP#.", "5:5 This class member is not supported yet in PHP#."]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Measured\n{\n    const int SIDES = 4;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -915,6 +1012,9 @@ fn an_interface_property_is_not_supported_yet_with_or_without_accessor_bodies() 
             "6:5 This class member is not supported yet in PHP#."
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Named\n{\n    public string $name { get; }\n    public string $label { get => \"label\"; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["8:32 Interface virtual property `Named::$label` must be abstract."]);
 }
 
 #[test]
@@ -935,6 +1035,12 @@ fn a_static_member_read_in_a_constant_expression_is_an_error() {
             "8:32 `Report.count` is a static member, which a constant value cannot read."
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private static int $count = 0;\n    public const int MAX = Report::$count;\n\n    public function run(int $extra = Report::$count): int\n    {\n        return 1;\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["8:28 Constant `Report::MAX` value contains a non-constant expression."]
+    );
 }
 
 #[test]
@@ -942,6 +1048,9 @@ fn a_member_chain_in_a_constant_expression_is_not_supported_yet() {
     let code = leak(method("        return extra;\n").replace("int extra", "int extra = Calc.rate.cents"));
 
     assert_eq!(issues(code), ["5:32 This expression is not supported yet in PHP#."]);
+
+    let php = leak(php_method("        return $extra;\n").replace("int $extra", "int $extra = Calc::RATE->cents"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -987,6 +1096,11 @@ fn a_write_through_null_safe_access_is_not_supported() {
             "9:9 This write target is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $this?->count = 1;\n        $this?->count ??= 2;\n        $this?->count++;\n        return 1;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -994,6 +1108,9 @@ fn a_reserved_class_name_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Mixed\n{\n}\n";
 
     assert_eq!(issues(code), ["3:7 Cannot use `Mixed` as a class name: it is reserved."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Mixed\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1001,6 +1118,9 @@ fn any_is_a_reserved_class_name() {
     let code = "namespace App.Tenant;\n\nclass Any\n{\n}\n";
 
     assert_eq!(issues(code), ["3:7 Cannot use `Any` as a class name: it is reserved."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Any\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// The standard library declares `Sharp.Int`, `Sharp.Float` and `Sharp.Bool`, spec section 24. The engine compiles
@@ -1046,6 +1166,9 @@ fn int_float_and_bool_outside_the_sharp_namespace_are_reserved() {
             "3:21 Cannot use `Int` as a class name: it is reserved.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App;\n\nfinal class Int\n{\n    public static function one(): int { return 1; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1054,6 +1177,9 @@ fn methods_whose_names_differ_only_in_case_are_an_error() {
 
     // The PHP checks already reject this, so PHP# adds no second error.
     assert_eq!(issues(code), ["5:16 class method `Report.Run` has already been defined"]);
+
+    let php = "<?php\n\nclass Report\n{\n    public function run(): int { return 1; }\n\n    public function Run(): int { return 2; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:21 class method `Report::Run` has already been defined"]);
 }
 
 #[test]
@@ -1068,6 +1194,10 @@ fn an_import_whose_short_name_is_reserved_is_an_error() {
             "5:8 Cannot import `Lib.Any` as `Any`: PHP# reserves `Any` for a type.",
         ]
     );
+
+    let php =
+        "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Int;\nuse Lib\\Mixed;\nuse Lib\\Any;\n\nclass Report\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Importing a standard library type class names the class a bare name already names, spec section 23.
@@ -1084,6 +1214,9 @@ fn two_imports_with_the_same_short_name_are_an_error() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Other.CALC;\n\nclass Report\n{\n}\n";
 
     assert_eq!(issues(code), ["4:8 Cannot import `Other.CALC` as `CALC`: `Lib.Calc` is already imported as `Calc`."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Calc;\nuse Other\\CALC;\n\nclass Report\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1097,6 +1230,9 @@ fn a_parameter_or_local_named_this_is_an_error() {
             "5:30 Cannot name a local `this`: `this` is the object the method runs on.",
         ]
     );
+
+    let php = "<?php\n\nclass Report\n{\n    public function run(int $this): int { return 1; }\n\n    public function total(): int { $this = 1; return 1; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1114,6 +1250,9 @@ fn an_import_named_like_a_class_of_the_same_file_is_an_error() {
         issues(code),
         ["3:8 Cannot import `App.Shared.Report` as `Report`: this file declares a class named `Report`."]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse App\\Shared\\Report;\n\nclass Report\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 23: a renamed import is used by its new name, so two imports of one name clash whether either is
@@ -1129,6 +1268,9 @@ fn an_import_renamed_to_the_name_of_another_import_is_an_error() {
             "5:8 Cannot import `Third.Thing` as `TOOL`: `Lib.Calc` is already imported as `Tool`.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Calc as Tool;\nuse Other\\Tool;\nuse Third\\Thing as TOOL;\n\nclass Report\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1143,6 +1285,9 @@ fn an_import_renamed_like_a_class_of_the_same_file_or_a_reserved_name_is_an_erro
             "5:8 Cannot import `Sharp.Int` as `Float`: PHP# reserves `Float` for a type.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse App\\Shared\\Page as Report;\nuse Lib\\Thing as Int;\nuse Sharp\\Int as Float;\n\nclass Report\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 23: renaming one of two imports of one name, or an import named like a class the file declares, fixes
@@ -1169,6 +1314,9 @@ fn a_clashing_import_is_helped_with_the_import_renamed() {
             Some("Rename the import with `as`, as in `import Lib.Any as OtherAny;`.".to_owned()),
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Calc;\nuse Other\\Calc;\nuse App\\Shared\\Report;\nuse Lib\\Any;\n\nclass Report\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 24 capitalizes every type but the built-in ones, and the parser reads a capitalized name before `<` as
@@ -1187,6 +1335,9 @@ fn a_class_interface_or_enum_name_starts_with_a_capital_letter() {
         [format!("3:7 `box` {rule}"), format!("7:11 `priced` {rule}"), format!("11:6 `status` {rule}")]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A name that starts with `_` is not capitalized. A `__Something__` name keeps its own error.
@@ -1200,6 +1351,9 @@ fn a_type_name_that_starts_with_an_underscore_is_an_error() {
             "3:7 `_Box` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass _Box\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// An import's new name is a type name of the file, so it starts with a capital letter as a declared one does.
@@ -1215,6 +1369,9 @@ fn an_import_alias_starts_with_a_capital_letter() {
         ]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Box as box;\n\nclass Report\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// PHP# capitalizes every namespace as it does every type, so each part of a `namespace` line starts with a capital
@@ -1231,6 +1388,9 @@ fn a_namespace_part_starts_with_a_capital_letter() {
         ]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
+
+    let php = "<?php\n\nnamespace App\\store;\n\nclass Report\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// The first part of a namespace is checked as every other part is, and so is a namespace of one part.
@@ -1248,6 +1408,7 @@ fn a_lowercase_first_namespace_part_is_an_error() {
             "1:11 `app` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
         ]
     );
+    assert_eq!(issues_in("src/Report.php", "<?php\n\nnamespace app;\n\nclass Report\n{\n}\n"), Vec::<String>::new());
 }
 
 /// Each lowercase part of a namespace is its own error, at that part.
@@ -1260,6 +1421,10 @@ fn each_lowercase_namespace_part_is_its_own_error() {
         issues("namespace app.Store.orders;\n\nclass Report\n{\n}\n"),
         [format!("1:11 `app` {rule}"), format!("1:21 `orders` {rule}")]
     );
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\nnamespace app\\Store\\orders;\n\nclass Report\n{\n}\n"),
+        Vec::<String>::new()
+    );
 }
 
 /// A namespace part that starts with `_` is not capitalized, as a type name that starts with `_` is not.
@@ -1271,6 +1436,10 @@ fn a_namespace_part_that_starts_with_an_underscore_is_an_error() {
             "1:15 `_Store` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
         ]
     );
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\nnamespace App\\_Store;\n\nclass Report\n{\n}\n"),
+        Vec::<String>::new()
+    );
 }
 
 /// An import names a namespace another file declares, and plain PHP vendor namespaces are often lowercase, so an
@@ -1280,27 +1449,15 @@ fn an_import_keeps_its_lowercase_namespace_parts() {
     assert_eq!(issues("namespace App.Tenant;\n\nimport vendor.lib.Box;\n\nclass Report\n{\n}\n"), Vec::<String>::new());
 }
 
-/// Plain PHP keeps its own namespaces, so a lowercase namespace part there reports nothing.
-#[test]
-fn a_php_file_keeps_its_lowercase_namespace_parts() {
-    assert_eq!(issues_in("src/Report.php", "<?php\n\nnamespace App\\store;\n"), Vec::<String>::new());
-}
-
-/// Plain PHP keeps its own names, so a lowercase class, interface, enum or `use` alias there reports nothing.
-#[test]
-fn a_php_file_keeps_its_lowercase_type_names_and_use_aliases() {
-    let types = "<?php\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n";
-
-    assert_eq!(issues_in("src/Report.php", types), Vec::<String>::new());
-    assert_eq!(issues_in("src/Report.php", "<?php\n\nuse Lib\\Box as box;\n"), Vec::<String>::new());
-}
-
 /// An interface's name is checked as a class's is, so a reserved one is an error, as the engine refuses it.
 #[test]
 fn an_interface_named_like_a_reserved_class_name_is_an_error() {
     let code = "namespace App.Tenant;\n\ninterface Mixed\n{\n}\n";
 
     assert_eq!(issues(code), ["3:11 Cannot use `Mixed` as a class name: it is reserved."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Mixed\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1314,6 +1471,9 @@ fn a_local_or_parameter_named_after_a_superglobal_is_an_error() {
             "7:13 `_GET` is the name of a PHP superglobal: rename this local.",
         ]
     );
+
+    let php = leak(php_method("        $_GET = 1;\n        return $_GET;\n").replace("int $extra", "int $GLOBALS"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`.
@@ -1699,6 +1859,9 @@ fn a_bare_member_name_is_an_error_that_names_this() {
         issues(code),
         ["5:31 Write `this.count()`: members of the same object are always written with `this.`."]
     );
+
+    let php = "<?php\n\nclass Report\n{\n    public function count(): int { return 0; }\n\n    public function run(): int { return count + run(); }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1709,6 +1872,9 @@ fn a_bare_method_name_matches_ignoring_case_as_in_php() {
         issues(code),
         ["5:31 Write `this.total()`: members of the same object are always written with `this.`."]
     );
+
+    let php = "<?php\n\nclass Report\n{\n    public function total(): int { return 0; }\n\n    public function run(): int { return Total; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1719,6 +1885,9 @@ fn a_bare_member_in_a_static_method_names_the_class() {
         issues(code),
         ["5:38 Write `Report.helper()`: a static method reaches the members of its class through the class name."]
     );
+
+    let php = "<?php\n\nclass Report\n{\n    public static function helper(): int { return 0; }\n\n    public static function run(): int { return helper; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1734,6 +1903,9 @@ fn extends_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Base\n{\n}\n\nclass Report extends Base\n{\n}\n";
 
     assert_eq!(issues(code), ["7:14 This `extends` clause is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Base\n{\n}\n\nclass Report extends Base\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1741,6 +1913,9 @@ fn implements_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nimport Lib.Shape;\n\nclass Report implements Shape\n{\n}\n";
 
     assert_eq!(issues(code), ["5:14 This `implements` clause is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Shape;\n\nclass Report implements Shape\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1761,6 +1936,12 @@ fn attribute_arguments_outside_the_slice_are_not_supported_yet() {
             "7:13 This expression is not supported yet in PHP#.",
             "8:19 This expression is not supported yet in PHP#.",
         ]
+    );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    #[Field(Report::class)]\n    #[Field(Mode::Write)]\n    #[Field([$this->run(1)])]\n    #[Field(label: new Report())]\n    public function run(int $extra): int\n    {\n        return $extra;\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["9:13 Attribute `Field` argument contains a non-constant expression."]
     );
 }
 
@@ -1797,6 +1978,15 @@ fn a_protected_or_private_class_reports_only_the_php_error() {
             "7:1 Class `Calc` cannot have the `private` visibility modifier.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nprotected class Report\n{\n}\n\nprivate class Calc\n{\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "5:1 Class `Report` cannot have the `protected` visibility modifier.",
+            "9:1 Class `Calc` cannot have the `private` visibility modifier.",
+        ]
+    );
 }
 
 #[test]
@@ -1807,6 +1997,9 @@ fn a_final_method_and_a_readonly_class_are_not_supported_yet() {
         issues(code),
         ["5:5 This modifier is not supported yet in PHP#.", "16:1 This modifier is not supported yet in PHP#."]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nfinal class Report\n{\n    final public function run(): int\n    {\n        return 1;\n    }\n}\n\nreadonly class Point\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1822,6 +2015,9 @@ fn a_method_name_starting_with_two_underscores_is_not_supported_yet() {
             "8:19 This method name is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __clone(): void { }\n    public function __get(string $name): int { return 1; }\n    public function __invoke(): int { return 1; }\n    public function __toString(): string { return \"report\"; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1835,6 +2031,9 @@ fn a_method_without_an_access_modifier_is_not_supported_yet() {
             "6:16 A method without `public`, `protected` or `private` is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    function run(): int { return 1; }\n    static function make(): int { return 1; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1848,6 +2047,9 @@ fn a_method_named_after_its_class_is_not_supported_yet() {
             "10:16 A method named after its class is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function report(): int { return 1; }\n}\n\nclass Calc\n{\n    public function CALC(): int { return 1; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1869,6 +2071,9 @@ fn a_promoted_member_read_without_this_is_an_error_that_names_this() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(private int count)\n    {\n        count = 1;\n    }\n\n    public int total()\n    {\n        return count;\n    }\n}\n";
 
     assert_eq!(issues(code), ["12:16 Write `this.count`: members of the same object are always written with `this.`."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(private int $count)\n    {\n        $count = 1;\n    }\n\n    public function total(): int\n    {\n        return $count;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1881,6 +2086,10 @@ fn a_public_constructor_parameter_without_accessors_is_an_error() {
             "5:19 A `public` constructor parameter needs accessors: a public member is a property, as in `public int id { get; }`."
         ]
     );
+
+    let php =
+        "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(public int $id) {}\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1909,6 +2118,15 @@ fn a_promoted_member_outside_the_slice_is_not_supported_yet() {
             "5:27 This modifier is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(private readonly int $a, private static int $b) {}\n\n    public function run(private int $c): void {}\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "9:25 Promoted properties are not allowed outside of constructors.",
+            "7:66 Parameter `$b` cannot have the `static` modifier.",
+        ]
+    );
 }
 
 #[test]
@@ -1922,6 +2140,9 @@ fn a_method_without_a_return_type_named_otherwise_is_an_error() {
             "6:12 A PHP# method needs a return type: only the constructor, named after its class, has none.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function report() {}\n    public function Calc() {}\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -1929,6 +2150,9 @@ fn a_static_constructor_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static Report() {}\n}\n";
 
     assert_eq!(issues(code), ["5:19 A static constructor is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public static function __construct() {}\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:12 Magic method `Report::__construct` cannot be static."]);
 }
 
 #[test]
@@ -1936,6 +2160,9 @@ fn a_method_without_a_body_reports_only_the_php_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run();\n}\n";
 
     assert_eq!(issues(code), ["5:21 Non-Abstract method `Report.run` must have a concrete body."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function run(): int;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:31 Non-Abstract method `Report::run` must have a concrete body."]);
 }
 
 #[test]
@@ -1984,10 +2211,6 @@ fn a_static_class_takes_only_public_and_static() {
             "7:1 A static class takes only `public` and `static`: remove `final`.",
         ]
     );
-}
-
-#[test]
-fn a_php_file_keeps_refusing_a_static_class() {
     assert_eq!(
         issues_in("src/Text.php", "<?php\n\nstatic class Text\n{\n}\n"),
         ["3:1 Class `Text` cannot have the `static` modifier."]
@@ -2073,6 +2296,9 @@ fn the_error_control_operator_outside_the_sharp_namespace_is_an_error() {
             "{namespace}"
         );
     }
+
+    let php = "<?php\n\nnamespace App;\n\nfinal class Text\n{\n    public static function quiet(string $title): string { return @trim($title); }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2090,6 +2316,12 @@ fn an_initial_value_may_be_any_expression_a_method_body_has_without_this() {
         issues(code),
         ["10:25 An initial value cannot use `this`: it runs before the constructor body, while the object is built."]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private int $made = 1;\n    private int $count = $this->made;\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["8:26 Property `Report::$count` value contains a non-constant expression."]
+    );
 }
 
 #[test]
@@ -2097,6 +2329,9 @@ fn a_public_field_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int count = 0;\n}\n";
 
     assert_eq!(issues(code), ["5:5 A PHP# field cannot be `public`: a field is `private` or `protected`."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public int $count = 0;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A field written `override` replaces a plain PHP parent's property, spec section 6.1, with the parent's access
@@ -2178,6 +2413,9 @@ fn fields_outside_the_slice_are_not_supported_yet() {
             "6:5 A field declaring several names is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private readonly int $count;\n    private int $first, $second;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2203,6 +2441,9 @@ fn a_nullable_field_of_a_type_outside_the_slice_is_not_supported_yet() {
         issues(code),
         ["5:13 This type is not supported yet in PHP#.", "6:18 This type is not supported yet in PHP#."]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private ?iterable $items;\n    private int|iterable|null $key;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2212,6 +2453,12 @@ fn a_void_field_reports_only_the_php_error() {
     assert_eq!(
         issues(code),
         ["6:13 Property `Report.plain` cannot have type `void`.", "5:13 Type `void` cannot be nullable."]
+    );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private ?void $nothing;\n    private void $plain;\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["8:13 Property `Report::$plain` cannot have type `void`.", "7:14 Type `void` cannot be nullable."]
     );
 }
 
@@ -2238,6 +2485,15 @@ fn a_static_member_outside_the_slice_is_not_supported_yet() {
             "7:23 A get-only static property is not supported yet in PHP#.",
             "8:32 A static member's initial value that is not constant is not supported yet in PHP#.",
             "9:45 A static member's initial value that is not constant is not supported yet in PHP#.",
+        ]
+    );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Calc;\n\nclass Report\n{\n    private static Calc $calc = new Calc();\n    public static int $views = Calc::make();\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "9:33 Property `Report::$calc` value contains a non-constant expression.",
+            "10:32 Property `Report::$views` value contains a non-constant expression.",
         ]
     );
 }
@@ -2279,6 +2535,9 @@ fn a_class_constant_outside_the_slice_is_not_supported_yet() {
             "9:18 This type is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    const A = 1;\n    public const B = 1, C = 2;\n    final public const D = 1;\n    public const E = 2 <> 3;\n    public const iterable F = [];\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2293,6 +2552,9 @@ fn a_constant_or_static_member_named_without_its_class_is_an_error_that_names_th
             "11:16 Write `Report.count`: a static member is reached through its class name.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    private static int $count = 0;\n\n    public function run(): int\n    {\n        $count = MAX;\n        return $count;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 24 writes a union anywhere a type goes, and PHP 8.3 types a class constant with one.
@@ -2315,6 +2577,9 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
             "7:29 Duplicate type `int` is redundant.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public const int|null NONE = null;\n    public const int|iterable ITEMS = 1;\n    public const int|string|int TWICE = 1;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2365,6 +2630,9 @@ fn an_expression_body_is_checked_as_a_method_body() {
             "8:35 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private int $count = 0;\n\n    public function total(): int { return $this->count ?: 1; }\n    public int $size { get => $this->count ?: 1; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2449,6 +2717,9 @@ fn the_property_read_through_this_inside_its_own_accessor_is_an_error_that_names
             "7:45 Write `field` instead of `this.size` inside `size`'s own accessor.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public int $count { get => $this->count + 1; set => $this->count = $value; }\n    public int $size { get => ($this)->size + ($this?->size ?? 0); }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// PHP gives a `get` hook the property's type and a `set` hook `void`, so `get` returns a value and `set` returns
@@ -2461,6 +2732,9 @@ fn a_get_returns_a_value_and_a_set_returns_none_as_php_hooks_do() {
         issues(code),
         ["5:26 A `get` accessor must return a value.", "6:47 A `set` accessor must not return a value.",]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public int $a { get { return; } }\n    public int $b { get => $this->b; set { return $value; } }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A property uses `field` where an accessor body names it outside a lambda, in a nested block too, as php-src finds
@@ -2499,6 +2773,9 @@ fn an_initial_value_or_a_constructor_parameter_needs_storage() {
             "9:30 The property `d` has no storage for the constructor to set: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public int $a = 2 { get => 1; }\n\n    public function __construct(public int $d { get => 1; set => $this->save($value); })\n    {\n    }\n\n    public function save(int $value): void\n    {\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A constant initial value is the property's default, but any other would run the `set` body in the constructor.
@@ -2520,6 +2797,10 @@ fn a_static_property_with_an_accessor_body_is_not_supported_yet() {
         "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n}\n";
 
     assert_eq!(issues(code), ["5:12 A static property with an accessor body is not supported yet in PHP#."]);
+
+    let php =
+        "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public static int $a = 0 { set => $value; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:12 Hooked property `Report::$a` cannot be static."]);
 }
 
 #[test]
@@ -2540,6 +2821,15 @@ fn a_variadic_parameter_that_is_not_last_or_has_a_default_is_an_error_as_in_php(
             "10:34 Invalid parameter definition: variadic parameter `values` cannot have a default value.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function run(int ...$values, int $extra): int\n    {\n        return $extra;\n    }\n\n    public function sum(int ...$values = 1): int\n    {\n        return 0;\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "7:45 Invalid parameter order: parameter `$extra` is defined after variadic parameter `$values`.",
+            "12:40 Invalid parameter definition: variadic parameter `$values` cannot have a default value.",
+        ]
+    );
 }
 
 #[test]
@@ -2547,6 +2837,10 @@ fn a_void_variadic_parameter_reports_only_the_php_error() {
     let code = leak(method("        return 1;\n").replace("int extra", "void ...extra"));
 
     assert_eq!(issues(code), ["5:20 Invalid parameter type: bottom type `void` cannot be used as a parameter type."]);
+
+    // Upstream Mago does not check the type of a variadic parameter, so the `.php` twin keeps its result.
+    let php = leak(php_method("        return 1;\n").replace("int $extra", "void ...$extra"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2560,15 +2854,10 @@ fn a_variadic_constructor_parameter_that_declares_a_member_is_an_error_as_in_php
             "12:18 Cannot declare variadic promoted property `values`.",
         ]
     );
-}
 
-/// Upstream Mago checks neither the member nor the type of a variadic parameter, nor a type written twice, so a `.php`
-/// file keeps its results. The PHP# twins of these lines are errors.
-#[test]
-fn a_php_file_keeps_upstream_results_for_a_variadic_parameter_and_a_type_written_twice() {
-    let code = "<?php\n\nclass Report\n{\n    public function __construct(private int ...$values)\n    {\n    }\n}\n\nfunction f(void ...$x) {}\n\nfunction g(int|int $x) {}\n";
-
-    assert_eq!(issues_in("src/Report.php", code), Vec::<String>::new());
+    // Upstream Mago does not check the member of a variadic parameter, so the `.php` twin keeps its result.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(private int ...$values)\n    {\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2593,6 +2882,15 @@ fn a_union_that_holds_null_is_not_supported_yet() {
             "5:62 This union that holds null is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(
+        php_method("        return 1;\n")
+            .replace("int $extra", "?int|string $a, int|?string $b, int|null $c, null|Calc $d"),
+    );
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["5:26 Type `int|string` cannot be nullable.", "5:45 Type `?string` cannot be part of a union."]
+    );
 }
 
 #[test]
@@ -2603,6 +2901,12 @@ fn void_in_a_union_reports_only_the_php_error() {
         issues(code),
         ["5:12 Type `void` cannot be part of a union.", "5:29 Type `void` cannot be part of a union."]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function run(int|void $extra): void|int\n    {\n        return 1;\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["7:29 Type `void` cannot be part of a union.", "7:43 Type `void` cannot be part of a union."]
+    );
 }
 
 #[test]
@@ -2610,6 +2914,10 @@ fn a_type_written_twice_in_a_union_is_an_error_as_in_php() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int|string|int run(Calc|string|calc extra)\n    {\n        return 1;\n    }\n}\n";
 
     assert_eq!(issues(code), ["7:23 Duplicate type `int` is redundant.", "7:43 Duplicate type `calc` is redundant."]);
+
+    // Upstream Mago does not check a type written twice, so the `.php` twin keeps its result.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Calc;\n\nclass Report\n{\n    public function run(Calc|string|calc $extra): int|string|int\n    {\n        return 1;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2631,6 +2939,9 @@ fn a_union_that_holds_null_names_the_nullable_union_to_write() {
         notes,
         [["PHP# writes a union that holds null in parentheses with `?` after it, as in `(int|string)?`."]]
     );
+
+    let php = leak(php_method("        return 1;\n").replace("int $extra", "int|null $a"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2650,6 +2961,10 @@ fn a_nullable_union_is_checked_as_its_union_and_never_joins_another_union() {
             "5:98 Type `void` cannot be part of a union.",
         ]
     );
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\nfunction f(?(int|string) $x) {}\n"),
+        ["3:13 Type `(int|string)` cannot be nullable."]
+    );
 }
 
 #[test]
@@ -2657,13 +2972,6 @@ fn a_single_type_in_parentheses_with_a_question_mark_after_it_reports_only_the_p
     let code = leak(method("        return 1;\n").replace("int extra", "(Calc)? extra"));
 
     assert_eq!(issues(code), ["5:20 Type `(Calc)` cannot be nullable.", "5:21 Type `Calc` cannot be parenthesized."]);
-}
-
-#[test]
-fn a_php_file_keeps_refusing_a_nullable_union_in_parentheses() {
-    let code = "<?php\n\nfunction f(?(int|string) $x) {}\n";
-
-    assert_eq!(issues_in("src/Report.php", code), ["3:13 Type `(int|string)` cannot be nullable."]);
 }
 
 #[test]
@@ -2702,6 +3010,11 @@ fn operators_outside_the_slice_are_not_supported_yet() {
             "12:19 This operator is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $a = $extra;\n        $a = @$extra;\n        $a = $extra xor true;\n        $a = $extra and true;\n        $a = $extra or true;\n        $a = $extra <> 1;\n        return $a;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// `<=>` orders two values, as spec section 19 writes it for numbers, strings and instances whose class declares
@@ -2718,6 +3031,9 @@ fn a_member_name_written_as_an_expression_is_not_supported_yet() {
     let code = leak(method("        return this.{\"run\"}(extra);\n"));
 
     assert_eq!(issues(code), ["7:21 This member name is not supported yet in PHP#."]);
+
+    let php = leak(php_method("        return $this->{\"run\"}($extra);\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2737,6 +3053,9 @@ fn types_outside_the_slice_are_not_supported_yet() {
             "8:12 PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.",
         ]
     );
+
+    let php = "<?php\n\nclass Report\n{\n    public function run(?iterable $a, int|iterable $b, iterable $c, callable $d, (Lib&Other)|null $e): object\n    {\n        return 1;\n    }\n\n    public function make(Lib $f, float $g, bool $h, string $i): self\n    {\n        return $this;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2792,6 +3111,9 @@ fn a_nullable_void_reports_only_the_php_error() {
     let code = "class Report\n{\n    public void? run()\n    {\n    }\n}\n";
 
     assert_eq!(issues(code), ["3:12 Type `void` cannot be nullable."]);
+
+    let php = "<?php\n\nclass Report\n{\n    public function run(): ?void\n    {\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["5:29 Type `void` cannot be nullable."]);
 }
 
 #[test]
@@ -2799,6 +3121,9 @@ fn a_by_reference_parameter_is_not_supported_yet() {
     let code = leak(method("        return 1;\n").replace("int extra", "&extra"));
 
     assert_eq!(issues(code), ["5:20 A by-reference parameter is not supported yet in PHP#."]);
+
+    let php = leak(php_method("        return 1;\n").replace("int $extra", "int &$extra"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2806,6 +3131,9 @@ fn a_dollar_parameter_without_a_type_reports_only_the_dollar_error() {
     let code = leak(method("        return 1;\n").replace("int extra", "$extra"));
 
     assert_eq!(issues(code), ["5:20 PHP# variables have no `$`: write `extra`."]);
+
+    let php = leak(php_method("        return 1;\n").replace("int $extra", "$extra"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2813,6 +3141,12 @@ fn a_void_parameter_reports_only_the_php_error() {
     let code = "class Report\n{\n    public void run(void nothing)\n    {\n    }\n}\n";
 
     assert_eq!(issues(code), ["3:21 Invalid parameter type: bottom type `void` cannot be used as a parameter type."]);
+
+    let php = "<?php\n\nclass Report\n{\n    public function run(void $nothing): void\n    {\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["5:25 Invalid parameter type: bottom type `void` cannot be used as a parameter type."]
+    );
 }
 
 #[test]
@@ -2823,6 +3157,9 @@ fn a_parameter_default_is_a_constant_expression() {
         issues(code),
         ["3:58 This expression is not supported yet in PHP#.", "3:69 This expression is not supported yet in PHP#.",]
     );
+
+    let php = "<?php\n\nclass Report\n{\n    public function run(int $a = -1 + 2 * PHP_INT_MAX, int $b = $a, int $c = $this->run(), bool $d = !true): int\n    {\n        return $a;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2844,6 +3181,11 @@ fn a_write_goes_only_to_a_local_a_parameter_or_a_member() {
             "14:9 This write target is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $this = $extra;\n        $this++;\n        $this->count = 1;\n        $extra = 2;\n        $extra++;\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2963,6 +3305,11 @@ fn a_literal_element_outside_the_slice_is_not_supported_yet() {
             "10:9 This write target is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $reference = [&$extra];\n        $missing = [, $extra];\n        $list = [1];\n        $list[] = 2;\n        return 1;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// The analyzer decides whether a spread is a `List`'s or a `Map`'s, since the spread value's type does.
@@ -2978,6 +3325,9 @@ fn a_second_namespace_is_not_supported_yet() {
     let code = "namespace A;\n\nclass Y\n{\n}\n\nnamespace B;\n\nimport B.X;\n\nclass X\n{\n}\n";
 
     assert_eq!(issues(code), ["7:1 This namespace is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace A;\n\nclass Y\n{\n}\n\nnamespace B;\n\nuse B\\X;\n\nclass X\n{\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -2985,6 +3335,13 @@ fn a_braced_or_global_namespace_is_not_supported_yet() {
     for code in ["namespace A\n{\n    class Y\n    {\n    }\n}\n", "namespace\n{\n    class Y\n    {\n    }\n}\n"] {
         assert_eq!(issues(code), ["1:1 This namespace is not supported yet in PHP#."], "{code}");
     }
+    assert_eq!(
+        issues_in(
+            "src/Report.php",
+            "<?php\n\nnamespace A\n{\n    class Y\n    {\n    }\n}\n\nnamespace\n{\n    class Z\n    {\n    }\n}\n"
+        ),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -2996,6 +3353,9 @@ fn an_invalid_codepoint_escape_is_an_error_as_in_php() {
         issues(code),
         ["7:21 Invalid UTF-8 codepoint escape sequence.", "8:23 Invalid UTF-8 codepoint escape sequence.",]
     );
+
+    let php = leak(php_method("        $big = \"\\u{110000}\";\n        $empty = \"\\u{}\";\n        return 1;\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3014,6 +3374,10 @@ fn new_outside_the_slice_is_not_supported_yet() {
         issues(code),
         ["7:22 This expression is not supported yet in PHP#.", "8:23 This expression is not supported yet in PHP#."]
     );
+
+    let php =
+        leak(php_method("        $kind = new (Report::class);\n        $other = new class {};\n        return 1;\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3051,6 +3415,7 @@ fn the_two_operand_ternary_is_not_part_of_php_sharp() {
         issues(code),
         ["7:22 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition."]
     );
+    assert_eq!(issues_in("src/Report.php", leak(php_method("        return $extra ?: 1;\n"))), Vec::<String>::new());
 }
 
 #[test]
@@ -3063,6 +3428,9 @@ fn a_ternary_nested_in_a_condition_without_parentheses_is_an_error_as_in_php() {
             "7:16 Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`."
         ]
     );
+
+    let php = leak(php_method("        return $extra > 1 ? 1 : $extra > 0 ? 2 : 3;\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3088,6 +3456,11 @@ fn bool_array_and_object_casts_do_not_exist_in_php_sharp() {
             "9:19 PHP# has no `(object)`: write a `Map` literal, or a struct.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $a = (bool)$extra;\n        $b = (array)$extra;\n        $c = (object)$extra;\n        return 1;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 24 replaces `(array)` with a struct's `parse` for an object and `List.wrap` for a value, and names a
@@ -3146,6 +3519,11 @@ fn php_cast_aliases_do_not_exist_in_php_sharp() {
             "11:19 PHP# has no `(binary)`: write `(string)`.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $a = (integer)$extra;\n        $b = (double)$extra;\n        $c = (real)$extra;\n        $d = (boolean)$extra;\n        $e = (binary)$extra;\n        return 1;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3168,6 +3546,9 @@ fn mixed_does_not_exist_in_php_sharp() {
             "9:9 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private mixed $last = null;\n\n    public function keep(mixed $value): mixed\n    {\n        return $value;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3182,6 +3563,9 @@ fn an_interface_method_and_a_class_constant_take_any_and_never_mixed() {
             "12:18 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Source\n{\n    public function read(mixed $key): mixed;\n}\n\nclass Report\n{\n    public const mixed NONE = 1;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3191,6 +3575,12 @@ fn a_cast_or_a_ternary_in_a_parameter_default_is_not_supported_yet() {
 
     assert_eq!(issues(cast), ["5:32 This operator is not supported yet in PHP#."]);
     assert_eq!(issues(ternary), ["5:32 This expression is not supported yet in PHP#."]);
+
+    let php = leak(
+        php_method("        return $extra;\n")
+            .replace("int $extra", "int $extra = (int)1.5, int $other = true ? 1 : 2"),
+    );
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 27: as a parameter's default, `Position.current()` gives the caller's position, which waits for
@@ -3215,6 +3605,9 @@ fn position_current_as_a_parameter_default_is_not_supported_yet() {
             "As a parameter's default, `Position.current()` gives the caller's position, which waits for typed compilation."
         ]]
     );
+
+    let php = "<?php\n\nnamespace App;\n\nclass Reports\n{\n    public static function logSlow(string $message, Position $caller = Position::current()): void\n    {\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// In a body and in an initial value that runs in the constructor, `Position.current()` gives the position where it
@@ -3235,6 +3628,9 @@ fn a_current_default_of_an_imported_or_declared_position_keeps_the_constant_expr
 
     assert_eq!(issues(imported), ["7:50 This expression is not supported yet in PHP#."]);
     assert_eq!(issues(declared), ["5:50 This expression is not supported yet in PHP#."]);
+
+    let php = "<?php\n\nnamespace App;\n\nuse App\\Shared\\Position;\n\nclass Reports\n{\n    public static function logSlow(Position $caller = Position::current()): void\n    {\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A class constant's value and an enum case's value are constant expressions as a default is, and keep the refusal of
@@ -3251,13 +3647,12 @@ fn position_current_as_a_constant_or_an_enum_case_value_keeps_the_constant_expre
             "10:17 This expression is not supported yet in PHP#.",
         ]
     );
-}
 
-#[test]
-fn a_php_file_keeps_its_results_for_a_position_current_default() {
-    let code = "<?php\n\nnamespace App;\n\nclass Reports\n{\n    public static function logSlow(string $message, Position $caller = Position::current()): void\n    {\n    }\n}\n";
-
-    assert_eq!(issues_in("src/Report.php", code), Vec::<String>::new());
+    let php = "<?php\n\nnamespace App;\n\nclass Reports\n{\n    public const Position HERE = Position::current();\n}\n\nenum Spot: string\n{\n    case Here = Position::current();\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["7:34 Constant `Reports::HERE` value contains a non-constant expression."]
+    );
 }
 
 #[test]
@@ -3271,6 +3666,17 @@ fn a_positional_argument_after_a_spread_or_a_spread_after_a_named_argument_is_an
         [
             "8:30 Cannot use positional argument after argument unpacking.",
             "9:30 Cannot use argument unpacking after a named argument.",
+        ]
+    );
+
+    let php = leak(php_method(
+        "        $parts = $this->parts();\n        $this->total(...$parts, 1);\n        $this->total(first: 1, ...$parts);\n        return 1;\n",
+    ));
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "8:33 Cannot use positional argument after argument unpacking.",
+            "9:32 Cannot use argument unpacking after a named argument.",
         ]
     );
 }
@@ -3288,6 +3694,11 @@ fn an_assert_whose_only_argument_is_a_spread_is_an_error_as_in_php() {
             "9:16 Cannot use positional argument after argument unpacking.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $parts = $this->parts();\n        assert(...$parts);\n        ASSERT(...$parts);\n        assert(true, ...$parts);\n        return 1;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3295,6 +3706,9 @@ fn a_spread_in_attribute_arguments_reports_only_the_php_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    [Field(...PARTS)]\n    public int run(int extra)\n    {\n        return extra;\n    }\n}\n";
 
     assert_eq!(issues(code), ["5:12 Cannot use argument unpacking in attribute arguments."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    #[Field(...PARTS)]\n    public function run(int $extra): int\n    {\n        return $extra;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:13 Cannot use argument unpacking in attribute arguments."]);
 }
 
 #[test]
@@ -3308,6 +3722,9 @@ fn implements_or_a_member_modifier_in_an_enum_is_not_supported_yet() {
             "9:5 This modifier is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\Shape;\n\nenum Status: string implements Shape\n{\n    case Active = \"a\";\n\n    final public function label(): string\n    {\n        return $this->name;\n    }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// An enum's constant follows a class constant's rules: an access modifier, an optional type, one name and a constant
@@ -3323,6 +3740,9 @@ fn an_enum_constant_follows_the_class_constant_rules() {
             "10:5 A constant declaring several names is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nenum Status: string\n{\n    case Active = \"a\";\n\n    const string BARE = \"b\";\n    public const int ONE = 1, TWO = 2;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3347,6 +3767,9 @@ fn a_header_naming_an_interface_twice_or_an_enum_header_naming_unit_enum_is_an_e
             "20:13 Every enum implements `UnitEnum`, and every backed enum `BackedEnum`, so an enum header never names them.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse Lib\\HasLabel;\n\nclass Card implements HasLabel, HasLabel\n{\n}\n\ninterface Shown extends HasLabel, HasLabel\n{\n}\n\nenum Status: string implements HasLabel, \\BackedEnum\n{\n    case Active = \"a\";\n}\n\nenum Suit implements \\UnitEnum\n{\n    case Hearts;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3354,6 +3777,9 @@ fn a_property_in_an_enum_reports_only_the_php_error() {
     let code = "namespace App.Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int count = 0;\n}\n";
 
     assert_eq!(issues(code), ["7:5 Enum `Status` cannot have properties."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nenum Status\n{\n    case Active;\n\n    private int $count = 0;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["9:5 Enum `Status` cannot have properties."]);
 }
 
 #[test]
@@ -3361,6 +3787,12 @@ fn a_backing_type_other_than_int_or_string_reports_only_the_php_error() {
     let code = "namespace App.Tenant;\n\nenum Status : float\n{\n    case Active = 1.5;\n}\n";
 
     assert_eq!(issues(code), ["3:15 Enum `Status` backing type must be either `string` or `int`, but found `float`."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nenum Status: float\n{\n    case Active = 1.5;\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["5:14 Enum `Status` backing type must be either `string` or `int`, but found `float`."]
+    );
 }
 
 #[test]
@@ -3374,6 +3806,9 @@ fn an_enum_method_without_a_return_type_is_an_error() {
             "8:12 A PHP# method needs a return type: only the constructor, named after its class, has none.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nenum Status\n{\n    case Active;\n\n    public function status() {}\n    public function label() {}\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3387,6 +3822,9 @@ fn an_enum_case_named_class_is_an_error_as_in_php() {
             "10:10 An enum case cannot be named `class`: PHP reserves `class` for the class name.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nenum Status\n{\n    case class;\n}\n\nenum Mode: string\n{\n    case CLASS = \"c\";\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3401,6 +3839,9 @@ fn a_bare_case_name_in_an_enum_method_is_an_error_that_names_the_enum() {
             "14:37 Write `Status.Active`: an enum case is reached through its enum's name.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nenum Status\n{\n    case Active;\n\n    public function active(): bool\n    {\n        return $this === Active && label != \"\";\n    }\n\n    public static function first(): Status { return Active; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3424,6 +3865,9 @@ fn a_static_member_read_in_an_enum_case_value_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n}\n\nenum Tier : int\n{\n    case Low = Report.count;\n}\n";
 
     assert_eq!(issues(code), ["10:16 `Report.count` is a static member, which a constant value cannot read."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private static int $count = 0;\n}\n\nenum Tier: int\n{\n    case Low = Report::$count;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3437,6 +3881,9 @@ fn an_enum_named_like_a_reserved_class_name_or_an_import_is_an_error_as_a_class_
             "10:6 Cannot use `Mixed` as a class name: it is reserved.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nuse App\\Shared\\Status;\n\nenum Status\n{\n    case Active;\n}\n\nenum Mixed\n{\n    case One;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// An enum's method follows a class's method rules, so it takes `List`, `Map` and function types and holds lambdas,
@@ -3463,6 +3910,11 @@ fn a_match_without_a_default_arm_is_an_error() {
         leak(method("        match (extra) {\n            0 => this.run(1),\n        }\n        return extra;\n"));
 
     assert_eq!(issues(code), ["7:9 A `match` needs a `default` arm."]);
+
+    let php = leak(php_method(
+        "        match ($extra) {\n            0 => $this->run(1),\n        };\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3485,6 +3937,11 @@ fn a_second_default_arm_or_a_block_arm_in_a_match_that_gives_a_value_is_an_error
             "12:18 A block arm is only in a `match` statement: a `match` that gives a value gives an expression in each arm.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $a = match ($extra) {\n            default => 1,\n            default => 2,\n        };\n        return $a;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), ["9:13 A match expression can only have one default arm."]);
 }
 
 #[test]
@@ -3566,6 +4023,11 @@ fn comparisons_and_equalities_do_not_chain_and_name_both_groupings() {
             "16:13 Comparisons do not chain: write `> (1 < 2)`.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $a = $extra < 1 < 2;\n        $b = $extra == 1 != 2;\n        $f = $extra < 1 == true;\n        $h = ($extra < 1) < 2;\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Decision 044: `is` binds with the comparisons, so `!entity is HasDesign` reads as `(!entity) is HasDesign`.
@@ -3576,6 +4038,11 @@ fn not_before_is_is_an_error_that_writes_is_not() {
     ));
 
     assert_eq!(issues(code), ["7:13 Write `extra is not int`: `!` applies to `extra` before `is` tests it."]);
+
+    let php = leak(php_method(
+        "        if (!$extra instanceof Calc) {\n        }\n        if (!($extra instanceof Calc)) {\n        }\n        return $extra;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Decision 045: `not` beside `or` reads two ways, and `not` beside `and` reads the way it binds.
@@ -3610,6 +4077,11 @@ fn a_binary_operation_as_a_statement_has_no_effect() {
             "11:9 This statement has no effect: use the result of `1 - extra`, or remove the statement.",
         ]
     );
+
+    let php = leak(php_method(
+        "        $flags = $extra;\n        $flags | 4;\n        $extra + 1;\n        $extra == 1;\n        1 - $extra;\n        return $flags;\n",
+    ));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3649,6 +4121,9 @@ fn a_method_named_as_a_property_of_its_class_is_an_error() {
             "12:17 The class `Report` declares a method and a property named `ready`.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private \\Closure $priceOf;\n\n    public function __construct(private \\Closure $ready) {}\n\n    public function priceof(int $amount): int { return $amount; }\n    public function ready(): bool { return true; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3664,6 +4139,9 @@ fn a_lambda_parameter_outside_the_slice_is_not_supported_yet() {
             "8:25 This modifier is not supported yet in PHP#.",
         ]
     );
+
+    let php = leak(php_method("        $changed = fn (&$value) => $value;\n        return $extra;\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A lambda's parameter is a method's, so it takes a union, a nullable union and a variadic last parameter, and a
@@ -3721,6 +4199,9 @@ fn a_lambda_parameter_named_like_an_enclosing_local_is_an_error() {
     let code = leak(method("        const twice = (extra) => extra * 2;\n        return twice(1);\n"));
 
     assert_eq!(issues(code), ["7:24 `extra` is already declared in an enclosing block of this method."]);
+
+    let php = leak(php_method("        $twice = fn ($extra) => $extra * 2;\n        return $twice(1);\n"));
+    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
