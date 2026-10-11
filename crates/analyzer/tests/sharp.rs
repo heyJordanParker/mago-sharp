@@ -3119,8 +3119,8 @@ fn ordering_an_any_keeps_its_report_unless_the_other_side_has_no_order() {
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "5:40 mixed-operand Left operand in `<` comparison has `mixed` type. | Ensure this operand has a known, comparable type before using this comparison operator.",
-            "7:41 mixed-operand Left operand in `<=` comparison has `mixed` type. | Ensure this operand has a known, comparable type before using this comparison operator.",
+            "5:40 mixed-operand Left operand of `<` is `Any`, which has no order. | Narrow the value with `is` or `as` to a number or a string before comparing it.",
+            "7:41 mixed-operand Left operand of `<=` is `Any?`, which has no order. | Narrow the value with `is` or `as` to a number or a string before comparing it.",
             "9:40 invalid-operand `<` orders numbers, strings and classes that declare `operator <=>`, and `bool` is none of them. | Order a number or a string taken from the value instead.",
         ]
     );
@@ -3209,30 +3209,33 @@ fn sorted_by_a_key_of_two_types_that_never_match_is_refused_as_less_than_refuses
 }
 
 /// `<` on two `Any` or two `Any?` values reports each side, as an `Any` must be checked with `is` first, so a `sortedBy`
-/// key of `Any` or `Any?` gets the same report, a `null` key aside. A `.php` call of the same method keeps PHP's report.
+/// key of `Any` or `Any?` gets the same report, a `null` key aside. Each names `Any` as PHP# writes it. A `.php` call of
+/// the same method keeps PHP's report.
 #[test]
 fn sorted_by_an_any_key_reports_what_less_than_reports_on_two_any_values() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool a(Any left, Any right) => left < right;\n\n    public bool b(Any? left, Any? right) => left < right;\n\n    public List<Any> c(List<Any> values) => values.sortedBy(v => v);\n\n    public List<Any?> d(List<Any?> values) => values.sortedBy(v => v);\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param ListMethods<mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(ListMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
-    let mixed = |at: &str, subject: &str, op: &str| {
+    let mixed = |at: &str, side: &str| {
         format!(
-            "{at} mixed-operand {subject} has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `{op}` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
+            "{at} mixed-operand {side} operand in `<` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `<` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
+        )
+    };
+    let any = |at: &str, subject: &str, any: &str| {
+        format!(
+            "{at} mixed-operand {subject} is `{any}`, which has no order. | An `Any` may hold any value, and PHP# orders only numbers, strings and classes that declare `operator <=>`. | Narrow the value with `is` or `as` to a number or a string before comparing it."
         )
     };
 
-    assert_eq!(
-        worded(("src/Demo/Report.php", php), &[]),
-        [mixed("11:16", "Left operand in `<` comparison", "<"), mixed("11:24", "Right operand in `<` comparison", "<")]
-    );
+    assert_eq!(worded(("src/Demo/Report.php", php), &[]), [mixed("11:16", "Left"), mixed("11:24", "Right")]);
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[]),
         [
-            mixed("5:43", "Left operand in `<` comparison", "<"),
-            mixed("5:50", "Right operand in `<` comparison", "<"),
-            mixed("7:45", "Left operand in `<` comparison", "<"),
-            mixed("7:52", "Right operand in `<` comparison", "<"),
-            mixed("9:61", "The `sortedBy` key", "<"),
-            mixed("11:63", "The `sortedBy` key", "<"),
+            any("5:43", "Left operand of `<`", "Any"),
+            any("5:50", "Right operand of `<`", "Any"),
+            any("7:45", "Left operand of `<`", "Any?"),
+            any("7:52", "Right operand of `<`", "Any?"),
+            any("9:61", "The `sortedBy` key", "Any"),
+            any("11:63", "The `sortedBy` key", "Any"),
         ]
     );
 }
@@ -4667,6 +4670,8 @@ fn a_php_non_null_mixed_keeps_accepting_a_value_that_may_be_null() {
     assert_eq!(issues(("src/Demo/Inbox.php", php), &[]), Vec::<String>::new());
 }
 
+/// An `Any?` compares by value with a string or a number. Against another `Any?` each side is reported, naming `Any?` as
+/// PHP# writes it.
 #[test]
 fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_value() {
     let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public bool same(Any? value, Any? other, Inbox inbox)\n    {\n        const a = value == \"1\";\n        const b = value != 2;\n        const c = 1.5 == value;\n        const d = value == other;\n        const e = value == inbox;\n        return a && b && c && d && e;\n    }\n}\n";
@@ -4674,6 +4679,13 @@ fn an_unchecked_any_compares_with_a_string_or_a_number_but_not_with_another_valu
     assert_eq!(
         issues(("src/Demo/Inbox.sharp", sharp), &[]),
         ["10:19 mixed-operand", "10:28 mixed-operand", "11:19 invalid-operand"]
+    );
+    assert_eq!(
+        refusals(("src/Demo/Inbox.sharp", sharp), &[])[..2],
+        [
+            "10:19 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Narrow the value with `is` or `as` to a number or a string before comparing it.",
+            "10:28 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Narrow the value with `is` or `as` to a number or a string before comparing it.",
+        ]
     );
 }
 

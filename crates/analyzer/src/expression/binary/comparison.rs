@@ -106,13 +106,19 @@ where
     let sharp_equality = context.dialect.is_sharp() && binary.operator.is_equality();
     if !refused && !binary.operator.is_identity() {
         let op = BytesDisplay(binary.operator.as_bytes());
+        let subject = |side: &str| {
+            if context.dialect.is_sharp() {
+                format!("{side} operand of `{op}`")
+            } else {
+                format!("{side} operand in `{op}` comparison")
+            }
+        };
+        let (lhs_subject, rhs_subject) = (subject("Left"), subject("Right"));
         if !sharp_equality || lhs_type.is_mixed() {
-            let subject = format!("Left operand in `{op}` comparison");
-            check_comparison_operand(context, binary.lhs, lhs_type, rhs_type, &subject, &binary.operator);
+            check_comparison_operand(context, binary.lhs, lhs_type, rhs_type, &lhs_subject, &binary.operator);
         }
         if !sharp_equality || rhs_type.is_mixed() {
-            let subject = format!("Right operand in `{op}` comparison");
-            check_comparison_operand(context, binary.rhs, rhs_type, lhs_type, &subject, &binary.operator);
+            check_comparison_operand(context, binary.rhs, rhs_type, lhs_type, &rhs_subject, &binary.operator);
         }
     }
 
@@ -575,7 +581,8 @@ fn involves_external_reference(expr: &Expression<'_>, block_context: &BlockConte
 }
 
 /// Checks a single operand of a comparison by `operator` for problematic types, naming it `subject`, as "Left operand in
-/// `<` comparison" names it. `other_type` is the other operand's.
+/// `<` comparison" names it in PHP and "Left operand of `<`" in PHP#. `other_type` is the other operand's. In PHP# an
+/// `Any` operand is named `Any`, with the check that narrows it.
 fn check_comparison_operand<A>(
     context: &mut Context<'_, '_, A>,
     operand: &Expression<'_>,
@@ -613,15 +620,33 @@ fn check_comparison_operand<A>(
     } else if operand_type.is_mixed()
         && !(context.dialect.is_sharp() && operator.is_equality() && compares_by_value(other_type, context.codebase))
     {
-        context.collector.report_with_code(
-            IssueCode::MixedOperand,
+        let issue = if context.dialect.is_sharp() {
+            let (reason, note) = if operator.is_equality() {
+                (
+                    "compares by value only with a string, a number or an enum case",
+                    "An `Any` may hold any value, so `==` cannot compare it strictly until it is checked.",
+                )
+            } else {
+                (
+                    "has no order",
+                    "An `Any` may hold any value, and PHP# orders only numbers, strings and classes that declare `operator <=>`.",
+                )
+            };
+
+            Issue::error(format!("{subject} is `{}`, which {reason}.", display_type(context, operand_type)))
+                .with_annotation(Annotation::primary(operand.span()))
+                .with_note(note)
+                .with_help("Narrow the value with `is` or `as` to a number or a string before comparing it.")
+        } else {
             Issue::error(format!("{subject} has `mixed` type."))
                 .with_annotation(Annotation::primary(operand.span()).with_message("This has type `mixed`"))
                 .with_note(format!(
                     "The result of comparing `mixed` types with `{op_str}` is unpredictable and can hide bugs."
                 ))
-                .with_help("Ensure this operand has a known, comparable type before using this comparison operator."),
-        );
+                .with_help("Ensure this operand has a known, comparable type before using this comparison operator.")
+        };
+
+        context.collector.report_with_code(IssueCode::MixedOperand, issue);
     } else if operand_type.is_false() {
         context.collector.report_with_code(
             IssueCode::FalseOperand,
