@@ -15,8 +15,8 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         ParseError::UnexpectedEndOfFile(..) => ErrorKind::UnexpectedEndOfFile,
         // PHP syntax in a PHP# file, such as a `fn` lambda, a PHP# parameter or field without its type, `in` in a PHP#
         // loop, PHP# syntax not supported yet, an escape a PHP# template refuses, an operator symbol a class cannot
-        // declare, effects after a function type's `>`, or a word other than `super` or `this` after a constructor's
-        // `:`, is a token the PHP# grammar does not expect there.
+        // declare, effects after a function type's `>`, a module member that is no law, or a word other than `super` or
+        // `this` after a constructor's `:`, is a token the PHP# grammar does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::PhpSyntaxInSharp(..)
         | ParseError::PhpLambdaInSharp(..)
@@ -30,6 +30,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::InvalidTemplateEscapeInSharp(..)
         | ParseError::UndeclarableOperatorInSharp(..)
         | ParseError::UsesAfterFunctionTypeInSharp(..)
+        | ParseError::NonLawInSharpModule(..)
         | ParseError::ConstructorInitializerInSharp(..) => ErrorKind::UnexpectedToken,
         ParseError::UnclosedLiteralString(..) => ErrorKind::UnclosedLiteralString,
         ParseError::RecursionLimitExceeded(..) | ParseError::NestingTooDeepInSharp(..) => {

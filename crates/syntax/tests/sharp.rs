@@ -2632,6 +2632,118 @@ fn a_law_in_an_enum_follows_its_cases_and_methods() {
     assert_eq!(source(CODE, law), "law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;");
 }
 
+/// Spec section 28 states a module's laws in `Module.sharp`, in a `module` with no name, because the folder names it.
+#[test]
+fn a_module_is_its_keyword_and_its_laws_in_braces() {
+    const CODE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Tenant/Store/Module.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let [Statement::Module(module)] = namespace.statements().as_slice() else {
+        panic!("expected one module, got {:#?}", namespace.statements());
+    };
+    let [ModuleMember::Law(law)] = module.members.as_slice() else {
+        panic!("expected one law, got {:#?}", module.members);
+    };
+    assert_eq!(module.module.value, b"module");
+    assert_eq!(source(CODE, &law.name), "receiptMatchesRefunds");
+    assert_eq!(
+        source(CODE, law.body.expression),
+        "Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded)"
+    );
+    assert_eq!(
+        source(CODE, module),
+        "module\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}"
+    );
+}
+
+/// Spec section 32's service bindings and parent header wait for the container. Each one is a single error where it
+/// starts, and the module around it still parses its laws.
+#[test]
+fn a_module_service_or_parent_is_one_not_supported_error_and_the_module_parses_on() {
+    for (header, member, message, start) in [
+        ("", "singleton Mailer = SmtpMailer;", "A `singleton` service is not supported yet in PHP#.", "singleton"),
+        (
+            "",
+            "singleton Mailer for SendReceipt = QueueMailer;",
+            "A `singleton` service is not supported yet in PHP#.",
+            "singleton",
+        ),
+        (
+            "",
+            "singleton List<PriceRule> = [TaxRule, DiscountRule];",
+            "A `singleton` service is not supported yet in PHP#.",
+            "singleton",
+        ),
+        (
+            "",
+            "singleton RedisStore = new RedisStore(Environment.require(\"REDIS_URL\"));",
+            "A `singleton` service is not supported yet in PHP#.",
+            "singleton",
+        ),
+        ("", "scoped Mailer = MailerFactory;", "A `scoped` service is not supported yet in PHP#.", "scoped"),
+        ("", "transient Mailer = SmtpMailer;", "A `transient` service is not supported yet in PHP#.", "transient"),
+        (" : App.Shop", "", "A module that overrides another is not supported yet in PHP#.", ": App.Shop"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("namespace App.Shop;\n\nmodule{header}\n{{\n    {member}\n    law same(int a) => a == a;\n}}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "app/Shop/Module.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{header}{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), message, "{header}{member}");
+        assert_eq!(source(code, error), start, "{header}{member}");
+        let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+            panic!("expected a namespace for `{header}{member}`, got {:#?}", program.statements);
+        };
+        let [Statement::Module(module)] = namespace.statements().as_slice() else {
+            panic!("expected one module for `{header}{member}`, got {:#?}", namespace.statements());
+        };
+        assert!(
+            matches!(module.members.as_slice(), [ModuleMember::Law(law)] if law.name.value == b"same"),
+            "the module keeps parsing after `{header}{member}`"
+        );
+    }
+}
+
+/// Spec section 32: a module holds no statements, branches, loops or methods. Any member but a law is one error at the
+/// member, and the law after it still parses.
+#[test]
+fn a_module_member_other_than_a_law_is_one_error_and_the_module_parses_on() {
+    for member in ["public int total(int a) => a + 1;", "private int count = 0;", "public const int LIMIT = 3;"] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("namespace App.Shop;\n\nmodule\n{{\n    {member}\n    law same(int a) => a == a;\n}}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "app/Shop/Module.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), "A module states only laws.", "{member}");
+        assert_eq!(source(code, error), member, "{member}");
+        let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+            panic!("expected a namespace for `{member}`, got {:#?}", program.statements);
+        };
+        let [Statement::Module(module)] = namespace.statements().as_slice() else {
+            panic!("expected one module for `{member}`, got {:#?}", namespace.statements());
+        };
+        assert!(
+            matches!(module.members.as_slice(), [ModuleMember::Law(law)] if law.name.value == b"same"),
+            "the module keeps parsing after `{member}`"
+        );
+    }
+}
+
 /// PHP has no laws, so a `.php` member that starts with `law` stays a typed property, and `law(…)` a call.
 #[test]
 fn law_in_a_php_file_is_a_name() {

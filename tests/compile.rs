@@ -555,26 +555,60 @@ fn compile_refuses_a_proof_that_uses_native_decide() {
     assert!(!compiled(root, "app/Shared/Limits.sharp").exists());
 }
 
+/// Spec section 28.1: a proof whose law was deleted is a compile error, whether the law, its whole class or its whole
+/// module was deleted. It sits on the class or module name, or at the start of a file that states neither any more.
 #[test]
-fn compile_reports_the_proof_of_a_deleted_law_on_the_class_name() {
-    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
-    let root = directory.path();
-    compile_succeeds(root);
+fn compile_reports_the_proof_of_a_deleted_law() {
+    const MONEY_DELETED: &str = "app/Shared/Money.lean line 4 proves App.Shared.Money.addKeepsCurrency, which Money.sharp no longer states. Delete the proof, or restore the law.";
+    const MODULE_DELETED: &str = "app/Tenant/Store/Module.lean line 4 proves App.Tenant.Store.Module.receiptMatchesRefunds, which Module.sharp no longer states. Delete the proof, or restore the law.";
+    let lawless_money =
+        LAWFUL_MONEY.replace("\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n", "");
+    let refundable = "refunded < paid ? refunded : paid";
 
-    write(
-        root,
-        "app/Shared/Money.sharp",
-        &LAWFUL_MONEY.replace("\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n", ""),
-    );
-    let output = compile_lines(root);
+    for (directory, source, reduced, position, deleted) in [
+        (
+            lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]),
+            "app/Shared/Money.sharp",
+            lawless_money.as_str(),
+            "3:14",
+            MONEY_DELETED,
+        ),
+        (
+            lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]),
+            "app/Shared/Money.sharp",
+            "namespace App.Shared;\n",
+            "1:1",
+            MONEY_DELETED,
+        ),
+        (
+            store(refundable, refundable),
+            "app/Tenant/Store/Module.sharp",
+            "namespace App.Tenant.Store;\n\nmodule\n{\n}\n",
+            "3:1",
+            MODULE_DELETED,
+        ),
+        (
+            store(refundable, refundable),
+            "app/Tenant/Store/Module.sharp",
+            "namespace App.Tenant.Store;\n",
+            "1:1",
+            MODULE_DELETED,
+        ),
+    ] {
+        let root = directory.path();
+        compile_succeeds(root);
 
-    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
-    assert!(
-        printed(&output).contains("app/Shared/Money.sharp:3:14:error - non-existent-law: app/Shared/Money.lean line 4 proves App.Shared.Money.addKeepsCurrency, which Money.sharp no longer states. Delete the proof, or restore the law."),
-        "{}",
-        printed(&output)
-    );
-    assert!(!compiled(root, "app/Shared/Money.sharp").exists());
+        write(root, source, reduced);
+        let output = compile_lines(root);
+
+        assert_eq!(output.status.code(), Some(1), "{reduced}: {}", printed(&output));
+        assert!(
+            printed(&output).contains(&format!("{source}:{position}:error - non-existent-law: {deleted}")),
+            "{reduced}: {}",
+            printed(&output)
+        );
+        assert!(!compiled(root, source).exists(), "{reduced}");
+    }
 }
 
 #[test]
@@ -705,6 +739,128 @@ fn compile_proves_spec_section_28_1_s_state_machine_law_over_an_enum_match() {
         read(root, "app/Shop/Status.lean").contains("theorem refundedIsFinal : App.Shop.Status.refundedIsFinal := by")
     );
     assert!(compiled(root, "app/Shop/Status.sharp").exists());
+}
+
+/// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
+const STORE_MODULE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
+
+/// `Receipts` and `Refunds`, each with the method `STORE_MODULE`'s law reaches, written with `refundable`'s body.
+fn store(refundable: &str, remaining: &str) -> tempfile::TempDir {
+    lawful_project(&[
+        ("app/Tenant/Store/Module.sharp", STORE_MODULE),
+        (
+            "app/Tenant/Store/Receipts.sharp",
+            &format!(
+                "namespace App.Tenant.Store;\n\npublic static class Receipts\n{{\n    public static int refundable(int paid, int refunded) => {refundable};\n}}\n"
+            ),
+        ),
+        (
+            "app/Tenant/Store/Refunds.sharp",
+            &format!(
+                "namespace App.Tenant.Store;\n\npublic static class Refunds\n{{\n    public static int remaining(int paid, int refunded) => {remaining};\n}}\n"
+            ),
+        ),
+    ])
+}
+
+/// Spec section 28.1: `app/Tenant/Store/Module.lean` proves the module law, created with the proof `simp` found.
+#[test]
+fn compile_proves_spec_section_28_s_module_law_with_the_proof_it_creates_in_module_lean() {
+    let directory = store("refunded < paid ? refunded : paid", "refunded < paid ? refunded : paid");
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert_eq!(
+        read(root, "app/Tenant/Store/Module.lean"),
+        "import Code.App.Tenant.Store.Module\nopen Sharp\n\ntheorem receiptMatchesRefunds : App.Tenant.Store.Module.receiptMatchesRefunds := by\n  simp [App.Tenant.Store.Module.receiptMatchesRefunds, App.Tenant.Store.Receipts.refundable, App.Tenant.Store.Refunds.remaining]\n"
+    );
+    assert!(compiled(root, "app/Tenant/Store/Module.sharp").exists());
+}
+
+/// A module law that does not hold refuses `Module.sharp` and names the law, as a class law refuses its class's file,
+/// and the classes it reaches still compile.
+#[test]
+fn compile_refuses_module_sharp_when_its_law_does_not_hold() {
+    let directory = store("refunded < paid ? refunded : paid", "refunded < paid ? paid : refunded");
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("app/Tenant/Store/Module.sharp:5:5:error - unproven-law: Law receiptMatchesRefunds is not proven: app/Tenant/Store/Module.lean line 6 is a gap (sorry). Write the proof there, or change the law."),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Tenant/Store/Module.sharp").exists());
+    assert!(compiled(root, "app/Tenant/Store/Receipts.sharp").exists());
+    assert!(compiled(root, "app/Tenant/Store/Refunds.sharp").exists());
+}
+
+/// `app/Shop/Module.sharp`, the folder's module, with one law.
+const SHOP_MODULE: &str = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n";
+
+/// Spec section 32: a namespace's module is the one its folder's `Module.sharp` declares. A `module` in another file
+/// of the folder is refused on that file alone, and `Module.sharp` still compiles and proves its law.
+#[test]
+fn compile_refuses_a_module_outside_module_sharp_on_its_own_file_and_proves_module_sharp() {
+    for (other, code, refusal) in [
+        (
+            "app/Shop/CheckoutTest.sharp",
+            "namespace App.Shop;\n\nmodule : App.Shop\n{\n}\n\npublic class CheckoutTest { }\n",
+            "app/Shop/CheckoutTest.sharp:3:8:error - parse: A module that overrides another is not supported yet in PHP#.",
+        ),
+        (
+            "app/Shop/CheckoutTest.sharp",
+            "namespace App.Shop;\n\nmodule\n{\n}\n",
+            "app/Shop/CheckoutTest.sharp:3:1:error - semantics: A module is declared in its folder's Module.sharp.",
+        ),
+        (
+            "app/Shop/Module.Production.sharp",
+            "namespace App.Shop;\n\nmodule\n{\n}\n",
+            "app/Shop/Module.Production.sharp:3:1:error - semantics: An environment module is not supported yet in PHP#.",
+        ),
+    ] {
+        let directory = lawful_project(&[("app/Shop/Module.sharp", SHOP_MODULE), (other, code)]);
+        let root = directory.path();
+
+        let output = compile_lines(root);
+
+        assert_eq!(output.status.code(), Some(1), "{other}: {}", printed(&output));
+        assert!(printed(&output).contains(refusal), "{other}: {}", printed(&output));
+        assert!(!printed(&output).contains("app/Shop/Module.sharp"), "{other}: {}", printed(&output));
+        assert!(compiled(root, "app/Shop/Module.sharp").exists(), "{other}");
+    }
+}
+
+/// A plain PHP class named like a PHP# module keeps its name, so Mago's PHP behavior does not change, and the module's
+/// `Module.sharp` is refused as a second definition of the name.
+#[test]
+fn compile_refuses_module_sharp_when_a_plain_php_class_holds_its_name() {
+    let directory = lawful_project(&[
+        ("app/Shop/Module.sharp", SHOP_MODULE),
+        (
+            "app/Shop/Module.php",
+            "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Shop;\n\nfinal class Module\n{\n    public function one(): int\n    {\n        return 1;\n    }\n}\n",
+        ),
+        (
+            "app/Shop/Uses.php",
+            "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Shop;\n\nfinal class Uses\n{\n    public function run(): int\n    {\n        return (new Module())->one();\n    }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("app/Shop/Module.sharp:3:1:error - duplicate-definition: "),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Shop/Module.sharp").exists());
 }
 
 #[test]

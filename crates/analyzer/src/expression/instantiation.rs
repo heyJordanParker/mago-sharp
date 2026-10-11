@@ -254,6 +254,17 @@ where
         argument_list.analyze(context, block_context, artifacts)?;
 
         return Ok(get_never());
+    } else if metadata.flags.is_module() {
+        let name = display_class_like_name(context, metadata.original_name);
+        context.collector.report_with_code(
+            IssueCode::AbstractInstantiation,
+            Issue::error(format!("`{name}` is its namespace's module, not a class: it has no instances."))
+                .with_annotation(Annotation::primary(class_expression_span).with_message("A module has no instances.")),
+        );
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(get_never());
     }
     // class kind is a regular class; no kind-specific instantiation diagnostic to emit
 

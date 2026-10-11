@@ -7720,6 +7720,48 @@ fn a_class_that_extends_a_static_class_is_an_error() {
     );
 }
 
+/// Spec section 32: a namespace's module is the class-like `Module` its laws are named by, and no class at runtime, so
+/// code neither creates it nor extends it.
+#[test]
+fn a_module_is_no_class_so_no_code_creates_or_extends_it() {
+    let module = ("app/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n");
+
+    for (code, message, issue) in [
+        (
+            "namespace App.Shop;\n\npublic class Page\n{\n    public void open() => new Module();\n}\n",
+            "`Module` is its namespace's module, not a class: it has no instances.",
+            "5:31 abstract-instantiation",
+        ),
+        (
+            "namespace App.Shop;\n\npublic class Page : Module\n{\n}\n",
+            "`Module` is its namespace's module, not a class: no class can extend it.",
+            "3:21 extend-final-class",
+        ),
+    ] {
+        assert_eq!(messages(("app/Shop/Page.sharp", code), &[module]), [message], "{code}");
+        assert_eq!(issues(("app/Shop/Page.sharp", code), &[module]), [issue], "{code}");
+    }
+}
+
+/// A plain PHP class named like a PHP# module keeps its name, whichever file the scan reads first, so plain PHP code
+/// that uses it analyzes as it does in Mago.
+#[test]
+fn a_plain_php_class_named_like_a_module_keeps_its_name() {
+    let module = ("app/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n");
+    let class = (
+        "app/Shop/Module.php",
+        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Shop;\n\nfinal class Module\n{\n    public function one(): int\n    {\n        return 1;\n    }\n}\n",
+    );
+    let uses = (
+        "app/Shop/Uses.php",
+        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Shop;\n\nfinal class Uses\n{\n    public function run(): int\n    {\n        return (new Module())->one();\n    }\n}\n",
+    );
+
+    for others in [[module, class], [class, module]] {
+        assert_eq!(issues(uses, &others), Vec::<String>::new(), "{:?}", others.map(|(name, _)| name));
+    }
+}
+
 /// Semantics takes a well-formed `extern` method in any namespace, because the engine compiles the standard library
 /// from `vendor/` without knowing it is vendored. The analyzer knows a project file, and refuses it there.
 #[test]
@@ -9985,7 +10027,8 @@ fn a_law_calling_plain_php_with_an_effect_is_refused_on_the_call() {
     );
 }
 
-/// A law that reaches an effect through PHP# code in another file names the method it reaches.
+/// A law that reaches an effect through PHP# code in another file names the method it reaches, in a class and in a
+/// module alike.
 #[test]
 fn a_law_reaching_a_method_with_an_effect_in_another_file_is_refused() {
     let timer = (
@@ -9997,17 +10040,25 @@ fn a_law_reaching_a_method_with_an_effect_in_another_file_is_refused() {
         "app/Shop/Order.sharp",
         "namespace App.Shop;\n\nimport Lib.Timer;\n\npublic class Order\n{\n    public int total() => Timer.now();\n}\n",
     );
-    let checkout = (
-        "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\npublic class Checkout\n{\n    law totalMatches(Order order) => order.total() == order.total();\n}\n",
-    );
 
-    assert_eq!(
-        effect_issues(&[checkout, order, stub, timer]),
-        [
-            "app/Shop/Checkout.sharp:5:38 impure-law: Law `totalMatches` reaches `Order.total`, which calls `Timer.now` with the effect `Clock`. Laws hold only over pure code."
-        ]
-    );
+    for law in [
+        (
+            "app/Shop/Checkout.sharp",
+            "namespace App.Shop;\n\npublic class Checkout\n{\n    law totalMatches(Order order) => order.total() == order.total();\n}\n",
+        ),
+        (
+            "app/Shop/Module.sharp",
+            "namespace App.Shop;\n\nmodule\n{\n    law totalMatches(Order order) => order.total() == order.total();\n}\n",
+        ),
+    ] {
+        assert_eq!(
+            effect_issues(&[law, order, stub, timer]),
+            [format!(
+                "{}:5:38 impure-law: Law `totalMatches` reaches `Order.total`, which calls `Timer.now` with the effect `Clock`. Laws hold only over pure code.",
+                law.0
+            )]
+        );
+    }
 }
 
 /// A law that calls plain PHP with no `extern` names the declaration it lacks, as the getter rule does.

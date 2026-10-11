@@ -28,6 +28,7 @@ use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::Module;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
@@ -42,6 +43,7 @@ use mago_syntax::walker::walk_anonymous_class_mut;
 use mago_syntax::walker::walk_class_mut;
 use mago_syntax::walker::walk_enum_mut;
 use mago_syntax::walker::walk_interface_mut;
+use mago_syntax::walker::walk_module_mut;
 use mago_syntax::walker::walk_trait_mut;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -61,6 +63,7 @@ use crate::scanner::class_like::register_anonymous_class;
 use crate::scanner::class_like::register_class;
 use crate::scanner::class_like::register_enum;
 use crate::scanner::class_like::register_interface;
+use crate::scanner::class_like::register_module;
 use crate::scanner::class_like::register_trait;
 use crate::scanner::constant::scan_constant;
 use crate::scanner::constant::scan_defined_constant;
@@ -777,6 +780,24 @@ where
 
             walk_interface_mut(self, interface, context);
         }
+    }
+
+    /// A PHP# module registers as its namespace's class-like `Module`, which encloses the lambdas of its laws as a
+    /// class encloses its methods' lambdas.
+    #[inline]
+    fn walk_module(&mut self, module: &'arena Module<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some(id) = register_module(&mut self.codebase, module, context, &self.scope) {
+            self.stack.push(id);
+            self.template_constraints.push(vec![]);
+
+            walk_module_mut(self, module, context);
+        }
+    }
+
+    #[inline]
+    fn walk_out_module(&mut self, _module: &'arena Module<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.stack.pop().expect("Expected class stack to be non-empty");
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
     }
 
     #[inline]

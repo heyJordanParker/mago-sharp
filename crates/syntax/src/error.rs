@@ -80,6 +80,9 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
+    /// A member other than a law written in a PHP# module, such as a method, at the member. Spec section 32: a module
+    /// holds no statements, branches, loops or methods.
+    NonLawInSharpModule(Span),
     /// A word other than `super` or `this` after a PHP# constructor's `:`, as in `: parent(row)`, at the `:` and the
     /// word.
     ConstructorInitializerInSharp(Span),
@@ -117,6 +120,7 @@ impl HasFileId for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::NonLawInSharpModule(span)
             | ParseError::ConstructorInitializerInSharp(span) => span.file_id,
         }
     }
@@ -156,6 +160,7 @@ impl HasSpan for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::NonLawInSharpModule(span)
             | ParseError::ConstructorInitializerInSharp(span) => *span,
         }
     }
@@ -267,6 +272,7 @@ impl std::fmt::Display for ParseError {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
+            ParseError::NonLawInSharpModule(_) => "A module states only laws.".to_string(),
             ParseError::ConstructorInitializerInSharp(_) => {
                 "A constructor passes control with `: super(…)` or `: this(…)`.".to_string()
             }
@@ -320,6 +326,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
+            | ParseError::NonLawInSharpModule(..)
             | ParseError::ConstructorInitializerInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
