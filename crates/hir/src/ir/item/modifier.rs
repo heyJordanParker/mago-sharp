@@ -54,6 +54,8 @@ pub enum ModifierKind {
     Required,
     /// PHP#'s `extern`.
     Extern,
+    /// PHP#'s `lazy`.
+    Lazy,
 }
 
 impl CopyInto for Visibility {

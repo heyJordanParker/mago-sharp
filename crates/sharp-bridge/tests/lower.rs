@@ -8154,6 +8154,53 @@ fn if_else_if_and_else_are_if_lists_of_if_elems() {
 }
 
 /// ```php
+/// if ($extra < 0) throw new \App\Tenant\Failure($extra);
+/// if ($extra > 1) return 1;
+/// ```
+///
+/// A guard clause's `IF_ELEM` holds the `THROW` or `RETURN` itself, with no `STMT_LIST`, as php-src's grammar builds
+/// `if (c) return x;`.
+#[test]
+fn a_guard_clause_is_an_if_elem_holding_its_throw_or_return() {
+    assert_eq!(
+        body_in(
+            RUN,
+            "        if (extra < 0) throw new Failure(extra);\n        if (extra > 1) return 1;\n        return extra;\n",
+            &[(
+                "src/App/Tenant/Failure.php",
+                "<?php namespace App\\Tenant; final class Failure extends \\Exception { public function __construct(int $code) { parent::__construct('', $code); } }",
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  BINARY_OP [20]
+                    VAR
+                      ZVAL "extra"
+                    ZVAL 0
+                  THROW
+                    NEW
+                      ZVAL "App\\Tenant\\Failure"
+                      ARG_LIST
+                        VAR
+                          ZVAL "extra"
+              IF
+                IF_ELEM
+                  GREATER
+                    VAR
+                      ZVAL "extra"
+                    ZVAL 1
+                  RETURN
+                    ZVAL 1
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
 /// while ($extra > 0) {
 ///     $extra -= 1;
 /// }
