@@ -150,6 +150,8 @@ use crate::cst::cst::MethodPartialApplication;
 use crate::cst::cst::MissingArrayElement;
 use crate::cst::cst::MixedUseItemList;
 use crate::cst::cst::Modifier;
+use crate::cst::cst::Module;
+use crate::cst::cst::ModuleMember;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedPlaceholderArgument;
 use crate::cst::cst::Namespace;
@@ -437,6 +439,7 @@ generate_ast_walker! {
             Statement::Namespace(namespace) => walker.walk_namespace(namespace, context),
             Statement::Use(r#use) => walker.walk_use(r#use, context),
             Statement::Extern(r#extern) => walker.walk_extern(r#extern, context),
+            Statement::Module(module) => walker.walk_module(module, context),
             Statement::Class(class) => walker.walk_class(class, context),
             Statement::Interface(interface) => walker.walk_interface(interface, context),
             Statement::Trait(r#trait) => walker.walk_trait(r#trait, context),
@@ -638,6 +641,20 @@ generate_ast_walker! {
 
         for name in &uses.names {
             walker.walk_local_identifier(name, context);
+        }
+    }
+
+    'arena Module as module => {
+        walker.walk_keyword(&module.module, context);
+
+        for member in &module.members {
+            walker.walk_module_member(member, context);
+        }
+    }
+
+    'arena ModuleMember as module_member => {
+        match module_member {
+            ModuleMember::Law(law) => walker.walk_law(law, context),
         }
     }
 

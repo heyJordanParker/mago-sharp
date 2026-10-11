@@ -23,6 +23,8 @@ use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAdaptation;
@@ -252,6 +254,48 @@ where
     )?;
 
     finish_registration(codebase, class_like_metadata)
+}
+
+/// Registers a PHP# module, spec sections 28 and 32, as the class-like `<Namespace>\Module` flagged as a module,
+/// holding only its laws, so every class-law path serves a module law. Only its folder's `Module.sharp` declares it:
+/// semantics refuses a module in any other file.
+#[inline]
+pub fn register_module<'arena, A>(
+    codebase: &mut CodebaseMetadata,
+    module: &'arena Module<'arena>,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) -> Option<Word>
+where
+    A: Arena,
+{
+    if !Module::is_declared_in(context.file) {
+        return None;
+    }
+
+    let original_name = word(context.resolved_names.get(&module.module));
+    let name = ascii_lowercase_word(original_name.as_bytes());
+    if codebase.class_likes.contains_key(&name) {
+        return None;
+    }
+
+    let flags = MetadataFlags::origin_flags(context.file.file_type)
+        | MetadataFlags::SHARP
+        | MetadataFlags::MODULE
+        | MetadataFlags::FINAL;
+    let mut metadata = ClassLikeMetadata::new(name, original_name, module.span(), Some(module.module.span), flags);
+    metadata.kind = SymbolKind::Class;
+    codebase.symbols.add_symbol_name(name, SymbolKind::Class);
+
+    let type_context = TypeResolutionContext::new();
+    for ModuleMember::Law(law) in &module.members {
+        let law_metadata = scan_law(law, &metadata, context, scope, &type_context);
+        metadata.laws.entry(law_metadata.name).or_insert(law_metadata);
+    }
+
+    codebase.class_likes.insert(name, metadata);
+
+    Some(name)
 }
 
 fn finish_registration(
