@@ -105,11 +105,20 @@ where
 
     let sharp_equality = context.dialect.is_sharp() && binary.operator.is_equality();
     if !refused && !binary.operator.is_identity() {
+        let op = BytesDisplay(binary.operator.as_bytes());
+        let subject = |side: &str| {
+            if context.dialect.is_sharp() {
+                format!("{side} operand of `{op}`")
+            } else {
+                format!("{side} operand in `{op}` comparison")
+            }
+        };
+        let (lhs_subject, rhs_subject) = (subject("Left"), subject("Right"));
         if !sharp_equality || lhs_type.is_mixed() {
-            check_comparison_operand(context, binary.lhs, lhs_type, rhs_type, "Left", &binary.operator);
+            check_comparison_operand(context, binary.lhs, lhs_type, rhs_type, &lhs_subject, &binary.operator);
         }
         if !sharp_equality || rhs_type.is_mixed() {
-            check_comparison_operand(context, binary.rhs, rhs_type, lhs_type, "Right", &binary.operator);
+            check_comparison_operand(context, binary.rhs, rhs_type, lhs_type, &rhs_subject, &binary.operator);
         }
     }
 
@@ -571,14 +580,16 @@ fn involves_external_reference(expr: &Expression<'_>, block_context: &BlockConte
     matches!(unwrap_expression(expr), Expression::Variable(Variable::Direct(var)) if block_context.references_to_external_scope.contains(&word(var.name)))
 }
 
-/// Checks a single operand of a comparison operation for problematic types. `other_type` is the other operand's.
-fn check_comparison_operand<'ast, 'arena, A>(
-    context: &mut Context<'_, 'arena, A>,
-    operand: &'ast Expression<'arena>,
+/// Checks a single operand of a comparison by `operator` for problematic types, naming it `subject`, as "Left operand in
+/// `<` comparison" names it in PHP and "Left operand of `<`" in PHP#. `other_type` is the other operand's. In PHP# an
+/// `Any` operand is named `Any`, with the check that narrows it.
+fn check_comparison_operand<A>(
+    context: &mut Context<'_, '_, A>,
+    operand: &Expression<'_>,
     operand_type: &TUnion,
     other_type: &TUnion,
-    side: &'static str,
-    operator: &'ast BinaryOperator<'arena>,
+    subject: &str,
+    operator: &BinaryOperator<'_>,
 ) where
     A: Arena,
 {
@@ -588,7 +599,7 @@ fn check_comparison_operand<'ast, 'arena, A>(
         context.collector.report_with_code(
             IssueCode::NullOperand,
             Issue::error(format!(
-                "{side} operand in `{op_str}` comparison is `null`."
+                "{subject} is `null`."
             ))
             .with_annotation(Annotation::primary(operand.span()).with_message("This is `null`"))
             .with_note(format!("Comparing `null` with `{op_str}` can lead to unexpected results due to PHP's type coercion rules (e.g., `null == 0` is true)."))
@@ -600,7 +611,7 @@ fn check_comparison_operand<'ast, 'arena, A>(
         context.collector.report_with_code(
             IssueCode::PossiblyNullOperand,
             Issue::warning(format!(
-                "{side} operand in `{op_str}` comparison might be `null` (type `{operand_type_str}`)."
+                "{subject} might be `null` (type `{operand_type_str}`)."
             ))
             .with_annotation(Annotation::primary(operand.span()).with_message("This might be `null`"))
             .with_note(format!("If this operand is `null` at runtime, PHP's specific comparison rules for `null` with `{op_str}` will apply."))
@@ -609,20 +620,38 @@ fn check_comparison_operand<'ast, 'arena, A>(
     } else if operand_type.is_mixed()
         && !(context.dialect.is_sharp() && operator.is_equality() && compares_by_value(other_type, context.codebase))
     {
-        context.collector.report_with_code(
-            IssueCode::MixedOperand,
-            Issue::error(format!("{side} operand in `{op_str}` comparison has `mixed` type."))
+        let issue = if context.dialect.is_sharp() {
+            let (reason, note) = if operator.is_equality() {
+                (
+                    "compares by value only with a string, a number or an enum case",
+                    "An `Any` may hold any value, so `==` cannot compare it strictly until it is checked.",
+                )
+            } else {
+                (
+                    "has no order",
+                    "An `Any` may hold any value, and PHP# orders only numbers, strings and classes that declare `operator <=>`.",
+                )
+            };
+
+            Issue::error(format!("{subject} is `{}`, which {reason}.", display_type(context, operand_type)))
+                .with_annotation(Annotation::primary(operand.span()))
+                .with_note(note)
+                .with_help("Narrow the value with `is` or `as` to a number or a string before comparing it.")
+        } else {
+            Issue::error(format!("{subject} has `mixed` type."))
                 .with_annotation(Annotation::primary(operand.span()).with_message("This has type `mixed`"))
                 .with_note(format!(
                     "The result of comparing `mixed` types with `{op_str}` is unpredictable and can hide bugs."
                 ))
-                .with_help("Ensure this operand has a known, comparable type before using this comparison operator."),
-        );
+                .with_help("Ensure this operand has a known, comparable type before using this comparison operator.")
+        };
+
+        context.collector.report_with_code(IssueCode::MixedOperand, issue);
     } else if operand_type.is_false() {
         context.collector.report_with_code(
             IssueCode::FalseOperand,
             Issue::error(format!(
-               "{side} operand in `{op_str}` comparison is `false`."
+               "{subject} is `false`."
             ))
             .with_annotation(Annotation::primary(operand.span()).with_message("This is `false`"))
             .with_note(format!("PHP compares `false` with other types according to specific rules (e.g., `false == 0` is true using `{op_str}`). This can hide bugs."))
@@ -634,7 +663,7 @@ fn check_comparison_operand<'ast, 'arena, A>(
         context.collector.report_with_code(
             IssueCode::PossiblyFalseOperand,
             Issue::warning(format!(
-                "{side} operand in `{op_str}` comparison might be `false` (type `{operand_type_str}`)."
+                "{subject} might be `false` (type `{operand_type_str}`)."
             ))
             .with_annotation(Annotation::primary(operand.span()).with_message("This might be `false`"))
             .with_note(format!("If this operand is `false` at runtime, PHP's specific comparison rules for `false` with `{op_str}` will apply."))
@@ -949,9 +978,7 @@ pub(crate) fn report_sharp_refusal<A>(
         }
         Refusal::DifferentTypes => (
             IssueCode::InvalidOperand,
-            Issue::error(format!("{pair}."))
-                .with_note("PHP# compares values strictly, so values of two different types never match.")
-                .with_help("Convert one side so both sides have the same type."),
+            different_types_issue(&pair, "Convert one side so both sides have the same type."),
         ),
     };
 
@@ -963,26 +990,50 @@ pub(crate) fn report_sharp_refusal<A>(
     );
 }
 
-/// Reports `selector`, the function a PHP# `sortedBy` orders by, when the key it returns, of `key_type`, has no order.
-/// `sortedBy` orders two keys as `<=>` orders them, so it refuses a key `<=>` refuses for having no order. A key that may
-/// be `null` still orders.
+/// Reports `selector`, the function a PHP# `sortedBy` orders by, when `<` cannot compare two keys it returns, of
+/// `key_type`, with the report `<` gives. A `null` key sorts before every other key, so only the other keys must order.
 pub(crate) fn check_sorted_by_key<A>(context: &mut Context<'_, '_, A>, selector: &Expression<'_>, key_type: &TUnion)
 where
     A: Arena,
 {
-    let (refusal, refused): (Refusal, fn(Comparand) -> bool) =
-        match ordering_refusal(key_type, key_type, context.codebase) {
-            Some(refusal @ Refusal::UnorderedOperand) => (refusal, Comparand::is_unordered),
-            Some(refusal @ Refusal::Instance) => (refusal, |comparand| comparand == Comparand::Instance),
-            _ => return,
-        };
     let key_name = display_operand(context, key_type);
-    let issue = unordered_issue("sortedBy", &display_refused_part(context, key_type, refused), refusal);
+    let key_type = key_type.to_non_nullable();
+    let issue = match ordering_refusal(&key_type, &key_type, context.codebase) {
+        None => {
+            let ordering = BinaryOperator::LessThan(Span::zero());
+            check_comparison_operand(context, selector, &key_type, &key_type, "The `sortedBy` key", &ordering);
+
+            return;
+        }
+        Some(Refusal::DifferentTypes) => {
+            let comparison = format!("`sortedBy` cannot compare two keys of `{}`", display_operand(context, &key_type));
+
+            different_types_issue(&comparison, "Convert the key so every key has the same type.")
+        }
+        Some(refusal @ Refusal::Instance) => {
+            let class = display_refused_part(context, &key_type, |comparand| comparand == Comparand::Instance);
+
+            unordered_issue("sortedBy", &class, refusal)
+        }
+        Some(refusal @ Refusal::UnorderedOperand) => {
+            unordered_issue("sortedBy", &display_refused_part(context, &key_type, Comparand::is_unordered), refusal)
+        }
+        Some(Refusal::Identity | Refusal::Collection | Refusal::NullableOperand) => {
+            unreachable!("an ordering of a key that is not `null` is refused only for its order or its types")
+        }
+    };
 
     context.collector.report_with_code(
         IssueCode::InvalidArgument,
         issue.with_annotation(Annotation::primary(selector.span()).with_message(format!("This returns `{key_name}`."))),
     );
+}
+
+/// The issue that refuses `comparison`, of values of two types that never match, with `help` naming what to convert.
+fn different_types_issue(comparison: &str, help: &str) -> Issue {
+    Issue::error(format!("{comparison}."))
+        .with_note("PHP# compares values strictly, so values of two different types never match.")
+        .with_help(help)
 }
 
 /// The issue that refuses ordering a value whose part `part` has no order by `orderer`, an operator or `sortedBy`, as
