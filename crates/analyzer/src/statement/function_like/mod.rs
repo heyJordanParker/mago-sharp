@@ -58,6 +58,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Statement;
@@ -239,7 +240,8 @@ where
 
 /// Spec section 14.2: a PHP# lambda's parameter types are optional where its function type is known. Before a
 /// lambda written for `expected`, such as the value of a typed local or property, or a returned value, this gives
-/// the lambda the parameter types of `expected`, as a call does for a lambda passed to a function type.
+/// the lambda the parameter types of `expected`, as a call does for a lambda passed to a function type. A member read
+/// takes them too, because a method value of a generic method infers its type arguments from them (section 14.3).
 pub fn expect_function_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -249,11 +251,18 @@ pub fn expect_function_type<A>(
     A: Arena,
 {
     if context.dialect.is_sharp()
-        && matches!(expression.unparenthesized(), Expression::ArrowFunction(_) | Expression::Closure(_))
+        && (matches!(expression.unparenthesized(), Expression::ArrowFunction(_) | Expression::Closure(_))
+            || is_member_read(expression))
         && let Some(expected) = expected
     {
         artifacts.inferred_parameter_types = Some(closure_parameter_types(context, expected));
     }
+}
+
+/// Whether `expression` reads a member, `x.m` or `Class.m`, which in PHP# is a method value when the class declares
+/// no property `m` (spec section 14.3).
+pub fn is_member_read(expression: &Expression<'_>) -> bool {
+    matches!(expression.unparenthesized(), Expression::Access(Access::Property(_)))
 }
 
 /// Joins the type each variable a closure captured by reference has at the end of the closure into its type in the

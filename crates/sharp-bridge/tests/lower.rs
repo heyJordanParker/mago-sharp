@@ -6968,6 +6968,111 @@ fn a_method_value_through_an_intersection_bound_is_the_method_one_of_its_classes
 }
 
 /// ```php
+/// return (function ($receiver) {
+///     return function (...$arguments) use ($receiver) {
+///         return $receiver->box(...$arguments, <App.Order>);
+///     };
+/// })($this);
+/// ```
+///
+/// A method value of a generic method is a closure that calls the method with the type arguments the checker took
+/// from its function type, on the receiver read once where the value is read. PHP's `$this->box(...)` would call it
+/// with none.
+#[test]
+fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_arguments() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.Order;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\nclass Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public Function<Box<Order>(Order)> run() => this.box;\n}\n",
+        &[("src/Lib/Order.php", "<?php namespace Lib; final class Order {}")],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @14-14
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @14-14
+                          PARAM_LIST
+                            PARAM [16]
+                              null
+                              ZVAL "arguments"
+                              null
+                              null
+                              null
+                              null
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              METHOD_CALL
+                                VAR
+                                  ZVAL "receiver"
+                                ZVAL "box"
+                                ARG_LIST
+                                  UNPACK
+                                    VAR
+                                      ZVAL "arguments"
+                                  SHARP_TYPE_ARGS
+                                    null
+                                    ZVAL "Lib.Order"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "this"
+        "#}
+    );
+}
+
+/// ```php
+/// $pick = $this->pick(...);
+/// return $pick(5);
+/// ```
+///
+/// A method value of a method that isn't generic stays PHP's first-class callable.
+#[test]
+fn a_method_value_of_a_method_that_is_not_generic_is_a_first_class_callable() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Report\n{\n    public int pick(int value) => value;\n\n    public int run()\n    {\n        let pick = this.pick;\n        return pick(5);\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "pick"
+                METHOD_CALL
+                  VAR
+                    ZVAL "this"
+                  ZVAL "pick"
+                  CALLABLE_CONVERT
+              RETURN
+                CALL
+                  VAR
+                    ZVAL "pick"
+                  ARG_LIST
+                    ZVAL 5
+        "#}
+    );
+}
+
+/// ```php
 /// $type = \Lib\Calc::class;
 /// return \Lib\Calc::MAX + $type::MAX + $type::$count + \strlen($type::defaultTag());
 /// ```

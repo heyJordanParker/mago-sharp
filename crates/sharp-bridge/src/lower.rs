@@ -229,6 +229,8 @@ const IS_STATIC: u32 = 15;
 const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
+/// The hidden local that holds a generic method's own type arguments, which a closure in the method captures.
+const TYPE_ARGUMENTS: &[u8] = b"\0<sharp>\0types";
 const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
 const IS_STRING: u32 = 6;
@@ -1675,17 +1677,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let full_name = self.names.get(&class.name);
                     let class = self.string(ZEND_NAME_FQ, self.line(class), full_name);
 
-                    self.static_member(line, class, &[full_name], &access.property)
+                    self.static_member(expression, class, &[full_name], &access.property)
                 }
                 None => match self.class_value(access.object) {
-                    Some((class, classes)) => self.static_member(line, class, &classes, &access.property),
+                    Some((class, classes)) => self.static_member(expression, class, &classes, &access.property),
                     None => {
                         let is_method = self.is_method_value(access.object, &access.property);
                         let object = self.expression(access.object);
                         let member = self.member(&access.property);
 
                         if is_method {
-                            self.method_value(line, object, member)
+                            self.method_value(expression, SHARP_AST_METHOD_CALL, object, member)
                         } else {
                             self.node(SHARP_AST_PROP, 0, line, &[object, member])
                         }
@@ -1725,14 +1727,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::Access(Access::NullSafeProperty(access)) => {
                 let tested = self.tested_links.contains(&expression.span());
                 if tested && let Some((class, classes)) = self.class_value(access.object) {
-                    return self.static_member(line, class, &classes, &access.property);
+                    return self.static_member(expression, class, &classes, &access.property);
                 }
 
                 let object = if tested { self.expression(access.object) } else { self.null_safe_object(access.object) };
                 let member = self.member(&access.property);
 
                 if tested {
-                    self.method_value(line, object, member)
+                    self.method_value(expression, SHARP_AST_METHOD_CALL, object, member)
                 } else {
                     self.node(SHARP_AST_NULLSAFE_PROP, 0, line, &[object, member])
                 }
@@ -1768,26 +1770,29 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// The fetch of the static `member` of `class`, whose node is `class` and whose possible classes are `classes`: a
-    /// class constant fetch for a constant or an enum case, a static property fetch, or a first-class callable of the
-    /// static method.
-    fn static_member(&mut self, line: u32, class: u32, classes: &[&[u8]], member: &ClassLikeMemberSelector) -> u32 {
+    /// The fetch the read `read` makes of the static `member` of `class`, whose node is `class` and whose possible
+    /// classes are `classes`: a class constant fetch for a constant or an enum case, a static property fetch, or the
+    /// static method's value.
+    fn static_member(
+        &mut self,
+        read: &Expression,
+        class: u32,
+        classes: &[&[u8]],
+        member: &ClassLikeMemberSelector,
+    ) -> u32 {
         let ClassLikeMemberSelector::Identifier(name) = member else {
             unreachable!("check_slice refuses the member name `{member}`");
         };
         let kind = agreed_kind(classes.iter().map(|class| self.types.member_declaration(class, name.value).kind));
         let member = self.member(member);
+        let line = self.line(read);
 
         match kind {
             DeclarationKind::Constant | DeclarationKind::EnumCase => {
                 self.node(SHARP_AST_CLASS_CONST, 0, line, &[class, member])
             }
             DeclarationKind::StaticProperty => self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]),
-            DeclarationKind::StaticMethod => {
-                let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
-
-                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, member, callable])
-            }
+            DeclarationKind::StaticMethod => self.method_value(read, SHARP_AST_STATIC_CALL, class, member),
             kind => unreachable!("a class's member read names a static member, not a {kind:?}"),
         }
     }
@@ -2073,11 +2078,61 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// `$object->member(...)`, the method as a first-class callable.
-    fn method_value(&mut self, line: u32, object: u32, member: u32) -> u32 {
-        let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
+    /// The value `value` reads of the method `member` of `target`, an object for a `METHOD_CALL` `call` or a class for
+    /// a `STATIC_CALL` one. A method that isn't generic is PHP's first-class callable, `$object->member(...)`. A PHP#
+    /// generic method's would run with no type arguments, so it is a closure that calls the method with those the
+    /// checker took from the value's function type, on `target` read once where the value is read:
+    /// `(function ($receiver) { return function (...$arguments) use ($receiver) { return
+    /// $receiver->member(...$arguments, <T>); }; })($object)`.
+    fn method_value(&mut self, value: &Expression, call: sharp_kind, target: u32, member: u32) -> u32 {
+        let line = self.line(value);
+        let Some(type_arguments) = self.types.method_value_type_arguments(value) else {
+            let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
 
-        self.node(SHARP_AST_METHOD_CALL, 0, line, &[object, member, callable])
+            return self.node(call, 0, line, &[target, member, callable]);
+        };
+
+        let names_method_type_arguments = type_arguments.contains('#');
+        let text = self.type_text(line, &type_arguments);
+        let type_arguments = self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]);
+        let arguments = self.variable(value.span(), b"arguments");
+        let spread = self.node(SHARP_AST_UNPACK, 0, line, &[arguments]);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[spread, type_arguments]);
+        let receiver = self.variable(value.span(), b"receiver");
+        let method_call = self.node(call, 0, line, &[receiver, member, arguments]);
+        let captured: &[&[u8]] =
+            if names_method_type_arguments { &[b"receiver", TYPE_ARGUMENTS] } else { &[b"receiver"] };
+        let caller = self.returning_closure(value, b"arguments", ZEND_PARAM_VARIADIC, captured, method_call);
+        let captured: &[&[u8]] = if names_method_type_arguments { &[TYPE_ARGUMENTS] } else { &[] };
+        let reader = self.returning_closure(value, b"receiver", 0, captured, caller);
+        let target = self.node(SHARP_AST_ARG_LIST, 0, line, &[target]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[reader, target])
+    }
+
+    /// A `CLOSURE` the lowering writes, with the one parameter `parameter` and its `flags`, that captures each local
+    /// of `captured` by value and returns `value`.
+    fn returning_closure(
+        &mut self,
+        span: impl HasSpan,
+        parameter: &[u8],
+        flags: u32,
+        captured: &[&[u8]],
+        value: u32,
+    ) -> u32 {
+        let line = self.line(&span);
+        let name = self.string(0, line, parameter);
+        let parameter = self.node(SHARP_AST_PARAM, flags, line, &[NULL, name, NULL, NULL, NULL, NULL]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+        let mut uses = Vec::new();
+        for captured in captured {
+            uses.push(self.string(0, line, captured));
+        }
+        let uses = if uses.is_empty() { NULL } else { self.node(SHARP_AST_CLOSURE_USES, 0, line, &uses) };
+        let value = self.node(SHARP_AST_RETURN, 0, line, &[value]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[value]);
+
+        self.declaration(SHARP_AST_CLOSURE, 0, &span, &span, b"", &[parameters, uses, body, NULL, NULL])
     }
 
     /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value or a property call, with
@@ -2241,7 +2296,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             uses.push(self.string(attr, line, name));
         }
         if captures_type_arguments {
-            uses.push(self.string(0, line, b"\0<sharp>\0types"));
+            uses.push(self.string(0, line, TYPE_ARGUMENTS));
         }
 
         if uses.is_empty() { NULL } else { self.node(SHARP_AST_CLOSURE_USES, 0, line, &uses) }

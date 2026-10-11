@@ -6,6 +6,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -27,6 +28,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateBound;
 use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
@@ -37,6 +39,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
@@ -49,6 +52,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::external::PropertyAccessKind;
+use crate::invocation::infer_parameter_templates_from_argument;
 use crate::invocation::rename_trait_objects;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::method::run_forwarded_methods;
@@ -823,9 +827,10 @@ where
     let Some(resolution) = resolution else {
         // A PHP# read of a declared method is its closure, ahead of anything the class serves through `__get`.
         let method_name = word(trim_start_byte(prop_name.as_bytes(), b'$'));
+        let read_span = object_expr.span().join(selector.span());
         if !for_assignment
             && let Some(method_type) =
-                resolve_method_value(context, block_context, artifacts, object, method_name, access_span)
+                resolve_method_value(context, block_context, artifacts, object, method_name, access_span, read_span)
         {
             check_private_method_reach(
                 context,
@@ -1675,7 +1680,8 @@ fn report_possibly_non_existent_property<A>(
 /// as PHP's `$x->name(...)` does, and `Class.name` gives its static method, as `Class::name(...)` does. The engine
 /// runs both on the read's missing-member path. Reports a method the read cannot reach, as the call would. Returns
 /// the closure's type, as `specialize_member_type` gives a call of the method on `receiver`, or on the intersection
-/// part of it that has the method.
+/// part of it that has the method. A PHP# generic method's value has the type arguments [`fix_type_arguments`] gives
+/// the read at `read_span`.
 pub(crate) fn resolve_method_value<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -1683,6 +1689,7 @@ pub(crate) fn resolve_method_value<A>(
     receiver: &TObject,
     method_name: Word,
     access_span: Span,
+    read_span: Span,
 ) -> Option<TUnion>
 where
     A: Arena,
@@ -1723,17 +1730,106 @@ where
     let declaring_class = codebase.get_class_like(class_name.as_bytes())?;
     let method_metadata = codebase.get_method_by_id(&method)?;
 
-    Some(specialize_member_type(context, receiver, declaring_class, class_id, &TemplateResult::default(), |options| {
-        let mut signature = get_signature_of_function_like_metadata(
-            &FunctionLikeIdentifier::Method(class_name, method.get_method_name()),
-            method_metadata,
-            codebase,
-            options,
-        );
-        signature.is_closure = true;
+    let value =
+        specialize_member_type(context, receiver, declaring_class, class_id, &TemplateResult::default(), |options| {
+            let mut signature = get_signature_of_function_like_metadata(
+                &FunctionLikeIdentifier::Method(class_name, method.get_method_name()),
+                method_metadata,
+                codebase,
+                options,
+            );
+            signature.is_closure = true;
 
-        TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)))
-    }))
+            TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)))
+        });
+    if !method_metadata.flags.is_sharp() || method_metadata.template_types.is_empty() {
+        return Some(value);
+    }
+
+    let method_name = display_sharp_member(display_class_like_name(context, class_name), method_metadata.original_name);
+
+    Some(fix_type_arguments(context, artifacts, value, &method_metadata.template_types, &method_name, read_span))
+}
+
+/// Spec section 14.3: a PHP# generic method's `value` takes its type arguments from the parameter types of the
+/// function type the read at `span` goes into, as C#'s method group conversion does, and the analysis records them at
+/// `span` for the lowering. Returns `value` with them. A type argument nothing fixes is refused, as C#'s CS0411.
+fn fix_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    value: TUnion,
+    templates: &TemplateTypes,
+    method_name: &str,
+    span: Span,
+) -> TUnion
+where
+    A: Arena,
+{
+    let mut template_result = TemplateResult::new(
+        templates.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
+        HashMap::default(),
+    );
+    if let Some(function_type) = artifacts.inferred_parameter_types.clone() {
+        let signatures = value.types.iter().filter_map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
+            _ => None,
+        });
+        for (index, parameter) in signatures.flat_map(|signature| signature.get_parameters().iter().enumerate()) {
+            if let (Some(parameter_type), Some(function_parameter_type)) =
+                (parameter.get_type_signature(), function_type.get(&index))
+            {
+                infer_parameter_templates_from_argument(
+                    context,
+                    parameter_type,
+                    function_parameter_type,
+                    &mut template_result,
+                    index,
+                    span,
+                    false,
+                    Dialect::Sharp,
+                );
+            }
+        }
+    }
+
+    let type_arguments: Vec<Option<TUnion>> = templates
+        .iter()
+        .map(|(name, template)| {
+            template_result
+                .lower_bounds
+                .get(name)
+                .and_then(|bounds| bounds.get(&template.defining_entity))
+                .filter(|bounds| !bounds.is_empty())
+                .map(|bounds| get_most_specific_type_from_bounds(bounds, context.codebase))
+        })
+        .collect();
+    let unfixed: Vec<String> = templates
+        .iter()
+        .zip(&type_arguments)
+        .filter(|(_, type_argument)| type_argument.is_none())
+        .map(|((name, _), _)| format!("`{name}`"))
+        .collect();
+    if !unfixed.is_empty() {
+        let arguments = if unfixed.len() == 1 { "argument" } else { "arguments" };
+        context.collector.report_with_code(
+            IssueCode::MissingTemplateParameter,
+            Issue::error(format!(
+                "Nothing fixes the type {arguments} {} of the method value `{method_name}`.",
+                unfixed.join(", ")
+            ))
+            .with_annotation(Annotation::primary(span).with_message(format!("`{method_name}` is read as a value here")))
+            .with_note(
+                "A method value takes its type arguments from the parameter types of the function type it goes into.",
+            )
+            .with_help("Give the value a function type, as a typed local or a parameter has, or call the method."),
+        );
+
+        return value;
+    }
+
+    artifacts.record_type_arguments(span, type_arguments.into_iter(), context.codebase);
+
+    inferred_type_replacer::replace(&value, &template_result, context.codebase)
 }
 
 fn report_non_existent_property<A>(

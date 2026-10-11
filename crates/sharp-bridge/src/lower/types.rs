@@ -191,6 +191,16 @@ impl<'analysis> Types<'analysis> {
         Some(self.argument_texts(arguments))
     }
 
+    /// The type arguments the method value `value` of a PHP# generic method takes from the function type it goes
+    /// into, as the checker found them, written as [`Self::type_arguments`] writes those of a `new`. None for the value
+    /// of a method that isn't generic.
+    pub(crate) fn method_value_type_arguments(&self, value: &Expression) -> Option<String> {
+        let span = value.span();
+        let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
+
+        Some(self.argument_texts(arguments))
+    }
+
     /// The type a PHP# `is`, `as`, `match` arm or `typeof` reads while the code runs, a type parameter or a class with
     /// type arguments, as the analysis records it for the name the test or `typeof` writes, written as
     /// [`Self::type_arguments`] writes a type. None for a class without type arguments.

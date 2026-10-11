@@ -64,6 +64,7 @@ use crate::invocation::template_inference::infer_parameter_templates_from_defaul
 use crate::invocation::template_result::get_class_template_parameters_from_result;
 use crate::invocation::template_result::populate_template_result_from_invocation;
 use crate::invocation::template_result::refine_template_result_for_function_like;
+use crate::statement::function_like::is_member_read;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
@@ -224,6 +225,21 @@ where
         };
 
         let parameter = get_parameter_of_argument(&invocation.target, argument, *argument_offset);
+        // A PHP# method value takes its type arguments from its parameter's function type, as `pages.map(this.take)`.
+        let function_type = parameter
+            .filter(|_| context.dialect.is_sharp() && is_member_read(argument_expression))
+            .map(|(_, parameter)| {
+                let parameter_type = get_parameter_type(
+                    context,
+                    Some(parameter),
+                    base_class_metadata,
+                    calling_class_like_metadata,
+                    calling_instance_type,
+                    method_class_type,
+                );
+
+                inferred_type_replacer::replace(&parameter_type, template_result, context.codebase)
+            });
 
         analyze_and_store_argument_type(
             context,
@@ -234,7 +250,7 @@ where
             *argument_offset,
             &mut analyzed_argument_types,
             parameter.is_some_and(|p| p.1.is_by_reference()),
-            None,
+            function_type.as_ref(),
         )?;
 
         if let Some((argument_type, span)) = analyzed_argument_types.get(argument_offset).cloned()

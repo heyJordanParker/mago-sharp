@@ -52,7 +52,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
     where
         A: Arena,
     {
-        match self {
+        let analyzed = match self {
             // As after an invalid call target, the read gets no type, so nothing reports again on what it reads.
             Access::Property(PropertyAccess {
                 object, property: ClassLikeMemberSelector::Identifier(name), ..
@@ -118,7 +118,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                 }) if is_static_method_value(context, context.resolved_names.get(&class_name.name), name.value) => {
                     let class = TObject::new_named(word(context.resolved_names.get(&class_name.name)));
                     let method_type =
-                        resolve_method_value(context, block_context, artifacts, &class, word(name.value), span)
+                        resolve_method_value(context, block_context, artifacts, &class, word(name.value), span, span)
                             .unwrap_or_else(get_mixed);
                     artifacts.set_expression_type(self, method_type);
 
@@ -145,7 +145,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             }
             Access::StaticProperty(access) => access.analyze(context, block_context, artifacts),
             Access::ClassConstant(access) => access.analyze(context, block_context, artifacts),
-        }
+        };
+        // Only a method value takes the function type the read goes into, so a property read leaves it to no lambda.
+        artifacts.inferred_parameter_types = None;
+
+        analyzed
     }
 }
 
@@ -419,8 +423,9 @@ where
             let mut method_type = None;
             for class in classes {
                 let class = TObject::new_named(class);
-                let value = resolve_method_value(context, block_context, artifacts, &class, word(name.value), span)
-                    .unwrap_or_else(get_mixed);
+                let value =
+                    resolve_method_value(context, block_context, artifacts, &class, word(name.value), span, span)
+                        .unwrap_or_else(get_mixed);
                 method_type = Some(add_optional_union_type(value, method_type.as_ref(), context.codebase));
             }
             artifacts.set_expression_type(&span, method_type.unwrap_or_else(get_mixed));

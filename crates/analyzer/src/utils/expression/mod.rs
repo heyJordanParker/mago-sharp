@@ -124,7 +124,8 @@ pub(crate) const fn expression_is_nullsafe(expr: &'_ Expression<'_>) -> bool {
 }
 
 /// Analyzes the object of `->` or `?->`. A PHP# `?.` reads a missing key of an index as null, as `??` does, because
-/// `x[k]?.name` runs as `($x[$k] ?? null)?->name`, so that index is analyzed as the left side of `??` is.
+/// `x[k]?.name` runs as `($x[$k] ?? null)?->name`, so that index is analyzed as the left side of `??` is. The function
+/// type a PHP# method value goes into is the member's, so the object neither takes nor sees it.
 pub(crate) fn analyze_member_object<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -141,9 +142,11 @@ where
     if is_null_safe && context.dialect.is_sharp() && matches!(object.unparenthesized(), Expression::ArrayAccess(_)) {
         block_context.flags.set_inside_isset(true);
     }
+    let member_function_type = artifacts.inferred_parameter_types.take();
 
     object.analyze(context, block_context, artifacts)?;
 
+    artifacts.inferred_parameter_types = member_function_type;
     block_context.flags.set_inside_general_use(was_inside_general_use);
     block_context.flags.set_inside_isset(was_inside_isset);
 

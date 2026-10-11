@@ -8669,8 +8669,8 @@ fn a_conditional_return_of_a_receiver_naming_its_own_type_parameter_replaces_it_
 
 /// A method value is specialized for its receiver when it is read, spec section 14.3, so calling it later gives that
 /// type: `first()` on a local holding `this.children().first` returns a `Node?`, as `this.children().first()` does,
-/// not a `Tree`. A stored generic method still takes its type arguments from the call: `pick(5)` returns a `5`. The
-/// PHP twin's `static` keeps Mago's issues.
+/// not a `Tree`. A generic method stored without a function type has nothing to fix its type arguments, as C#'s
+/// CS0411. The PHP twin's `static` keeps Mago's issues.
 #[test]
 fn calling_a_stored_method_value_keeps_the_self_of_its_receiver() {
     let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public T pick<T>(T value) => value;\n\n    public bool called()\n    {\n        let first = this.children().first;\n        return first();\n    }\n\n    public bool picked()\n    {\n        let pick = this.pick;\n        return pick(5);\n    }\n}\n\npublic abstract class Tree<out TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
@@ -8689,7 +8689,41 @@ fn calling_a_stored_method_value_keeps_the_self_of_its_receiver() {
         [
             "Method `Node.called` is declared to return `bool` but possibly returns a nullable value (inferred as `Node?`).",
             "Invalid return type for method `Node.called`: expected `bool`, but found `Node?`.",
+            "Nothing fixes the type argument `T` of the method value `Node.pick`.",
             "Invalid return type for method `Node.picked`: expected `bool`, but found `int`.",
+        ]
+    );
+}
+
+/// Spec section 14.3: a method value of a generic method takes its type arguments from the function type it goes
+/// into, as C#'s method group conversion does. `Function<Box<Order>(Order)> make = this.box` fixes `box`'s `T` as
+/// `Order` through the parameter, and so does the element type of `pages` for `pages.map(this.take)`.
+#[test]
+fn a_generic_method_value_takes_its_type_arguments_from_its_function_type() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Page<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public int take<T : Order>(Page<T> page) => 1;\n\n    public Box<Order> made(Order order)\n    {\n        Function<Box<Order>(Order)> make = this.box;\n        return make(order);\n    }\n\n    public List<int> taken(List<Page<Order>> pages) => pages.map(this.take);\n}\n";
+    let library = "<?php namespace Lib; final class Library {}";
+
+    assert_eq!(recorded_type_arguments(("src/Demo/Report.sharp", sharp), library, "this.box"), ["Demo\\Order"]);
+    assert_eq!(recorded_type_arguments(("src/Demo/Report.sharp", sharp), library, "this.take"), ["Demo\\Order"]);
+}
+
+/// A method value of a generic method with no function type to fix its type arguments is refused, as C#'s CS0411
+/// refuses a method group whose type arguments nothing infers. A method that isn't generic needs none. Plain PHP's
+/// generics are erased, so its first-class callable of a `@template` method keeps Mago's issues.
+#[test]
+fn a_generic_method_value_without_a_function_type_is_refused() {
+    let php = "<?php\n\nnamespace Demo;\n\n/** @template T */\nclass Box\n{\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @param T $item\n     * @return Box<T>\n     */\n    public function box(mixed $item): Box\n    {\n        return new Box();\n    }\n\n    public function run(): void\n    {\n        $make = $this->box(...);\n        $make(5);\n    }\n}\n";
+    assert_eq!(
+        messages(("src/Demo/Report.php", php), &[]),
+        ["Template parameter `T` is never used in class `Demo\\Box`."]
+    );
+
+    let sharp = "namespace Demo;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public int pick(int value) => value;\n\n    public void run()\n    {\n        let make = this.box;\n        let pick = this.pick;\n        pick(5);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "16:20 missing-template-parameter Nothing fixes the type argument `T` of the method value `Report.box`. Give the value a function type, as a typed local or a parameter has, or call the method."
         ]
     );
 }
