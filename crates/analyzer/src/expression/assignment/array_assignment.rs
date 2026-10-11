@@ -48,6 +48,7 @@ use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
+use crate::resolver::method::with_declared_kinds;
 use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
@@ -161,32 +162,49 @@ where
         root_array_type
     };
 
-    // A PHP# local, parameter, `field` or property is the collection it is declared as, so an element written into it
-    // must fit that type's elements, and the place keeps its type. An `int` written where the elements are `float` is
-    // reported at the value. A property's other mismatches are `property_assignment`'s to report, and its key is the
-    // index checks'.
+    // A PHP# local, parameter, `field` or property is the collections it is declared as, so an element written into it
+    // must fit the elements of each of them, and the place keeps its type. An `int` written where the elements are
+    // `float` is reported at the value, when every refusal is for that `int`, as `are_parts_contained_by` decides for
+    // a union's parts. A property's other mismatches are `property_assignment`'s to report, and its key is the index
+    // checks'.
     if context.dialect.is_sharp()
         && let Some(declared) = get_declared_collection(context, block_context, artifacts, root_array_expression)
     {
-        let (_, declared_element) = get_array_parameters(&declared, context.codebase);
-        let mut comparison_result = ComparisonResult::with_sharp_rules(true);
-        let fits = root_array_type.types.iter().all(|atomic| {
+        let declared_elements: Vec<TUnion> = declared
+            .types
+            .iter()
+            .filter_map(|atomic| match atomic {
+                TAtomic::Array(collection) => Some(get_array_parameters(collection, context.codebase).1),
+                _ => None,
+            })
+            .collect();
+        let mut fits = true;
+        let mut refused_otherwise = false;
+        for atomic in root_array_type.types.iter() {
             let TAtomic::Array(written) = atomic else {
-                return true;
+                continue;
             };
+            let written_element = get_array_parameters(written, context.codebase).1;
 
-            union_comparator::is_contained_by(
-                context.codebase,
-                &get_array_parameters(written, context.codebase).1,
-                &declared_element,
-                false,
-                false,
-                false,
-                &mut comparison_result,
-            )
-        });
+            for declared_element in &declared_elements {
+                let mut element_result = ComparisonResult::with_sharp_rules(true);
+                if !union_comparator::is_contained_by(
+                    context.codebase,
+                    &written_element,
+                    declared_element,
+                    false,
+                    false,
+                    false,
+                    &mut element_result,
+                ) {
+                    fits = false;
+                    refused_otherwise |= !element_result.int_for_float;
+                }
+            }
+        }
         if !fits {
-            let declared = TUnion::from_atomic(TAtomic::Array(declared));
+            let comparison_result =
+                ComparisonResult { int_for_float: !refused_otherwise, ..ComparisonResult::with_sharp_rules(true) };
             let local = match root_array_expression.unparenthesized() {
                 Expression::ConstantAccess(access) => Some(access),
                 _ => None,
@@ -815,9 +833,14 @@ where
             array_expression_type = scoped_type;
         }
 
+        // A PHP# place is written by index as every kind of collection it is declared as, whatever it holds.
+        let declared_type =
+            with_declared_kinds(context, block_context, artifacts, array_target.get_array(), &array_expression_type);
+        let written_type = declared_type.as_ref().unwrap_or(&array_expression_type);
+
         // Spec section 12 keeps a PHP# `List`'s keys without gaps, so it changes by `set` and `add`, never by index.
         if context.dialect.is_sharp()
-            && array_expression_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
         {
             context.collector.report_with_code(
                 IssueCode::InvalidArrayAccess,
@@ -841,7 +864,7 @@ where
             array_target.span(),
             array_target.get_array().span(),
             array_target.get_index().map(mago_span::HasSpan::span),
-            &array_expression_type,
+            written_type,
             &new_index_type,
             true,
             extended_var_id,

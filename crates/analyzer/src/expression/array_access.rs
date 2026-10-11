@@ -5,8 +5,10 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_reporting::Level;
 use mago_span::HasSpan;
 use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::Expression;
@@ -17,7 +19,9 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_collection;
+use crate::resolver::method::with_declared_kinds;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_array_access_id;
@@ -68,7 +72,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
         self.array.analyze(context, block_context, artifacts)?;
         block_context.flags.set_inside_general_use(was_inside_general_use);
 
-        if let Some(keyed_array_var_id) = &keyed_array_var_id
+        // A PHP# place is indexed as every kind of collection it is declared as, whatever it holds. A `Set` has no
+        // index, so a read of one is refused even where an earlier write of the index left its type behind.
+        let container_type = artifacts.get_rc_expression_type(&self.array).cloned().map(|container_type| {
+            with_declared_kinds(context, block_context, artifacts, self.array, &container_type)
+                .map_or(container_type, Rc::new)
+        });
+        let has_no_index = context.dialect.is_sharp()
+            && container_type.as_ref().is_some_and(|container_type| {
+                container_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
+            });
+
+        if !has_no_index
+            && let Some(keyed_array_var_id) = &keyed_array_var_id
             && block_context.has_variable(keyed_array_var_id.as_bytes())
             && let Some(array_access_type) = block_context.locals.get(keyed_array_var_id).cloned()
         {
@@ -80,7 +96,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
             }
         }
 
-        if let Some(saved_type) = saved_narrowed_type {
+        if !has_no_index && let Some(saved_type) = saved_narrowed_type {
             let is_variable_key =
                 keyed_array_var_id.as_ref().is_some_and(|k| memchr::memmem::find(k.as_bytes(), b"[$").is_some());
             if is_variable_key || !saved_type.possibly_undefined() {
@@ -90,28 +106,44 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
             }
         }
 
-        let container_type = artifacts.get_rc_expression_type(&self.array).cloned();
-
         if let Some(container_type) = container_type {
-            let access_type = get_array_target_type_given_index(
-                context,
-                block_context,
-                self.span(),
-                self.array.span(),
-                Some(self.index.span()),
-                &container_type,
-                &index_type,
-                false,
-                extended_var_id,
-                None,
-                container_type.can_be_null() && expression_is_nullsafe(self.array),
-            );
+            let read = |context: &mut Context<'ctx, 'arena, A>| {
+                get_array_target_type_given_index(
+                    context,
+                    block_context,
+                    self.span(),
+                    self.array.span(),
+                    Some(self.index.span()),
+                    &container_type,
+                    &index_type,
+                    false,
+                    extended_var_id,
+                    None,
+                    container_type.can_be_null() && expression_is_nullsafe(self.array),
+                )
+            };
+            // A refused PHP# read of a container with no `List`, `Map` or `Set` member, such as an `int`, `null` or an
+            // object with no index, never gives a value. It has the error type, so nothing that uses it reports the same
+            // mistake again, and it is judged again each time it runs. A collection member gives its value type even when
+            // the key is refused, so a wrong use of that value is still reported.
+            let access_type = if context.dialect.is_sharp()
+                && !container_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_)))
+            {
+                let (access_type, issues) = context.record(read);
+                let refused = issues.iter().any(|issue| issue.level == Level::Error);
+                context.collector.extend(issues);
+
+                if refused { TUnion::from_atomic(TAtomic::Error) } else { access_type }
+            } else {
+                read(context)
+            };
 
             if let Some(keyed_array_var_id) = &keyed_array_var_id {
                 let can_store_result = block_context.flags.inside_assignment() || !container_type.is_mixed();
 
                 if !block_context.flags.inside_isset()
                     && can_store_result
+                    && !is_refused_type(&access_type)
                     && memchr::memmem::find(keyed_array_var_id.as_bytes(), b"[$").is_some()
                     && !block_context.locals.contains_key(keyed_array_var_id)
                 {
@@ -132,7 +164,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
 /// key, so a `Map` is read only where the read is handled: `??` and `?.` read a missing key as null, as `isset`
 /// does, and so do `is`, `as` and `match`, whose PHP reads the index they test with `??`. A refused bare read keeps
 /// the type `V` it would have when it runs, so it is reported once. A `List` read stays bare, because a `List`'s keys
-/// run without gaps. A place is the collection it is declared as, whatever literal it holds.
+/// run without gaps. A place is the collections it is declared as, whatever literal it holds, and a place that may be
+/// a `Map` is read as one. A place that may be a `Set` has no index at all, which the `Set`'s own rule refuses, so
+/// this rule adds no second report to its bare read.
 pub(crate) fn check_sharp_map_read<'arena, A>(
     access: &ArrayAccess<'arena>,
     context: &mut Context<'_, 'arena, A>,
@@ -141,25 +175,31 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
 ) where
     A: Arena,
 {
-    let is_map = match get_declared_collection(context, block_context, artifacts, access.array) {
-        Some(collection) => collection.is_keyed(),
-        None => artifacts.get_expression_type(access.array).is_some_and(|container| {
-            container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
-        }),
+    let has_map =
+        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
+    let has_set =
+        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
+    let (may_be_map, may_be_set) = match get_declared_collection(context, block_context, artifacts, access.array) {
+        Some(declared) => (has_map(&declared), has_set(&declared)),
+        None => artifacts
+            .get_expression_type(access.array)
+            .map_or((false, false), |container| (has_map(container), has_set(container))),
     };
-    if !is_map {
+    if !may_be_map {
         return;
     }
 
-    if !block_context.flags.inside_isset() {
+    if block_context.flags.inside_isset() {
+        if let Some(read) = artifacts.get_expression_type(access).cloned() {
+            artifacts.set_expression_type(access, read.as_nullable());
+        }
+    } else if !may_be_set {
         context.collector.report_with_code(
             IssueCode::PossiblyUndefinedArrayIndex,
             Issue::error("A `Map` is not read by a bare index, because its key may be missing.")
                 .with_annotation(Annotation::primary(access.span()).with_message("This read throws when the key is missing."))
                 .with_help("Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."),
         );
-    } else if let Some(read) = artifacts.get_expression_type(access).cloned() {
-        artifacts.set_expression_type(access, read.as_nullable());
     }
 }
 

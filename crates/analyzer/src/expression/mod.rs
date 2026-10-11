@@ -653,8 +653,9 @@ pub(crate) const fn is_refused(expression: &Expression<'_>) -> bool {
     }
 }
 
-/// Whether `union` is the type of a refused PHP# expression. A check that judges an operand's kind skips it, and
-/// the expression that reads it gets the same type, because the parse error already reports the expression.
+/// Whether `union` is the type of a refused PHP# expression: one that failed to parse, or an index read of a container
+/// that gives no value, such as an `int`. A check that judges an operand's kind skips it, and the expression that reads
+/// it gets the same type, because the expression's own error already reports it.
 pub(crate) fn is_refused_type(union: &TUnion) -> bool {
     union.types.iter().any(|atomic| matches!(atomic, TAtomic::Error))
 }

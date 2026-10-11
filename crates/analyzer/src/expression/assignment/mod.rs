@@ -24,6 +24,7 @@ use mago_names::binding::Binding;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_reporting::IssueCollection;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -80,6 +81,52 @@ use crate::utils::report_int_for_float;
 mod array_assignment;
 pub(crate) mod property_assignment;
 mod static_property_assignment;
+
+/// Runs `read`, the read of an assignment operation, `+=`, `??=`, `++` or `--`, and returns what it reported in a PHP#
+/// file for [`write_after_read`].
+pub(crate) fn read_before_write<'ctx, 'arena, A, T>(
+    context: &mut Context<'ctx, 'arena, A>,
+    read: impl FnOnce(&mut Context<'ctx, 'arena, A>) -> T,
+) -> (T, Option<IssueCollection>)
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return (read(context), None);
+    }
+
+    let (result, issues) = context.record(read);
+    context.collector.extend(issues.iter().cloned());
+
+    (result, Some(issues))
+}
+
+/// Runs `write`, the write of an assignment operation whose read reported `read`. A PHP# place is refused once, so the
+/// write reports no issue its read already reported, with the same code and message at the same place, as `+=` on an
+/// index of a `Set` or an `int` would. A different refusal at that place still reports. PHP reports both.
+pub(crate) fn write_after_read<'ctx, 'arena, A, T>(
+    context: &mut Context<'ctx, 'arena, A>,
+    read: Option<&IssueCollection>,
+    write: impl FnOnce(&mut Context<'ctx, 'arena, A>) -> T,
+) -> T
+where
+    A: Arena,
+{
+    let Some(read) = read else {
+        return write(context);
+    };
+
+    let (result, written) = context.record(write);
+    context.collector.extend(written.into_iter().filter(|issue| {
+        !read.iter().any(|earlier| {
+            earlier.code == issue.code
+                && earlier.message == issue.message
+                && earlier.primary_span() == issue.primary_span()
+        })
+    }));
+
+    result
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PropertyWriteKind {
@@ -150,6 +197,7 @@ where
     }
 
     let mut assignment_operation_type = None;
+    let mut read_issues = None;
     if let Some(source_expression) = source_expression {
         let was_inside_general_use = block_context.flags.inside_general_use();
         block_context.flags.set_inside_general_use(true);
@@ -189,7 +237,10 @@ where
                     rhs: context.arena.alloc(source_expression.clone()),
                 });
 
-                binary_expression.analyze(context, block_context, artifacts)?;
+                let (analyzed, read) =
+                    read_before_write(context, |context| binary_expression.analyze(context, block_context, artifacts));
+                analyzed?;
+                read_issues = read;
                 block_context.flags.set_inside_assignment_operation(false);
                 assignment_operation_type = if let Some(assignment_span) = assignment_span {
                     artifacts.get_rc_expression_type(&assignment_span).cloned()
@@ -303,17 +354,19 @@ where
         None => PropertyWriteKind::Direct,
     };
 
-    let successful = assign_to_expression(
-        context,
-        block_context,
-        artifacts,
-        target_expression,
-        target_variable_id,
-        source_expression,
-        Rc::clone(&source_type),
-        false,
-        property_write_kind,
-    )?;
+    let successful = write_after_read(context, read_issues.as_ref(), |context| {
+        assign_to_expression(
+            context,
+            block_context,
+            artifacts,
+            target_expression,
+            target_variable_id,
+            source_expression,
+            Rc::clone(&source_type),
+            false,
+            property_write_kind,
+        )
+    })?;
 
     if !successful {
         if matches!(
