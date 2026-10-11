@@ -12,6 +12,8 @@
 //! - `x as Calc` is `x instanceof Calc ? x : null`.
 //! - A `match` that gives a value is `match (true)` with one condition per arm, its pattern's test `and` its `when`
 //!   condition. A `match` that starts a statement is `if`, then `else if` per arm, and `else` for `default`.
+//! - A tested index reads a missing key as null, as `??` does, so `x[k] is int n` is `is_int($n = x[k] ?? null)`.
+//!   Spec section 12 handles a `Map` read with `is`, `as` and `match`, where a bare read throws on a missing key.
 //!
 //! A tested value that is not a local or a parameter goes into a hidden variable, `$match#N` or `$as#N`, which no
 //! PHP# source can name. Its first test assigns it, so it is evaluated once, and the analyzer narrows the hidden
@@ -169,7 +171,7 @@ where
             pattern => is_named(pattern),
         };
         let mut subject =
-            if named { Subject { first: Some(is.value), variable: None } } else { self.subject(is.value) };
+            if named { Subject { first: Some(self.tested(is.value)), variable: None } } else { self.subject(is.value) };
         let test = self.test(is.pattern, is.is.span, &mut subject)?;
         self.tests.push((is.pattern.span(), test));
 
@@ -203,7 +205,7 @@ where
 
             (self.arm_subject(pattern_match.expression), tested)
         } else {
-            (Subject { first: None, variable: None }, pattern_match.expression)
+            (Subject { first: None, variable: None }, self.tested(pattern_match.expression))
         };
 
         let mut arms = Vec::new_in(self.arena);
@@ -264,7 +266,7 @@ where
                 return Some(body);
             }
 
-            let value = self.expression_statement(pattern_match.expression);
+            let value = self.expression_statement(self.tested(pattern_match.expression));
             let statements = self.arena.alloc_slice_fill_iter([value.clone(), body.clone()]);
 
             return Some(self.arena.alloc(Statement::Block(Block {
@@ -497,10 +499,22 @@ where
         let assignment = self.alloc(Expression::Assignment(Assignment {
             lhs: variable,
             operator: AssignmentOperator::Assign(at),
-            rhs: value,
+            rhs: self.tested(value),
         }));
 
         Subject { first: Some(assignment), variable: Some(name) }
+    }
+
+    /// The PHP that reads a tested value: `x[k] ?? null` for an index, and the value itself otherwise.
+    fn tested(&self, value: &'arena Expression<'arena>) -> &'arena Expression<'arena> {
+        if !matches!(value.unparenthesized(), Expression::ArrayAccess(_)) {
+            return value;
+        }
+
+        let at = end_of(value.span());
+        let null = self.alloc(Expression::Literal(Literal::Null(Keyword { span: at, value: b"null" })));
+
+        self.binary(value, BinaryOperator::NullCoalesce(at), null)
     }
 
     /// The subject's next read, at the start of the pattern node at `at` when it is not the first.

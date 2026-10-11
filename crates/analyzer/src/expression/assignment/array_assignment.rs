@@ -43,9 +43,11 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::block::ReferenceConstraintSource;
 use crate::error::AnalysisError;
+use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::resolver::method::get_declared_collection;
+use crate::resolver::method::get_declared_type;
 use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
@@ -58,6 +60,7 @@ pub(crate) fn analyze<'ctx, 'arena, A>(
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     array_target: ArrayTarget<'_, 'arena>,
+    assign_value: Option<&Expression<'arena>>,
     assign_value_type: &TUnion,
 ) -> Result<(), AnalysisError>
 where
@@ -89,6 +92,28 @@ where
         root_array_type.types.iter().all(|atomic| atomic.extends_or_implements(context.codebase, b"ArrayAccess"));
 
     let mut current_type = root_array_type.clone();
+
+    // A value written into a PHP# `Map` takes only a literal of the collection its value type declares, as a value
+    // written to a declared place does, at any depth. A `List` and a `Set` are never written by index, which their own
+    // checks refuse.
+    if context.dialect.is_sharp()
+        && let Some(value) = assign_value
+        && let Some(declared) = get_declared_type(context, block_context, artifacts, root_array_expression)
+        && let Some(element) = array_target_expressions.iter().try_fold(declared, |declared, _| {
+            declared
+                .types
+                .iter()
+                .filter_map(|atomic| match atomic {
+                    TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase).1),
+                    _ => None,
+                })
+                .reduce(|first, other| {
+                    combine_union_types(&first, &other, context.codebase, context.settings.combiner_options())
+                })
+        })
+    {
+        check_sharp_literal_kind(context, value, &element);
+    }
 
     let root_var_id = get_block_expression_id(root_array_expression, context, block_context);
     let current_index = analyze_nested_array_assignment(

@@ -110,8 +110,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LegacyArray<'arena> {
 /// The type a PHP# literal has at a place declared a `Set`: spec section 12 makes a list literal the `Set` of its
 /// elements, which the lowering keys by each element. The literal keeps this type, so its place checks its elements. A
 /// `Map` literal there is refused by [`check_sharp_literal_kind`], and keeps the `Set` of its values, so its place adds
-/// no second issue. `None` for any other value or place. The literal inside any parentheses gets the type too, since
-/// the lowering reads it there.
+/// no second issue, unless the place also declares a `Map`, which takes it as it is. `None` for any other value or
+/// place. The literal inside any parentheses gets the type too, since the lowering reads it there.
 pub(crate) fn get_set_literal_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -122,10 +122,12 @@ where
     A: Arena,
 {
     let literal = unwrap_expression(value);
-    if !context.dialect.is_sharp()
-        || !matches!(literal, Expression::Array(_))
-        || !declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
-    {
+    let Expression::Array(array_literal) = literal else {
+        return None;
+    };
+    let declares_set = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
+    let declares_map = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
+    if !context.dialect.is_sharp() || !declares_set || (declares_map && is_map_literal(array_literal) == Some(true)) {
         return None;
     }
 
@@ -136,6 +138,27 @@ where
     artifacts.set_expression_type(value, set_type.clone());
 
     Some(set_type)
+}
+
+/// The type an empty value written to a place declared `declared` has there: PHP types `[]` and `[:]` as one empty
+/// array, and the place keeps the collection it declares, so its rules and elements stay. `[]` is the place's `List`
+/// or `Set` and `[:]` its `Map`, whichever its union names. A literal no collection there takes, which
+/// [`check_sharp_literal_kind`] refuses, and any other empty value keep every collection the place declares, so the
+/// place adds no second issue. `None` where `declared` holds no collection.
+pub(crate) fn get_empty_literal_type(value: Option<&Expression<'_>>, declared: &TUnion) -> Option<TUnion> {
+    let collections = declared.types.iter().filter(|atomic| matches!(atomic, TAtomic::Array(_)));
+    let is_map_literal = match value.map(Expression::unparenthesized) {
+        Some(Expression::Array(literal)) => is_map_literal(literal),
+        _ => None,
+    };
+    let taken: Vec<TAtomic> = collections
+        .clone()
+        .filter(|atomic| Some(matches!(atomic, TAtomic::Array(TArray::Keyed(_)))) == is_map_literal)
+        .cloned()
+        .collect();
+    let types = if taken.is_empty() { collections.cloned().collect() } else { taken };
+
+    (!types.is_empty()).then(|| TUnion::from_vec(types))
 }
 
 #[derive(Debug)]
@@ -691,11 +714,8 @@ where
             _ => continue,
         };
 
-        let is_map_literal = match literal.elements.iter().find(|element| element.is_key_value() || element.is_value())
-        {
-            Some(element) => element.is_key_value(),
-            None if literal.elements.is_empty() => literal.colon.is_some(),
-            None => continue,
+        let Some(is_map_literal) = is_map_literal(literal) else {
+            continue;
         };
         if (is_map_literal && takes_map_literal) || (!is_map_literal && takes_list_literal) {
             continue;
@@ -719,6 +739,16 @@ where
                 Annotation::primary(literal.span()).with_message(format!("Declared `{declared_str}`.")),
             ),
         );
+    }
+}
+
+/// Whether a PHP# literal is a `Map` literal, `[:]` or `[key: value]`, rather than a `List` literal, `[]` or `[a, b]`.
+/// `None` for a literal of spreads alone, which names no collection of its own.
+fn is_map_literal(literal: &Array<'_>) -> Option<bool> {
+    match literal.elements.iter().find(|element| element.is_key_value() || element.is_value()) {
+        Some(element) => Some(element.is_key_value()),
+        None if literal.elements.is_empty() => Some(literal.colon.is_some()),
+        None => None,
     }
 }
 
