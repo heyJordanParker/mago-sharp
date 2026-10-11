@@ -15,7 +15,6 @@ use mago_codex::ttype::union::TUnion;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_method_name;
 use mago_names::display_sharp_member;
-use mago_php_version::PHPVersion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -33,8 +32,6 @@ use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Operator;
-use mago_syntax::cst::Property;
-use mago_syntax::cst::PropertyHookBody;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -389,7 +386,11 @@ pub(super) fn check_super_call<A>(
                     .with_annotation(Annotation::primary(constructor.name.span).with_message("Declared here.")),
             );
         }
-        None if !constructor_of_base.parameters.is_empty() && members.iter().any(runs_in_constructor) => {
+        None if !constructor_of_base.parameters.is_empty()
+            && members.iter().any(|member| {
+                matches!(member, ClassLikeMember::Property(property) if property.initial_value_runs_in_constructor())
+            }) =>
+        {
             context.collector.report_with_code(
                 IssueCode::NotSupportedYet,
                 Issue::error(format!(
@@ -415,21 +416,6 @@ where
     let constructor = base.declaring_method_ids.get(&word("__construct"))?;
 
     Some((base, context.codebase.get_method_by_id(constructor)?))
-}
-
-/// Whether `member` has an initial value the constructor sets, as the bridge lowers it: one that is not constant, or
-/// one of a get-only property, which `readonly` sets only in the constructor.
-fn runs_in_constructor(member: &ClassLikeMember<'_>) -> bool {
-    let ClassLikeMember::Property(property) = member else {
-        return false;
-    };
-    let Some(value) = property.initial_value() else {
-        return false;
-    };
-
-    matches!(property, Property::Hooked(hooked) if hooked.hook_list.is_get_only()
-        && !hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_))))
-        || !value.is_constant(&PHPVersion::PHP85, false)
 }
 
 /// Reports `class`'s `operator ==`, declared at `operator`, when neither `class` nor a parent declares a

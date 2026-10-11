@@ -451,8 +451,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut initial_values = Vec::new();
         for member in &class.members {
             if let ClassLikeMember::Property(property) = member
+                && property.initial_value_runs_in_constructor()
                 && let Some(value) = property.initial_value()
-                && !is_default(property, value)
             {
                 initial_values.push(self.initial_value(property.first_variable(), value));
             }
@@ -942,7 +942,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let name = self.string(0, line, variable.name);
         let default = match property.initial_value() {
-            Some(value) if is_default(property, value) => self.expression(value),
+            Some(value) if !property.initial_value_runs_in_constructor() => self.expression(value),
             None if is_null_by_default(property, self.names) => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
             _ => NULL,
         };
@@ -3029,13 +3029,6 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
     flags
 }
 
-/// Whether PHP takes an initial value as the property's default: a constant expression without `new`, on a property
-/// that is not `readonly`, which takes no default.
-fn is_default(property: &Property, value: &Expression) -> bool {
-    !matches!(property, Property::Hooked(hooked) if is_readonly(&hooked.hook_list))
-        && value.is_constant(&PHPVersion::PHP85, false)
-}
-
 /// Whether `parameter` is a `Set`, as `Some` of whether it is nullable.
 fn set_parameter(parameter: &FunctionLikeParameter) -> Option<bool> {
     match &parameter.hint {
@@ -3045,13 +3038,6 @@ fn set_parameter(parameter: &FunctionLikeParameter) -> Option<bool> {
         }
         _ => None,
     }
-}
-
-/// Whether a property runs as `readonly`: a get-only auto-property, which spec section 6.1 sets in the constructor.
-/// PHP refuses hooks on a `readonly` property.
-fn is_readonly(accessors: &PropertyHookList) -> bool {
-    accessors.is_get_only()
-        && !accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
 }
 
 /// Whether a member without an initial value starts as null, as in C# and Swift: a field, or a property with storage
@@ -3074,7 +3060,7 @@ fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
 /// property. PHP drops a set visibility equal to the property's own, so a private property, or a protected one with
 /// `protected(set)`, takes none, and the flags carry only what the engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
-    if is_readonly(accessors) {
+    if accessors.is_readonly() {
         return ZEND_ACC_READONLY;
     }
 
