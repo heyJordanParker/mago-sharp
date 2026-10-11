@@ -3394,6 +3394,78 @@ fn a_function_type_is_the_closure_class() {
     );
 }
 
+/// `App\Shop\Cart` and `App\Shop\Charge`, the parameter and return types of the function types below.
+const SHOP: (&str, &str) =
+    ("src/App/Shop/Shop.php", "<?php namespace App\\Shop; final class Cart {} final class Charge {}");
+
+/// The type and the declaration of the one property `code` declares, rendered, after the checker accepts `code`.
+fn lowered_field(code: &str) -> (String, String) {
+    let lowered = Lowered::with(code, &[SHOP]);
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "the source lowers");
+    let group =
+        lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_PROP_GROUP).expect("a property");
+
+    (lowered.render(lowered.child(group as u32, 0)), lowered.render(lowered.child(group as u32, 1)))
+}
+
+/// ```php
+/// private \Closure $charge;
+/// ```
+///
+/// A function type's effects are the checker's alone, so a function type with effects runs as PHP's `\Closure`.
+#[test]
+fn a_function_type_with_effects_is_the_closure_class() {
+    let (hint, declaration) = lowered_field(
+        "namespace App.Shop;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n}\n",
+    );
+
+    assert_eq!(hint, "ZVAL \"Closure\"\n");
+    assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"charge\"\n    null\n    null\n    null\n");
+}
+
+/// ```php
+/// private ?\Closure $fallback = null;
+/// ```
+///
+/// `[256]` is `ZEND_TYPE_NULLABLE`.
+#[test]
+fn a_nullable_function_type_with_effects_is_the_nullable_closure_class() {
+    let (hint, declaration) = lowered_field(
+        "namespace App.Shop;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n}\n",
+    );
+
+    assert_eq!(hint, "ZVAL [256] \"Closure\"\n");
+    assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"fallback\"\n    ZVAL null\n    null\n    null\n");
+}
+
+/// ```php
+/// private array $handlers;
+/// ```
+///
+/// `[7]` is `IS_ARRAY`.
+#[test]
+fn a_map_of_function_types_with_two_effects_is_an_array() {
+    let (hint, declaration) = lowered_field(
+        "namespace App.Shop;\n\nclass Checkout\n{\n    private Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n}\n",
+    );
+
+    assert_eq!(hint, "TYPE [7]\n");
+    assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"handlers\"\n    null\n    null\n    null\n");
+}
+
+/// ```php
+/// private \Closure $apply;
+/// ```
+#[test]
+fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
+    let (hint, declaration) = lowered_field(
+        "namespace App.Shop;\n\nclass Checkout\n{\n    private Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n}\n",
+    );
+
+    assert_eq!(hint, "ZVAL \"Closure\"\n");
+    assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"apply\"\n    null\n    null\n    null\n");
+}
+
 /// ```php
 /// $numbers = [1, $extra];
 /// $named = ['a' => 1, 2 => $numbers[0]];
@@ -8679,6 +8751,69 @@ fn as_is_a_conditional_that_gives_the_value_or_null() {
               RETURN
                 VAR
                   ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
+/// if (\is_int($count = $counts[$key] ?? null)) { return $count; }
+/// $price = \is_int(${'as#1'} = $counts[$key] ?? null) ? ${'as#1'} : null;
+/// ```
+///
+/// An index a pattern tests reads a missing key as null, as `??` does, so the index is the left side of a
+/// `COALESCE`, and a missing key reaches the test as null instead of a warning.
+#[test]
+fn an_index_a_pattern_tests_coalesces_a_missing_key_to_null() {
+    assert_eq!(
+        body_in(
+            "int? run(Map<string, int> counts, string key)",
+            "        if (counts[key] is int count) {\n            return count;\n        }\n        const price = counts[key] as int;\n        return price;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "count"
+                        COALESCE
+                          DIM
+                            VAR
+                              ZVAL "counts"
+                            VAR
+                              ZVAL "key"
+                          ZVAL null
+                  STMT_LIST
+                    RETURN
+                      VAR
+                        ZVAL "count"
+              ASSIGN
+                VAR
+                  ZVAL "price"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "as#1"
+                        COALESCE
+                          DIM
+                            VAR
+                              ZVAL "counts"
+                            VAR
+                              ZVAL "key"
+                          ZVAL null
+                  VAR
+                    ZVAL "as#1"
+                  ZVAL null
+              RETURN
+                VAR
+                  ZVAL "price"
         "#}
     );
 }

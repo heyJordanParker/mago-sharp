@@ -68,6 +68,13 @@ impl Fingerprintable for FunctionHint<'_> {
         for parameter in &self.parameters {
             parameter.fingerprint_with_hasher(hasher, resolved_names, options);
         }
+
+        if let Some(uses) = &self.uses {
+            "uses".hash(hasher);
+            for effect in &uses.names {
+                effect.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+        }
     }
 }
 

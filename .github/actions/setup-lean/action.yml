@@ -1,0 +1,24 @@
+name: Set up Lean
+description: >-
+  Installs elan and the Lean version pinned in crates/sharp-lean/lean/lean-toolchain, and puts lake on PATH.
+  mago compile proves laws with Lean, and installing the pinned version up front keeps the tests that run lake in
+  parallel from each installing it.
+
+runs:
+  using: composite
+  steps:
+    - name: Install elan and Lean
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        curl -sSfL https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain "$(cat crates/sharp-lean/lean/lean-toolchain)"
+        echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+    - name: Install elan and Lean (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Invoke-WebRequest https://elan.lean-lang.org/elan-init.ps1 -OutFile elan-init.ps1
+        ./elan-init.ps1 -NoPrompt 1 -DefaultToolchain (Get-Content crates/sharp-lean/lean/lean-toolchain -Raw).Trim()
+        Remove-Item elan-init.ps1
+        "$env:USERPROFILE\.elan\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

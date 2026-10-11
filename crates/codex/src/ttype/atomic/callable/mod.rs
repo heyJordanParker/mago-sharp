@@ -26,9 +26,10 @@ pub struct TCallableSignature {
     pub is_pure: bool,
     /// `true` if this signature specifically represents a closure instance.
     pub is_closure: bool,
-    /// `true` if PHP# wrote this signature, as a `Function<…>` type or as a method or lambda of a `.sharp` file, so its
-    /// parameters are PHP# types.
-    pub is_sharp: bool,
+    /// `Some` if PHP# wrote this signature, as a `Function<…>` type or as a method or lambda of a `.sharp` file, so its
+    /// parameters are PHP# types. A `Function<…>` type holds the full class names of the effects its `uses` lists. A
+    /// method or lambda holds none, as its body's effects are inferred. `None` if PHP wrote it.
+    pub effects: Option<Vec<Word>>,
     /// Ordered list of parameters expected by the callable signature.
     pub parameters: Vec<TCallableParameter>,
     /// The return type of the callable, if specified. `None` implies `mixed` or unknown.
@@ -81,7 +82,7 @@ impl TCallableSignature {
         Self {
             is_pure,
             is_closure,
-            is_sharp: false,
+            effects: None,
             parameters: Vec::new(),
             return_type: None,
             source: None,

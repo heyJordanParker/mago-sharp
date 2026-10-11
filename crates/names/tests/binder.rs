@@ -512,16 +512,30 @@ fn a_bare_extern_target_that_is_not_imported_is_a_global_function() {
 /// effect resolves through the imports.
 #[test]
 fn an_effect_name_binds_as_a_class_name() {
-    const CODE: &str = "namespace App.Stubs;\n\nimport App.Effects.Payments;\n\nextern now uses Http, Database, Files, Console, Process, Clock, Random, Cache, Mail, Environment, Payments;\n";
+    const CODE: &str = "namespace App.Stubs;\n\nimport App.Effects.Payments;\n\nextern now uses Http, Database, Files, Console, Process, Clock, Random, Cache, Mail, Environment, Events, Payments;\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
-    for effect in ["Http", "Database", "Files", "Console", "Process", "Clock", "Random", "Cache", "Mail", "Environment"]
+    for effect in
+        ["Http", "Database", "Files", "Console", "Process", "Clock", "Random", "Cache", "Mail", "Environment", "Events"]
     {
         assert_eq!(binding(&names, CODE, effect, 0), Some(Binding::Class), "`{effect}`");
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, effect, 0)), format!("Sharp\\{effect}"));
     }
     assert_eq!(resolved(&names, CODE, "Payments;", 1), b"App\\Effects\\Payments");
+}
+
+/// An effect a function type lists binds as a class name, as an `extern`'s does.
+#[test]
+fn an_effect_of_a_function_type_binds_as_a_class_name() {
+    const CODE: &str = "namespace App.Shop;\n\nimport App.Effects.Payments;\n\nclass Checkout\n{\n    private Map<string, Function<Charge(Cart) uses Http, Payments>> handlers = [:];\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(binding(&names, CODE, "Http", 0), Some(Binding::Class));
+    assert_eq!(resolved(&names, CODE, "Http", 0), b"Sharp\\Http");
+    assert_eq!(binding(&names, CODE, "Payments>", 0), Some(Binding::Class));
+    assert_eq!(resolved(&names, CODE, "Payments>", 0), b"App\\Effects\\Payments");
 }
 
 #[test]

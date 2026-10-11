@@ -2721,6 +2721,10 @@ generate_ast_walker! {
         for parameter in &function_hint.parameters {
             walker.walk_hint(parameter, context);
         }
+
+        if let Some(uses) = &function_hint.uses {
+            walker.walk_uses(uses, context);
+        }
     }
 
     'arena ParenthesizedHint as parenthesized_hint => {

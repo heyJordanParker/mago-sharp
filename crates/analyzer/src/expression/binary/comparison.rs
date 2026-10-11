@@ -786,38 +786,45 @@ pub(crate) fn sharp_refusal(
                 Some(Refusal::DifferentTypes)
             }
         }
-        // PHP# orders an instance by the `operator <=>` its class declares, and a string by its bytes, so only against a
-        // string. A `bool`, an enum case and a collection have no order, even against an `Any?`. Only `==` and `!=` take
-        // `null`, so a side that may be `null` is refused whatever its type. An `Any?` keeps its own report.
         BinaryOperator::LessThan(_)
         | BinaryOperator::LessThanOrEqual(_)
         | BinaryOperator::GreaterThan(_)
         | BinaryOperator::GreaterThanOrEqual(_)
-        | BinaryOperator::Spaceship(_) => {
-            if lhs.iter().chain(&rhs).any(|comparand| comparand.is_unordered()) {
-                return Some(Refusal::UnorderedOperand);
-            }
-
-            let different_types = if has(Comparand::Instance) {
-                let Some(method) = get_comparison_method(operator, lhs_type, rhs_type, codebase) else {
-                    return Some(Refusal::Instance);
-                };
-
-                !can_take_operands(codebase, method, &[&lhs_type.to_non_nullable(), &rhs_type.to_non_nullable()])
-            } else {
-                has(Comparand::String)
-                    && !lhs.iter().chain(&rhs).all(|comparand| matches!(comparand, Comparand::String | Comparand::Any))
-            };
-
-            if different_types {
-                Some(Refusal::DifferentTypes)
-            } else if !has(Comparand::Any) && (lhs_type.can_be_null() || rhs_type.can_be_null()) {
-                Some(Refusal::NullableOperand)
-            } else {
-                None
-            }
-        }
+        | BinaryOperator::Spaceship(_) => ordering_refusal(lhs_type, rhs_type, codebase),
         _ => None,
+    }
+}
+
+/// Why PHP# cannot order a value of `lhs_type` against one of `rhs_type`, as `<`, `<=`, `>`, `>=`, `<=>` and `sortedBy`
+/// order, or `None` when it can. PHP# orders an instance by the `operator <=>` its class declares, and a string by its
+/// bytes, so only against a string. A `bool`, an enum case and a collection have no order, even against an `Any?`. Only
+/// `==` and `!=` take `null`, so a side that may be `null` is refused whatever its type. An `Any?` keeps its own report.
+fn ordering_refusal(lhs_type: &TUnion, rhs_type: &TUnion, codebase: &CodebaseMetadata) -> Option<Refusal> {
+    let (lhs, rhs) = (comparands(lhs_type, codebase), comparands(rhs_type, codebase));
+    let has = |comparand: Comparand| lhs.contains(&comparand) || rhs.contains(&comparand);
+
+    if lhs.iter().chain(&rhs).any(|comparand| comparand.is_unordered()) {
+        return Some(Refusal::UnorderedOperand);
+    }
+
+    let different_types = if has(Comparand::Instance) {
+        let ordering = BinaryOperator::Spaceship(Span::zero());
+        let Some(method) = get_comparison_method(&ordering, lhs_type, rhs_type, codebase) else {
+            return Some(Refusal::Instance);
+        };
+
+        !can_take_operands(codebase, method, &[&lhs_type.to_non_nullable(), &rhs_type.to_non_nullable()])
+    } else {
+        has(Comparand::String)
+            && !lhs.iter().chain(&rhs).all(|comparand| matches!(comparand, Comparand::String | Comparand::Any))
+    };
+
+    if different_types {
+        Some(Refusal::DifferentTypes)
+    } else if !has(Comparand::Any) && (lhs_type.can_be_null() || rhs_type.can_be_null()) {
+        Some(Refusal::NullableOperand)
+    } else {
+        None
     }
 }
 
@@ -885,13 +892,12 @@ pub(crate) fn report_sharp_refusal<A>(
     let (lhs_name, rhs_name) = (display_operand(context, lhs_type), display_operand(context, rhs_type));
     let op = BytesDisplay(operator.as_bytes());
     let pair = format!("`{op}` cannot compare `{lhs_name}` with `{rhs_name}`");
-    // The part of an operand that holds a refused comparand, the left one first, as `Cart` of a `Cart|int`.
+    // The part of an operand that holds a refused comparand, the left one first.
     let part = |refused: fn(Comparand) -> bool| {
-        let holds =
-            |atomic: &&TAtomic| comparands(&TUnion::from_atomic((*atomic).clone()), codebase).into_iter().any(refused);
-        let side = if lhs_type.types.iter().any(|atomic| holds(&atomic)) { lhs_type } else { rhs_type };
+        let side =
+            if lhs_type.types.iter().any(|atomic| holds(atomic, refused, codebase)) { lhs_type } else { rhs_type };
 
-        display_operand(context, &TUnion::from_vec(side.types.iter().filter(holds).cloned().collect()))
+        display_refused_part(context, side, refused)
     };
 
     let (code, issue) = match refusal {
@@ -938,15 +944,9 @@ pub(crate) fn report_sharp_refusal<A>(
                 .with_note("PHP# lifts `==` and `!=` over `null`, and no other operator.")
                 .with_help("Test it with `!= null` before the comparison."),
         ),
-        Refusal::UnorderedOperand => (
-            IssueCode::InvalidOperand,
-            Issue::error(format!(
-                "`{op}` orders numbers, strings and classes that declare `operator <=>`, and `{}` is none of them.",
-                part(Comparand::is_unordered)
-            ))
-            .with_note("A `bool`, an enum case and a collection have no order.")
-            .with_help("Order a number or a string taken from the value instead."),
-        ),
+        Refusal::UnorderedOperand => {
+            (IssueCode::InvalidOperand, unordered_issue(op, &part(Comparand::is_unordered), refusal))
+        }
         Refusal::DifferentTypes => (
             IssueCode::InvalidOperand,
             Issue::error(format!("{pair}."))
@@ -961,6 +961,60 @@ pub(crate) fn report_sharp_refusal<A>(
             .with_annotation(Annotation::primary(binary.lhs.span()).with_message(format!("This is `{lhs_name}`.")))
             .with_annotation(Annotation::secondary(binary.rhs.span()).with_message(format!("This is `{rhs_name}`."))),
     );
+}
+
+/// Reports `selector`, the function a PHP# `sortedBy` orders by, when the key it returns, of `key_type`, has no order.
+/// `sortedBy` orders two keys as `<=>` orders them, so it refuses a key `<=>` refuses for having no order. A key that may
+/// be `null` still orders.
+pub(crate) fn check_sorted_by_key<A>(context: &mut Context<'_, '_, A>, selector: &Expression<'_>, key_type: &TUnion)
+where
+    A: Arena,
+{
+    let (refusal, refused): (Refusal, fn(Comparand) -> bool) =
+        match ordering_refusal(key_type, key_type, context.codebase) {
+            Some(refusal @ Refusal::UnorderedOperand) => (refusal, Comparand::is_unordered),
+            Some(refusal @ Refusal::Instance) => (refusal, |comparand| comparand == Comparand::Instance),
+            _ => return,
+        };
+    let key_name = display_operand(context, key_type);
+    let issue = unordered_issue("sortedBy", &display_refused_part(context, key_type, refused), refusal);
+
+    context.collector.report_with_code(
+        IssueCode::InvalidArgument,
+        issue.with_annotation(Annotation::primary(selector.span()).with_message(format!("This returns `{key_name}`."))),
+    );
+}
+
+/// The issue that refuses ordering a value whose part `part` has no order by `orderer`, an operator or `sortedBy`, as
+/// `refusal` gives the reason: a `bool`, an enum case or a collection, or an instance of a class that declares no
+/// `operator <=>`.
+fn unordered_issue(orderer: impl std::fmt::Display, part: &str, refusal: Refusal) -> Issue {
+    let note = if matches!(refusal, Refusal::Instance) {
+        "A class instance has an order only where its class declares `operator <=>`."
+    } else {
+        "A `bool`, an enum case and a collection have no order."
+    };
+
+    Issue::error(format!(
+        "`{orderer}` orders numbers, strings and classes that declare `operator <=>`, and `{part}` is none of them."
+    ))
+    .with_note(note)
+    .with_help("Order a number or a string taken from the value instead.")
+}
+
+/// Whether `atomic` holds a comparand `refused` accepts.
+fn holds(atomic: &TAtomic, refused: fn(Comparand) -> bool, codebase: &CodebaseMetadata) -> bool {
+    comparands(&TUnion::from_atomic(atomic.clone()), codebase).into_iter().any(refused)
+}
+
+/// The part of `union` that holds a comparand `refused` accepts, as `Cart` of a `Cart|int`.
+fn display_refused_part<A>(context: &Context<'_, '_, A>, union: &TUnion, refused: fn(Comparand) -> bool) -> String
+where
+    A: Arena,
+{
+    let part = union.types.iter().filter(|atomic| holds(atomic, refused, context.codebase)).cloned().collect();
+
+    display_operand(context, &TUnion::from_vec(part))
 }
 
 /// The operand that `==`, `!=`, `===` or `!==` compares with `null` when its type cannot be `null`, as in

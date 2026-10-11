@@ -4,8 +4,13 @@ use mago_fingerprint::FingerprintOptions;
 use mago_fingerprint::Fingerprintable;
 
 fn get_fingerprint(code: &'static [u8]) -> u64 {
+    fingerprint_of(b"test.php", code)
+}
+
+/// The fingerprint of `code` as the file `name`, whose extension picks its dialect.
+fn fingerprint_of(name: &'static [u8], code: &'static [u8]) -> u64 {
     let arena = LocalArena::new();
-    let file = File::ephemeral(b"test.php".into(), code.into());
+    let file = File::ephemeral(name.into(), code.into());
     let program = mago_syntax::parser::parse_file(&arena, &file);
     assert!(!program.has_errors(), "Parse failed: {:?}", program.errors);
 
@@ -484,4 +489,15 @@ fn test_method_order() {
     let sig2 = get_fingerprint(b"<?php class A { function bar() {} function foo() {} }");
 
     assert_ne!(sig1, sig2, "Method order should matter");
+}
+
+#[test]
+fn a_function_type_effect_change_changes_the_fingerprint() {
+    let field = |code| fingerprint_of(b"src/Checkout.sharp", code);
+    let pure = field(b"class Checkout\n{\n    private Function<Charge(Cart)>? charge = null;\n}\n");
+    let http = field(b"class Checkout\n{\n    private Function<Charge(Cart) uses Http>? charge = null;\n}\n");
+    let mail = field(b"class Checkout\n{\n    private Function<Charge(Cart) uses Mail>? charge = null;\n}\n");
+
+    assert_ne!(pure, http, "Adding an effect should change the fingerprint");
+    assert_ne!(http, mail, "Changing an effect should change the fingerprint");
 }

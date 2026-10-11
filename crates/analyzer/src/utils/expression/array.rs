@@ -49,6 +49,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::var_has_root;
+use crate::expression::is_refused_type;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_sharp_type;
@@ -146,6 +147,10 @@ where
         Some(index) => index,
         None => access_span,
     };
+
+    if is_refused_type(array_like_type) {
+        return array_like_type.clone();
+    }
 
     if array_like_type.is_never() || index_type.is_never() {
         return get_never();

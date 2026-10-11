@@ -71,6 +71,9 @@ pub enum TAtomic {
     Null,
     Void,
     Placeholder,
+    /// The type of a PHP# expression a parse error refused. It fits every type both ways, absorbs every union it
+    /// joins, and adds no issue, because the parse error already reports the expression.
+    Error,
 }
 
 impl PartialEq for TAtomic {
@@ -97,7 +100,8 @@ impl PartialEq for TAtomic {
             (TAtomic::Never, TAtomic::Never)
             | (TAtomic::Null, TAtomic::Null)
             | (TAtomic::Void, TAtomic::Void)
-            | (TAtomic::Placeholder, TAtomic::Placeholder) => true,
+            | (TAtomic::Placeholder, TAtomic::Placeholder)
+            | (TAtomic::Error, TAtomic::Error) => true,
             _ => false,
         }
     }
@@ -388,8 +392,8 @@ impl TAtomic {
 
                 return false;
             }
-            // bottom type: subtype of all types
-            TAtomic::Never => return true,
+            // bottom type: subtype of all types; the error type fits every type
+            TAtomic::Never | TAtomic::Error => return true,
             _ => return false,
         };
 
@@ -779,6 +783,7 @@ impl TType for TAtomic {
             TAtomic::Never => word("never"),
             TAtomic::Null => word("null"),
             TAtomic::Void => word("void"),
+            TAtomic::Error => word(""),
             _ => word("_"),
         })
     }
@@ -789,6 +794,7 @@ impl TType for TAtomic {
             TAtomic::Never => word("never"),
             TAtomic::Null => word("null"),
             TAtomic::Void => word("void"),
+            TAtomic::Error => word(""),
             _ => word("_"),
         })
     }

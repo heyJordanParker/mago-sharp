@@ -21,6 +21,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
 use crate::invocation::resolver::resolve_invocation_type;
 use crate::utils::names::display_sharp_type;
@@ -44,6 +45,18 @@ where
 
     if context.dialect.is_sharp() && is_method(invocation, b"Sharp\\SetMethods", b"filter") {
         return Ok(fetch_set_filter_return_type(context, invocation, template_result, parameters));
+    }
+
+    if context.dialect.is_sharp()
+        && is_sorted_by(invocation)
+        && let Some(selector) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
+        && let Some(selector) = selector.value()
+        && let Some([key_type]) = artifacts
+            .inferred_type_arguments
+            .get(&(invocation.span.start.offset, invocation.span.end.offset))
+            .map(Vec::as_slice)
+    {
+        check_sorted_by_key(context, selector, key_type);
     }
 
     if let Some(return_type) = fetch_invocation_provider_return_type(context, block_context, artifacts, invocation) {
@@ -146,6 +159,13 @@ where
         declared.get_single_array().map_or_else(get_mixed, |array| get_array_parameters(array, context.codebase).1);
 
     TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
+}
+
+/// Whether `invocation` calls `sortedBy` on a PHP# `List`, `Map` or `Set`, which orders by the key its function returns.
+fn is_sorted_by(invocation: &Invocation<'_, '_, '_>) -> bool {
+    [b"Sharp\\ListMethods".as_slice(), b"Sharp\\MapMethods", b"Sharp\\SetMethods"]
+        .into_iter()
+        .any(|class| is_method(invocation, class, b"sortedBy"))
 }
 
 /// Whether `invocation` calls the method `method` of the class `class`.

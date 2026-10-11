@@ -66,6 +66,7 @@ use crate::context::scope::loop_scope::LoopScope;
 use crate::context::scope::var_has_root;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::reconciler::reconcile_keyed_types;
@@ -1472,6 +1473,10 @@ where
 
         return Ok((false, get_mixed(), get_mixed()));
     };
+
+    if is_refused_type(&iterator_type) {
+        return Ok((false, TUnion::clone(&iterator_type), TUnion::clone(&iterator_type)));
+    }
 
     if iterator_type.is_never() {
         return Ok((false, get_never(), get_never()));

@@ -1640,7 +1640,8 @@ fn encode_atomic_snapshot<'type_info>(
             writer.write_bytes(alias.get_class_name().as_bytes())?;
             writer.write_bytes(alias.get_alias_name().as_bytes())?;
         }
-        TAtomic::Never => writer.write_u8(SNAPSHOT_NEVER),
+        // An external analyzer sees a refused PHP# expression as `never`, as it did before PHP# typed it.
+        TAtomic::Never | TAtomic::Error => writer.write_u8(SNAPSHOT_NEVER),
         TAtomic::Null => writer.write_u8(SNAPSHOT_NULL),
         TAtomic::Void => writer.write_u8(SNAPSHOT_VOID),
         TAtomic::Placeholder => writer.write_u8(SNAPSHOT_PLACEHOLDER),
@@ -1908,28 +1909,39 @@ fn encode_array_snapshot<'type_info>(
 
             writer.write_bool(keyed.parameters.is_some());
             if let Some((key_type, value_type)) = &keyed.parameters {
-                encode_union_snapshot_inner(writer, key_type, types, depth + 1)?;
+                encode_backing_key_snapshot(writer, key_type, types, depth + 1)?;
                 encode_union_snapshot_inner(writer, value_type, types, depth + 1)?;
             }
 
             writer.write_bool(keyed.non_empty);
         }
         // An external analyzer is plain PHP, which sees a `Set` as the array it runs as: a `Map` of the element type,
-        // keyed by each element's key, which is a backed enum's backing value.
+        // keyed by each element's key.
         TArray::Set(element_type) => {
             writer.write_u8(2);
             writer.write_bool(false);
             writer.write_bool(true);
-            match get_backing_key_type(element_type, types.codebase) {
-                Cow::Borrowed(key_type) => encode_union_snapshot_inner(writer, key_type, types, depth + 1)?,
-                Cow::Owned(key_type) => encode_owned_union_snapshot(writer, &key_type, types, depth + 1)?,
-            }
+            encode_backing_key_snapshot(writer, element_type, types, depth + 1)?;
             encode_union_snapshot_inner(writer, element_type, types, depth + 1)?;
             writer.write_bool(false);
         }
     }
 
     Ok(())
+}
+
+/// Encodes `key_type` as the key of the array it runs as: an external analyzer is plain PHP, which keys a PHP# `Map`
+/// or `Set` of a backed enum by the case's backing value.
+fn encode_backing_key_snapshot<'type_info>(
+    writer: &mut PayloadWriter,
+    key_type: &'type_info TUnion,
+    types: &mut SnapshotTypeTable<'_, 'type_info>,
+    depth: usize,
+) -> Result<(), ExternalAnalyzerError> {
+    match get_backing_key_type(key_type, types.codebase) {
+        Cow::Borrowed(key_type) => encode_union_snapshot_inner(writer, key_type, types, depth),
+        Cow::Owned(key_type) => encode_owned_union_snapshot(writer, &key_type, types, depth),
+    }
 }
 
 fn encode_reference_snapshot<'type_info>(
@@ -3379,10 +3391,8 @@ pub(super) mod testing {
         assert!(!writer.finish().is_empty());
     }
 
-    /// A `Set` runs as an array that keys each element by its key, which for a backed enum is its backing value, so an
-    /// external analyzer sees a `Set` of a string-backed enum as a `Map` keyed by `string`.
-    #[test]
-    fn a_set_of_a_backed_enum_is_keyed_by_the_backing_type() {
+    /// A codebase that declares the string-backed enum `Status`.
+    fn string_backed_status() -> CodebaseMetadata {
         let arena = mago_allocator::LocalArena::new();
         let file = mago_database::file::File::ephemeral(
             Cow::Borrowed(b"status.php"),
@@ -3398,13 +3408,39 @@ pub(super) mod testing {
             HashSet::default(),
         );
 
-        let status = TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status"))));
-        let set = TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(status))));
-        let mut types = Vec::new();
-        encode_union_snapshot(&mut PayloadWriter::new(), &set, &mut types, &codebase, 0).unwrap();
+        codebase
+    }
 
-        let key_and_value: Vec<_> = types[1..].iter().map(|ty| ty.get_id().to_string()).collect();
-        assert_eq!(key_and_value, ["string", "enum(Status)"]);
+    /// The key and value types an external analyzer receives for `array`, written as their ids.
+    fn snapshot_key_and_value(array: TArray, codebase: &CodebaseMetadata) -> Vec<String> {
+        let array = TUnion::from_atomic(TAtomic::Array(array));
+        let mut types = Vec::new();
+        encode_union_snapshot(&mut PayloadWriter::new(), &array, &mut types, codebase, 0).unwrap();
+
+        types[1..].iter().map(|ty| ty.get_id().to_string()).collect()
+    }
+
+    /// A `Set` runs as an array that keys each element by its key, which for a backed enum is its backing value, so an
+    /// external analyzer sees a `Set` of a string-backed enum as a `Map` keyed by `string`.
+    #[test]
+    fn a_set_of_a_backed_enum_is_keyed_by_the_backing_type() {
+        let codebase = string_backed_status();
+        let status = TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status"))));
+
+        assert_eq!(snapshot_key_and_value(TArray::Set(Arc::new(status)), &codebase), ["string", "enum(Status)"]);
+    }
+
+    /// A `Map` keyed by a backed enum runs as an array keyed by each case's backing value, so an external analyzer sees
+    /// a `Map<Status, int>` of a string-backed `Status` keyed by `string`. A PHP array keeps the key type it declares.
+    #[test]
+    fn a_map_keyed_by_a_backed_enum_is_keyed_by_the_backing_type() {
+        let codebase = string_backed_status();
+        let status = TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status"))));
+        let map = TKeyedArray::new_with_parameters(Arc::new(status), Arc::new(get_int()));
+        let array = TKeyedArray::new_with_parameters(Arc::new(get_int()), Arc::new(get_int()));
+
+        assert_eq!(snapshot_key_and_value(TArray::Keyed(map), &codebase), ["string", "int"]);
+        assert_eq!(snapshot_key_and_value(TArray::Keyed(array), &codebase), ["int", "int"]);
     }
 
     #[test]
