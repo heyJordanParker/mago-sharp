@@ -54,20 +54,32 @@ pub(crate) enum Changed {
 pub(crate) type Roots = BTreeSet<Changed>;
 
 /// A PHP# body: a method by its lowercase class and method names, an accessor by its lowercase class, its
-/// property's PHP name (`$total`) and `get` or `set`, or a lambda by the name its function value's `source` gives it.
+/// property's PHP name (`$total`) and `get` or `set`, a lambda by the name its function value's `source` gives it, or
+/// an initial value that is not constant, which runs in the constructor, by its lowercase class and its property's PHP
+/// name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Body {
     Method(Word, Word),
     Accessor(Word, Word, Word),
     Lambda(Word),
+    InitialValue(Word, Word),
+}
+
+/// What a function value runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Runs {
+    /// A PHP# lambda or method, whose effects only the solve knows.
+    Body(Body),
+    /// A plain PHP method, as its full class name and its member, with the effects its `extern` declares, or `Unknown`
+    /// without one, as a call of it has them.
+    Foreign { callee: (Word, Word), effects: Vec<Effect> },
 }
 
 /// A lambda or a method value a body gives a place whose PHP# function type lists its effects. Spec section 29 holds
-/// it to that list, and only the solve knows the effects of the body it runs.
+/// it to that list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FunctionValue {
-    /// The body the value runs.
-    pub(crate) body: Body,
+    pub(crate) runs: Runs,
     /// The effects the place's function type lists, by full class name.
     pub(crate) allowed: Vec<Word>,
     pub(crate) span: Span,
@@ -274,7 +286,9 @@ impl Effects {
             names: summaries
                 .iter()
                 .map(|summary| match summary.body {
-                    Body::Method(class, _) | Body::Accessor(class, _, _) => (class, summary.member),
+                    Body::Method(class, _) | Body::Accessor(class, _, _) | Body::InitialValue(class, _) => {
+                        (class, summary.member)
+                    }
                     Body::Lambda(_) => (empty_word(), summary.member),
                 })
                 .collect(),
@@ -331,13 +345,10 @@ impl Effects {
         self.first_item(body, |item| !(constructor && item == Item::Changed(Changed::This)))
     }
 
-    /// Why `body` has an effect that `allowed` does not list: a foreign effect it does not name, or an unknown one.
+    /// Why `body` has an effect that `allowed` does not list.
     fn effect_outside(&self, body: Body, allowed: &[Word]) -> Option<Impurity> {
         self.first_item(body, |item| match item {
-            Item::Effect(Effect::Foreign(effect)) => {
-                !allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes()))
-            }
-            Item::Effect(Effect::Unknown(_)) => true,
+            Item::Effect(effect) => is_outside(effect, allowed),
             Item::Changed(_) => false,
         })
     }
@@ -369,21 +380,27 @@ impl Effects {
         Some(Impurity { span, path, cause: origin.cause, effect })
     }
 
-    /// Each function value whose body has an effect its place's function type does not list, each once, with the
-    /// body's class and member as messages name them, the imports and the scope of the file that gives the value, and
-    /// the call that has the effect.
+    /// Each function value that has an effect its place's function type does not list, each once, with what it runs
+    /// as messages name it, a class and a member, the imports and the scope of the file that gives the value, and the
+    /// call that has the effect: a call in the body it runs, or the value itself for a plain PHP method.
     fn unfit_function_values(
         &self,
     ) -> impl Iterator<Item = (&FunctionValue, (Word, Word), &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
-        let mut reported = Vec::new();
+        let mut reported: Vec<(Span, &Runs)> = Vec::new();
         self.function_values.iter().filter_map(move |(value, giver)| {
-            if reported.contains(&(value.span, value.body)) {
+            if reported.contains(&(value.span, &value.runs)) {
                 return None;
             }
-            reported.push((value.span, value.body));
+            reported.push((value.span, &value.runs));
 
-            let impurity = self.effect_outside(value.body, &value.allowed)?;
-            let name = self.names[*self.index.get(&value.body)?];
+            let (name, impurity) = match &value.runs {
+                Runs::Body(body) => (self.names[*self.index.get(body)?], self.effect_outside(*body, &value.allowed)?),
+                Runs::Foreign { callee, effects } => {
+                    let effect = effects.iter().find(|effect| is_outside(**effect, &value.allowed))?;
+
+                    (*callee, Impurity { span: value.span, path: Vec::new(), cause: *callee, effect: Some(*effect) })
+                }
+            };
 
             Some((value, name, &*self.imports[*giver], &*self.scopes[*giver], impurity))
         })
@@ -398,6 +415,16 @@ impl Effects {
                 })
             },
         )
+    }
+}
+
+/// Whether `allowed` does not list `effect`: a foreign effect it does not name, or an unknown one.
+fn is_outside(effect: Effect, allowed: &[Word]) -> bool {
+    match effect {
+        Effect::Foreign(effect) => {
+            !allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes()))
+        }
+        Effect::Unknown(_) => true,
     }
 }
 

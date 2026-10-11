@@ -20,6 +20,7 @@ use crate::effects::Body;
 use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
+use crate::effects::Runs;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_missing_imports;
@@ -97,24 +98,32 @@ pub(crate) fn function_values_must_fit_their_types(
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
-            let (subject, body) = match value.body {
-                Body::Lambda(_) => ("This lambda".to_owned(), "lambda"),
-                Body::Method(..) | Body::Accessor(..) => {
-                    (format!("`{}`", display_sharp_member(class_name(name.0), name.1)), "method")
+            let method = || format!("`{}`", display_sharp_member(class_name(name.0), name.1));
+            let reason = match (&value.runs, impurity.effect) {
+                (Runs::Body(Body::Lambda(_)), _) => format!("This lambda {}", impurity.describe(&class_name)),
+                (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name)),
+                (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
+                    format!("{} has the effect `{}`", method(), class_name(effect))
                 }
+                (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
             };
+            let body = if matches!(value.runs, Runs::Body(Body::Lambda(_))) { "lambda" } else { "method" };
 
-            impure(
+            let issue = impure(
                 value.code,
-                format!("{subject} {}, so a `{}` cannot hold it.", impurity.describe(&class_name), value.declared),
+                format!("{reason}, so a `{}` cannot hold it.", value.declared),
                 value.span,
                 body,
                 &impurity,
                 &class_name,
                 &code_class_name,
                 &missing_import,
-            )
-            .with_annotation(Annotation::secondary(impurity.span))
+            );
+
+            match value.runs {
+                Runs::Body(_) => issue.with_annotation(Annotation::secondary(impurity.span)),
+                Runs::Foreign { .. } => issue,
+            }
         })
         .collect()
 }

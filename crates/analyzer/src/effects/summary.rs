@@ -58,13 +58,14 @@ use crate::effects::Effect;
 use crate::effects::EffectSummary;
 use crate::effects::FunctionValue;
 use crate::effects::Roots;
+use crate::effects::Runs;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
 
-/// Records the summary of the method or accessor `body`, which messages name by `member`, and whose parameters are
-/// declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with the function
-/// values the analysis gave places since the last body.
+/// Records the summary of the method, accessor or initial value `body`, which messages name by `member`, and whose
+/// parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with
+/// the function values the analysis gave places since the last body.
 pub(crate) fn record<'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -76,7 +77,7 @@ pub(crate) fn record<'arena, A>(
     A: Arena,
 {
     let class = match body {
-        Body::Method(class, _) | Body::Accessor(class, _, _) => class,
+        Body::Method(class, _) | Body::Accessor(class, _, _) | Body::InitialValue(class, _) => class,
         Body::Lambda(_) => empty_word(),
     };
 
@@ -125,29 +126,63 @@ pub(crate) fn record_function_values<A>(
 
     let codebase = context.codebase;
     for atomic in value.types.iter() {
+        // A method value of plain PHP has a signature PHP wrote, which lists no effects.
         let source = match atomic {
-            TAtomic::Callable(TCallable::Signature(signature)) if signature.effects.is_some() => signature.source,
+            TAtomic::Callable(TCallable::Signature(signature)) => signature
+                .source
+                .filter(|source| signature.effects.is_some() || matches!(source, FunctionLikeIdentifier::Method(..))),
             TAtomic::Callable(TCallable::Alias(identifier)) => Some(*identifier),
             _ => None,
         };
-        let body = match source {
-            Some(FunctionLikeIdentifier::Closure(name)) => Body::Lambda(name),
+        let runs = match source {
+            Some(FunctionLikeIdentifier::Closure(name)) => Runs::Body(Body::Lambda(name)),
             Some(FunctionLikeIdentifier::Method(class, method)) => {
                 let Some(declaring_class) = codebase.get_declaring_method_class(class.as_bytes(), method.as_bytes())
                 else {
                     continue;
                 };
-                if !codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|class| class.flags.is_sharp()) {
+                let Some(declaring) = codebase.get_class_like(declaring_class.as_bytes()) else {
                     continue;
-                }
+                };
+                let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), method.as_bytes()) else {
+                    continue;
+                };
 
-                Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), ascii_lowercase_word(method.as_bytes()))
+                let lowercase_method = ascii_lowercase_word(method.as_bytes());
+                if declaring.flags.is_sharp() {
+                    Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
+                } else if is_prelude_stub(declaring_class) {
+                    continue;
+                } else {
+                    // The `extern` lookup starts from the class the value is read through, as a call's does.
+                    let read_through = artifacts
+                        .call_targets
+                        .get(&(span.start.offset, span.end.offset))
+                        .into_iter()
+                        .flatten()
+                        .find_map(|target| match target {
+                            CallTarget::FunctionLike { callee, class: Some(read_through) }
+                                if *callee == FunctionLikeIdentifier::Method(class, method) =>
+                            {
+                                Some(*read_through)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(declaring_class);
+                    let class_name = codebase
+                        .get_class_like(read_through.as_bytes())
+                        .map_or(read_through, |metadata| metadata.original_name);
+                    let callee = (class_name, metadata.original_name);
+                    let effects = plain_php_effects(extern_of(codebase, read_through, lowercase_method), callee);
+
+                    Runs::Foreign { callee, effects }
+                }
             }
             Some(FunctionLikeIdentifier::Function(_)) | None => continue,
         };
 
         artifacts.function_values.push(FunctionValue {
-            body,
+            runs,
             allowed: allowed.clone(),
             span,
             declared: display_sharp_type(context, declared),
@@ -601,7 +636,8 @@ where
                         .codebase()
                         .get_function(function_name.as_bytes())
                         .map_or(function_name, |metadata| metadata.original_name);
-                    let declaration = self.extern_of(empty_word(), ascii_lowercase_word(function_name.as_bytes()));
+                    let declaration =
+                        extern_of(self.codebase(), empty_word(), ascii_lowercase_word(function_name.as_bytes()));
                     self.plain_php(declaration, span, (empty_word(), sharp_name(cause)));
                 }
                 CallTarget::FunctionLike {
@@ -711,7 +747,7 @@ where
         if is_prelude_stub(declaring_class) || is_prelude_stub(class) {
             self.prelude_stub_call(class, metadata, span, receiver, arguments, cause);
         } else {
-            let declaration = self.extern_of(class, ascii_lowercase_word(method_name.as_bytes()));
+            let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
         }
     }
@@ -750,51 +786,15 @@ where
             let callee = Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
         } else if !is_prelude_stub(class.name) {
-            let declaration = self.extern_of(class.name, constructor);
+            let declaration = extern_of(codebase, class.name, constructor);
             self.plain_php(declaration, span, (class.original_name, empty_word()));
         }
     }
 
-    /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a
-    /// function) falls under: the member's, then the class's, then the same for each parent class, nearest first.
-    fn extern_of(&self, class: Word, member: Word) -> Option<&'ctx ExternMetadata> {
-        let codebase = self.codebase();
-        let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
-        if class.is_empty() {
-            return declared((empty_word(), member));
-        }
-
-        let mut current = Some(ascii_lowercase_word(class.as_bytes()));
-        let mut remaining =
-            codebase.get_class_like(class.as_bytes()).map_or(0, |metadata| metadata.all_parent_classes.len());
-        while let Some(class) = current {
-            if let Some(declaration) = declared((class, member)).or_else(|| declared((class, empty_word()))) {
-                return Some(declaration);
-            }
-
-            if remaining == 0 {
-                break;
-            }
-            remaining -= 1;
-            current = codebase
-                .get_class_like(class.as_bytes())
-                .and_then(|metadata| metadata.direct_parent_class)
-                .map(|parent| ascii_lowercase_word(parent.as_bytes()));
-        }
-
-        None
-    }
-
-    /// Records a call into plain PHP, of the callee `cause`: the effects its declaration lists, or `Unknown` without
-    /// one.
+    /// Records a call into plain PHP, of the callee `cause`, with the effects `declaration` gives it.
     fn plain_php(&mut self, declaration: Option<&ExternMetadata>, span: Span, cause: (Word, Word)) {
-        match declaration {
-            Some(declaration) => {
-                for effect in &declaration.effects {
-                    self.summary.effects.push((Effect::Foreign(*effect), span, cause));
-                }
-            }
-            None => self.summary.effects.push((Effect::Unknown(Some(cause)), span, cause)),
+        for effect in plain_php_effects(declaration, cause) {
+            self.summary.effects.push((effect, span, cause));
         }
     }
 
@@ -1013,6 +1013,44 @@ where
         recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
     ) {
         recorder.write(unary.operand, unary.span(), None);
+    }
+}
+
+/// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
+/// falls under: the member's, then the class's, then the same for each parent class, nearest first.
+fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
+    let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
+    if class.is_empty() {
+        return declared((empty_word(), member));
+    }
+
+    let mut current = Some(ascii_lowercase_word(class.as_bytes()));
+    let mut remaining =
+        codebase.get_class_like(class.as_bytes()).map_or(0, |metadata| metadata.all_parent_classes.len());
+    while let Some(class) = current {
+        if let Some(declaration) = declared((class, member)).or_else(|| declared((class, empty_word()))) {
+            return Some(declaration);
+        }
+
+        if remaining == 0 {
+            break;
+        }
+        remaining -= 1;
+        current = codebase
+            .get_class_like(class.as_bytes())
+            .and_then(|metadata| metadata.direct_parent_class)
+            .map(|parent| ascii_lowercase_word(parent.as_bytes()));
+    }
+
+    None
+}
+
+/// The effects of a call into plain PHP of the callee `cause`: the effects its declaration lists, or `Unknown` without
+/// one.
+fn plain_php_effects(declaration: Option<&ExternMetadata>, cause: (Word, Word)) -> Vec<Effect> {
+    match declaration {
+        Some(declaration) => declaration.effects.iter().map(|effect| Effect::Foreign(*effect)).collect(),
+        None => vec![Effect::Unknown(Some(cause))],
     }
 }
 

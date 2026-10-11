@@ -5463,7 +5463,9 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
 #[test]
 fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
     let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @param null|\\Closure(int): int $step */\n    public static function apply(?\\Closure $step): int { return $step === null ? 0 : $step(1); }\n\n    /**\n     * @param \\Closure(int): int $fetch\n     * @param null|\\Closure(int): int $maybe\n     */\n    public function run(\\Closure $fetch, ?\\Closure $maybe): int { return self::apply($fetch) + self::apply($maybe); }\n}\n";
 
+    assert_eq!(issues(("src/App/Shop/Pricing.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
             .iter()
@@ -8652,7 +8654,13 @@ fn a_getter_calling_a_function_value_with_an_effect_is_refused_naming_the_effect
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Database> rate) { }\n\n    public int price => this.rate(2);\n\n    public int total => this.apply(this.rate);\n\n    public int stored\n    {\n        get\n        {\n            Function<int(int) uses Database> lookup = this.rate;\n            return lookup(3);\n        }\n    }\n\n    public int apply(Function<int(int) uses Database> step) => step(1);\n}\n",
     );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @param \\Closure(int): int $rate */\n    public function __construct(private \\Closure $rate) {}\n\n    public int $price { get => ($this->rate)(2); }\n\n    public int $total { get => $this->apply($this->rate); }\n\n    public int $stored\n    {\n        get\n        {\n            $lookup = $this->rate;\n            return $lookup(3);\n        }\n    }\n\n    /** @param \\Closure(int): int $step */\n    public function apply(\\Closure $step): int { return $step(1); }\n}\n",
+    );
 
+    assert_eq!(issues(php, &[]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing]),
@@ -8713,7 +8721,13 @@ fn a_lambda_with_an_effect_returned_or_held_in_a_local_of_a_pure_function_type_i
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\npublic class Pricing\n{\n    public Function<int(int)> rate() => n => fetch(n);\n\n    public int price()\n    {\n        Function<int(int)> live = n => fetch(n) + 1;\n        return live(2);\n    }\n}\n",
     );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @return \\Closure(int): int */\n    public function rate(): \\Closure { return fn (int $n): int => fetch($n); }\n\n    public function price(): int\n    {\n        $live = fn (int $n): int => fetch($n) + 1;\n        return $live(2);\n    }\n}\n",
+    );
 
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, FETCH]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
@@ -8742,7 +8756,13 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
         "app/Shop/Pricing.sharp",
         "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int live(int n) => fetch(n);\n\n    public int fixed(int n) => n;\n\n    public int run() => Pricing.apply(this.live) + Pricing.apply(this.fixed);\n}\n",
     );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function live(int $n): int { return fetch($n); }\n\n    public function fixed(int $n): int { return $n; }\n\n    public function run(): int { return self::apply($this->live(...)) + self::apply($this->fixed(...)); }\n}\n",
+    );
 
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, FETCH]), Vec::<String>::new());
     assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
@@ -8750,6 +8770,129 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
             "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
         ]
     );
+}
+
+/// A conditional may give either branch, so each lambda in it is held to the place's function type, whichever branch
+/// holds it and whatever the other branch holds.
+#[test]
+fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
+    let branch = (
+        "app/Shop/Branch.sharp",
+        "namespace App.Shop;\n\npublic class Branch\n{\n    private Function<int(int)> rate;\n\n    public Branch(bool live, Function<int(int)> fixed)\n    {\n        this.rate = live ? (int n) => fetch(n) : (int n) => n + 1;\n        this.rate = live ? (int n) => n + 2 : (int n) => fetch(n) + 3;\n        this.rate = live ? (int n) => fetch(n) + 4 : fixed;\n        this.rate = live ? fixed : (int n) => fetch(n) + 5;\n    }\n\n    public int price() => this.rate(2);\n}\n",
+    );
+    let php = (
+        "app/Shop/Branch.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Branch\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    /** @param \\Closure(int): int $fixed */\n    public function __construct(bool $live, \\Closure $fixed)\n    {\n        $this->rate = $live ? fn (int $n): int => fetch($n) : fn (int $n): int => $n + 1;\n        $this->rate = $live ? $fixed : fn (int $n): int => fetch($n) + 5;\n    }\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(issues(branch, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    let message = "invalid-property-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
+    assert_eq!(
+        effect_issues(&[branch, FETCH, FETCH_STUB]),
+        [
+            format!("app/Shop/Branch.sharp:9:21 {message}"),
+            format!("app/Shop/Branch.sharp:10:21 {message}"),
+            format!("app/Shop/Branch.sharp:11:21 {message}"),
+            format!("app/Shop/Branch.sharp:12:21 {message}"),
+        ]
+    );
+}
+
+/// `Client` is plain PHP that its `extern` gives the effect `Http`, `Cache` is plain PHP its `extern` declares pure, and
+/// `Store` is plain PHP with no `extern`.
+const SERVICES: (&str, &str) = (
+    "src/Lib/Services.php",
+    "<?php\n\nnamespace Lib;\n\nfinal class Client\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class Cache\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class Store\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n",
+);
+
+const SERVICES_STUB: (&str, &str) = (
+    "app/Stubs/Services.sharp",
+    "namespace App.Stubs;\n\nimport Lib.Cache;\nimport Lib.Client;\n\nextern Client uses Http;\nextern Cache;\n",
+);
+
+/// A plain PHP method value runs the method, so a function type holds it only when it lists every effect the method's
+/// `extern` declares, as a call of the method has them. A method with no `extern` has an unknown effect.
+#[test]
+fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nuse Lib\\Cache;\nuse Lib\\Client;\nuse Lib\\Store;\n\nclass Pricing\n{\n    public function __construct(private Client $client, private Cache $cache, private Store $store) {}\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    public function run(): int { return self::apply($this->client->get(...)) + self::apply($this->cache->get(...)) + self::apply($this->store->get(...)); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[SERVICES]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, SERVICES]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, SERVICES, SERVICES_STUB]),
+        [
+            "app/Shop/Pricing.sharp:13:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:13:104 invalid-argument: `Store.get` has no `extern` declaration, so a `Function<int(int)>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`.",
+        ]
+    );
+}
+
+/// A method value and a call of the method find the same `extern`: the one on the class it is read through, before its
+/// parent's that declares the method.
+#[test]
+fn a_plain_php_method_value_read_through_a_subclass_is_held_to_the_subclass_extern() {
+    let feeds = (
+        "src/Lib/Feeds.php",
+        "<?php\n\nnamespace Lib;\n\nclass Feed\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class RemoteFeed extends Feed\n{\n}\n",
+    );
+    let stub =
+        ("app/Stubs/Feeds.sharp", "namespace App.Stubs;\n\nimport Lib.RemoteFeed;\n\nextern RemoteFeed uses Http;\n");
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\nimport Lib.RemoteFeed;\n\npublic class Pricing\n{\n    public Pricing(private RemoteFeed feed) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.feed.get);\n\n    public int price => this.feed.get(1);\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[feeds, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, feeds, stub]),
+        [
+            "app/Shop/Pricing.sharp:13:25 impure-getter: Getter `price` calls `RemoteFeed.get`, which has the effect `Http`. Getters must be pure.",
+            "app/Shop/Pricing.sharp:11:39 invalid-argument: `RemoteFeed.get` has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+        ]
+    );
+}
+
+/// An initial value that is not constant runs in the constructor, so a lambda in it is held to the property's function
+/// type, even in a class with no method.
+#[test]
+fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refused() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate = (int n) => fetch(n);\n}\n",
+    );
+    let listed = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate = (int n) => fetch(n);\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/Pricing.sharp:5:39 invalid-property-default-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
+    assert_eq!(effect_issues(&[listed, FETCH, FETCH_STUB]), Vec::<String>::new());
+}
+
+/// A lambda of the wrong type is refused once, for its type: whether its effects fit a type it does not have is moot.
+#[test]
+fn a_lambda_argument_of_the_wrong_type_is_refused_once() {
+    let twice = (
+        "app/Shop/Twice.sharp",
+        "namespace App.Shop;\n\npublic class Twice\n{\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Twice.apply((string s) => fetch(1));\n}\n",
+    );
+
+    assert_eq!(issues(twice, &[FETCH, FETCH_STUB]), ["7:37 invalid-argument"]);
+    assert_eq!(effect_issues(&[twice, FETCH, FETCH_STUB]), Vec::<String>::new());
 }
 
 const HOLDER: (&str, &str) = (

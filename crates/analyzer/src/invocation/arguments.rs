@@ -173,7 +173,7 @@ where
     Ok(())
 }
 
-/// Verifies an argument's type against the expected parameter type.
+/// Verifies an argument's type against the expected parameter type, and returns whether the argument fits it.
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     input_type: &TUnion,
@@ -181,7 +181,8 @@ pub fn verify_argument_type<'arena, A>(
     argument_offset: usize,
     input_expression: &Expression<'arena>,
     invocation_target: &InvocationTarget<'_>,
-) where
+) -> bool
+where
     A: Arena,
 {
     let target_kind_str = invocation_target.guess_kind();
@@ -217,7 +218,7 @@ pub fn verify_argument_type<'arena, A>(
             ),
         );
 
-        return;
+        return false;
     }
 
     if !parameter_type.accepts_null() {
@@ -240,7 +241,7 @@ pub fn verify_argument_type<'arena, A>(
                 )),
             );
 
-            return;
+            return false;
         }
 
         if input_type.is_nullable() && !input_type.ignore_nullable_issues() {
@@ -288,7 +289,7 @@ pub fn verify_argument_type<'arena, A>(
                 .with_help(help),
             );
 
-            return;
+            return false;
         }
 
         if input_type.is_falsable() && !input_type.ignore_falsable_issues() {
@@ -341,7 +342,7 @@ pub fn verify_argument_type<'arena, A>(
     );
 
     if type_match_found {
-        return;
+        return true;
     }
 
     let target_name_str = invocation_target.guess_name(context);
@@ -371,7 +372,7 @@ pub fn verify_argument_type<'arena, A>(
             .with_help("Add specific type hints or assertions to the argument value."),
         );
 
-        return;
+        return false;
     }
 
     let is_empty_container = input_type.is_empty_array() || is_empty_container_construction(input_expression);
@@ -443,7 +444,7 @@ pub fn verify_argument_type<'arena, A>(
             });
 
             if all_inputs_are_resolvable_aliases {
-                return;
+                return true;
             }
         }
 
@@ -489,6 +490,8 @@ pub fn verify_argument_type<'arena, A>(
 
         context.collector.report_with_code(kind, issue);
     }
+
+    false
 }
 
 /// Whether an argument of `input_type` can hold a value of `parameter_type`. A function value whose type lists an

@@ -666,22 +666,23 @@ where
                     check_sharp_literal_kind(context, argument_expression, &final_parameter_type);
                 }
 
-                verify_argument_type(
+                if verify_argument_type(
                     context,
                     &argument_value_type,
                     &final_parameter_type,
                     *argument_offset,
                     argument_expression,
                     &invocation.target,
-                );
-                record_function_values(
-                    context,
-                    artifacts,
-                    &argument_value_type,
-                    &final_parameter_type,
-                    argument_expression.span(),
-                    IssueCode::InvalidArgument,
-                );
+                ) {
+                    record_function_values(
+                        context,
+                        artifacts,
+                        &argument_value_type,
+                        &final_parameter_type,
+                        argument_expression.span(),
+                        IssueCode::InvalidArgument,
+                    );
+                }
             }
 
             if let Some(parameter_name) = parameter_ref.get_name() {

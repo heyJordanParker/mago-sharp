@@ -54,10 +54,10 @@ pub struct ResolvedMethodCall {
     pub method: Word,
 }
 
-/// What a PHP# call runs, as the analysis resolved it.
+/// What a PHP# call or method value runs, as the analysis resolved it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallTarget {
-    /// A function or method, and the class the call names, which an `extern` lookup starts from.
+    /// A function or method, and the class the call or method value names, which an `extern` lookup starts from.
     FunctionLike { callee: FunctionLikeIdentifier, class: Option<Word> },
     /// The method `method` of the class `class`, which no class declares, so `callee`, the class's `__call` or
     /// `__callStatic`, serves it.
@@ -92,7 +92,7 @@ pub struct AnalysisArtifacts {
     pub body_returns: HashMap<(Word, Word), TUnion>,
     /// What each PHP# body of the file does by itself, for [`Effects::solve`](crate::effects::Effects::solve).
     pub effect_summaries: Vec<EffectSummary>,
-    /// What each PHP# call runs, keyed by the call's span.
+    /// What each PHP# call and method value runs, keyed by its span.
     pub(crate) call_targets: HashMap<(u32, u32), Vec<CallTarget>>,
     /// The function values the analysis gave places whose function types list effects, until the body that gives them
     /// records its summary.
@@ -300,7 +300,7 @@ impl AnalysisArtifacts {
         self.call_targets.get(&get_expression_range(call)).into_iter().flatten()
     }
 
-    /// Records that the PHP# call at `span` runs `target`, once however often the analysis checks the call.
+    /// Records that the PHP# call or method value at `span` runs `target`, once however often the analysis checks it.
     pub(crate) fn record_call_target(&mut self, span: Span, target: CallTarget) {
         let recorded = self.call_targets.entry((span.start.offset, span.end.offset)).or_default();
         if !recorded.contains(&target) {
