@@ -145,7 +145,10 @@ pub fn combine_preserving_array_shapes(
     let (mut array_types, other_types): (Vec<_>, Vec<_>) = types.into_iter().partition(TAtomic::is_array);
     let mut combined_types = if other_types.is_empty() { Vec::new() } else { combine(other_types, codebase, options) };
 
-    if combined_types.iter().any(|atomic| matches!(atomic, TAtomic::Mixed(mixed) if mixed.is_vanilla())) {
+    if combined_types
+        .iter()
+        .any(|atomic| matches!(atomic, TAtomic::Error) || matches!(atomic, TAtomic::Mixed(mixed) if mixed.is_vanilla()))
+    {
         return combined_types;
     }
 
@@ -172,6 +175,11 @@ pub fn combine(types: Vec<TAtomic>, codebase: &CodebaseMetadata, options: Combin
 
     if types.len() == 1 {
         return types;
+    }
+
+    // The type of a refused PHP# expression absorbs the union, so no check judges the members beside it.
+    if types.iter().any(|atomic| matches!(atomic, TAtomic::Error)) {
+        return vec![TAtomic::Error];
     }
 
     let mut combination = TypeCombination::new();
@@ -1809,5 +1817,19 @@ mod tests {
 
             assert_eq!(combined, [atomic(&sharp)]);
         }
+    }
+
+    #[test]
+    fn test_the_error_type_absorbs_every_union_it_joins_and_shows_nothing() {
+        let list = |element: TScalar| {
+            TAtomic::Array(TArray::List(TList::new(Arc::new(TUnion::from_atomic(TAtomic::Scalar(element))))))
+        };
+        let types =
+            vec![TAtomic::Scalar(TScalar::string()), TAtomic::Error, list(TScalar::int()), list(TScalar::string())];
+        let codebase = CodebaseMetadata::default();
+
+        assert_eq!(combine(types.clone(), &codebase, CombinerOptions::default()), [TAtomic::Error]);
+        assert_eq!(combine_preserving_array_shapes(types, &codebase, CombinerOptions::default()), [TAtomic::Error]);
+        assert_eq!(TAtomic::Error.get_id(), mago_word::word(""));
     }
 }

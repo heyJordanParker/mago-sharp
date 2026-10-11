@@ -66,6 +66,7 @@ use crate::expression::assignment::assign_to_expression;
 use crate::expression::binary::utils::analyze_instance_operator;
 use crate::expression::binary::utils::refuse_non_int_operands;
 use crate::expression::call::method_call::analyze_implicit_method_call;
+use crate::expression::is_refused_type;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
@@ -105,6 +106,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
         block_context.flags.set_inside_variable_reference(was_in_variable_reference);
 
         let operand_type = artifacts.get_rc_expression_type(&self.operand).cloned();
+        if let Some(operand_type) = &operand_type
+            && is_refused_type(operand_type)
+        {
+            artifacts.set_expression_type(self, TUnion::clone(operand_type));
+            return Ok(());
+        }
+
         if context.dialect.is_sharp()
             && let Some(cast_type) = sharp_number_cast_type(&self.operator)
             && let Some(operand_type) = &operand_type

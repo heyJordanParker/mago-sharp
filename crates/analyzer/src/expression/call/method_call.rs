@@ -44,6 +44,7 @@ use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::constant_access::field_storage;
+use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -448,6 +449,12 @@ where
             MethodInvocationKind::Instance,
             !has_resolved_methods,
         )?;
+    }
+
+    if let Some(object_type) = artifacts.get_rc_expression_type(object).cloned()
+        && is_refused_type(&object_type)
+    {
+        artifacts.set_rc_expression_type(&span, object_type);
     }
 
     Ok(())

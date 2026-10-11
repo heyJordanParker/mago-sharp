@@ -61,6 +61,7 @@ use crate::utils::expression::get_block_expression_id;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_type;
+use crate::utils::names::display_value_type;
 
 /// Analyzes array literals and their elements.
 ///
@@ -231,7 +232,22 @@ where
                 let (item_key_value, key_type) = artifacts
                     .get_expression_type(key_value_array_element.key)
                     .map_or((None, get_mixed()), |item_key_type| {
-                        let key_type = if item_key_type.is_null() {
+                        let key_type = if context.dialect.is_sharp() {
+                            // PHP# casts only between numbers, so a key PHP would cast, such as `1.5`, `true` or
+                            // `null`, names the rule a `Map` type keeps, and its error is its only report. A backed
+                            // enum key runs as its backing value.
+                            if get_backing_key_type(item_key_type, context.codebase).is_always_array_key(true) {
+                                item_key_type.clone()
+                            } else {
+                                let item_key_type_id = display_value_type(context, item_key_type, &get_arraykey());
+                                context.collector.report_with_code(
+                                    IssueCode::InvalidArrayElementKey,
+                                    map_key_error(&item_key_type_id, key_value_array_element.key.span()),
+                                );
+
+                                get_never()
+                            }
+                        } else if item_key_type.is_null() {
                             get_literal_string(empty_word())
                         } else if item_key_type.is_true() {
                             get_literal_int(1)
@@ -241,19 +257,11 @@ where
                             get_literal_int(f.trunc() as i64)
                         } else if item_key_type.is_float() {
                             get_int()
-                        } else if context.dialect.is_sharp()
-                            && get_backing_key_type(item_key_type, context.codebase).is_always_array_key(true)
-                        {
-                            // A PHP# literal keys a `Map` by a backed enum, which runs as its backing value.
-                            item_key_type.clone()
                         } else if !item_key_type.is_always_array_key(true) {
                             let item_key_type_id = display_type(context, item_key_type);
                             let key_span = key_value_array_element.key.span();
-
-                            // PHP# casts only between numbers, so its literal names the rule a `Map` type keeps.
-                            let issue = if context.dialect.is_sharp() {
-                                map_key_error(&item_key_type_id, key_span)
-                            } else {
+                            context.collector.report_with_code(
+                                IssueCode::InvalidArrayElementKey,
                                 Issue::error("Invalid array key type.")
                                     .with_annotation(Annotation::primary(key_span).with_message(format!(
                                         "This has type `{item_key_type_id}`, which cannot be cast to a string or integer.",
@@ -261,9 +269,8 @@ where
                                     .with_note(format!(
                                         "In PHP, array keys must be strings or integers. While types like `bool` or `float` are automatically cast, a value of type `{item_key_type_id}` cannot be.",
                                     ))
-                                    .with_help("Ensure the array key is either a string or an integer.")
-                            };
-                            context.collector.report_with_code(IssueCode::InvalidArrayElementKey, issue);
+                                    .with_help("Ensure the array key is either a string or an integer."),
+                            );
 
                             get_arraykey()
                         } else {

@@ -234,7 +234,7 @@ where
                 continue;
             }
 
-            if object_atomic.is_never() {
+            if object_atomic.is_never() || matches!(object_atomic, TAtomic::Error) {
                 continue;
             }
 

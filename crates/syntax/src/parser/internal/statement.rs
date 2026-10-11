@@ -5,7 +5,6 @@ use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::T;
 use crate::cst::cst::AttributeList;
-use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Statement;
 use crate::cst::sequence::Sequence;
@@ -73,25 +72,15 @@ where
                     T!["const"] => Statement::Constant(self.parse_constant_with_attributes(attributes)?),
                     T!["function"] => self.parse_closure_or_function(attributes)?,
                     T!["fn"] => Statement::Expression(ExpressionStatement {
-                        expression: {
-                            self.arena.alloc(Expression::ArrowFunction(
-                                self.parse_arrow_function_with_attributes(attributes)?,
-                            ))
-                        },
+                        expression: self.parse_arrow_function_with_attributes(attributes)?,
                         terminator: self.parse_terminator()?,
                     }),
                     T!["static"] if maybe_after == Some(T!["fn"]) => Statement::Expression(ExpressionStatement {
-                        expression: {
-                            self.arena.alloc(Expression::ArrowFunction(
-                                self.parse_arrow_function_with_attributes(attributes)?,
-                            ))
-                        },
+                        expression: self.parse_arrow_function_with_attributes(attributes)?,
                         terminator: self.parse_terminator()?,
                     }),
                     T!["static"] if maybe_after == Some(T!["function"]) => Statement::Expression(ExpressionStatement {
-                        expression: {
-                            self.arena.alloc(Expression::Closure(self.parse_closure_with_attributes(attributes)?))
-                        },
+                        expression: self.parse_closure_with_attributes(attributes)?,
                         terminator: self.parse_terminator()?,
                     }),
                     kind if kind.is_modifier() => self.parse_modified_class_like_with_attributes(attributes)?,
@@ -167,7 +156,7 @@ where
         Ok(match (self.stream.peek_kind(1)?, self.stream.lookahead(2)?.map(|t| t.kind)) {
             // if the next token is `(` or `&` followed by `(`, then we know this is a closure
             (Some(T!["("]), _) | (Some(T!["&"]), Some(T!["("])) => Statement::Expression(ExpressionStatement {
-                expression: { self.arena.alloc(Expression::Closure(self.parse_closure_with_attributes(attributes)?)) },
+                expression: self.parse_closure_with_attributes(attributes)?,
                 terminator: self.parse_terminator()?,
             }),
             _ => {

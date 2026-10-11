@@ -391,11 +391,9 @@ where
 
         Ok(match (next.kind, after.map(|t| t.kind)) {
             (T!["function"], _) | (T!["static"], Some(T!["function"])) => {
-                self.arena.alloc(Expression::Closure(self.parse_closure_with_attributes(attributes)?))
+                self.parse_closure_with_attributes(attributes)?
             }
-            (T!["fn"], _) | (T!["static"], Some(T!["fn"])) => {
-                self.arena.alloc(Expression::ArrowFunction(self.parse_arrow_function_with_attributes(attributes)?))
-            }
+            (T!["fn"], _) | (T!["static"], Some(T!["fn"])) => self.parse_arrow_function_with_attributes(attributes)?,
             _ => return Err(self.stream.unexpected(Some(next), &[T!["function"], T!["fn"], T!["static"]])),
         })
     }
@@ -419,22 +417,24 @@ where
         })
     }
 
-    /// Consumes an operator, and reports it when PHP# does not have it, such as `->` where PHP# writes `.`.
+    /// Consumes an operator, and reports it when PHP# does not have it, such as `->` where PHP# writes `.`. Returns
+    /// its span, and whether it is refused: the expression it builds still parses so the rest of the file does, and
+    /// stands as an error expression, so no stage after the parser checks it.
     ///
-    /// PHP#'s `?.` is two tokens, consumed together. The error stands, and the PHP operator still parses so the
-    /// rest of the file does.
-    fn consume_operator_span(&mut self) -> Result<Span, ParseError> {
+    /// PHP#'s `?.` is two tokens, consumed together.
+    fn consume_operator_span(&mut self) -> Result<(Span, bool), ParseError> {
         let token = self.stream.consume()?;
         let span = token.span_for(self.stream.file_id());
         if self.dialect.is_sharp() && token.kind == T!["?"] {
-            return Ok(span.join(self.stream.eat_span(T!["."])?));
+            return Ok((span.join(self.stream.eat_span(T!["."])?), false));
         }
 
-        if self.dialect.is_sharp() && matches!(token.kind, T!["->" | "?->" | "::" | ".="]) {
+        let refused = self.dialect.is_sharp() && matches!(token.kind, T!["->" | "?->" | "::" | ".="]);
+        if refused {
             self.errors.push(ParseError::PhpSyntaxInSharp(token.kind, span));
         }
 
-        Ok(span)
+        Ok((span, refused))
     }
 
     fn parse_postfix_expression(
@@ -443,7 +443,8 @@ where
         operator: TokenKind,
         precedence: Precedence,
     ) -> Result<&'arena Expression<'arena>, ParseError> {
-        Ok(self.arena.alloc(match operator {
+        let mut refused = false;
+        let expression = self.arena.alloc(match operator {
             T!["("] => {
                 let partial_args = self.parse_partial_argument_list()?;
 
@@ -490,7 +491,8 @@ where
                 }
             }
             T!["::"] => {
-                let double_colon = self.consume_operator_span()?;
+                let (double_colon, operator_refused) = self.consume_operator_span()?;
+                refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
                 let current = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
@@ -548,7 +550,8 @@ where
                 }
             }
             T!["->"] => {
-                let arrow = self.consume_operator_span()?;
+                let (arrow, operator_refused) = self.consume_operator_span()?;
+                refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
 
                 if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
@@ -574,7 +577,8 @@ where
                 }
             }
             T!["?->"] => {
-                let question_mark_arrow = self.consume_operator_span()?;
+                let (question_mark_arrow, operator_refused) = self.consume_operator_span()?;
+                refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
 
                 if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
@@ -604,7 +608,9 @@ where
             // wildcard means the caller passed a non-postfix kind, which is a parser bug — bubble
             // it up as an unexpected-token error instead of panicking.
             _ => return Err(self.stream.unexpected(None, &[])),
-        }))
+        });
+
+        Ok(if refused { self.arena.alloc(Expression::Error(expression.span())) } else { expression })
     }
 
     fn parse_infix_expression(
@@ -761,10 +767,13 @@ where
                 return Ok(self.create_assignment_expression(lhs, operator, rhs));
             }
             T![".="] => {
-                let operator = AssignmentOperator::Concat(self.consume_operator_span()?);
+                let (operator, refused) = self.consume_operator_span()?;
                 let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+                if refused {
+                    return Ok(self.arena.alloc(Expression::Error(lhs.span().join(rhs.span()))));
+                }
 
-                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+                return Ok(self.create_assignment_expression(lhs, AssignmentOperator::Concat(operator), rhs));
             }
             T!["&"] => {
                 let operator = self.stream.consume_span()?;

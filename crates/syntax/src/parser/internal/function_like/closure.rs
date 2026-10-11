@@ -3,20 +3,23 @@ use crate::cst::cst::AttributeList;
 use crate::cst::cst::Closure;
 use crate::cst::cst::ClosureUseClause;
 use crate::cst::cst::ClosureUseClauseVariable;
+use crate::cst::cst::Expression;
 use crate::cst::sequence::Sequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
 use mago_allocator::prelude::*;
+use mago_span::HasSpan;
 
 impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// Parses a PHP `function` closure. A PHP# file refuses it, so there it stands as an error expression.
     pub(crate) fn parse_closure_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Closure<'arena>, ParseError> {
-        Ok(Closure {
+    ) -> Result<&'arena Expression<'arena>, ParseError> {
+        let closure = Closure {
             attribute_lists: attributes,
             r#static: self.maybe_expect_keyword(T!["static"])?,
             function: Some(self.expect_php_lambda_keyword(T!["function"])?),
@@ -26,7 +29,13 @@ where
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
             arrow: None,
             body: self.parse_block()?,
-        })
+        };
+
+        Ok(self.arena.alloc(if self.dialect.is_sharp() {
+            Expression::Error(closure.span())
+        } else {
+            Expression::Closure(closure)
+        }))
     }
 
     fn parse_optional_closure_use_clause(&mut self) -> Result<Option<ClosureUseClause<'arena>>, ParseError> {

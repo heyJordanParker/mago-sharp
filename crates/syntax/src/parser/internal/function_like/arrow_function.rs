@@ -18,11 +18,12 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// Parses a PHP `fn` arrow function. A PHP# file refuses it, so there it stands as an error expression.
     pub(crate) fn parse_arrow_function_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<ArrowFunction<'arena>, ParseError> {
-        Ok(ArrowFunction {
+    ) -> Result<&'arena Expression<'arena>, ParseError> {
+        let arrow_function = ArrowFunction {
             attribute_lists: attributes,
             r#static: self.maybe_expect_keyword(T!["static"])?,
             r#fn: Some(self.expect_php_lambda_keyword(T!["fn"])?),
@@ -31,7 +32,13 @@ where
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
             arrow: self.stream.eat_span(T!["=>"])?,
             expression: self.arena.alloc(self.parse_expression()?),
-        })
+        };
+
+        Ok(self.arena.alloc(if self.dialect.is_sharp() {
+            Expression::Error(arrow_function.span())
+        } else {
+            Expression::ArrowFunction(arrow_function)
+        }))
     }
 
     /// Whether a PHP# lambda starts here: a bare name, or a parenthesized list, followed by `=>`. A lambda binds as

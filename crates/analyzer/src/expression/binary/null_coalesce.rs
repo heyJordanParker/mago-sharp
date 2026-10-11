@@ -27,6 +27,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::if_scope::IfScope;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::formula::get_formula;
 use crate::reconciler::reconcile_keyed_types;
 use crate::utils::conditional;
@@ -103,6 +104,7 @@ where
         && !lhs_type.possibly_undefined()
         && !lhs_type.possibly_undefined_from_try()
         && !is_static_var
+        && !is_refused_type(lhs_type)
     {
         let lhs_type_str = display_type(context, lhs_type);
         let issue = context.as_null_check_error(
