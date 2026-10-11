@@ -137,7 +137,24 @@ pub fn called_function(node: Node<'_, '_>) -> Option<LocalIdentifier<'static>> {
 /// PHP for a form that tests any other type, so the semantic check refuses it.
 #[must_use]
 pub fn has_type_test(hint: &Hint<'_>) -> bool {
-    scalar_test(hint).is_some() || matches!(hint, Hint::Identifier(_))
+    type_test_of(hint).is_some()
+}
+
+/// The PHP that tests a value against a type.
+enum TypeTest<'arena> {
+    /// A call to the function that tests a scalar type.
+    Scalar(LocalIdentifier<'static>),
+    /// `instanceof` the class.
+    Class(Identifier<'arena>),
+}
+
+/// The PHP test of `hint`, which both `has_type_test` and `php_shape` read, so the checker accepts exactly the types
+/// the bridge lowers.
+fn type_test_of<'arena>(hint: &Hint<'arena>) -> Option<TypeTest<'arena>> {
+    match hint {
+        Hint::Identifier(class) => Some(TypeTest::Class(*class)),
+        hint => scalar_test(hint).map(TypeTest::Scalar),
+    }
 }
 
 /// The function that tests a value against a scalar type, at the type's span.
@@ -462,20 +479,14 @@ where
         hint: &'arena Hint<'arena>,
         operand: &'arena Expression<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
-        if let Some(function) = scalar_test(hint) {
-            return Some(self.call(function, operand));
-        }
-
-        let Hint::Identifier(class) = hint else {
-            return None;
-        };
-        let class = self.alloc(Expression::Identifier(*class));
-
-        Some(self.binary(
-            operand,
-            BinaryOperator::Instanceof(Keyword { span: start_of(hint.span()), value: b"instanceof" }),
-            class,
-        ))
+        Some(match type_test_of(hint)? {
+            TypeTest::Scalar(function) => self.call(function, operand),
+            TypeTest::Class(class) => self.binary(
+                operand,
+                BinaryOperator::Instanceof(Keyword { span: start_of(hint.span()), value: b"instanceof" }),
+                self.alloc(Expression::Identifier(class)),
+            ),
+        })
     }
 
     /// A tested value: itself when it is a local or a parameter, and a hidden `$match#N` otherwise.
