@@ -8,6 +8,7 @@ use mago_bytes::BytesDisplay;
 use mago_bytes::trim_start_byte;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_union_type;
@@ -193,6 +194,7 @@ where
 
     let arg_count = invocation.arguments_source.argument_count();
     let mut analyzed_argument_types = HashMap::default();
+    let mut violated_templates = WordSet::default();
 
     let mut non_closure_arguments = Vec::with_capacity(arg_count);
     let mut closure_arguments = Vec::with_capacity(arg_count);
@@ -286,7 +288,7 @@ where
             };
 
             if parameter_type.has_template_types() {
-                infer_parameter_templates_from_argument(
+                violated_templates.extend(infer_parameter_templates_from_argument(
                     context,
                     &parameter_type,
                     &argument_type.0,
@@ -295,7 +297,7 @@ where
                     argument_type.1,
                     false,
                     invocation.target.get_dialect(),
-                );
+                ));
             }
         }
     }
@@ -432,7 +434,7 @@ where
             && let Some(argument_type) = analyzed_argument_types.get(argument_offset)
             && let Some(base_type) = &base_parameter_type_for_inference
         {
-            infer_parameter_templates_from_argument(
+            violated_templates.extend(infer_parameter_templates_from_argument(
                 context,
                 base_type,
                 &argument_type.0,
@@ -441,7 +443,7 @@ where
                 argument_type.1,
                 true,
                 invocation.target.get_dialect(),
-            );
+            ));
         }
     }
 
@@ -872,7 +874,7 @@ where
                     continue;
                 };
 
-                infer_parameter_templates_from_argument(
+                violated_templates.extend(infer_parameter_templates_from_argument(
                     context,
                     &base_variadic_parameter_type,
                     &unpacked_element_type,
@@ -881,7 +883,7 @@ where
                     argument_expression.span(),
                     false,
                     invocation.target.get_dialect(),
-                );
+                ));
             }
         }
     }
@@ -919,19 +921,29 @@ where
     if let Some(template_types) = function_template_types
         && !template_types.is_empty()
     {
-        let type_arguments = template_types.iter().map(|(template_name, template)| {
-            // A template only a callback binds holds the fallback first, then the callback's bound.
-            let fallbacks = usize::from(unbound_templates.contains(template_name));
+        let type_arguments: Vec<Option<TUnion>> = template_types
+            .iter()
+            .map(|(template_name, template)| {
+                // A template only a callback binds holds the fallback first, then the callback's bound.
+                let fallbacks = usize::from(unbound_templates.contains(template_name));
 
-            template_result
-                .lower_bounds
-                .get(template_name)
-                .and_then(|bounds| bounds.get(&template.defining_entity))
-                .and_then(|bounds| bounds.get(fallbacks..))
-                .filter(|bounds| !bounds.is_empty())
-                .map(|bounds| get_most_specific_type_from_bounds(bounds, context.codebase))
-        });
-        artifacts.record_type_arguments(invocation.span, type_arguments, context.codebase);
+                template_result
+                    .lower_bounds
+                    .get(template_name)
+                    .and_then(|bounds| bounds.get(&template.defining_entity))
+                    .and_then(|bounds| bounds.get(fallbacks..))
+                    .filter(|bounds| !bounds.is_empty())
+                    .map(|bounds| get_most_specific_type_from_bounds(bounds, context.codebase))
+            })
+            .collect();
+        if context.dialect.is_sharp()
+            && let Some(metadata) = invocation.target.get_function_like_metadata()
+            && metadata.flags.is_sharp()
+        {
+            report_unfixed_type_arguments(context, invocation, metadata, &type_arguments, &violated_templates);
+        }
+
+        artifacts.record_type_arguments(invocation.span, type_arguments.into_iter(), context.codebase);
     }
 
     let max_params = invocation.target.parameter_count();
@@ -1290,6 +1302,49 @@ where
     }
 
     Ok(())
+}
+
+/// Spec section 11: a call of a PHP# generic method takes its type arguments from its arguments and from those it
+/// writes. A type argument neither fixes, `None` in `type_arguments`, is refused, as C#'s CS0411, instead of running
+/// with its bound. An argument outside the bound fixes one of `violated_templates`, whose own issue names the bound.
+/// Plain PHP's generics keep their fallback.
+fn report_unfixed_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    metadata: &FunctionLikeMetadata,
+    type_arguments: &[Option<TUnion>],
+    violated_templates: &WordSet,
+) where
+    A: Arena,
+{
+    let unfixed: Vec<String> = metadata
+        .template_types
+        .iter()
+        .zip(type_arguments)
+        .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
+        .map(|((name, _), _)| format!("`{name}`"))
+        .collect();
+    if unfixed.is_empty() {
+        return;
+    }
+
+    let method_name = invocation.target.guess_name(context);
+    let unfixed_arguments = if unfixed.len() == 1 { "argument" } else { "arguments" };
+    let written_arguments = if metadata.template_types.len() == 1 { "argument" } else { "arguments" };
+    let written = metadata.template_types.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>().join(", ");
+    context.collector.report_with_code(
+        IssueCode::MissingTemplateParameter,
+        Issue::error(format!(
+            "Nothing fixes the type {unfixed_arguments} {} of the call to `{method_name}`.",
+            unfixed.join(", ")
+        ))
+        .with_annotation(Annotation::primary(invocation.span).with_message(format!("`{method_name}` is called here")))
+        .with_note("A generic method call takes its type arguments from its arguments and from the ones it writes.")
+        .with_help(format!(
+            "Write the type {written_arguments} on the call, as in `{}<{written}>()`.",
+            metadata.original_name
+        )),
+    );
 }
 
 /// Installs a provider-supplied signature for an explicit callable identity.

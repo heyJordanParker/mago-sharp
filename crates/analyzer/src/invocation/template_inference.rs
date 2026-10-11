@@ -7,6 +7,7 @@ use foldhash::HashMap;
 
 use foldhash::HashSet;
 use mago_word::Word;
+use mago_word::WordSet;
 use mago_word::word;
 
 use mago_codex::metadata::CodebaseMetadata;
@@ -1246,6 +1247,9 @@ pub fn infer_templates_for_method_call<'ctx, A>(
 /// * `is_callable_argument`: A flag indicating if the argument is a callable, which
 ///   can influence inference strategy.
 /// * `target_dialect`: The dialect the call's target is declared in, which `parameter_type` is read in.
+///
+/// Returns the templates the argument falls outside the constraint of. The argument fixes them, though it may add no
+/// bound for them.
 #[allow(clippy::too_many_arguments)]
 pub fn infer_parameter_templates_from_argument<A>(
     context: &mut Context<'_, '_, A>,
@@ -1256,7 +1260,8 @@ pub fn infer_parameter_templates_from_argument<A>(
     argument_span: Span,
     is_callable_argument: bool,
     target_dialect: Dialect,
-) where
+) -> WordSet
+where
     A: Arena,
 {
     let mut violations = vec![];
@@ -1279,8 +1284,10 @@ pub fn infer_parameter_templates_from_argument<A>(
     } else {
         ("template", "Template parameter", "is constrained with", "template constraint")
     };
+    let mut violated_templates = WordSet::default();
     for violation in violations {
         let template_name = violation.template_name;
+        violated_templates.insert(template_name);
         let inferred_bound = display_type(context, &violation.inferred_bound);
         let constraint = display_type(context, &violation.constraint);
 
@@ -1294,6 +1301,8 @@ pub fn infer_parameter_templates_from_argument<A>(
                 .with_help(format!("Ensure the argument's type satisfies the {constraint_kind}.")),
         );
     }
+
+    violated_templates
 }
 
 /// Infers template types for a parameter based on its **default value**.

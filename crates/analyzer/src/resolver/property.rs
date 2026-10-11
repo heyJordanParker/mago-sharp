@@ -42,6 +42,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::dialect::Dialect;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
+use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
@@ -1753,7 +1754,8 @@ where
 
 /// Spec section 14.3: a PHP# generic method's `value` takes its type arguments from the parameter types of the
 /// function type the read at `span` goes into, as C#'s method group conversion does, and the analysis records them at
-/// `span` for the lowering. Returns `value` with them. A type argument nothing fixes is refused, as C#'s CS0411.
+/// `span` for the lowering. Returns `value` with them. A type argument nothing fixes is refused, as C#'s CS0411, and
+/// one a parameter type fixes outside its bound is left to the bound's own issue.
 fn fix_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -1769,6 +1771,7 @@ where
         templates.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
         HashMap::default(),
     );
+    let mut violated_templates = WordSet::default();
     if let Some(function_type) = artifacts.inferred_parameter_types.clone() {
         let signatures = value.types.iter().filter_map(|atomic| match atomic {
             TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
@@ -1778,7 +1781,7 @@ where
             if let (Some(parameter_type), Some(function_parameter_type)) =
                 (parameter.get_type_signature(), function_type.get(&index))
             {
-                infer_parameter_templates_from_argument(
+                violated_templates.extend(infer_parameter_templates_from_argument(
                     context,
                     parameter_type,
                     function_parameter_type,
@@ -1787,7 +1790,7 @@ where
                     span,
                     false,
                     Dialect::Sharp,
-                );
+                ));
             }
         }
     }
@@ -1806,7 +1809,7 @@ where
     let unfixed: Vec<String> = templates
         .iter()
         .zip(&type_arguments)
-        .filter(|(_, type_argument)| type_argument.is_none())
+        .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
         .map(|((name, _), _)| format!("`{name}`"))
         .collect();
     if !unfixed.is_empty() {

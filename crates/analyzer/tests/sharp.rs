@@ -8728,6 +8728,87 @@ fn a_generic_method_value_without_a_function_type_is_refused() {
     );
 }
 
+/// A function type that fixes a method value's type argument outside its bound gets the bound's issue alone: the
+/// type argument is fixed, so nothing is left to refuse as unfixed. The PHP twin keeps Mago's issues.
+#[test]
+fn a_generic_method_value_fixed_outside_its_bound_names_only_the_bound() {
+    let php = "<?php\n\nnamespace Demo;\n\nabstract class DatabaseEntity\n{\n}\n\nclass Line\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T of DatabaseEntity\n     * @param T $item\n     * @return Box<T>\n     */\n    public function box(DatabaseEntity $item): Box\n    {\n        return new Box();\n    }\n\n    /** @return Box<Line> */\n    public function run(Line $line): Box\n    {\n        /** @var \\Closure(Line): Box<Line> $make */\n        $make = $this->box(...);\n        return $make($line);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Line\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> box<T : DatabaseEntity>(T item) => new Box<T>();\n\n    public Box<Line> run(Line line)\n    {\n        Function<Box<Line>(Line)> make = this.box;\n        return make(line);\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.php", php), &[]),
+        [
+            "38:18 docblock-type-mismatch Docblock type mismatch for variable `$make`. Change the assigned value to match `(closure(Demo\\Line): Demo\\Box<Demo\\Line>)`, or update the `@var` tag to a compatible type."
+        ]
+    );
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "22:42 template-constraint-violation Argument type mismatch for type parameter `T`. Ensure the argument's type satisfies the bound.",
+            "22:42 invalid-local-assignment-value Invalid assignment to `make`: it is declared as `Function<Box<Line>(Line)>`. Assign a `Function<Box<Line>(Line)>` value, or change the type `make` is declared with.",
+        ]
+    );
+}
+
+/// A call of a generic method whose type argument nothing fixes is refused, as C#'s CS0411 refuses it, instead of
+/// running with the type parameter's bound. Plain PHP's generics keep their fallback, so the PHP twin keeps Mago's
+/// issues.
+#[test]
+fn a_generic_call_nothing_fixes_is_refused() {
+    let php = "<?php\n\nnamespace Demo;\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    public function run(): void\n    {\n        $box = $this->make();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> make<T>() => new Box<T>();\n\n    public void run()\n    {\n        let box = this.make();\n    }\n}\n";
+
+    assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "14:19 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.make`. Write the type argument on the call, as in `make<T>()`."
+        ]
+    );
+}
+
+/// A static generic method is refused as an instance one is. PHP# has no top-level functions, so a static method is
+/// its only other generic call. The PHP twin keeps Mago's issues.
+#[test]
+fn a_generic_static_call_nothing_fixes_is_refused() {
+    let php = "<?php\n\nnamespace Demo;\n\n/**\n * @template TFirst\n * @template TSecond\n */\nclass Pair\n{\n    /** @return TFirst|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n\n    /** @return TSecond|null */\n    public function second(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template TFirst\n     * @template TSecond\n     * @return Pair<TFirst, TSecond>\n     */\n    public static function pair(): Pair\n    {\n        return new Pair();\n    }\n\n    public static function run(): void\n    {\n        $pair = Report::pair();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public TFirst? first() => null;\n\n    public TSecond? second() => null;\n}\n\npublic class Report\n{\n    public static Pair<TFirst, TSecond> pair<TFirst, TSecond>() => new Pair<TFirst, TSecond>();\n\n    public static void run()\n    {\n        let pair = Report.pair();\n    }\n}\n";
+
+    assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "16:20 missing-template-parameter Nothing fixes the type arguments `TFirst`, `TSecond` of the call to `Report.pair`. Write the type arguments on the call, as in `pair<TFirst, TSecond>()`."
+        ]
+    );
+}
+
+/// The type argument a call writes fixes it, on an instance and a static method alike. The PHP twin, which cannot
+/// write type arguments on a call, keeps Mago's issues for the call without them.
+#[test]
+fn a_generic_call_takes_the_type_argument_it_writes() {
+    let php = "<?php\n\nnamespace Demo;\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    public function run(): void\n    {\n        $box = $this->make();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> make<T>() => new Box<T>();\n\n    public static Box<T> made<T>() => new Box<T>();\n\n    public void run()\n    {\n        let box = this.make<Order>();\n        let made = Report.made<Order>();\n    }\n}\n";
+    let analyzed = ("src/Demo/Report.sharp", sharp);
+
+    assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "this.make<Order>()"), ["Demo\\Order"]);
+    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "Report.made<Order>()"), ["Demo\\Order"]);
+}
+
+/// An argument fixes the type argument of a call. The PHP twin keeps Mago's issues.
+#[test]
+fn a_generic_call_takes_the_type_argument_an_argument_fixes() {
+    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @param T $item\n     * @return Box<T>\n     */\n    public function wrap(mixed $item): Box\n    {\n        return new Box();\n    }\n\n    public function run(Order $order): void\n    {\n        $box = $this->wrap($order);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> wrap<T>(T item) => new Box<T>();\n\n    public void run(Order order)\n    {\n        let box = this.wrap(order);\n    }\n}\n";
+
+    assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        recorded_type_arguments(("src/Demo/Report.sharp", sharp), "<?php\n", "this.wrap(order)"),
+        ["Demo\\Order"]
+    );
+}
+
 /// A PHP conditional return type compares its subject and target as the receiver gives them, spec section 11.
 /// `picker.pick(apple)` on a `Picker` whose `pick` returns `($fruit is Apple ? int : string)` is an `int`, and
 /// `picker.pickClass(typeof(Apple))` against `class-string<Apple>` is an `int` too. A `static` target is the receiver's
