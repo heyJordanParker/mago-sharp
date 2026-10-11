@@ -329,14 +329,23 @@ mod tests {
                 GenericParent::ClassLike(word("Box")),
             )))
         };
-        let string_or_int = TUnion::from_vec(vec![get_string().get_single().clone(), get_int().get_single().clone()]);
+        let string = get_string().get_single().clone();
+        let int = get_int().get_single().clone();
 
         let mut int_result = ComparisonResult::with_sharp_rules(true);
         assert_is_contained_by(&codebase, &template(get_int()), &get_float(), false, &mut int_result);
         assert_eq!(int_result.int_for_float, Some(TInteger::Unspecified));
 
-        let mut string_or_int_result = ComparisonResult::with_sharp_rules(true);
-        assert_is_contained_by(&codebase, &template(string_or_int), &get_float(), false, &mut string_or_int_result);
-        assert_eq!(string_or_int_result.int_for_float, None);
+        for constraint in [vec![string.clone(), int.clone()], vec![int, string]] {
+            let mut result = ComparisonResult::with_sharp_rules(true);
+            assert_is_contained_by(
+                &codebase,
+                &template(TUnion::new(Cow::Owned(constraint))),
+                &get_float(),
+                false,
+                &mut result,
+            );
+            assert_eq!(result.int_for_float, None);
+        }
     }
 }
