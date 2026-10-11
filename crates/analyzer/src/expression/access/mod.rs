@@ -34,6 +34,7 @@ use crate::resolver::property::resolve_method_value;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::get_bare_name_variable_id;
+use crate::utils::names::display_class_like_name;
 
 pub mod class_constant_access;
 pub mod property_access;
@@ -298,7 +299,11 @@ where
         .iter()
         .enumerate()
         .filter_map(|(index, kind_name)| {
-            let classes: Vec<Word> = kinds.iter().filter(|(kind, _)| *kind == index).map(|(_, class)| *class).collect();
+            let classes: Vec<Word> = kinds
+                .iter()
+                .filter(|(kind, _)| *kind == index)
+                .map(|(_, class)| display_class_like_name(context, *class))
+                .collect();
 
             (!classes.is_empty()).then(|| format!("a {kind_name} on {}", and_list(&classes)))
         })

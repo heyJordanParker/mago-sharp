@@ -1234,25 +1234,29 @@ where
 
                 if should_report_error {
                     let never = display_bool(context, false);
+                    // PHP# has no `isset`: a `.sharp` file reaches this check through the `??` or test it wrote.
+                    let (check, checked, checking) = if context.dialect.is_sharp() {
+                        ("check", "A check", "checking it")
+                    } else {
+                        ("`isset` check", "`isset`", "checking `isset`")
+                    };
                     context.collector.report_with_code(
                         IssueCode::ImpossibleNonnullEntryCheck,
                         Issue::warning(format!(
-                            "Impossible `isset` check on key `{}` accessed on `{}`.",
+                            "Impossible {check} on key `{}` accessed on `{}`.",
                             array_key,
                             display_atomic(context, &TAtomic::Array(TArray::Keyed(keyed_array.clone())))
                         ))
                         .with_annotation(
                             Annotation::primary(span)
-                                .with_message(format!("`isset` on key `{array_key}` will always be {never} here."))
+                                .with_message(format!("{checked} on key `{array_key}` will always be {never} here."))
                         )
                         .with_note(
                             format!(
-                                "The analysis determined that the key `{array_key}` definitely does not exist in this array, so checking `isset` is unnecessary."
+                                "The analysis determined that the key `{array_key}` definitely does not exist in this array, so {checking} is unnecessary."
                             )
                         )
-                        .with_help(
-                            "Remove the redundant `isset` check."
-                        ),
+                        .with_help(format!("Remove the redundant {check}.")),
                     );
                 }
 
