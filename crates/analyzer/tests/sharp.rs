@@ -3178,12 +3178,63 @@ fn sorted_by_in_a_loop_is_refused_once() {
 }
 
 /// `sortedBy` by a number, a string or an instance of a class that declares `operator <=>` still orders, and so does a
-/// key that may be `null`.
+/// key of each that may be `null`, as a `null` key sorts first. A `.php` call of the same method keeps PHP's report.
 #[test]
 fn sorted_by_a_number_a_string_or_a_class_declaring_operator_spaceship_still_orders() {
-    let sharp = "namespace App;\n\npublic class Ranking\n{\n    public List<int> a(List<int> numbers) => numbers.sortedBy(n => -n);\n\n    public List<float> b(List<float> ratios) => ratios.sortedBy(r => r);\n\n    public List<string> c(List<string> names) => names.sortedBy(n => n);\n\n    public List<int?> d(List<int?> counts) => counts.sortedBy(c => c);\n\n    public List<Money> e(List<Money> prices) => prices.sortedBy(p => p);\n}\n";
+    let sharp = "namespace App;\n\npublic class Ranking\n{\n    public List<int> a(List<int> numbers) => numbers.sortedBy(n => -n);\n\n    public List<float> b(List<float> ratios) => ratios.sortedBy(r => r);\n\n    public List<string> c(List<string> names) => names.sortedBy(n => n);\n\n    public List<int?> d(List<int?> counts) => counts.sortedBy(c => c);\n\n    public List<Money> e(List<Money> prices) => prices.sortedBy(p => p);\n\n    public List<string?> f(List<string?> names) => names.sortedBy(n => n);\n\n    public List<Money?> g(List<Money?> prices) => prices.sortedBy(p => p);\n}\n";
+    let php = "<?php\n\nnamespace App;\n\nuse Sharp\\ListMethods;\n\nfinal class Ranking\n{\n    /**\n     * @param ListMethods<?int> $counts\n     *\n     * @return list<?int>\n     */\n    public function d(ListMethods $counts): array\n    {\n        return $counts->sortedBy(fn (?int $c): ?int => $c);\n    }\n\n    /**\n     * @param ListMethods<?string> $names\n     *\n     * @return list<?string>\n     */\n    public function f(ListMethods $names): array\n    {\n        return $names->sortedBy(fn (?string $n): ?string => $n);\n    }\n\n    /**\n     * @param ListMethods<?Money> $prices\n     *\n     * @return list<?Money>\n     */\n    public function g(ListMethods $prices): array\n    {\n        return $prices->sortedBy(fn (?Money $p): ?Money => $p);\n    }\n}\n";
 
+    assert_eq!(worded(("src/App/Ranking.php", php), &[MONEY_OPERATORS]), Vec::<String>::new());
     assert_eq!(errors(("src/App/Ranking.sharp", sharp), &[MONEY_OPERATORS]), Vec::<String>::new());
+}
+
+/// A key that may be one of two types that never match has no order, so `sortedBy` refuses it as `<` refuses two such
+/// values, a `null` key aside. A `.php` call of the same method keeps PHP's report.
+#[test]
+fn sorted_by_a_key_of_two_types_that_never_match_is_refused_as_less_than_refuses_it() {
+    let row = "<?php\n\nnamespace Demo;\n\nfinal class Row\n{\n    public int|string $code = 0;\n\n    public int|string|null $label = null;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public List<Row> a(List<Row> rows) => rows.sortedBy(r => r.code);\n\n    public List<Row> b(List<Row> rows) => rows.sortedBy(r => r.label);\n\n    public bool c(Row left, Row right) => left.code < right.code;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Report\n{\n    /**\n     * @param ListMethods<Row> $rows\n     *\n     * @return list<Row>\n     */\n    public function a(ListMethods $rows): array\n    {\n        return $rows->sortedBy(fn (Row $r): int|string => $r->code);\n    }\n\n    public function c(Row $left, Row $right): bool\n    {\n        return $left->code < $right->code;\n    }\n}\n";
+    let others = [("src/Demo/Row.php", row)];
+
+    assert_eq!(worded(("src/Demo/Report.php", php), &others), Vec::<String>::new());
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &others),
+        [
+            "5:57 invalid-argument `sortedBy` cannot compare two keys of `int|string`. | This returns `int|string`. | PHP# compares values strictly, so values of two different types never match. | Convert the key so every key has the same type.",
+            "7:57 invalid-argument `sortedBy` cannot compare two keys of `int|string`. | This returns `(int|string)?`. | PHP# compares values strictly, so values of two different types never match. | Convert the key so every key has the same type.",
+            "9:43 invalid-operand `<` cannot compare `int|string` with `int|string`. | This is `int|string`. | This is `int|string`. | PHP# compares values strictly, so values of two different types never match. | Convert one side so both sides have the same type.",
+        ]
+    );
+}
+
+/// `<` on two `Any` or two `Any?` values reports each side, as an `Any` must be checked with `is` first, so a `sortedBy`
+/// key of `Any` or `Any?` gets the same report, a `null` key aside. A `.php` call of the same method keeps PHP's report.
+#[test]
+fn sorted_by_an_any_key_reports_what_less_than_reports_on_two_any_values() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool a(Any left, Any right) => left < right;\n\n    public bool b(Any? left, Any? right) => left < right;\n\n    public List<Any> c(List<Any> values) => values.sortedBy(v => v);\n\n    public List<Any?> d(List<Any?> values) => values.sortedBy(v => v);\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param ListMethods<mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(ListMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
+    let mixed = |at: &str, subject: &str, op: &str| {
+        format!(
+            "{at} mixed-operand {subject} has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `{op}` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
+        )
+    };
+
+    assert_eq!(
+        worded(("src/Demo/Report.php", php), &[]),
+        [mixed("11:16", "Left operand in `<` comparison", "<"), mixed("11:24", "Right operand in `<` comparison", "<")]
+    );
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            mixed("5:43", "Left operand in `<` comparison", "<"),
+            mixed("5:50", "Right operand in `<` comparison", "<"),
+            mixed("7:45", "Left operand in `<` comparison", "<"),
+            mixed("7:52", "Right operand in `<` comparison", "<"),
+            mixed("9:61", "The `sortedBy` key", "<"),
+            mixed("11:63", "The `sortedBy` key", "<"),
+        ]
+    );
 }
 
 /// Spec section 19: `==` and `!=` on a nullable type are lifted, so null equals only null, and an `Any?` compares by
