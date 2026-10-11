@@ -5207,6 +5207,18 @@ fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_an_error_after_it_holds_the
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
 }
 
+/// A local that may be a `Set` or a `Map` is refused an index once by the `Set`, whatever the key: the `Map` checks no
+/// key for an index that cannot exist. PHP reads either array by any key.
+#[test]
+fn an_index_of_a_local_that_may_be_a_set_or_a_map_is_refused_once_whatever_its_key() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        int handled = tags[0] ?? 0;\n        return tags[0] + handled;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /**\n     * @param array<int, int> $ids\n     * @param array<string, int> $counts\n     */\n    public function run(bool $ready, array $ids, array $counts): int\n    {\n        $tags = $ready ? $ids : $counts;\n        $handled = $tags[0] ?? 0;\n        return ($tags[1] ?? 0) + $handled;\n    }\n}\n";
+
+    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
+    assert_eq!(refusals(("src/Demo/Tags.sharp", sharp), &[]), [format!("8:23 {no_index}"), format!("9:16 {no_index}")]);
+    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+}
+
 /// Pin: a local that may be a `List` or a `Map` has an index, so it is read as the `Map`: a bare read is refused and a
 /// read handled with `??` compiles. PHP reads an index of either array.
 #[test]
@@ -6426,6 +6438,27 @@ fn an_index_of_a_set_is_an_error() {
         [
             "7:9 invalid-array-access A `Set<string>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.",
             "8:16 invalid-array-access A `Set<string>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.",
+        ]
+    );
+    assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());
+}
+
+/// `??=`, `+=` and `++` read an index, then write it, and a `Set` has no index, so each is refused once. PHP reads and
+/// writes the index of its array.
+#[test]
+fn a_compound_assignment_or_increment_on_an_index_of_a_set_is_refused_once() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void bump(Set<int> ids, int times)\n    {\n        ids[1] ??= 1;\n        ids[2] += 1;\n        ids[3]++;\n        for (let i = 0; i < times; i++) {\n            ids[4] = 1;\n            ids[5] += 1;\n        }\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param array<int, int> $ids */\n    public function bump(array $ids, int $times): void\n    {\n        $ids[1] ??= 1;\n        $ids[2] = ($ids[2] ?? 0) + 1;\n        $ids[3] = ($ids[3] ?? 0) + 1;\n        for ($i = 0; $i < $times; $i++) {\n            $ids[4] = 1;\n            $ids[5] = ($ids[5] ?? 0) + 1;\n        }\n    }\n}\n";
+
+    let no_index = "invalid-array-access A `Set<int>` has no index. | Test an element with `set.contains(x)`, add one with `set.add(x)`, or read each one with `for (const x of set)`.";
+    assert_eq!(
+        refusals(("src/Demo/Tags.sharp", sharp), &[]),
+        [
+            format!("7:9 {no_index}"),
+            format!("8:9 {no_index}"),
+            format!("9:9 {no_index}"),
+            format!("11:13 {no_index}"),
+            format!("12:13 {no_index}"),
         ]
     );
     assert_eq!(issues(("src/Demo/Tags.php", php), &[]), Vec::<String>::new());

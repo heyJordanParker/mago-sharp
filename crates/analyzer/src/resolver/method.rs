@@ -1201,9 +1201,10 @@ where
         return None;
     }
 
-    let kind = |array: &TArray| (array.is_list(), array.is_keyed());
     let held = |declared: &TArray| {
-        value_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(array) if kind(array) == kind(declared)))
+        value_type.types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::Array(array) if std::mem::discriminant(array) == std::mem::discriminant(declared))
+        })
     };
     let declared = get_declared_collection(context, block_context, artifacts, object)?;
     let missing: Vec<TAtomic> = declared
