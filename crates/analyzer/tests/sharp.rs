@@ -5228,6 +5228,46 @@ fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() 
     );
 }
 
+/// Spec section 29: a function type without `uses` is pure, so it holds no function value with an effect, whether the
+/// value is assigned, passed or returned, and a function type that uses `Mail` holds none that uses `Http`. PHP closures
+/// carry no effects, so the PHP twin is checked as before.
+#[test]
+fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing(Function<int(int) uses Http> fetch)\n    {\n        this.rate = fetch;\n        Function<int(int)> local = fetch;\n        Pricing.apply(fetch);\n        Pricing.mail(fetch);\n    }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static int mail(Function<int(int) uses Mail> step) => step(1);\n\n    public Function<int(int)> current(Function<int(int) uses Http> fetch) => fetch;\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    /** @param \\Closure(int): int $fetch */\n    public function __construct(\\Closure $fetch)\n    {\n        $this->rate = $fetch;\n        self::apply($fetch);\n    }\n\n    /** @param \\Closure(int): int $step */\n    public static function apply(\\Closure $step): int { return $step(1); }\n\n    /**\n     * @param \\Closure(int): int $fetch\n     * @return \\Closure(int): int\n     */\n    public function current(\\Closure $fetch): \\Closure { return $fetch; }\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Pricing.php", php), &[]), Vec::<String>::new());
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect::<Vec<_>>(),
+        [
+            "9:21 invalid-property-assignment-value Invalid type for property `Pricing.rate`: expected `Function<int(int)>`, but got `Function<int(int) uses Http>`.",
+            "10:36 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Function<int(int)>`.",
+            "11:23 invalid-argument Invalid argument type for argument #1 of `Pricing.apply`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
+            "12:22 invalid-argument Invalid argument type for argument #1 of `Pricing.mail`: expected `Function<int(int) uses Mail>`, but found `Function<int(int) uses Http>`.",
+            "19:78 invalid-return-statement Invalid return type for method `Pricing.current`: expected `Function<int(int)>`, but found `Function<int(int) uses Http>`.",
+        ]
+    );
+}
+
+/// A function type that lists more effects than a function value uses holds it, as a wider type holds a narrower value.
+#[test]
+fn a_function_type_holds_a_function_value_whose_effects_it_lists() {
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http, Mail> rate;\n\n    public Pricing(Function<int(int) uses Http> fetch)\n    {\n        this.rate = fetch;\n    }\n\n    public Function<int(int) uses Mail, Http> current(Function<int(int) uses Http> fetch) => fetch;\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Pricing.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A pure function value has no effect, so every function type holds it.
+#[test]
+fn a_function_type_with_an_effect_holds_a_pure_function_value() {
+    let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate;\n\n    public Pricing(Function<int(int)> fixed)\n    {\n        this.rate = fixed;\n    }\n\n    public static int apply(Function<int(int) uses Http> step) => step(1);\n\n    public int run(Function<int(int)> fixed) => Pricing.apply(fixed);\n}\n";
+
+    assert_eq!(issues(("src/App/Shop/Pricing.sharp", sharp), &[]), Vec::<String>::new());
+}
+
 /// A `Function` value keeps the collections its parameters declare when a `let` local copies it, when a template
 /// passes it through, and when a `List` of `Function` values gives it back.
 #[test]
@@ -8300,6 +8340,100 @@ fn a_getter_calling_a_property_holding_a_function_type_passes() {
     );
 
     assert_eq!(effect_issues(&[pricing]), Vec::<String>::new());
+}
+
+/// A plain PHP `fetch`, which its `extern` gives the effect `Http`.
+const FETCH: (&str, &str) = ("src/fetch.php", "<?php\n\nfunction fetch(int $id): int\n{\n    return $id;\n}\n");
+
+const FETCH_STUB: (&str, &str) = ("app/Stubs/Fetch.sharp", "namespace App.Stubs;\n\nextern fetch uses Http;\n");
+
+/// Spec section 29: a call through a function value has the effects its function type lists, whether the value is a
+/// field, a parameter or a local, so a getter calling one that uses `Database` is refused and names `Database`.
+#[test]
+fn a_getter_calling_a_function_value_with_an_effect_is_refused_naming_the_effect() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Function<int(int) uses Database> rate) { }\n\n    public int price => this.rate(2);\n\n    public int total => this.apply(this.rate);\n\n    public int stored\n    {\n        get\n        {\n            Function<int(int) uses Database> lookup = this.rate;\n            return lookup(3);\n        }\n    }\n\n    public int apply(Function<int(int) uses Database> step) => step(1);\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing]),
+        [
+            "app/Shop/Pricing.sharp:7:26 impure-getter: Getter `price` calls `Pricing.rate`, which has the effect `Database`. Getters must be pure.",
+            "app/Shop/Pricing.sharp:9:26 impure-getter: Getter `total` reaches `Pricing.apply`, which calls `step` with the effect `Database`. Getters must be pure.",
+            "app/Shop/Pricing.sharp:16:20 impure-getter: Getter `stored` calls `lookup`, which has the effect `Database`. Getters must be pure.",
+        ]
+    );
+}
+
+/// A law takes a function value as any parameter, and calling it has the effects its function type lists.
+#[test]
+fn a_law_calling_a_function_value_with_the_effect_clock_is_refused() {
+    let rule = (
+        "app/Shop/Rule.sharp",
+        "namespace App.Shop;\n\npublic class Rule\n{\n    law positive(Function<int() uses Clock> clock) => clock() > 0;\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[rule]),
+        [
+            "app/Shop/Rule.sharp:5:55 impure-law: Law `positive` calls `clock`, which has the effect `Clock`. Laws hold only over pure code."
+        ]
+    );
+}
+
+/// Spec section 29 holds every implementation to what its declaration allows, so a lambda stored where a pure function
+/// type is declared may have no effect. The solve knows a lambda's effects only after every file is analyzed, so the
+/// refusal names the call that has the effect. The PHP twin's closure carries no effects and is checked as before.
+#[test]
+fn a_lambda_with_an_effect_stored_in_a_pure_function_type_is_refused() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing()\n    {\n        this.rate = n => fetch(n);\n    }\n\n    public int price() => this.rate(2);\n}\n",
+    );
+    let php = (
+        "app/Shop/Pricing.php",
+        "<?php\n\nnamespace App\\Shop;\n\nclass Pricing\n{\n    /** @var \\Closure(int): int */\n    private \\Closure $rate;\n\n    public function __construct()\n    {\n        $this->rate = fn (int $n): int => fetch($n);\n    }\n\n    public function price(): int { return ($this->rate)(2); }\n}\n",
+    );
+
+    assert_eq!(issues(php, &[FETCH]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[php, FETCH]), Vec::<String>::new());
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/Pricing.sharp:9:21 invalid-property-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
+}
+
+#[test]
+fn a_lambda_with_an_effect_stored_in_a_function_type_that_lists_it_passes() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int) uses Http> rate;\n\n    public Pricing()\n    {\n        this.rate = n => fetch(n);\n    }\n\n    public int price() => this.rate(2);\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[pricing, FETCH, FETCH_STUB]), Vec::<String>::new());
+}
+
+/// A method value runs the method's body, so a function type holds it only when it lists the method's effects.
+#[test]
+fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_is_refused() {
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int live(int n) => fetch(n);\n\n    public int fixed(int n) => n;\n\n    public int run() => Pricing.apply(this.live) + Pricing.apply(this.fixed);\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[FETCH, FETCH_STUB]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
 }
 
 const HOLDER: (&str, &str) = (
