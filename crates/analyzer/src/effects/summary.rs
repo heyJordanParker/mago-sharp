@@ -739,8 +739,9 @@ where
         }
     }
 
-    /// Records a `new`: a PHP# class runs its constructor's body on a fresh object, and plain PHP has the effects
-    /// its `extern` declares.
+    /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
+    /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
+    /// the class `new` names decides when no class declares one.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
         let class_name = match instantiation.class.unparenthesized() {
@@ -755,13 +756,12 @@ where
 
         let span = instantiation.span();
         let constructor = word(b"__construct");
-        if class.flags.is_sharp() {
-            let Some(declaring_class) =
-                codebase.get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
-            else {
-                return;
-            };
-            let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), constructor.as_bytes()) else {
+        let declaring = codebase
+            .get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
+            .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
+            .unwrap_or(class);
+        if declaring.flags.is_sharp() {
+            let Some(metadata) = codebase.get_method(declaring.name.as_bytes(), constructor.as_bytes()) else {
                 return;
             };
 
@@ -770,11 +770,11 @@ where
                 .as_ref()
                 .map(|arguments| self.argument_roots(arguments, &metadata.parameters))
                 .unwrap_or_default();
-            let callee = Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), constructor);
+            let callee = Body::Method(ascii_lowercase_word(declaring.name.as_bytes()), constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
-            self.plain_php(declaration, span, (class.original_name, empty_word()));
+            self.plain_php(declaration, span, (declaring.original_name, empty_word()));
         }
     }
 

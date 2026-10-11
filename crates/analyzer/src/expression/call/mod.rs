@@ -529,7 +529,25 @@ where
         });
 
     let Some(metadata) = metadata else {
-        if !skip_error_on_not_found {
+        if !skip_error_on_not_found && context.dialect.is_sharp() {
+            let title_str = function_like.title_kind_str();
+            let kind_str = function_like.kind_str();
+            // A `.sharp` file calls a function by its bare name, the global name PHP's fallback tries.
+            let name_str = display_function_like_identifier(context, &alternative.unwrap_or(function_like));
+
+            context.collector.report_with_code(
+                IssueCode::NonExistentFunction,
+                Issue::error(format!("{title_str} `{name_str}` could not be found."))
+                    .with_annotation(
+                        Annotation::primary(span)
+                            .with_message(format!("Undefined {kind_str} `{name_str}` called here")),
+                    )
+                    .with_note(format!("This often means the {kind_str} is misspelled, or not defined or autoloaded."))
+                    .with_help(format!(
+                        "Check the spelling of `{name_str}`, or declare `function {name_str}()` in a `.php` file outside any namespace."
+                    )),
+            );
+        } else if !skip_error_on_not_found {
             let title_str = function_like.title_kind_str();
             let kind_str = function_like.kind_str();
             let name_str = display_function_like_identifier(context, &function_like);

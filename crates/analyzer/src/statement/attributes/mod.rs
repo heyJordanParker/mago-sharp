@@ -218,9 +218,31 @@ where
         if let Some(first_usage_span) = used_attributes.get(&attribute_name_bytes)
             && !attribute_flags.is_repeatable()
         {
+            // The attribute class may be written in either dialect, so a PHP# message names no PHP code to add to it.
+            let (note, help) = if context.dialect.is_sharp() {
+                (
+                    format!(
+                        "The attribute `{attribute_name}` is not declared repeatable, so it applies once to a given target."
+                    ),
+                    format!(
+                        "Remove this duplicate `{attribute_name}` attribute, or declare the attribute class `{attribute_name}` repeatable."
+                    ),
+                )
+            } else {
+                (
+                    format!(
+                        "The attribute `{attribute_name}` is not declared with `Attribute::IS_REPEATABLE` in its `#[Attribute]` flags. Non-repeatable attributes can only be applied once to a given target (e.g., a class, method, property)."
+                    ),
+                    format!(
+                        "Remove this duplicate `{attribute_name}` attribute, or if multiple instances are intended and valid, modify the attribute class `{attribute_name}` to include `Attribute::IS_REPEATABLE` in its `#[Attribute]` declaration (e.g., `#[Attribute(Attribute::TARGET_ALL | Attribute::IS_REPEATABLE)]`)."
+                    ),
+                )
+            };
             context.collector.report_with_code(
                 IssueCode::AttributeNotRepeatable,
-                Issue::error(format!("Attribute `{attribute_name}` is not declared as repeatable and has already been used."))
+                Issue::error(format!(
+                    "Attribute `{attribute_name}` is not declared as repeatable and has already been used."
+                ))
                 .with_annotation(
                     Annotation::primary(attribute.name.span())
                         .with_message(format!("Duplicate use of non-repeatable attribute `{attribute_name}`")),
@@ -229,12 +251,8 @@ where
                     Annotation::secondary(*first_usage_span)
                         .with_message(format!("Attribute `{attribute_name}` was first used here")),
                 )
-                .with_note(format!(
-                    "The attribute `{attribute_name}` is not declared with `Attribute::IS_REPEATABLE` in its `#[Attribute]` flags. Non-repeatable attributes can only be applied once to a given target (e.g., a class, method, property).",
-                ))
-                .with_help(format!(
-                    "Remove this duplicate `{attribute_name}` attribute, or if multiple instances are intended and valid, modify the attribute class `{attribute_name}` to include `Attribute::IS_REPEATABLE` in its `#[Attribute]` declaration (e.g., `#[Attribute(Attribute::TARGET_ALL | Attribute::IS_REPEATABLE)]`).",
-                )),
+                .with_note(note)
+                .with_help(help),
             );
         }
 

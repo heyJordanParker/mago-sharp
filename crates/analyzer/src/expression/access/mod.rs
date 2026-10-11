@@ -36,6 +36,7 @@ use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::and_list;
+use crate::utils::names::display_class_like_name;
 use mago_names::short_name;
 
 pub mod class_constant_access;
@@ -301,7 +302,11 @@ where
         .iter()
         .enumerate()
         .filter_map(|(index, kind_name)| {
-            let classes: Vec<Word> = kinds.iter().filter(|(kind, _)| *kind == index).map(|(_, class)| *class).collect();
+            let classes: Vec<Word> = kinds
+                .iter()
+                .filter(|(kind, _)| *kind == index)
+                .map(|(_, class)| display_class_like_name(context, *class))
+                .collect();
 
             (!classes.is_empty()).then(|| format!("a {kind_name} on {}", and_list(&classes)))
         })

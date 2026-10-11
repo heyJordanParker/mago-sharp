@@ -324,8 +324,20 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
                             invalid_operand_messages.push(("Cannot negate `resource`".to_string(), operand_span));
                         }
                         TAtomic::Mixed(_) => {
-                            context.collector.report_with_code(
-                                IssueCode::MixedOperand,
+                            let issue = if context.dialect.is_sharp() {
+                                let operand_name = display_atomic(context, operand_part);
+                                Issue::error(format!("Cannot reliably negate an `{operand_name}` operand."))
+                                    .with_annotation(
+                                        Annotation::primary(operand_span)
+                                            .with_message(format!("Operand is `{operand_name}`.")),
+                                    )
+                                    .with_note(
+                                        "An `Any` may hold any value, so negating it is unsafe until it is checked.",
+                                    )
+                                    .with_help(
+                                        "Check the operand with `is` or `match` first, as in `if (value is int n)`, and negate `n`.",
+                                    )
+                            } else {
                                 Issue::error("Cannot reliably negate a `mixed` operand.")
                                     .with_annotation(
                                         Annotation::primary(operand_span)
@@ -336,8 +348,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
                                     )
                                     .with_help(
                                         "Ensure the operand has a known type (e.g., `int`, `float`) using type hints, assertions, or checks.",
-                                    ),
-                            );
+                                    )
+                            };
+                            context.collector.report_with_code(IssueCode::MixedOperand, issue);
                             resulting_types.push(TAtomic::Scalar(TScalar::int()));
                             resulting_types.push(TAtomic::Scalar(TScalar::float()));
                         }
@@ -826,9 +839,18 @@ where
             }
             // A refused operand has no value, and its refusal is its only report.
             TAtomic::Error => possibilities.push(TAtomic::Error),
-            TAtomic::Mixed(_) => {
-                context.collector.report_with_code(
-                    IssueCode::MixedOperand,
+            TAtomic::Mixed(mixed) => {
+                let issue = if context.dialect.is_sharp() {
+                    let operand_name = display_atomic(context, &TAtomic::Mixed(*mixed));
+                    Issue::error(format!("Cannot reliably increment an `{operand_name}` operand."))
+                        .with_annotation(
+                            Annotation::primary(operand.span()).with_message(format!("Operand is `{operand_name}`.")),
+                        )
+                        .with_note("An `Any` may hold any value, so incrementing it is unsafe until it is checked.")
+                        .with_help(
+                            "Check the operand with `is` or `match` first, as in `if (value is int n)`, and write `value = n + 1`.",
+                        )
+                } else {
                     Issue::error("Cannot reliably increment a `mixed` operand.")
                         .with_annotation(
                             Annotation::primary(operand.span()).with_message("Operand is `mixed`."),
@@ -838,8 +860,9 @@ where
                         )
                         .with_help(
                             "Ensure the operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks.",
-                        ),
-                );
+                        )
+                };
+                context.collector.report_with_code(IssueCode::MixedOperand, issue);
 
                 possibilities.push(TAtomic::Mixed(TMixed::new()));
             }
@@ -1065,9 +1088,18 @@ where
             }
             // A refused operand has no value, and its refusal is its only report.
             TAtomic::Error => possibilities.push(TAtomic::Error),
-            TAtomic::Mixed(_) => {
-                context.collector.report_with_code(
-                    IssueCode::MixedOperand,
+            TAtomic::Mixed(mixed) => {
+                let issue = if context.dialect.is_sharp() {
+                    let operand_name = display_atomic(context, &TAtomic::Mixed(*mixed));
+                    Issue::error(format!("Cannot reliably decrement an `{operand_name}` operand."))
+                        .with_annotation(
+                            Annotation::primary(operand.span()).with_message(format!("Operand is `{operand_name}`.")),
+                        )
+                        .with_note("An `Any` may hold any value, so decrementing it is unsafe until it is checked.")
+                        .with_help(
+                            "Check the operand with `is` or `match` first, as in `if (value is int n)`, and write `value = n - 1`.",
+                        )
+                } else {
                     Issue::error("Cannot reliably decrement a `mixed` operand.")
                         .with_annotation(
                             Annotation::primary(operand.span()).with_message("Operand is `mixed`."),
@@ -1077,8 +1109,9 @@ where
                         )
                         .with_help(
                             "Ensure the operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks.",
-                        ),
-                );
+                        )
+                };
+                context.collector.report_with_code(IssueCode::MixedOperand, issue);
 
                 possibilities.push(TAtomic::Mixed(TMixed::new()));
             }
