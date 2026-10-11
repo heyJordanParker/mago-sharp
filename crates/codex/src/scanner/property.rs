@@ -226,6 +226,7 @@ where
 
                     let read_visibility = match plain_property.modifiers.get_first_read_visibility() {
                         Some(visibility) => Visibility::try_from(visibility).unwrap_or(Visibility::Public),
+                        None if is_sharp => Visibility::Private,
                         None => Visibility::Public,
                     };
 

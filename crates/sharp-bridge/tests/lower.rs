@@ -622,6 +622,63 @@ fn a_field_is_a_property_group_of_one_property() {
 }
 
 /// ```php
+/// private array $cache = [];
+/// private \Closure $priceOf;
+/// private \Closure $charge;
+/// ```
+///
+/// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, `[4]`,
+/// while PHP makes a member with no modifier `public`.
+#[test]
+fn a_field_without_an_access_modifier_is_a_private_property() {
+    let lowered = Lowered::with(
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n}\n",
+        &[
+            SHOP,
+            (
+                "src/App/Shop/Offers.php",
+                "<?php namespace App\\Shop; final class Plan {} final class Money {} final class Offer {}",
+            ),
+        ],
+    );
+    let class = lowered.child(lowered.root(), 2);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [4]
+                TYPE [7]
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "cache"
+                    ARRAY [3]
+                    null
+                    null
+                null
+              PROP_GROUP [4]
+                ZVAL "Closure"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "priceOf"
+                    null
+                    null
+                    null
+                null
+              PROP_GROUP [4]
+                ZVAL "Closure"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "charge"
+                    null
+                    null
+                    null
+                null
+        "#}
+    );
+}
+
+/// ```php
 /// public private(set) int $views = 0;
 /// public string $name;
 /// public readonly int $id;
@@ -3416,7 +3473,7 @@ fn lowered_field(code: &str) -> (String, String) {
 #[test]
 fn a_function_type_with_effects_is_the_closure_class() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n}\n",
     );
 
     assert_eq!(hint, "ZVAL \"Closure\"\n");
@@ -3431,7 +3488,7 @@ fn a_function_type_with_effects_is_the_closure_class() {
 #[test]
 fn a_nullable_function_type_with_effects_is_the_nullable_closure_class() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    private Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n}\n",
     );
 
     assert_eq!(hint, "ZVAL [256] \"Closure\"\n");
@@ -3446,7 +3503,7 @@ fn a_nullable_function_type_with_effects_is_the_nullable_closure_class() {
 #[test]
 fn a_map_of_function_types_with_two_effects_is_an_array() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    private Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n}\n",
     );
 
     assert_eq!(hint, "TYPE [7]\n");
@@ -3459,7 +3516,7 @@ fn a_map_of_function_types_with_two_effects_is_an_array() {
 #[test]
 fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
     let (hint, declaration) = lowered_field(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    private Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n}\n",
+        "namespace App.Shop;\n\nclass Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n}\n",
     );
 
     assert_eq!(hint, "ZVAL \"Closure\"\n");

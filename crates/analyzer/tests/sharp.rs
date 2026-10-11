@@ -5385,7 +5385,7 @@ const SHOP: (&str, &str) =
 /// closure type it runs as.
 #[test]
 fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n\n    public Charge pay(Cart cart) => this.charge(cart);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Charge(Cart) uses Http> charge)\n    {\n        this.charge = charge;\n    }\n\n    public Charge pay(Cart cart) => this.charge(cart);\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n\n    /** @param \\Closure(Cart): Charge $charge */\n    public function __construct(\\Closure $charge)\n    {\n        $this->charge = $charge;\n    }\n\n    public function pay(Cart $cart): Charge { return ($this->charge)($cart); }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
@@ -5394,7 +5394,7 @@ fn a_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
 
 #[test]
 fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<Charge(Cart) uses Http>? fallback;\n\n    public Function<Charge(Cart) uses Http>? current() => this.fallback;\n\n    public void replace(Function<Charge(Cart) uses Http> next)\n    {\n        this.fallback = next;\n    }\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n\n    /** @return null|\\Closure(Cart): Charge */\n    public function current(): ?\\Closure { return $this->fallback; }\n\n    /** @param \\Closure(Cart): Charge $next */\n    public function replace(\\Closure $next): void\n    {\n        $this->fallback = $next;\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
@@ -5404,7 +5404,7 @@ fn a_nullable_field_of_a_function_type_with_an_effect_is_checked_as_its_php_twin
 /// `Http` and `Mail` are both effects of the map's value type, so the map takes two type arguments.
 #[test]
 fn a_map_of_function_types_with_two_effects_is_checked_as_its_php_twin() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n\n    public int size() => count(this.handlers);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n\n    public Checkout(Map<string, Function<Charge(Cart) uses Http, Mail>> handlers)\n    {\n        this.handlers = handlers;\n    }\n\n    public int size() => count(this.handlers);\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers;\n\n    /** @param array<string, \\Closure(Cart): Charge> $handlers */\n    public function __construct(array $handlers)\n    {\n        $this->handlers = $handlers;\n    }\n\n    public function size(): int { return count($this->handlers); }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
@@ -5413,11 +5413,50 @@ fn a_map_of_function_types_with_two_effects_is_checked_as_its_php_twin() {
 
 #[test]
 fn a_function_type_taking_a_function_type_with_an_effect_is_checked_as_its_php_twin() {
-    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Function<int(Function<int(int) uses Http>)> apply;\n\n    public Checkout(Function<int(Function<int(int) uses Http>)> apply)\n    {\n        this.apply = apply;\n    }\n\n    public int run(Function<int(int) uses Http> step) => this.apply(step);\n}\n";
     let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n\n    /** @param \\Closure(\\Closure(int): int): int $apply */\n    public function __construct(\\Closure $apply)\n    {\n        $this->apply = $apply;\n    }\n\n    /** @param \\Closure(int): int $step */\n    public function run(\\Closure $step): int { return ($this->apply)($step); }\n}\n";
 
     assert_eq!(issues(("src/App/Shop/Checkout.php", php), &[SHOP]), Vec::<String>::new());
     assert_eq!(issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP]), Vec::<String>::new());
+}
+
+/// Spec sections 6 and 29 write these fields with no access modifier. A field with no modifier is `private`, so an
+/// unused one is reported, and another class reading one is refused, as for the PHP twin's `private` properties.
+#[test]
+fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
+    let offers = (
+        "src/App/Shop/Offers.php",
+        "<?php\n\nnamespace App\\Shop;\n\nfinal class Plan\n{\n}\n\nfinal class Money\n{\n}\n\nfinal class Offer\n{\n}\n",
+    );
+    let sharp = "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n    Function<int(Function<int(int) uses Http>)> apply;\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    /** @var array<string, Plan> */\n    private array $cache = [];\n    /** @var \\Closure(Offer): Money */\n    private \\Closure $priceOf;\n    /** @var \\Closure(Cart): Charge */\n    private \\Closure $charge;\n    /** @var null|\\Closure(Cart): Charge */\n    private ?\\Closure $fallback = null;\n    /** @var array<string, \\Closure(Cart): Charge> */\n    private array $handlers;\n    /** @var \\Closure(\\Closure(int): int): int */\n    private \\Closure $apply;\n}\n";
+    let sharp_reader = "namespace App.Shop;\n\npublic class Receipt\n{\n    public static int size(Checkout checkout) => count(checkout.cache);\n}\n";
+    let php_reader = "<?php\n\nnamespace App\\Shop;\n\nfinal class Receipt\n{\n    public static function size(Checkout $checkout): int { return count($checkout->cache); }\n}\n";
+
+    let sharp_issues = issues(("src/App/Shop/Checkout.sharp", sharp), &[SHOP, offers]);
+    let php_issues = issues(("src/App/Shop/Checkout.php", php), &[SHOP, offers]);
+    assert_eq!(
+        sharp_issues,
+        [
+            "8:39 unused-property",
+            "9:57 unused-property",
+            "10:49 unused-property",
+            "5:23 unused-property",
+            "6:28 unused-property",
+            "7:38 unused-property",
+        ]
+    );
+    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+
+    let sharp_issues =
+        issues(("src/App/Shop/Receipt.sharp", sharp_reader), &[("src/App/Shop/Checkout.sharp", sharp), SHOP, offers]);
+    let php_issues =
+        issues(("src/App/Shop/Receipt.php", php_reader), &[("src/App/Shop/Checkout.php", php), SHOP, offers]);
+    assert_eq!(sharp_issues, ["5:65 invalid-property-read", "5:56 no-value"]);
+    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    let refused =
+        refusals(("src/App/Shop/Receipt.sharp", sharp_reader), &[("src/App/Shop/Checkout.sharp", sharp), SHOP, offers]);
+    assert!(refused[0].starts_with("5:65 invalid-property-read Cannot read private property `Checkout.cache`."));
 }
 
 /// A `.sharp` message writes a function type's effects inside its brackets, each named as the file names the class:
