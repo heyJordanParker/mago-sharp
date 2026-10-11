@@ -27,6 +27,7 @@ use crate::expression::binary::comparison::sharp_refusal;
 use crate::expression::binary::utils::is_always_greater_than;
 use crate::expression::binary::utils::is_always_identical_to;
 use crate::expression::binary::utils::is_always_less_than;
+use crate::utils::names::display_type;
 
 /// Analyzes the spaceship operator (`LHS <=> RHS`).
 ///
@@ -199,13 +200,18 @@ fn check_spaceship_operand<'arena, A>(
             .with_help("Ensure this operand is non-null or that comparison with `null` is intended."),
         );
     } else if operand_type.is_mixed() {
-        context.collector.report_with_code(
-            IssueCode::MixedOperand,
+        let issue = if context.dialect.is_sharp() {
+            Issue::error(format!("{side} operand of `<=>` is `{}`, which has no order.", display_type(context, operand_type)))
+                .with_annotation(Annotation::primary(operand.span()))
+                .with_note("An `Any` may hold any value, and PHP# orders only numbers, strings and classes that declare `operator <=>`.")
+                .with_help("Narrow the value with `is` or `as` to a number or a string before comparing it.")
+        } else {
             Issue::error(format!("{side} operand in spaceship comparison (`<=>`) has `mixed` type."))
                 .with_annotation(Annotation::primary(operand.span()).with_message("This has type `mixed`"))
                 .with_note("The result of comparing `mixed` types with `<=>` is unpredictable.")
-                .with_help("Ensure this operand has a known, comparable type before using the spaceship operator."),
-        );
+                .with_help("Ensure this operand has a known, comparable type before using the spaceship operator.")
+        };
+        context.collector.report_with_code(IssueCode::MixedOperand, issue);
     } else if operand_type.is_false() {
         context.collector.report_with_code(
             IssueCode::FalseOperand,

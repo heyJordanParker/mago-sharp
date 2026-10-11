@@ -1,6 +1,7 @@
 #![allow(clippy::panic, clippy::expect_used)]
 
 use std::borrow::Cow;
+use std::path::Path;
 
 use mago_allocator::LocalArena;
 use mago_database::file::File;
@@ -10,7 +11,11 @@ use mago_reporting::Issue;
 use mago_semantics::SemanticsChecker;
 use mago_syntax::parser::parse_file;
 
-/// Every semantic issue in the source, in the dialect its path names.
+#[path = "../../../tests/support/sharp_words.rs"]
+mod sharp_words;
+
+/// Every semantic issue in the source, in the dialect its path names. Panics when an issue of a `.sharp` file names a
+/// word only PHP has, in its message, help, notes or annotations.
 fn check(path: &'static str, code: &'static str) -> Vec<Issue> {
     let arena = LocalArena::new();
     let file = File::ephemeral(Cow::Borrowed(path.as_bytes()), Cow::Borrowed(code.as_bytes()));
@@ -19,7 +24,20 @@ fn check(path: &'static str, code: &'static str) -> Vec<Issue> {
 
     let names = NameResolver::new(&arena).resolve(program);
 
-    SemanticsChecker::new(PHPVersion::new(8, 4, 0)).check(&file, program, &names).into_iter().collect()
+    let issues: Vec<Issue> =
+        SemanticsChecker::new(PHPVersion::new(8, 4, 0)).check(&file, program, &names).into_iter().collect();
+    if Path::new(path).extension().is_some_and(|extension| extension == "sharp") {
+        let leaks: Vec<String> = issues
+            .iter()
+            .filter_map(|issue| {
+                let (text, word) = sharp_words::banned_word(issue)?;
+                Some(format!("{path}: `{}` says {text:?}, which names {word}", issue.code.as_deref().unwrap_or("none")))
+            })
+            .collect();
+        assert!(leaks.is_empty(), "A `.sharp` message speaks PHP#.\n{}", leaks.join("\n"));
+    }
+
+    issues
 }
 
 /// Every semantic issue in the PHP# source, as `line:column message` at its primary span.

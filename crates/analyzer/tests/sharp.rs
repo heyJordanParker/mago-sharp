@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::borrow::Cow;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -44,6 +45,9 @@ use mago_syntax::cst::Expression;
 use mago_syntax::parser::parse_file;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
+
+#[path = "../../../tests/support/sharp_words.rs"]
+mod sharp_words;
 
 static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
@@ -137,7 +141,34 @@ fn analyze_with_artifacts(
         .expect("analysis succeeds");
 
     // The analyzed file's parse errors come first, as `mago analyze` reports them beside the analysis.
-    (program.errors.iter().map(Issue::from).chain(result.issues).collect(), artifacts)
+    let issues: Vec<Issue> = program.errors.iter().map(Issue::from).chain(result.issues).collect();
+    assert_speaks_sharp(file_ids.iter().map(|(name, _)| *name), &issues);
+
+    (issues, artifacts)
+}
+
+/// Asserts that no issue on a `.sharp` file of `names` names a word only PHP has, in its message, help, notes or
+/// annotations.
+fn assert_speaks_sharp<'name, 'issue>(
+    names: impl Iterator<Item = &'name str> + Clone,
+    issues: impl IntoIterator<Item = &'issue Issue>,
+) {
+    let mut leaks = Vec::new();
+    for issue in issues {
+        let file_id = issue.primary_span().expect("a primary span").file_id;
+        if let Some(name) = names.clone().find(|name| {
+            Path::new(name).extension().is_some_and(|extension| extension == "sharp")
+                && FileId::new(name.as_bytes()) == file_id
+        }) && let Some((text, word)) = sharp_words::banned_word(issue)
+        {
+            leaks.push(format!(
+                "{name}: `{}` says {text:?}, which names {word}",
+                issue.code.as_deref().unwrap_or("none")
+            ));
+        }
+    }
+
+    assert!(leaks.is_empty(), "A `.sharp` message speaks PHP#.\n{}", leaks.join("\n"));
 }
 
 #[test]
@@ -151,6 +182,14 @@ fn adding_a_mixed_operand_reports_mixed_operand_as_in_php() {
 
     assert!(codes(&sharp_issues).contains(&"mixed-operand"), "{sharp_issues:?}");
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Lib/Source.php", source)])[0],
+        "Left operand in binary operation has type `Any?`."
+    );
+    assert_eq!(
+        messages(("src/Demo/Report.php", php), &[("src/Lib/Source.php", source)])[0],
+        "Left operand in binary operation has type `mixed`."
+    );
 }
 
 #[test]
@@ -320,6 +359,14 @@ fn bare_constants_resolve_as_in_php() {
 
     assert_eq!(sharp_issues[0], "7:30 non-existent-constant");
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[])[..2],
+        ["Undefined constant: `MISSING`.", "Right operand in binary operation has type `Any?`."]
+    );
+    assert_eq!(
+        messages(("src/Demo/Report.php", php), &[])[..2],
+        ["Undefined constant: `Demo\\MISSING`.", "Right operand in binary operation has type `mixed`."]
+    );
 }
 
 #[test]
@@ -665,6 +712,14 @@ fn a_sharp_import_passes_the_use_statement_and_casing_checks_as_in_php() {
 
     assert_eq!(sharp_issues, ["4:8 incorrect-class-like-casing", "5:8 non-existent-use-import"]);
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.sharp", sharp), &others)[0],
+        "Incorrect casing for class-like `Lib.Money`."
+    );
+    assert_eq!(
+        messages_with(settings(), ("src/Demo/Report.php", php), &others)[0],
+        "Incorrect casing for class-like `Lib\\Money`."
+    );
 }
 
 /// `Sharp\Text\Regex`, a plain PHP class with a static method.
@@ -1836,6 +1891,11 @@ fn calling_a_function_that_does_not_exist_is_reported_as_in_php() {
 
     assert_eq!(sharp_issues, ["7:16 non-existent-function", "7:16 mixed-return-statement"]);
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    assert_eq!(messages(("src/Demo/Report.sharp", sharp), &[])[0], "Function `missing` could not be found.");
+    assert_eq!(
+        messages(("src/Demo/Report.php", php), &[])[0],
+        "Could not find definition for function `Demo\\missing` (also tried as `missing` in a broader scope)."
+    );
 }
 
 /// The engine calls a bare function name as the global function, so a call the analyzer resolves to a namespaced
@@ -1849,6 +1909,13 @@ fn calling_a_namespaced_function_is_not_supported_yet() {
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/helpers.php", helpers)]),
         ["7:16 not-supported-yet", "7:32 not-supported-yet"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/helpers.php", helpers)]),
+        [
+            "Calling the namespaced function `Demo.helper` is not supported yet in PHP#.",
+            "Calling the namespaced function `Demo.strlen` is not supported yet in PHP#."
+        ]
     );
     assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Demo/helpers.php", helpers)]), Vec::<String>::new());
 }
@@ -3873,6 +3940,41 @@ fn an_unchecked_any_is_refused_wherever_its_type_matters() {
             "14:19 invalid-operand",
             "15:13 invalid-operand",
             "17:16 mixed-return-statement",
+        ]
+    );
+    let negation = "<?php\n\nnamespace Demo;\n\nclass Inbox\n{\n    public function use(mixed $value): int\n    {\n        return -$value;\n    }\n}\n";
+    assert_eq!(
+        messages(("src/Demo/Inbox.sharp", sharp), &[("src/Demo/Source.php", SOURCE)])[3],
+        "Cannot reliably negate an `Any?` operand."
+    );
+    assert_eq!(messages(("src/Demo/Inbox.php", negation), &[])[0], "Cannot reliably negate a `mixed` operand.");
+}
+
+#[test]
+fn stepping_or_ordering_an_any_names_it_any() {
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int use(Any? value)\n    {\n        let up = value;\n        up++;\n        let down = value;\n        down--;\n        return value <=> 1;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Inbox\n{\n    public function use(mixed $value): int\n    {\n        $up = $value;\n        $up++;\n        $down = $value;\n        $down--;\n        return $value <=> 1;\n    }\n}\n";
+    let operand_messages = |analyzed| {
+        messages(analyzed, &[])
+            .into_iter()
+            .filter(|message| message.starts_with("Cannot reliably") || message.contains("`<=>`"))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        operand_messages(("src/Demo/Inbox.sharp", sharp)),
+        [
+            "Cannot reliably increment an `Any?` operand.",
+            "Cannot reliably decrement an `Any?` operand.",
+            "Left operand of `<=>` is `Any?`, which has no order.",
+        ]
+    );
+    assert_eq!(
+        operand_messages(("src/Demo/Inbox.php", php)),
+        [
+            "Cannot reliably increment a `mixed` operand.",
+            "Cannot reliably decrement a `mixed` operand.",
+            "Left operand in spaceship comparison (`<=>`) has `mixed` type.",
         ]
     );
 }
@@ -6593,10 +6695,16 @@ fn a_map_key_type_without_a_backing_value_is_an_error() {
 #[test]
 fn a_field_type_naming_a_missing_class_is_reported_as_a_parameter_type_is() {
     let sharp = "namespace Demo;\n\nclass Tally\n{\n    public Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        return 0;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Tally\n{\n    public ?Missing $item = null;\n\n    public function count(?Missing $other): int\n    {\n        return 0;\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[]),
         ["5:12 non-existent-class-like", "7:22 non-existent-class-like"]
+    );
+    assert_eq!(messages(("src/Demo/Tally.sharp", sharp), &[]), ["Cannot find class, interface or enum `Missing`."; 2]);
+    assert_eq!(
+        messages(("src/Demo/Tally.php", php), &[]),
+        ["Cannot find class, interface, enum, or type alias `Demo\\Missing`."; 2]
     );
 }
 
@@ -8932,6 +9040,7 @@ fn summarized(files: &[(&'static str, &'static str)]) -> (CodebaseMetadata, Vec<
         let mut artifacts = Analyzer::new(&arena, file, names, &metadata, &PLUGIN_REGISTRY, settings())
             .analyze_with_artifacts(program, &mut result)
             .expect("analysis succeeds");
+        assert_speaks_sharp(files.iter().map(|(name, _)| *name), result.issues.iter());
         summaries.append(&mut artifacts.effect_summaries);
     }
 
@@ -8942,9 +9051,10 @@ fn summarized(files: &[(&'static str, &'static str)]) -> (CodebaseMetadata, Vec<
 /// it has one.
 fn effect_issues(files: &[(&'static str, &'static str)]) -> Vec<String> {
     let (codebase, summaries) = summarized(files);
+    let issues = Effects::solve(&codebase, &summaries).issues(&codebase);
+    assert_speaks_sharp(files.iter().map(|(name, _)| *name), issues.iter());
 
-    Effects::solve(&codebase, &summaries)
-        .issues(&codebase)
+    issues
         .into_iter()
         .map(|issue| {
             let file_id = issue.primary_span().expect("a primary span").file_id;

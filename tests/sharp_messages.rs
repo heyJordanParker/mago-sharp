@@ -1,6 +1,6 @@
-//! Reads the tests of `.sharp` messages and checks the two promises they make: a `.sharp` message speaks PHP#, so
-//! it names nothing only PHP has, and a test of one asserts the `.php` twin as well, so a `.sharp` rule leaves PHP's
-//! messages alone.
+//! Reads the tests of `.sharp` messages and checks that a test of one asserts the `.php` twin as well, so a `.sharp`
+//! rule leaves PHP's messages alone. That a `.sharp` message speaks PHP# is checked where the tests analyze, on every
+//! issue, through `tests/support/sharp_words.rs`.
 //!
 //! A test's expected strings are what its assertions compare with the words they render, so the checks read them from
 //! the test source rather than running the analyzer. An assertion is an `assert!`, an `assert_eq!` or a call of a helper
@@ -151,25 +151,6 @@ const PHP_CANNOT_EXPRESS: &[(&str, &[&str])] = &[
         &["a_single_type_in_parentheses_with_a_question_mark_after_it_reports_only_the_php_errors"],
     ),
 ];
-
-/// What a `.sharp` message must not name, each with the pattern that finds it.
-static BANNED: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
-    [
-        ("`mixed`", r"\bmixed\b"),
-        ("the word `unit`", r"(?i)\bunit\b"),
-        ("`isset`", r"\bisset\b"),
-        ("a collection stub class", r"\b(List|Map|Set)Methods\b"),
-        ("a PHP class name with a backslash", r"\w\\\w"),
-        ("PHP member access", r"(->|::)\$?[A-Za-z_]"),
-        ("a spec section", r"(?i)\bsections?\s+\d|§"),
-    ]
-    .into_iter()
-    .map(|(name, pattern)| (name, Regex::new(pattern).expect("a valid pattern")))
-    .collect()
-});
-
-/// The PHP form a refusal quotes because the developer wrote it, as in "PHP# has no `mixed`".
-static REFUSED_FORM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"PHP# has no `[^`]*`").expect("a valid pattern"));
 
 /// A file path a test names: the analyzed file or one beside it.
 static PATH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\w./-]+\.(sharp|php)$").expect("a valid pattern"));
@@ -829,23 +810,6 @@ fn sharp_messages(test: &Test) -> Vec<String> {
         .map(|string| message(&string.text))
         .filter(|words| !words.is_empty())
         .collect()
-}
-
-#[test]
-fn a_sharp_message_names_nothing_only_php_has() {
-    let mut leaks = Vec::new();
-    for (path, test) in message_tests() {
-        for words in sharp_messages(&test) {
-            let own_words = REFUSED_FORM.replace_all(&words, "");
-            for (name, pattern) in BANNED.iter() {
-                if let Some(found) = pattern.find(&own_words) {
-                    leaks.push(format!("{path}: the `.sharp` message {words:?} names {name}: `{}`", found.as_str()));
-                }
-            }
-        }
-    }
-
-    assert!(leaks.is_empty(), "A `.sharp` message speaks PHP#.\n{}", leaks.join("\n"));
 }
 
 #[test]

@@ -1879,6 +1879,7 @@ dependencies = [
  "mago-span",
  "mago-syntax",
  "mago-syntax-core",
+ "regex",
 ]
 
 [[package]]
