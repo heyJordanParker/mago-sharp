@@ -2,8 +2,13 @@ use diffy::PatchFormatter;
 use mago_allocator::Arena;
 
 use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::scalar::int::TInteger;
 use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::Span;
 
+use crate::code::IssueCode;
 use crate::context::Context;
 
 pub mod availability;
@@ -52,4 +57,25 @@ where
     let diff = formatter.fmt_patch(&patch);
 
     Some(format!("{diff}"))
+}
+
+/// Reports a PHP# `int` at `span` that lands where `declared` expects a `float`, with the `code` of the place it lands.
+/// An int literal is named in its float form, so `2` reads "write 2.0".
+pub fn report_int_for_float<A>(
+    context: &mut Context<'_, '_, A>,
+    code: IssueCode,
+    span: Span,
+    integer: TInteger,
+    declared: &TUnion,
+) where
+    A: Arena,
+{
+    let float = integer.get_literal_value().map_or_else(|| "0.0".to_owned(), |value| format!("{value}.0"));
+    let declared = names::display_type(context, declared);
+
+    context.collector.report_with_code(
+        code,
+        Issue::error(format!("`int` is not `float`: write {float}, or convert with (float) n"))
+            .with_annotation(Annotation::primary(span).with_message(format!("Declared `{declared}`."))),
+    );
 }

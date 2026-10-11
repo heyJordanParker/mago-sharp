@@ -86,6 +86,7 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::report_int_for_float;
 
 pub mod function;
 pub mod rejected_nullable_parameter;
@@ -1682,7 +1683,7 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
         && default_type.is_null()
         && context.settings.version.is_supported(Feature::ImplicitlyNullableParameterTypes);
 
-    let mut comparison_result = ComparisonResult::with_strict_nonnull(is_sharp);
+    let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
     if union_comparator::is_contained_by(
         context.codebase,
         default_type,
@@ -1692,6 +1693,18 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
         false,
         &mut comparison_result,
     ) {
+        return;
+    }
+
+    if let Some(integer) = comparison_result.int_for_float {
+        report_int_for_float(
+            context,
+            IssueCode::InvalidParameterDefaultValue,
+            default_expression.span(),
+            integer,
+            declared_type,
+        );
+
         return;
     }
 

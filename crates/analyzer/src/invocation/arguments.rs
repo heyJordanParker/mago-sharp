@@ -46,6 +46,7 @@ use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::report_int_for_float;
 
 /// Checks if an argument can be passed by reference.
 pub(super) fn is_argument_referenceable(
@@ -329,7 +330,7 @@ pub fn verify_argument_type<'arena, A>(
         .filter(|declared_type| is_declared_set(declared_type))
         .and_then(|_| get_list_accepting_set_type(parameter_type));
 
-    let mut union_comparison_result = ComparisonResult::with_strict_nonnull(context.dialect.is_sharp());
+    let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
     let type_match_found = is_contained_by(
         context.codebase,
         input_type,
@@ -341,6 +342,12 @@ pub fn verify_argument_type<'arena, A>(
     );
 
     if type_match_found {
+        return;
+    }
+
+    if let Some(integer) = union_comparison_result.int_for_float {
+        report_int_for_float(context, IssueCode::InvalidArgument, input_expression.span(), integer, parameter_type);
+
         return;
     }
 

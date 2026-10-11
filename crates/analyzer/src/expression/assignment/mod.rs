@@ -73,6 +73,7 @@ use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::report_int_for_float;
 
 mod array_assignment;
 pub(crate) mod property_assignment;
@@ -471,6 +472,7 @@ where
                     artifacts,
                     static_property,
                     &source_type,
+                    source_expression,
                     target_expression_id,
                 )?,
                 None => property_assignment::analyze(
@@ -490,6 +492,7 @@ where
             artifacts,
             StaticProperty::from_static_property_access(property_access),
             &source_type,
+            source_expression,
             target_expression_id,
         )?,
         Expression::ArrayAccess(array_access) => {
@@ -689,6 +692,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
         }
     }
 
+    let mut comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
     if let Some((local_type, local_type_span)) = block_context.local_types.get(&variable_id).cloned()
         && !union_comparator::is_contained_by(
             context.codebase,
@@ -697,26 +701,33 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
             false,
             false,
             false,
-            &mut ComparisonResult::with_strict_nonnull(context.dialect.is_sharp()),
+            &mut comparison_result,
         )
     {
-        let name = display_variable_name(context, variable_id.as_bytes());
-        let local_type_str = display_type(context, &local_type);
-        let assigned_type_str = display_value_type(context, &assigned_type, &local_type);
+        let value_span = source_expression.map_or(variable_span, HasSpan::span);
+        if let Some(integer) = comparison_result.int_for_float {
+            report_int_for_float(context, IssueCode::InvalidLocalAssignmentValue, value_span, integer, &local_type);
+        } else {
+            let name = display_variable_name(context, variable_id.as_bytes());
+            let local_type_str = display_type(context, &local_type);
+            let assigned_type_str = display_value_type(context, &assigned_type, &local_type);
 
-        context.collector.report_with_code(
-            IssueCode::InvalidLocalAssignmentValue,
-            Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{local_type_str}`."))
-                .with_annotation(
-                    Annotation::primary(source_expression.map_or(variable_span, HasSpan::span))
-                        .with_message(format!("This value has type `{assigned_type_str}`.")),
-                )
-                .with_annotation(
-                    Annotation::secondary(local_type_span)
-                        .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
-                )
-                .with_help(format!("Assign a `{local_type_str}` value, or change the type `{name}` is declared with.")),
-        );
+            context.collector.report_with_code(
+                IssueCode::InvalidLocalAssignmentValue,
+                Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{local_type_str}`."))
+                    .with_annotation(
+                        Annotation::primary(value_span)
+                            .with_message(format!("This value has type `{assigned_type_str}`.")),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(local_type_span)
+                            .with_message(format!("`{name}` is declared as `{local_type_str}` here.")),
+                    )
+                    .with_help(format!(
+                        "Assign a `{local_type_str}` value, or change the type `{name}` is declared with."
+                    )),
+            );
+        }
 
         // The local keeps its written type, as the engine never checks it.
         assigned_type = local_type;

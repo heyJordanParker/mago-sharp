@@ -1,6 +1,7 @@
 use mago_word::Word;
 
 use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::scalar::int::TInteger;
 use crate::ttype::template::TemplateBound;
 use crate::ttype::union::TUnion;
 
@@ -28,9 +29,12 @@ pub struct ComparisonResult {
     pub replacement_atomic_type: Option<TAtomic>,
     pub type_variable_lower_bounds: Vec<(Word, TemplateBound)>,
     pub type_variable_upper_bounds: Vec<(Word, TemplateBound)>,
-    /// Whether a `nonnull` container refuses a value that may be null, as PHP#'s `Any` does. The caller sets it for a
-    /// `.sharp` file. A PHP file keeps upstream's rule, which lets any `mixed` into `nonnull`.
-    pub strict_nonnull: bool,
+    /// Whether the comparison follows PHP#'s rules: a `nonnull` container refuses a value that may be null, as PHP#'s
+    /// `Any` does, and a `float` container refuses an `int`. The caller sets it for a `.sharp` file. A PHP file keeps
+    /// upstream's rules, which let any `mixed` into `nonnull` and an `int` into a `float`.
+    pub sharp_rules: bool,
+    /// The `int` a failed comparison refused only because a `float` was expected, under `sharp_rules`.
+    pub int_for_float: Option<TInteger>,
 }
 
 impl Default for ComparisonResult {
@@ -50,14 +54,15 @@ impl ComparisonResult {
             replacement_atomic_type: None,
             type_variable_lower_bounds: vec![],
             type_variable_upper_bounds: vec![],
-            strict_nonnull: false,
+            sharp_rules: false,
+            int_for_float: None,
         }
     }
 
-    /// A result whose comparison treats `nonnull` as PHP# does when `strict_nonnull` is set.
+    /// A result whose comparison follows PHP#'s rules when `sharp_rules` is set.
     #[must_use]
-    pub fn with_strict_nonnull(strict_nonnull: bool) -> Self {
-        Self { strict_nonnull, ..Self::new() }
+    pub fn with_sharp_rules(sharp_rules: bool) -> Self {
+        Self { sharp_rules, ..Self::new() }
     }
 }
 

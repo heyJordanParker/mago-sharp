@@ -28,7 +28,15 @@ pub fn is_contained_by(
         (TAtomic::Scalar(TScalar::Integer(ci)), TAtomic::Scalar(TScalar::Integer(ii))) if ci.contains(*ii) => {
             return true;
         }
-        (TAtomic::Scalar(TScalar::Float(TFloat::Float)), TAtomic::Scalar(TScalar::Integer(_))) if !inside_assertion => {
+        (TAtomic::Scalar(TScalar::Float(TFloat::Float)), TAtomic::Scalar(TScalar::Integer(integer)))
+            if !inside_assertion =>
+        {
+            if atomic_comparison_result.sharp_rules {
+                atomic_comparison_result.int_for_float = Some(*integer);
+
+                return false;
+            }
+
             return true;
         }
         (TAtomic::Scalar(TScalar::Float(container_float)), TAtomic::Scalar(TScalar::Float(input_float)))

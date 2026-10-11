@@ -37,6 +37,7 @@ use crate::utils::get_type_diff;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 #[inline]
 pub fn analyze<'ctx, 'arena, A>(
@@ -125,7 +126,7 @@ where
             );
         }
 
-        let mut union_comparison_result = ComparisonResult::with_strict_nonnull(context.dialect.is_sharp());
+        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
 
         let type_match_found = union_comparator::is_contained_by(
             context.codebase,
@@ -156,7 +157,15 @@ where
 
             let mut issue;
 
-            if union_comparison_result.type_coerced == Some(true) {
+            if let Some(integer) = union_comparison_result.int_for_float {
+                report_int_for_float(
+                    context,
+                    IssueCode::InvalidPropertyAssignmentValue,
+                    assigned_value_span.unwrap_or_else(|| property_access.span()),
+                    integer,
+                    &resolved_property.property_type,
+                );
+            } else if union_comparison_result.type_coerced == Some(true) {
                 let issue_kind;
 
                 if union_comparison_result.type_coerced_from_nested_mixed.unwrap_or(false) {

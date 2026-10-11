@@ -22,6 +22,7 @@ use crate::statement::attributes::analyze_attributes;
 use crate::utils::names::display_member;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstant<'arena> {
     fn analyze<'ctx, A>(
@@ -100,7 +101,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                     },
                 );
 
-                let mut comparison_result = ComparisonResult::with_strict_nonnull(is_sharp);
+                let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
                 if !union_comparator::is_contained_by(
                     context.codebase,
                     value_type,
@@ -110,6 +111,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                     false,
                     &mut comparison_result,
                 ) {
+                    if let Some(integer) = comparison_result.int_for_float {
+                        report_int_for_float(
+                            context,
+                            IssueCode::InvalidConstantValue,
+                            self.value.span(),
+                            integer,
+                            &declared_type,
+                        );
+
+                        return Ok(());
+                    }
+
                     let value_type_str = display_value_type(context, value_type, &declared_type);
                     let declared_type_str = display_type(context, &declared_type);
 

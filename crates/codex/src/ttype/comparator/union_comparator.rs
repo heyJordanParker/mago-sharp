@@ -35,9 +35,11 @@ pub fn is_contained_by(
 
     let container_has_template = container_type.has_template_or_static();
     let mut all_matched = true;
+    let mut int_for_float = None;
+    let mut refused_otherwise = false;
 
     for input_type_part in input_type.types.as_ref() {
-        all_matched &= is_contained_by_atomic(
+        let matched = is_contained_by_atomic(
             codebase,
             input_type,
             input_type_part,
@@ -48,6 +50,20 @@ pub fn is_contained_by(
             inside_assertion,
             union_comparison_result,
         );
+
+        match (matched, union_comparison_result.int_for_float.take()) {
+            (true, _) => {}
+            (false, Some(integer)) => {
+                int_for_float.get_or_insert(integer);
+            }
+            (false, None) => refused_otherwise = true,
+        }
+
+        all_matched &= matched;
+    }
+
+    if !all_matched && !refused_otherwise {
+        union_comparison_result.int_for_float = int_for_float;
     }
 
     if all_matched
@@ -193,6 +209,7 @@ fn is_contained_by_atomic(
     let mut type_match_found = false;
     let mut some_type_coerced = false;
     let mut some_type_coerced_from_nested_mixed = false;
+    let mut int_for_float = None;
 
     if matches!(input_type_part, TAtomic::Scalar(TScalar::ArrayKey)) {
         if container_type.has_int_and_string() {
@@ -284,8 +301,7 @@ fn is_contained_by_atomic(
             continue;
         }
 
-        let mut atomic_comparison_result =
-            ComparisonResult::with_strict_nonnull(union_comparison_result.strict_nonnull);
+        let mut atomic_comparison_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
         let is_atomic_contained_by = atomic_comparator::is_contained_by(
             codebase,
             input_type_part,
@@ -293,6 +309,7 @@ fn is_contained_by_atomic(
             inside_assertion,
             &mut atomic_comparison_result,
         );
+        int_for_float = int_for_float.or(atomic_comparison_result.int_for_float);
 
         if is_atomic_contained_by {
             if let Some(replacement_atomic_type) = atomic_comparison_result.replacement_atomic_type {
@@ -333,8 +350,7 @@ fn is_contained_by_atomic(
         && let Some(combined_container_type) =
             get_combined_keyed_array_union_container(codebase, input_type_part, container_atomic_types)
     {
-        let mut atomic_comparison_result =
-            ComparisonResult::with_strict_nonnull(union_comparison_result.strict_nonnull);
+        let mut atomic_comparison_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
         if atomic_comparator::is_contained_by(
             codebase,
             input_type_part,
@@ -362,7 +378,10 @@ fn is_contained_by_atomic(
 
         some_type_coerced |= atomic_comparison_result.type_coerced.unwrap_or(false);
         some_type_coerced_from_nested_mixed |= atomic_comparison_result.type_coerced_from_nested_mixed.unwrap_or(false);
+        int_for_float = int_for_float.or(atomic_comparison_result.int_for_float);
     }
+
+    union_comparison_result.int_for_float = int_for_float;
 
     if some_type_coerced {
         union_comparison_result.type_coerced = Some(true);

@@ -54,6 +54,7 @@ use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_index_id;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
 
 pub(crate) fn analyze<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -167,6 +168,7 @@ where
         && let Some(declared) = get_declared_collection(context, block_context, artifacts, root_array_expression)
     {
         let (_, declared_element) = get_array_parameters(&declared, context.codebase);
+        let mut comparison_result = ComparisonResult::with_sharp_rules(true);
         let fits = root_array_type.types.iter().all(|atomic| {
             let TAtomic::Array(written) = atomic else {
                 return true;
@@ -179,24 +181,30 @@ where
                 false,
                 false,
                 false,
-                &mut ComparisonResult::with_strict_nonnull(true),
+                &mut comparison_result,
             )
         });
         if !fits {
             let declared = TUnion::from_atomic(TAtomic::Array(declared));
-            let name = String::from_utf8_lossy(access.name.value());
-            let declared_str = display_type(context, &declared);
-            let written_str = display_value_type(context, &root_array_type, &declared);
-            context.collector.report_with_code(
-                IssueCode::InvalidLocalAssignmentValue,
-                Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{declared_str}`."))
-                    .with_annotation(
-                        Annotation::primary(array_target.span()).with_message(format!("This makes it `{written_str}`.")),
-                    )
-                    .with_help(format!(
-                        "Write a value of `{declared_str}`'s element type, or change the type `{name}` is declared with."
-                    )),
-            );
+            if let Some(integer) = comparison_result.int_for_float {
+                let value_span = assign_value.map_or_else(|| array_target.span(), HasSpan::span);
+                report_int_for_float(context, IssueCode::InvalidLocalAssignmentValue, value_span, integer, &declared);
+            } else {
+                let name = String::from_utf8_lossy(access.name.value());
+                let declared_str = display_type(context, &declared);
+                let written_str = display_value_type(context, &root_array_type, &declared);
+                context.collector.report_with_code(
+                    IssueCode::InvalidLocalAssignmentValue,
+                    Issue::error(format!("Invalid assignment to `{name}`: it is declared as `{declared_str}`."))
+                        .with_annotation(
+                            Annotation::primary(array_target.span())
+                                .with_message(format!("This makes it `{written_str}`.")),
+                        )
+                        .with_help(format!(
+                            "Write a value of `{declared_str}`'s element type, or change the type `{name}` is declared with."
+                        )),
+                );
+            }
 
             root_array_type = declared;
         }

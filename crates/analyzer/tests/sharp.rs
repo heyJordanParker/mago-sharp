@@ -343,7 +343,8 @@ fn sharp_arguments_follow_strict_conversion_rules() {
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Money.php", money)]);
     let php_issues = issues(("src/Demo/Report.php", php), &[("src/Lib/Money.php", money)]);
 
-    assert_eq!(sharp_issues, ["10:28 invalid-argument"]);
+    // PHP# also refuses the `int` passed where a `float` is expected, which `strict_types=1` converts in PHP.
+    assert_eq!(sharp_issues, ["9:32 invalid-argument", "10:28 invalid-argument"]);
     // Mago applies strict conversion rules to every file, whether or not it declares `strict_types=1`.
     assert_eq!(php_issues, ["12:29 invalid-argument"]);
 }
@@ -1807,6 +1808,266 @@ fn division_with_a_float_operand_gives_a_float_in_php_sharp() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public float share(int total, float parts) => total / parts;\n\n    public int whole(int total, float parts) => total / parts;\n}\n";
 
     assert_eq!(codes(&issues(("src/Demo/Report.sharp", sharp), &[])), ["invalid-return-statement"]);
+}
+
+const CELL: &str = "<?php\n\nnamespace Lib;\n\n/** @template T */\nfinal class Cell\n{\n    /** @param T $item */\n    public function __construct(private mixed $item) {}\n\n    /** @param T $item */\n    public function put(mixed $item): void\n    {\n        $this->item = $item;\n    }\n\n    /** @return T */\n    public function get(): mixed\n    {\n        return $this->item;\n    }\n}\n";
+
+/// Spec section 24 refuses an `int` where a `float` is expected in PHP# code, wherever the value lands, and the
+/// refusal names the float form of an int literal. Plain PHP keeps PHP's conversion, so each `.php` twin is silent.
+fn int_for_float_refusals(sharp: &'static str, php: &'static str) -> Vec<String> {
+    assert_eq!(
+        issues(("src/Demo/Report.php", php), &[("src/Lib/Cell.php", CELL)]),
+        Vec::<String>::new(),
+        "the .php twin keeps PHP's conversion"
+    );
+
+    worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Cell.php", CELL)])
+}
+
+#[test]
+fn an_int_literal_in_a_float_local_is_refused_with_its_float_form() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run()\n    {\n        float total = 0;\n        return total;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function run(): float\n    {\n        $total = 0;\n        return $total;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "7:23 invalid-local-assignment-value `int` is not `float`: write 0.0, or convert with (float) n | Declared `float`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_value_in_a_float_local_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run(int count)\n    {\n        float price = count;\n        return price;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function run(int $count): float\n    {\n        $price = $count;\n        return $price;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "7:23 invalid-local-assignment-value `int` is not `float`: write 0.0, or convert with (float) n | Declared `float`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_assigned_to_a_float_local_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run()\n    {\n        float total = 0.5;\n        total = 3;\n        return total;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function run(): float\n    {\n        $total = 0.5;\n        $total = 3;\n        return $total;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "8:17 invalid-local-assignment-value `int` is not `float`: write 3.0, or convert with (float) n | Declared `float`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_default_of_a_float_property_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float rate = 5;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public float $rate = 5;\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "5:25 invalid-property-default-value `int` is not `float`: write 5.0, or convert with (float) n | Declared `float`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_written_to_a_float_property_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float rate = 0.5;\n\n    public void reset()\n    {\n        this.rate = 2;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public float $rate = 0.5;\n\n    public function reset(): void\n    {\n        $this->rate = 2;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "9:21 invalid-property-assignment-value `int` is not `float`: write 2.0, or convert with (float) n | Declared `float`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_default_of_a_float_parameter_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float scale(float by = 2) => by;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function scale(float $by = 2): float\n    {\n        return $by;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "5:35 invalid-parameter-default-value `int` is not `float`: write 2.0, or convert with (float) n | Declared `float`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_argument_to_a_float_parameter_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float scale(float by) => by;\n\n    public float run() => this.scale(3);\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function scale(float $by): float\n    {\n        return $by;\n    }\n\n    public function run(): float\n    {\n        return $this->scale(3);\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        ["7:38 invalid-argument `int` is not `float`: write 3.0, or convert with (float) n | Declared `float`."]
+    );
+}
+
+#[test]
+fn an_int_returned_where_a_float_is_declared_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float zero()\n    {\n        return 0;\n    }\n\n    public float count(int n) => n;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function zero(): float\n    {\n        return 0;\n    }\n\n    public function count(int $n): float\n    {\n        return $n;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "7:16 invalid-return-statement `int` is not `float`: write 0.0, or convert with (float) n | Declared `float`.",
+            "10:34 invalid-return-statement `int` is not `float`: write 0.0, or convert with (float) n | Declared `float`.",
+        ]
+    );
+}
+
+#[test]
+fn an_int_element_of_a_float_list_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public List<float> prices()\n    {\n        List<float> prices = [1, 2.5];\n        return prices;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @return list<float> */\n    public function prices(): array\n    {\n        /** @var list<float> $prices */\n        $prices = [1, 2.5];\n        return $prices;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "7:30 invalid-local-assignment-value `int` is not `float`: write 1.0, or convert with (float) n | Declared `List<float>`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_value_of_a_float_map_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public Map<string, float> prices()\n    {\n        Map<string, float> prices = [\"tea\": 4];\n        return prices;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @return array<string, float> */\n    public function prices(): array\n    {\n        /** @var array<string, float> $prices */\n        $prices = ['tea' => 4];\n        return $prices;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "7:37 invalid-local-assignment-value `int` is not `float`: write 4.0, or convert with (float) n | Declared `Map<string, float>`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_in_a_nullable_float_local_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float? discount()\n    {\n        float? discount = 1;\n        return discount;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function discount(): ?float\n    {\n        $discount = 1;\n        return $discount;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "7:27 invalid-local-assignment-value `int` is not `float`: write 1.0, or convert with (float) n | Declared `float?`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_in_a_float_or_string_local_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float|string label()\n    {\n        float|string label = 7;\n        return label;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function label(): float|string\n    {\n        $label = 7;\n        return $label;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "7:30 invalid-local-assignment-value `int` is not `float`: write 7.0, or convert with (float) n | Declared `float|string`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_argument_where_a_template_is_float_is_refused() {
+    let sharp = "namespace Demo;\n\nimport Lib.Cell;\n\nclass Report\n{\n    public bool run()\n    {\n        const cell = new Cell(0.5);\n        cell.put(2);\n        return cell.get() == 2.0;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Cell;\n\nclass Report\n{\n    public function run(): bool\n    {\n        $cell = new Cell(0.5);\n        $cell->put(2);\n        return $cell->get() === 2.0;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        ["10:18 invalid-argument `int` is not `float`: write 2.0, or convert with (float) n | Declared `float`."]
+    );
+}
+
+#[test]
+fn an_int_added_to_a_float_list_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public List<float> prices()\n    {\n        List<float> prices = [];\n        prices.add(6);\n        return prices;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @return list<float> */\n    public function prices(): array\n    {\n        /** @var list<float> $prices */\n        $prices = [];\n        $prices[] = 6;\n        return $prices;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        ["8:20 invalid-argument `int` is not `float`: write 6.0, or convert with (float) n | Declared `float`."]
+    );
+}
+
+#[test]
+fn an_int_written_by_key_into_a_float_map_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public Map<string, float> prices()\n    {\n        Map<string, float> prices = [:];\n        prices[\"tea\"] = 8;\n        return prices;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @return array<string, float> */\n    public function prices(): array\n    {\n        /** @var array<string, float> $prices */\n        $prices = [];\n        $prices['tea'] = 8;\n        return $prices;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "8:25 invalid-local-assignment-value `int` is not `float`: write 8.0, or convert with (float) n | Declared `Map<string, float>`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_returned_by_a_float_computed_property_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float rate => 9;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public float $rate { get => 9; }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "5:26 invalid-return-statement `int` is not `float`: write 9.0, or convert with (float) n | Declared `float`."
+        ]
+    );
+}
+
+#[test]
+fn an_int_value_of_a_float_constant_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public const float RATE = 10;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public const float RATE = 10;\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        ["5:31 invalid-constant-value `int` is not `float`: write 10.0, or convert with (float) n | Declared `float`."]
+    );
+}
+
+#[test]
+fn an_int_written_to_a_float_static_field_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static float rate = 0.5;\n\n    public static void reset()\n    {\n        Report.rate = 11;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static float $rate = 0.5;\n\n    public static function reset(): void\n    {\n        self::$rate = 11;\n    }\n}\n";
+
+    assert_eq!(
+        int_for_float_refusals(sharp, php),
+        [
+            "9:23 invalid-property-assignment-value `int` is not `float`: write 11.0, or convert with (float) n | Declared `float`."
+        ]
+    );
+}
+
+/// The refusal names the `int` only when it is the one reason the value does not fit, so a value that may also be a
+/// `string` keeps the message of any value of the wrong type.
+#[test]
+fn a_value_that_may_be_an_int_or_a_string_where_a_float_is_expected_keeps_the_wrong_type_message() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run(int|string value)\n    {\n        float total = value;\n        return total;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["Invalid assignment to `total`: it is declared as `float`."]
+    );
+}
+
+#[test]
+fn a_float_a_written_conversion_and_mixed_arithmetic_land_where_a_float_is_expected() {
+    let sharp = "namespace Demo;\n\nimport Lib.Cell;\n\nclass Report\n{\n    public float run(int count, int n)\n    {\n        float total = 0.0;\n        float price = (float) count;\n        float half = count * 1.5;\n        int|float either = 1;\n        const cell = new Cell(2.0);\n        cell.put((float) n);\n        return total + price + half + either + cell.get();\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Cell.php", CELL)]), Vec::<String>::new());
 }
 
 #[test]
@@ -3517,7 +3778,7 @@ fn a_function_type_refuses_a_lambda_of_another_type_and_a_string_or_array_callab
 /// `associateBy` key a map by it, and `filterValues` keeps a map's keys.
 #[test]
 fn collection_methods_that_take_a_lambda_type_its_parameter_and_their_result() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, Map<string, int> prices)\n    {\n        List<int> evens = numbers.filter(n => n % 2 == 0);\n        List<string> labels = numbers.map(n => `#${n}`);\n        int total = evens.sumOf(n => n * 2);\n        List<string> sorted = labels.sortedBy(s => strlen(s));\n        Map<int, List<int>> groups = numbers.groupBy(n => n % 3);\n        Map<string, string> byLabel = labels.associateBy(s => s);\n        Map<string, int> cheap = prices.filterValues(p => p < 100);\n        List<int> kept = prices.filter(p => p > 0);\n        List<float> halves = prices.map(p => p / 2);\n        int first = numbers.first(n => n > 2);\n        bool expensive = prices.any(p => p > 1000);\n        return total + first + count(sorted) + count(groups) + count(byLabel) + count(cheap) + count(kept) + count(halves) + (expensive ? 1 : 0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, Map<string, int> prices)\n    {\n        List<int> evens = numbers.filter(n => n % 2 == 0);\n        List<string> labels = numbers.map(n => `#${n}`);\n        int total = evens.sumOf(n => n * 2);\n        List<string> sorted = labels.sortedBy(s => strlen(s));\n        Map<int, List<int>> groups = numbers.groupBy(n => n % 3);\n        Map<string, string> byLabel = labels.associateBy(s => s);\n        Map<string, int> cheap = prices.filterValues(p => p < 100);\n        List<int> kept = prices.filter(p => p > 0);\n        List<float> halves = prices.map(p => p / 2.0);\n        int first = numbers.first(n => n > 2);\n        bool expensive = prices.any(p => p > 1000);\n        return total + first + count(sorted) + count(groups) + count(byLabel) + count(cheap) + count(kept) + count(halves) + (expensive ? 1 : 0);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
