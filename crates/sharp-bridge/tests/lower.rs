@@ -2700,6 +2700,53 @@ fn set_count_to_list_and_filter_are_the_php_that_reads_the_array() {
 }
 
 /// ```php
+/// return \count($this->lines) + \count($counts) + ((($maybe === null) ? null : \count($maybe)) ?? 0);
+/// ```
+///
+/// `count()` is PHP's `count` on the array, on a `List` and a `Map` as on a `Set`.
+#[test]
+fn every_collection_counts_with_php_count() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> lines { get; private set; } = [];\n\n    public int run(Map<string, int> counts, List<int>? maybe)\n    {\n        return this.lines.count() + counts.count() + (maybe?.count() ?? 0);\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  BINARY_OP [1]
+                    CALL
+                      ZVAL "count"
+                      ARG_LIST
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "lines"
+                    CALL
+                      ZVAL "count"
+                      ARG_LIST
+                        VAR
+                          ZVAL "counts"
+                  COALESCE
+                    CONDITIONAL [1]
+                      BINARY_OP [16]
+                        VAR
+                          ZVAL "maybe"
+                        ZVAL null
+                      ZVAL null
+                      CALL
+                        ZVAL "count"
+                        ARG_LIST
+                          VAR
+                            ZVAL "maybe"
+                    ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
 /// !isset($this->tags["vip"]) && ($this->tags += ["vip" => "vip"]);
 /// isset(($receiver#1 = $this->next())->tags["old"]) && $receiver#1->tags->delete("old") === null;
 /// $this->next()->tags = [];

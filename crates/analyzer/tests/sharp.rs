@@ -6049,6 +6049,27 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
     );
 }
 
+/// The php-sharp README's one example, `Cart`, exactly as the README writes it, with the `Line` it leaves out.
+#[test]
+fn the_readme_cart_example_analyzes_with_no_issue() {
+    let cart = "// app/Store/Cart.sharp\nnamespace App.Store;\n\npublic class Cart\n{\n    public List<Line> lines { get; private set; } = [];\n\n    public void add(Line line) { this.lines.add(line); }\n\n    public int total() => this.lines.filter(l => !l.refunded).sumOf(l => l.amount);\n\n    public string status() => match (this.lines.count()) {\n        0 => \"empty\",\n        default => \"open\",\n    };\n}\n";
+    let line = "namespace App.Store;\n\npublic class Line\n{\n    public Line(public bool refunded { get; }, public int amount { get; }) { }\n}\n";
+
+    assert_eq!(issues(("app/Store/Cart.sharp", cart), &[("app/Store/Line.sharp", line)]), Vec::<String>::new());
+    assert_eq!(issues(("app/Store/Line.sharp", line), &[("app/Store/Cart.sharp", cart)]), Vec::<String>::new());
+}
+
+/// Every collection has `count()`, the number of elements it holds, as spec sections 21 and 24 call it. Its result is
+/// an `int`, so it is no condition on its own.
+#[test]
+fn every_collection_counts_its_elements() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public List<string> names { get; private set; } = [];\n\n    public int total(List<int> sizes, Map<string, int> counts, Set<string> tags)\n    {\n        return this.names.count() + sizes.count() + counts.count() + tags.count();\n    }\n\n    public string label(Map<string, int> counts) => match (counts.count()) {\n        0 => \"empty\",\n        default => \"full\",\n    };\n\n    public void wrong(List<int> sizes)\n    {\n        if (sizes.count()) { }\n        sizes.count(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\ListMethods;\nuse Sharp\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["19:13 invalid-operand", "20:21 too-many-arguments"]);
+    assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), Vec::<String>::new());
+}
+
 /// The analyzer checks a collection method against `Sharp\ListMethods` or `Sharp\MapMethods`, and every message names
 /// the PHP# type the code wrote instead, as in "`add` doesn't exist on `Map<string, int>`".
 #[test]
