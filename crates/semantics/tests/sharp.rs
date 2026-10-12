@@ -1005,7 +1005,7 @@ fn new_self_cannot_name_a_named_constructor() {
             "13:36 `Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
         ]
     );
-    assert!(issues(leak(fixed)).is_empty());
+    assert_eq!(issues(leak(fixed)), Vec::<String>::new());
 }
 
 #[test]

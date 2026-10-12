@@ -360,7 +360,7 @@ fn a_local_reads_a_missing_property_as_in_php() {
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Calc.php", CALC)]);
     let php_issues = issues(("src/Demo/Report.php", php), &[("src/Lib/Calc.php", CALC)]);
 
-    assert!(!sharp_issues.is_empty());
+    assert!(!sharp_issues.is_empty(), "expected the missing property to be reported");
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 

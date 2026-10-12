@@ -3388,7 +3388,7 @@ pub(super) mod testing {
         encode_union_snapshot(&mut writer, &ty, &mut types, &CodebaseMetadata::new(), 0).unwrap();
 
         assert_eq!(types.len(), 73);
-        assert!(!writer.finish().is_empty());
+        assert!(!writer.finish().is_empty(), "expected an encoded payload");
     }
 
     /// A codebase that declares the string-backed enum `Status`.

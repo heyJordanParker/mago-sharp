@@ -26,7 +26,7 @@ fn plain_text_is_raw_text() {
 #[test]
 fn empty_input_yields_no_tokens() {
     let toks = lex("");
-    assert!(toks.is_empty());
+    assert!(toks.is_empty(), "expected no tokens");
 }
 
 #[test]

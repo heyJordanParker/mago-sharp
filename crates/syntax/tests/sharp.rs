@@ -121,7 +121,7 @@ fn dotted_name_with_a_space_is_a_parse_error() {
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Store.sharp", "namespace App. Tenant;\n");
 
-    assert!(!program.errors.is_empty());
+    assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
 fn class_members<'arena>(program: &'arena Program<'arena>) -> &'arena Sequence<'arena, ClassLikeMember<'arena>> {
@@ -366,7 +366,7 @@ fn a_by_reference_parameter_is_a_parse_error() {
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", "class Report\n{\n    public void fill(int &count) {}\n}\n");
 
-    assert!(!program.errors.is_empty());
+    assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
 #[test]
@@ -1252,7 +1252,7 @@ fn a_php_hooked_property_has_no_trailing_initial_value() {
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.php", "<?php class Report { public int $views { get; } = 0; }");
 
-    assert!(!program.errors.is_empty());
+    assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
 #[test]
@@ -1916,7 +1916,7 @@ fn a_question_mark_apart_from_the_dot_is_not_null_safe_access() {
     let program =
         parse(&arena, "src/Report.sharp", "class Report\n{\n    void run()\n    {\n        calc? .add(1);\n    }\n}\n");
 
-    assert!(!program.errors.is_empty());
+    assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
 #[test]
