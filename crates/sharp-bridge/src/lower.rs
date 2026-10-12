@@ -347,8 +347,24 @@ enum Search {
 /// `property` of type `r#type` of the hidden variable `object`, as a struct's `==` compares each of its properties.
 enum Side<'side, 'ast> {
     Expression(&'side Expression<'ast>),
-    Hidden { span: Span, name: Vec<u8>, r#type: &'side TUnion },
-    Property { span: Span, object: &'static [u8], property: &'side [u8], r#type: &'side TUnion },
+    Hidden {
+        span: Span,
+        name: Vec<u8>,
+        r#type: &'side TUnion,
+    },
+    Property {
+        span: Span,
+        object: &'static [u8],
+        property: &'side [u8],
+        r#type: &'side TUnion,
+    },
+    /// The element of the hidden collection `array` under the hidden key `key`.
+    Index {
+        span: Span,
+        array: Vec<u8>,
+        key: Vec<u8>,
+        r#type: &'side TUnion,
+    },
 }
 
 /// Lowers one checked file. Every node is pushed after its children, and each node's children are contiguous.
@@ -2129,6 +2145,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if mixes_numbers(lhs_type, rhs_type) {
             return self.float_equality(line, &lhs, &rhs, negated);
         }
+        if !self.compares_identically(lhs_type, rhs_type) {
+            return self.collection_equality(line, &lhs, &rhs, negated);
+        }
 
         let lhs = self.side(&lhs);
         let rhs = self.side(&rhs);
@@ -2155,8 +2174,88 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     {
         match side {
             Side::Expression(expression) => self.types.expression_type(expression),
-            Side::Hidden { r#type, .. } | Side::Property { r#type, .. } => r#type,
+            Side::Hidden { r#type, .. } | Side::Property { r#type, .. } | Side::Index { r#type, .. } => r#type,
         }
+    }
+
+    /// Whether `==` on a value of `lhs_type` and one of `rhs_type` is PHP's `===`, spec section 19: true for every value
+    /// but a collection, and for two lists whose elements compare so. Two maps compare their entries regardless of
+    /// order, which `===` does not, and elements compared by an `op_Equality` or as floats need their own `==`.
+    fn compares_identically(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> bool {
+        let (Some(lhs_lists), Some(rhs_lists)) = (collection_kind(lhs_type), collection_kind(rhs_type)) else {
+            return true;
+        };
+        let (lhs_element, rhs_element) = (self.types.element_type(lhs_type), self.types.element_type(rhs_type));
+
+        lhs_lists
+            && rhs_lists
+            && self.declared_equality(&lhs_element, &rhs_element).is_none()
+            && !mixes_numbers(&lhs_element, &rhs_element)
+            && self.compares_identically(&lhs_element, &rhs_element)
+    }
+
+    /// `lhs == rhs` of two collections, spec section 19, which holds when both hold as many elements and each element of
+    /// `lhs` equals the one under its key in `rhs` by the element's own `==`, so two maps compare regardless of order:
+    /// `(fn ($lhs#1, $rhs#2) => \count($lhs#1) === \count($rhs#2) && \array_all($lhs#1, fn ($element#3, $key#4) =>
+    /// \array_key_exists($key#4, $rhs#2) && $element#3 == $rhs#2[$key#4]))(lhs, rhs)`. When a side may be null, null
+    /// equals only null first: `$lhs#1 === null || $rhs#2 === null ? $lhs#1 === $rhs#2 : …`. `!=` is its `!`.
+    fn collection_equality(&mut self, line: u32, lhs: &Side, rhs: &Side, negated: bool) -> u32 {
+        let span = Self::side_span(lhs);
+        let (lhs_type, rhs_type) = (self.side_type(lhs), self.side_type(rhs));
+        let (lhs_element, rhs_element) = (self.types.element_type(lhs_type), self.types.element_type(rhs_type));
+        let nullable = lhs_type.can_be_null() || rhs_type.can_be_null();
+
+        let taken = self.temporaries;
+        let [lhs_name, rhs_name, element_name, key_name] = [("lhs", 1), ("rhs", 2), ("element", 3), ("key", 4)]
+            .map(|(name, n)| format!("{name}#{}", taken + n).into_bytes());
+        self.temporaries += 4;
+
+        let element = Side::Hidden { span, name: element_name.clone(), r#type: &lhs_element };
+        let other = Side::Index { span, array: rhs_name.clone(), key: key_name.clone(), r#type: &rhs_element };
+        let element_equal = self.equality(line, element, other, false);
+        let key = self.variable(span, &key_name);
+        let rhs_array = self.variable(span, &rhs_name);
+        let has_key = self.global_call(line, b"array_key_exists", &[key, rhs_array]);
+        let element_matches = self.node(SHARP_AST_AND, 0, line, &[has_key, element_equal]);
+        let predicate = self.hidden_arrow_function(span, &[&element_name, &key_name], element_matches);
+
+        let lhs_array = self.variable(span, &lhs_name);
+        let every = self.global_call(line, b"array_all", &[lhs_array, predicate]);
+        let lhs_count = self.variable(span, &lhs_name);
+        let lhs_count = self.global_call(line, b"count", &[lhs_count]);
+        let rhs_count = self.variable(span, &rhs_name);
+        let rhs_count = self.global_call(line, b"count", &[rhs_count]);
+        let same_count = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[lhs_count, rhs_count]);
+        let mut equal = self.node(SHARP_AST_AND, 0, line, &[same_count, every]);
+        if nullable {
+            let is_null = |lowering: &mut Self, name: &[u8]| {
+                let variable = lowering.variable(span, name);
+                let null = lowering.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+                lowering.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[variable, null])
+            };
+            let either_null = [is_null(self, &lhs_name), is_null(self, &rhs_name)];
+            let either_null = self.node(SHARP_AST_OR, 0, line, &either_null);
+            let both = [self.variable(span, &lhs_name), self.variable(span, &rhs_name)];
+            let identical = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &both);
+            equal = self.node(SHARP_AST_CONDITIONAL, 0, line, &[either_null, identical, equal]);
+        }
+        let compare = self.hidden_arrow_function(span, &[&lhs_name, &rhs_name], equal);
+        self.temporaries -= 4;
+
+        let operands = [self.side(lhs), self.side(rhs)];
+        let operands = self.node(SHARP_AST_ARG_LIST, 0, line, &operands);
+        let call = self.node(SHARP_AST_CALL, 0, line, &[compare, operands]);
+
+        if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call }
+    }
+
+    /// `\function(arguments)`, a call of the global PHP function `function`.
+    fn global_call(&mut self, line: u32, function: &[u8], arguments: &[u32]) -> u32 {
+        let function = self.string(ZEND_NAME_FQ, line, function);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
     /// A read of `side`: the expression, lowered, its hidden variable, or its hidden variable's property.
@@ -2171,13 +2270,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_PROP, 0, line, &[object, property])
             }
+            Side::Index { span, array, key, .. } => {
+                let array = self.variable(*span, array);
+                let key = self.variable(*span, key);
+
+                self.node(SHARP_AST_DIM, 0, self.line(*span), &[array, key])
+            }
         }
     }
 
     fn side_span(side: &Side) -> Span {
         match side {
             Side::Expression(expression) => expression.span(),
-            Side::Hidden { span, .. } | Side::Property { span, .. } => *span,
+            Side::Hidden { span, .. } | Side::Property { span, .. } | Side::Index { span, .. } => *span,
         }
     }
 
@@ -2946,6 +3051,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let strict = self.declared_equality(element_type, value_type).is_none()
             && !mixes_numbers(element_type, value_type)
+            && self.compares_identically(element_type, value_type)
             && self.is_pure(value)
             && receiver_runs_nothing;
         let hidden = (matches!(search, Search::Remove) || (strict && matches!(search, Search::IndexOf))).then(|| {
@@ -2970,8 +3076,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let element = Side::Hidden { span: call, name: element_name.clone(), r#type: element_type };
             let held = Side::Hidden { span: call, name: value_name.clone(), r#type: value_type };
             let equality = self.equality(line, element, held, false);
-            let compare = self.hidden_arrow_function(call, &element_name, equality);
-            let compare_with = self.hidden_arrow_function(call, &value_name, compare);
+            let compare = self.hidden_arrow_function(call, &[&element_name], equality);
+            let compare_with = self.hidden_arrow_function(call, &[&value_name], compare);
             let value = self.expression(value);
             let value = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
             let predicate = self.node(SHARP_AST_CALL, 0, line, &[compare_with, value]);
@@ -3018,12 +3124,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         lowered
     }
 
-    /// `fn ($parameter) => body`, an arrow function of one untyped hidden parameter, on the line of `span`.
-    fn hidden_arrow_function(&mut self, span: Span, parameter: &[u8], body: u32) -> u32 {
+    /// `fn ($parameter, …) => body`, an arrow function of untyped hidden parameters, on the line of `span`.
+    fn hidden_arrow_function(&mut self, span: Span, parameters: &[&[u8]], body: u32) -> u32 {
         let line = self.line(span);
-        let name = self.string(0, line, parameter);
-        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[NULL, name, NULL, NULL, NULL, NULL]);
-        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+        let mut lowered = Vec::new();
+        for parameter in parameters {
+            let name = self.string(0, line, parameter);
+            lowered.push(self.node(SHARP_AST_PARAM, 0, line, &[NULL, name, NULL, NULL, NULL, NULL]));
+        }
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &lowered);
 
         self.declaration(SHARP_AST_ARROW_FUNC, 0, span, span, b"", &[parameters, NULL, body, NULL, NULL])
     }
@@ -3631,6 +3740,20 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
     } else {
         flags
     }
+}
+
+/// Whether every value of `r#type` but `null` is a collection, and then whether each is a `List`, or `None` when part of
+/// it is no collection.
+fn collection_kind(r#type: &TUnion) -> Option<bool> {
+    let mut lists = None;
+    for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
+        let TAtomic::Array(array) = atomic else {
+            return None;
+        };
+        lists = Some(lists.unwrap_or(true) && matches!(array, TArray::List(_)));
+    }
+
+    lists
 }
 
 /// Whether `==` compares a value of `lhs` with one of `rhs` as an int and a float: both are numbers, `null` aside, and

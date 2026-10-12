@@ -6,7 +6,8 @@
 //! - `x is Calc` is `x instanceof Calc`, and `x is int` is `is_int(x)`, with `is_float`, `is_string` and `is_bool`.
 //! - `x is Calc c` is `($c = x) instanceof Calc`, so `c` holds the value whether or not it matches, and the binder
 //!   keeps it in scope only where it matches.
-//! - `x is 200` is `x === 200`, `x is < 10` is `x < 10`, and `x is limit` is `x === limit` when `limit` is a local.
+//! - `x is 200` is `x == 200`, `x is < 10` is `x < 10`, and `x is limit` is `x == limit` when `limit` is a local. The
+//!   `==` is spec section 19's, so a struct value matches an equal struct.
 //! - `not`, `and` and `or` are `!`, `&&` and `||`.
 //! - `x is { total: > 0 }` is `is_object(x) && x->total > 0`.
 //! - `x as Calc` is `x instanceof Calc ? x : null`.
@@ -376,7 +377,7 @@ where
     }
 
     /// The PHP that is `true` when the subject matches `pattern`, reading the subject in evaluation order. `follows`
-    /// is the token the pattern follows. A value's read sits at its start, so `read === value` spans more than the
+    /// is the token the pattern follows. A value's read sits at its start, so `read == value` spans more than the
     /// value: the analyzer keeps one type per span, and the value keeps its own.
     fn test(
         &mut self,
@@ -392,7 +393,7 @@ where
                 let value = self.alloc(Expression::ConstantAccess(ConstantAccess { name: *name }));
                 let read = self.read(subject, follows);
 
-                self.binary(read, BinaryOperator::Identical(start_of(local.span)), value)
+                self.binary(read, BinaryOperator::Equal(start_of(local.span)), value)
             }
             Pattern::Type(TypePattern { hint, variable }) => {
                 let read = self.read(subject, pattern.span());
@@ -417,7 +418,7 @@ where
             Pattern::Value(value) => {
                 let read = self.read(subject, follows);
 
-                self.binary(read, BinaryOperator::Identical(start_of(value.span())), value)
+                self.binary(read, BinaryOperator::Equal(start_of(value.span())), value)
             }
             Pattern::Comparison(comparison) => {
                 let read = self.read(subject, pattern.span());

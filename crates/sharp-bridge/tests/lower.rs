@@ -3227,11 +3227,13 @@ fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
 /// return \array_find_key($prices, (fn (${'value#1'}) => fn (${'element#2'}) => \App\Money::op_Equality(${'element#2'}, ${'value#1'}))($price)) !== null
 ///     && \array_find_key($amounts, (fn (${'value#1'}) => fn (${'element#2'}) =>
 ///         ((${'operand#3'} = ${'element#2'}) === null) === ((${'operand#4'} = ${'value#1'}) === null)
-///         && (${'operand#3'} === null || (float) ${'operand#3'} === (float) ${'operand#4'}))(1)) === 0;
+///         && (${'operand#3'} === null || (float) ${'operand#3'} === (float) ${'operand#4'}))(1)) === 0
+///     && \array_find_key($rows, (fn (${'value#1'}) => fn (${'element#2'}) => (fn (${'lhs#3'}, ${'rhs#4'}) => …)(${'element#2'}, ${'value#1'}))($row)) !== null;
 /// ```
 ///
 /// Where section 19's `==` is not `===`, a search runs the `==` the bridge lowers for each element: the `op_Equality`
-/// the element's class declares, or an int compared with a float as two floats, where a null element equals only null.
+/// the element's class declares, an int compared with a float as two floats, where a null element equals only null,
+/// or two maps compared entry by entry.
 /// The outer function takes the value
 /// once, as an argument, after the receiver, and the inner one compares an element with it. `contains` is whether
 /// `\array_find_key` found a key.
@@ -3239,19 +3241,125 @@ fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
 fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
     assert_eq!(
         ledger_body(
-            "bool run(List<Money> prices, Money price, List<(int|float)?> amounts)",
-            "        return prices.contains(price) && amounts.indexOf(1) == 0;\n"
+            "bool run(List<Money> prices, Money price, List<(int|float)?> amounts, List<Map<string, int>> rows, Map<string, int> row)",
+            "        return prices.contains(price) && amounts.indexOf(1) == 0 && rows.contains(row);\n"
         ),
         indoc! {r#"
             STMT_LIST
               RETURN
                 AND
+                  AND
+                    BINARY_OP [17]
+                      CALL
+                        ZVAL "array_find_key"
+                        ARG_LIST
+                          VAR
+                            ZVAL "prices"
+                          CALL
+                            ARROW_FUNC "" @16-16
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "value#1"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              ARROW_FUNC "" @16-16
+                                PARAM_LIST
+                                  PARAM
+                                    null
+                                    ZVAL "element#2"
+                                    null
+                                    null
+                                    null
+                                    null
+                                null
+                                STATIC_CALL
+                                  ZVAL "App\\Money"
+                                  ZVAL "op_Equality"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "element#2"
+                                    VAR
+                                      ZVAL "value#1"
+                                null
+                                null
+                              null
+                              null
+                            ARG_LIST
+                              VAR
+                                ZVAL "price"
+                      ZVAL null
+                    BINARY_OP [16]
+                      CALL
+                        ZVAL "array_find_key"
+                        ARG_LIST
+                          VAR
+                            ZVAL "amounts"
+                          CALL
+                            ARROW_FUNC "" @16-16
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "value#1"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              ARROW_FUNC "" @16-16
+                                PARAM_LIST
+                                  PARAM
+                                    null
+                                    ZVAL "element#2"
+                                    null
+                                    null
+                                    null
+                                    null
+                                null
+                                AND
+                                  BINARY_OP [16]
+                                    BINARY_OP [16]
+                                      ASSIGN
+                                        VAR
+                                          ZVAL "operand#3"
+                                        VAR
+                                          ZVAL "element#2"
+                                      ZVAL null
+                                    BINARY_OP [16]
+                                      ASSIGN
+                                        VAR
+                                          ZVAL "operand#4"
+                                        VAR
+                                          ZVAL "value#1"
+                                      ZVAL null
+                                  OR
+                                    BINARY_OP [16]
+                                      VAR
+                                        ZVAL "operand#3"
+                                      ZVAL null
+                                    BINARY_OP [16]
+                                      CAST [5]
+                                        VAR
+                                          ZVAL "operand#3"
+                                      CAST [5]
+                                        VAR
+                                          ZVAL "operand#4"
+                                null
+                                null
+                              null
+                              null
+                            ARG_LIST
+                              ZVAL 1
+                      ZVAL 0
                   BINARY_OP [17]
                     CALL
                       ZVAL "array_find_key"
                       ARG_LIST
                         VAR
-                          ZVAL "prices"
+                          ZVAL "rows"
                         CALL
                           ARROW_FUNC "" @16-16
                             PARAM_LIST
@@ -3273,9 +3381,78 @@ fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
                                   null
                                   null
                               null
-                              STATIC_CALL
-                                ZVAL "App\\Money"
-                                ZVAL "op_Equality"
+                              CALL
+                                ARROW_FUNC "" @16-16
+                                  PARAM_LIST
+                                    PARAM
+                                      null
+                                      ZVAL "lhs#3"
+                                      null
+                                      null
+                                      null
+                                      null
+                                    PARAM
+                                      null
+                                      ZVAL "rhs#4"
+                                      null
+                                      null
+                                      null
+                                      null
+                                  null
+                                  AND
+                                    BINARY_OP [16]
+                                      CALL
+                                        ZVAL "count"
+                                        ARG_LIST
+                                          VAR
+                                            ZVAL "lhs#3"
+                                      CALL
+                                        ZVAL "count"
+                                        ARG_LIST
+                                          VAR
+                                            ZVAL "rhs#4"
+                                    CALL
+                                      ZVAL "array_all"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "lhs#3"
+                                        ARROW_FUNC "" @16-16
+                                          PARAM_LIST
+                                            PARAM
+                                              null
+                                              ZVAL "element#5"
+                                              null
+                                              null
+                                              null
+                                              null
+                                            PARAM
+                                              null
+                                              ZVAL "key#6"
+                                              null
+                                              null
+                                              null
+                                              null
+                                          null
+                                          AND
+                                            CALL
+                                              ZVAL "array_key_exists"
+                                              ARG_LIST
+                                                VAR
+                                                  ZVAL "key#6"
+                                                VAR
+                                                  ZVAL "rhs#4"
+                                            BINARY_OP [16]
+                                              VAR
+                                                ZVAL "element#5"
+                                              DIM
+                                                VAR
+                                                  ZVAL "rhs#4"
+                                                VAR
+                                                  ZVAL "key#6"
+                                          null
+                                          null
+                                  null
+                                  null
                                 ARG_LIST
                                   VAR
                                     ZVAL "element#2"
@@ -3287,70 +3464,8 @@ fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
                             null
                           ARG_LIST
                             VAR
-                              ZVAL "price"
+                              ZVAL "row"
                     ZVAL null
-                  BINARY_OP [16]
-                    CALL
-                      ZVAL "array_find_key"
-                      ARG_LIST
-                        VAR
-                          ZVAL "amounts"
-                        CALL
-                          ARROW_FUNC "" @16-16
-                            PARAM_LIST
-                              PARAM
-                                null
-                                ZVAL "value#1"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            ARROW_FUNC "" @16-16
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "element#2"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              AND
-                                BINARY_OP [16]
-                                  BINARY_OP [16]
-                                    ASSIGN
-                                      VAR
-                                        ZVAL "operand#3"
-                                      VAR
-                                        ZVAL "element#2"
-                                    ZVAL null
-                                  BINARY_OP [16]
-                                    ASSIGN
-                                      VAR
-                                        ZVAL "operand#4"
-                                      VAR
-                                        ZVAL "value#1"
-                                    ZVAL null
-                                OR
-                                  BINARY_OP [16]
-                                    VAR
-                                      ZVAL "operand#3"
-                                    ZVAL null
-                                  BINARY_OP [16]
-                                    CAST [5]
-                                      VAR
-                                        ZVAL "operand#3"
-                                    CAST [5]
-                                      VAR
-                                        ZVAL "operand#4"
-                              null
-                              null
-                            null
-                            null
-                          ARG_LIST
-                            ZVAL 1
-                    ZVAL 0
         "#}
     );
 }
@@ -12027,6 +12142,254 @@ fn every_operand_shape_the_checker_accepts_calls_the_class_that_declares_the_ope
 }
 
 /// Spec section 10: the struct `Point`, whose `==` compares an `int`, a `float` and a nullable `Money`.
+/// ```php
+/// return (fn (${'lhs#1'}, ${'rhs#2'}) => \count(${'lhs#1'}) === \count(${'rhs#2'})
+///         && \array_all(${'lhs#1'}, fn (${'element#3'}, ${'key#4'}) => \array_key_exists(${'key#4'}, ${'rhs#2'})
+///             && ${'element#3'} === ${'rhs#2'}[${'key#4'}]))($a, $b)
+///     && !(fn (${'lhs#1'}, ${'rhs#2'}) => ${'lhs#1'} === null || ${'rhs#2'} === null ? ${'lhs#1'} === ${'rhs#2'}
+///         : \count(${'lhs#1'}) === \count(${'rhs#2'}) && \array_all(${'lhs#1'}, fn (${'element#3'}, ${'key#4'}) =>
+///             \array_key_exists(${'key#4'}, ${'rhs#2'}) && (float) ${'element#3'} === ${'rhs#2'}[${'key#4'}]))($c, $d)
+///     && $c === $e;
+/// ```
+///
+/// Spec section 19 compares two collections element by element, each with its element's own `==`. Two maps hold equal
+/// values under the same keys in any order, so each entry of one is looked up in the other. An int list compared with a
+/// float list compares each pair as two floats, and a side that may be null equals only null. Two lists whose elements
+/// compare by `===` are one `===`, which PHP runs on arrays in order.
+#[test]
+fn equality_of_two_collections_compares_each_element_with_its_own_equality() {
+    assert_eq!(
+        body_in(
+            "bool run(Map<string, int> a, Map<string, int> b, List<int> c, List<float>? d, List<int>? e)",
+            "        return a == b && c != d && c == e;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                AND
+                  AND
+                    CALL
+                      ARROW_FUNC "" @9-9
+                        PARAM_LIST
+                          PARAM
+                            null
+                            ZVAL "lhs#1"
+                            null
+                            null
+                            null
+                            null
+                          PARAM
+                            null
+                            ZVAL "rhs#2"
+                            null
+                            null
+                            null
+                            null
+                        null
+                        AND
+                          BINARY_OP [16]
+                            CALL
+                              ZVAL "count"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "lhs#1"
+                            CALL
+                              ZVAL "count"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "rhs#2"
+                          CALL
+                            ZVAL "array_all"
+                            ARG_LIST
+                              VAR
+                                ZVAL "lhs#1"
+                              ARROW_FUNC "" @9-9
+                                PARAM_LIST
+                                  PARAM
+                                    null
+                                    ZVAL "element#3"
+                                    null
+                                    null
+                                    null
+                                    null
+                                  PARAM
+                                    null
+                                    ZVAL "key#4"
+                                    null
+                                    null
+                                    null
+                                    null
+                                null
+                                AND
+                                  CALL
+                                    ZVAL "array_key_exists"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "key#4"
+                                      VAR
+                                        ZVAL "rhs#2"
+                                  BINARY_OP [16]
+                                    VAR
+                                      ZVAL "element#3"
+                                    DIM
+                                      VAR
+                                        ZVAL "rhs#2"
+                                      VAR
+                                        ZVAL "key#4"
+                                null
+                                null
+                        null
+                        null
+                      ARG_LIST
+                        VAR
+                          ZVAL "a"
+                        VAR
+                          ZVAL "b"
+                    UNARY_OP [14]
+                      CALL
+                        ARROW_FUNC "" @9-9
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "lhs#1"
+                              null
+                              null
+                              null
+                              null
+                            PARAM
+                              null
+                              ZVAL "rhs#2"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          CONDITIONAL
+                            OR
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "lhs#1"
+                                ZVAL null
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "rhs#2"
+                                ZVAL null
+                            BINARY_OP [16]
+                              VAR
+                                ZVAL "lhs#1"
+                              VAR
+                                ZVAL "rhs#2"
+                            AND
+                              BINARY_OP [16]
+                                CALL
+                                  ZVAL "count"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "lhs#1"
+                                CALL
+                                  ZVAL "count"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "rhs#2"
+                              CALL
+                                ZVAL "array_all"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "lhs#1"
+                                  ARROW_FUNC "" @9-9
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "element#3"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
+                                        ZVAL "key#4"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    AND
+                                      CALL
+                                        ZVAL "array_key_exists"
+                                        ARG_LIST
+                                          VAR
+                                            ZVAL "key#4"
+                                          VAR
+                                            ZVAL "rhs#2"
+                                      BINARY_OP [16]
+                                        CAST [5]
+                                          VAR
+                                            ZVAL "element#3"
+                                        DIM
+                                          VAR
+                                            ZVAL "rhs#2"
+                                          VAR
+                                            ZVAL "key#4"
+                                    null
+                                    null
+                          null
+                          null
+                        ARG_LIST
+                          VAR
+                            ZVAL "c"
+                          VAR
+                            ZVAL "d"
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "c"
+                    VAR
+                      ZVAL "e"
+        "#}
+    );
+}
+
+/// ```php
+/// return match (true) {
+///     \App\Point::op_Equality($p, $origin) => "origin",
+///     default => "elsewhere",
+/// };
+/// ```
+///
+/// A value pattern compares with section 19's `==`, so a struct subject matches an equal struct through the struct's
+/// `op_Equality`.
+#[test]
+fn a_value_pattern_on_a_struct_runs_its_op_equality() {
+    assert_eq!(
+        Lowered::with(
+            "namespace App;\n\nclass Report\n{\n    public string run(Point p, Point origin)\n    {\n        return match (p) {\n            origin => \"origin\",\n            default => \"elsewhere\",\n        };\n    }\n}\n",
+            &[("src/App/Point.sharp", POINT), ("src/App/Money.sharp", MONEY)]
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                MATCH
+                  ZVAL true
+                  MATCH_ARM_LIST
+                    MATCH_ARM
+                      EXPR_LIST
+                        STATIC_CALL
+                          ZVAL "App\\Point"
+                          ZVAL "op_Equality"
+                          ARG_LIST
+                            VAR
+                              ZVAL "p"
+                            VAR
+                              ZVAL "origin"
+                      ZVAL "origin"
+                    MATCH_ARM
+                      null
+                      ZVAL "elsewhere"
+        "#}
+    );
+}
+
 const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(public int x { get; }, public float y { get; }, public Money? total { get; }) { }\n\n    public Point moved(int dx) => new Point(this.x + dx, this.y, this.total);\n}\n";
 
 /// ```php

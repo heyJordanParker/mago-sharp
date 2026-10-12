@@ -3255,18 +3255,21 @@ fn equality_of_a_class_instance_is_refused_until_the_class_declares_operator_equ
     );
 }
 
-/// A `List`, `Map` or `Set` is a PHP array at runtime, which `==` cannot compare strictly yet, also against an `Any?`.
+/// Spec section 19: two lists compare element by element and two maps entry by entry, each element with its own `==`,
+/// so a list of a class compares only where the class declares `operator ==`, a list never equals a map, and `Any?`
+/// against a collection is not supported yet.
 #[test]
-fn equality_of_a_collection_is_not_supported_yet() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool a(List<int> items, List<int> others) => items == others;\n\n    public static bool b(Any? value, List<int> items) => value != items;\n}\n";
+fn collections_compare_by_value() {
+    let sharp = "namespace Demo;\n\nimport App.Money;\n\nclass Report\n{\n    public static bool a(List<int> items, List<int> others) => items == others;\n\n    public static bool b(Any? value, List<int> items) => value != items;\n\n    public static bool c(Map<string, int> a, Map<string, int> b, List<Money> m, List<Money> n, List<List<int>> d, List<List<int>> e) => a == b && m != n && d == e && d.contains(Report.items(1));\n\n    public static bool f(List<Cart> carts, List<Cart> others, List<int> items, Map<string, int> counts) => carts == others || items == counts;\n\n    public static List<int> items(int count) => [count];\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param list<int> $items @param list<int> $others */\n    public static function a(array $items, array $others): bool { return $items == $others; }\n\n    /** @param list<int> $items */\n    public static function b(mixed $value, array $items): bool { return $value != $items; }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["11:73 mixed-operand"]);
     assert_eq!(
-        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        refusals(("src/Demo/Report.sharp", sharp), &[("src/Demo/Cart.php", CART), MONEY_OPERATORS]),
         [
-            "5:64 not-supported-yet `==` on a collection is not supported yet, so it cannot compare `List<int>` with `List<int>`. | Compare the elements one by one.",
-            "7:58 not-supported-yet `!=` on a collection is not supported yet, so it cannot compare `Any?` with `List<int>`. | Compare the elements one by one.",
+            "9:58 not-supported-yet `!=` on a collection is not supported yet, so it cannot compare `Any?` with `List<int>`. | Compare the elements one by one.",
+            "13:108 invalid-operand `==` compares `List<Cart>` with `List<Cart>` element by element, and `Cart` declares no `operator ==`. | ",
+            "13:127 invalid-operand `==` cannot compare `List<int>` with `Map<string, int>`. | Convert one side so both sides have the same type.",
         ]
     );
 }
@@ -6742,7 +6745,6 @@ fn a_search_needs_equality_on_the_element_type() {
         [
             "7:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
-            "9:34 not-supported-yet `contains` on `List<List<int>>` is not supported yet: `==` on a collection is not supported yet. | Compare the elements one by one.",
             "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
             "14:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
             "15:35 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",

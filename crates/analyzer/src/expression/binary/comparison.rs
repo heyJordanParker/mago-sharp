@@ -7,7 +7,9 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_bool;
 use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_mixed;
@@ -366,19 +368,15 @@ where
                 if !should_be_specific {
                     get_bool()
                 } else if are_expressions_always_identical(binary.lhs, binary.rhs, lhs_type, rhs_type, artifacts)
-                    || are_definitely_loosely_equal(context.settings.version, lhs_type, rhs_type)
+                    || (!context.dialect.is_sharp()
+                        && are_definitely_loosely_equal(context.settings.version, lhs_type, rhs_type))
                 {
                     if !block_context.flags.inside_loop_expressions() {
                         report_redundant_comparison(context, artifacts, binary, "always equal to", "`true`");
                     }
 
                     get_true()
-                } else if are_definitely_not_loosely_equal(
-                    context.codebase,
-                    context.settings.version,
-                    lhs_type,
-                    rhs_type,
-                ) {
+                } else if never_equal(context, lhs_type, rhs_type) {
                     if !block_context.flags.inside_loop_expressions() {
                         report_redundant_comparison(context, artifacts, binary, "never equal to", "`false`");
                     }
@@ -395,7 +393,8 @@ where
                 if !should_be_specific {
                     get_bool()
                 } else if are_expressions_always_identical(binary.lhs, binary.rhs, lhs_type, rhs_type, artifacts)
-                    || are_definitely_loosely_equal(context.settings.version, lhs_type, rhs_type)
+                    || (!context.dialect.is_sharp()
+                        && are_definitely_loosely_equal(context.settings.version, lhs_type, rhs_type))
                 {
                     if !block_context.flags.inside_loop_expressions() {
                         let description = format!("never equal to (always {} for !=)", display_bool(context, false));
@@ -403,12 +402,7 @@ where
                     }
 
                     get_false()
-                } else if are_definitely_not_loosely_equal(
-                    context.codebase,
-                    context.settings.version,
-                    lhs_type,
-                    rhs_type,
-                ) {
+                } else if never_equal(context, lhs_type, rhs_type) {
                     if !block_context.flags.inside_loop_expressions() {
                         let description =
                             format!("always not equal to (always {} for !=)", display_bool(context, true));
@@ -480,6 +474,25 @@ where
 }
 
 /// Attempts to extract a boolean literal from an expression, looking through parentheses.
+/// Whether `==` never holds for a value of `lhs_type` and one of `rhs_type`. PHP# `==` is `===` on every pair but an
+/// int with a float and two collections, spec section 19, so it never holds where `===` never does. PHP's `==` never
+/// holds where no juggling makes the values equal.
+fn never_equal<A>(context: &Context<'_, '_, A>, lhs_type: &TUnion, rhs_type: &TUnion) -> bool
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    if context.dialect.is_sharp()
+        && !mixes_numbers(lhs_type, rhs_type, codebase)
+        && !lhs_type.has_array()
+        && !rhs_type.has_array()
+    {
+        are_definitely_not_identical(codebase, lhs_type, rhs_type, false)
+    } else {
+        are_definitely_not_loosely_equal(codebase, context.settings.version, lhs_type, rhs_type)
+    }
+}
+
 fn get_boolean_literal(expr: &Expression<'_>) -> Option<bool> {
     match expr {
         Expression::Literal(Literal::True(_)) => Some(true),
@@ -750,6 +763,74 @@ fn comparands(union: &TUnion, codebase: &CodebaseMetadata) -> Vec<Comparand> {
     found
 }
 
+/// Whether a PHP# collection type is a `Map`, with its key and value types: what `==` compares, spec section 19.
+/// `None` when `union` is not one `List` or `Map`, besides `null`, as a `Set` or an iterable is not.
+fn collection_parts(union: &TUnion, codebase: &CodebaseMetadata) -> Option<(bool, TUnion, TUnion)> {
+    let mut collections = union.types.iter().filter(|atomic| !atomic.is_null());
+    let (Some(TAtomic::Array(array @ (TArray::List(_) | TArray::Keyed(_)))), None) =
+        (collections.next(), collections.next())
+    else {
+        return None;
+    };
+    let (key, value) = get_array_parameters(array, codebase);
+
+    Some((matches!(array, TArray::Keyed(_)), key, value))
+}
+
+/// Why `operator`, `==` or `!=`, may not compare a collection of `lhs_type` with one of `rhs_type`, spec section 19:
+/// two lists compare element by element in order, and two maps compare the values under each key regardless of order,
+/// each with its own `==`. A list never equals a map, and an empty literal equals either.
+fn collection_refusal(
+    operator: &BinaryOperator<'_>,
+    lhs_type: &TUnion,
+    rhs_type: &TUnion,
+    codebase: &CodebaseMetadata,
+) -> Option<Refusal> {
+    let (Some((lhs_map, _, lhs_value)), Some((rhs_map, _, rhs_value))) =
+        (collection_parts(lhs_type, codebase), collection_parts(rhs_type, codebase))
+    else {
+        return Some(Refusal::Collection);
+    };
+    if lhs_map != rhs_map && !lhs_value.is_never() && !rhs_value.is_never() {
+        return Some(Refusal::DifferentTypes);
+    }
+
+    sharp_refusal(operator, &lhs_value, &rhs_value, codebase).map(|_| Refusal::CollectionElement)
+}
+
+/// Why `operator` cannot compare the elements of a collection of `lhs_type` with those of one of `rhs_type`, read
+/// through nested collections, as "`Cart` declares no `operator ==`".
+fn element_reason<A>(
+    context: &Context<'_, '_, A>,
+    operator: &BinaryOperator<'_>,
+    lhs_type: &TUnion,
+    rhs_type: &TUnion,
+) -> String
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let (Some((_, _, lhs)), Some((_, _, rhs))) =
+        (collection_parts(lhs_type, codebase), collection_parts(rhs_type, codebase))
+    else {
+        unreachable!("`==` refuses elements only of two collections");
+    };
+
+    match sharp_refusal(operator, &lhs, &rhs, codebase) {
+        Some(Refusal::Instance) => {
+            let class = display_refused_side(context, &lhs, &rhs, |comparand| comparand == Comparand::Instance);
+
+            format!("`{class}` declares no `operator ==`")
+        }
+        Some(Refusal::CollectionElement) => element_reason(context, operator, &lhs, &rhs),
+        Some(Refusal::StructProperty) => {
+            struct_property_issue(context, &lhs, &rhs).message.trim_end_matches('.').to_owned()
+        }
+        Some(Refusal::Collection) => format!("`==` on `{}` is not supported yet", display_operand(context, &lhs)),
+        _ => format!("`{}` never equals `{}`", display_operand(context, &lhs), display_operand(context, &rhs)),
+    }
+}
+
 /// Why spec section 19 gives a PHP# comparison no meaning.
 #[derive(Clone, Copy)]
 pub(crate) enum Refusal {
@@ -759,6 +840,8 @@ pub(crate) enum Refusal {
     StructIdentity,
     /// `==` or `!=` on a struct with a property its own `==` cannot compare, spec section 10.
     StructProperty,
+    /// `==` or `!=` on two collections whose elements `==` cannot compare, spec section 19.
+    CollectionElement,
     /// `==` or `!=` on a `List`, `Map` or `Set`.
     Collection,
     /// `==` or `!=` on an instance of a class that declares no `operator ==`, or `<=>` or an ordering on one whose class
@@ -828,7 +911,7 @@ pub(crate) fn sharp_refusal(
                 })
                 .collect();
             if has(Comparand::Collection) {
-                Some(Refusal::Collection)
+                collection_refusal(operator, lhs_type, rhs_type, codebase)
             } else if let Some(&name) = structs.first() {
                 // A struct equals only an instance of the same struct, or an `Any` that holds one.
                 let same = lhs
@@ -989,6 +1072,16 @@ pub(crate) fn report_sharp_refusal<A>(
             )
         }
         Refusal::StructProperty => (IssueCode::InvalidOperand, struct_property_issue(context, lhs_type, rhs_type)),
+        Refusal::CollectionElement => (
+            IssueCode::InvalidOperand,
+            Issue::error(format!(
+                "`{op}` compares `{lhs_name}` with `{rhs_name}` element by element, and {}.",
+                element_reason(context, operator, lhs_type, rhs_type)
+            ))
+            .with_note(
+                "Two lists are equal when their elements are, in order, and two maps when they hold equal values under the same keys.",
+            ),
+        ),
         Refusal::Collection => (
             IssueCode::NotSupportedYet,
             Issue::error(format!(
@@ -1071,6 +1164,7 @@ where
             Refusal::Identity
             | Refusal::StructIdentity
             | Refusal::StructProperty
+            | Refusal::CollectionElement
             | Refusal::Collection
             | Refusal::NullableOperand,
         ) => {
@@ -1156,6 +1250,14 @@ pub(crate) fn check_element_equality<A>(
                     .with_note("A search compares each element with the value by `==`."),
             )
         }
+        Some(Refusal::CollectionElement) => (
+            IssueCode::InvalidArgument,
+            Issue::error(format!(
+                "`{method}` compares elements with `==`, and {}.",
+                element_reason(context, &equality, element_type, value_type)
+            ))
+            .with_note("A search compares each element with the value by `==`."),
+        ),
         Some(Refusal::Collection) => (
             IssueCode::NotSupportedYet,
             Issue::error(format!(
@@ -1252,6 +1354,7 @@ where
     let why = match reason {
         Some(Refusal::Instance) => "which declares no `operator ==`",
         Some(Refusal::Collection) => "and `==` on a collection is not supported yet",
+        Some(Refusal::CollectionElement) => "whose elements `==` cannot compare",
         Some(_) => "which `==` cannot compare with another of its type",
         None if r#type.starts_with("Any") => "which compares by value only with a string, a number or an enum case",
         None => "which can't compare by value",
