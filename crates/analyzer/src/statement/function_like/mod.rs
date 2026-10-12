@@ -1734,6 +1734,13 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
     context.collector.report_with_code(IssueCode::InvalidParameterDefaultValue, issue);
 }
 
+/// Whether the type `written` names `name` after a dot, as `Order.Fild` names `Fild`, and not bare.
+fn writes_after_a_dot(written: &[u8], name: &[u8]) -> bool {
+    written
+        .split(|&byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.'))
+        .any(|part| part.strip_suffix(name).is_some_and(|before| before.ends_with(b".")))
+}
+
 /// Reports errors for any undefined type references in the given type metadata.
 ///
 /// This function scans the type union for unresolved `TReference::Symbol` entries,
@@ -1753,7 +1760,15 @@ where
 
         let separator = name.as_bytes().iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
         let (outer, nested) = name.as_bytes().split_at(separator);
-        let issue = if context.dialect.is_sharp() && context.codebase.get_class_like(outer).is_some() {
+        let span = type_metadata.span;
+        let written = (span.file_id == context.source_file.id)
+            .then(|| context.source_file.contents.get(span.start.offset as usize..span.end.offset as usize))
+            .flatten()
+            .unwrap_or_default();
+        let issue = if context.dialect.is_sharp()
+            && writes_after_a_dot(written, &nested[1..])
+            && context.codebase.get_class_like(outer).is_some()
+        {
             // A dotted type names a type nested in its class, spec section 15.
             Issue::error(format!(
                 "`{}` has no event `{}`.",

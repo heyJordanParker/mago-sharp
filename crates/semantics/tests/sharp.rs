@@ -128,10 +128,13 @@ fn an_extern_event_names_a_class_without_uses() {
 }
 
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
-/// `public`, and each parameter is a type, a name and an optional default.
+/// `public`, and each parameter is a type, a name and an optional default. A type nested in a class without `public` is
+/// private, spec section 5, so a nested event or interface writes `public`. An event named with a word PHP reserves
+/// cannot run as a class.
 #[test]
 fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
-    let code = "namespace App.Shop;\n\npublic class Order\n{\n    private event Hidden(int id);\n    static event Shared(int id);\n    public event Typed(public int id, int ...rest);\n    public event Tagged(Set<string> tags);\n    [Logged] public event Noted(int id);\n    public event Tracked(int id { get; });\n    public event Maybe(int id, Set<int>? tags);\n    public event Paid(int orderId, string note = \"\") : Placed;\n}\n";
+    let code = "namespace App.Shop;\n\npublic class Order\n{\n    private event Hidden(int id);\n    static event Shared(int id);\n    public event Typed(public int id, int ...rest);\n    public event Tagged(Set<string> tags);\n    [Logged] public event Noted(int id);\n    public event Tracked(int id { get; });\n    public event Maybe(int id, Set<int>? tags);\n    public event Paid(int orderId, string note = \"\") : Placed;\n    event Moved(int id);\n    interface Placed { }\n    public event Empty();\n    public event Print(int id);\n}\n\npublic event Exit(int code);\n";
+    let fixed = "namespace App.Shop;\n\npublic class Order\n{\n    public event Moved(int id);\n    public interface Placed { }\n    public event Emptied();\n}\n\nevent Shipped(int id);\n";
 
     assert_eq!(
         issues(code),
@@ -143,9 +146,29 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
             "8:25 A `Set` parameter of an event is not supported yet in PHP#.",
             "9:5 This construct is not supported yet in PHP#.",
             "10:33 An event's parameter takes no accessors: it is a get-only property of the event.",
-            "11:32 A `Set` parameter of an event is not supported yet in PHP#."
+            "11:32 A `Set` parameter of an event is not supported yet in PHP#.",
+            "13:5 An event takes only `public`.",
+            "14:5 A nested interface takes only `public`.",
+            "15:18 Event `Empty` name cannot be a reserved keyword.",
+            "16:18 Event `Print` name cannot be a reserved keyword.",
+            "19:14 Event `Exit` name cannot be a reserved keyword."
         ]
     );
+    let helps: Vec<Option<String>> = check("src/Report.sharp", code)
+        .into_iter()
+        .filter(|issue| {
+            issue
+                .annotations
+                .iter()
+                .any(|annotation| annotation.message.as_deref() == Some("Private without `public`."))
+        })
+        .map(|issue| issue.help)
+        .collect();
+    assert_eq!(
+        helps,
+        [Some("Write `public event Moved(int id);`.".to_owned()), Some("Write `public interface Placed`.".to_owned())]
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
     let construct_notes: Vec<Vec<String>> = check("src/Report.sharp", code)
         .into_iter()
         .filter(|issue| issue.message == "This construct is not supported yet in PHP#.")
@@ -171,6 +194,21 @@ fn only_events_and_interfaces_nest_in_a_class() {
             "9:9 This class member is not supported yet in PHP#.",
             "17:5 This class member is not supported yet in PHP#.",
             "24:5 This class member is not supported yet in PHP#."
+        ]
+    );
+}
+
+/// A type a class nests is not named like the class, as C# refuses (CS0542): inside the class, the name would name the
+/// nested type.
+#[test]
+fn a_nested_type_is_not_named_like_its_class() {
+    let code = "namespace App.Shop;\n\npublic class Order\n{\n    public event Order(int id);\n    public interface Order { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:18 `Order` cannot declare a nested type named `Order`.",
+            "6:22 `Order` cannot declare a nested type named `Order`."
         ]
     );
 }

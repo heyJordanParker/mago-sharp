@@ -173,7 +173,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
 
     #[inline]
     fn walk_in_event(&self, event: &'ast Event<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
-        checker::sharp::check_class_name(&event.name, context);
+        checker::sharp::check_event_name(event, context);
     }
 
     #[inline]

@@ -6521,12 +6521,12 @@ fn an_emptied_php_array_property_keeps_the_map_rules() {
     assert_eq!(issues(("src/Demo/Rows.sharp", sharp), &[STORE]), ["20:27 possibly-undefined-array-index"]);
 }
 
-/// A `List` has `add`, `set`, `get`, `entries()`, `contains`, `indexOf` and `last`, and a `Map` has `delete` and `get`,
-/// each typed by the elements of the collection it is called on, as spec section 12 decides. `indexOf` gives `int?`,
-/// null when no element matches.
+/// A `List` has `add`, `set`, `get`, `entries()`, `contains`, `indexOf`, `last`, `insert`, `remove` and `clear`, and a
+/// `Map` has `delete` and `get`, each typed by the elements of the collection it is called on, as spec section 12
+/// decides. `indexOf` gives `int?`, null when no element matches, and a `List`'s `remove` gives `bool`.
 #[test]
 fn collection_methods_take_and_give_the_types_of_their_elements() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra.set(0, line);\n        this.counts.delete(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.get(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(\"a\", new Line(1));\n        counts.add(1);\n        extra.delete(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other;\n    }\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra.set(0, line);\n        this.counts.delete(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.get(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(\"a\", new Line(1));\n        counts.add(1);\n        extra.delete(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other;\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Order.sharp", sharp), &[]),
@@ -6537,20 +6537,26 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
             "26:15 non-existent-method",
             "34:21 invalid-local-assignment-value",
             "35:36 invalid-argument",
-            "36:32 too-many-arguments"
+            "36:32 too-many-arguments",
+            "45:22 invalid-argument",
+            "46:25 invalid-argument",
+            "47:23 invalid-local-assignment-value"
         ]
     );
 }
 
 /// Spec section 12: "`contains`, a `List`'s `remove`, `indexOf` and `Set<T>` need `==` on the element type. Without it,
-/// they are a compile error." A class element without `operator ==`, or whose `operator ==` does not take two of it, is
-/// refused, a collection element is not supported yet, as `==` on a collection is, and an `Any?` element is refused as
-/// `==` refuses `Any`. An element `==` compares, a class that declares `operator ==`, a string or an `int|float` given
-/// an int, searches with no issue, as does the help's `any` with `===`, whose lambda names an element by its class's
-/// initial unless the call already uses that name, and which keeps a null-safe call's `?.`.
+/// they are a compile error." A search compares each element with the value by `==`, so it refuses what
+/// `any(x => x == value)` refuses: a class element without `operator ==`, an element union the value's `operator ==`
+/// does not always take, an `operator ==` that does not take the element and the value, named by the value's class,
+/// and an `Any?` element compared with an `Any?` or an instance, while a collection element is not supported yet, as
+/// `==` on a collection is. An element `==` compares, a class that declares `operator ==`, nullable or not, a string,
+/// an `int|float` given an int and an `Any?` given a string, searches with no issue, as does the help's `any` with
+/// `===`, whose lambda names an element by its class's initial unless the call already uses that name, and which keeps
+/// a null-safe call's `?.`.
 #[test]
 fn a_search_needs_equality_on_the_element_type() {
-    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(l => l === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value);\n        bool maybe = held?.contains(line) ?? false;\n        bool fixed = held?.any(l => l === line) ?? false;\n        return (kept || row || found || same || minted || named || any || maybe || fixed ? 1 : 0) + (at ?? 0) + (priced ?? 0);\n    }\n}\n\nclass Line\n{\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(l => l === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? false;\n        bool fixed = held?.any(l => l === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n\nclass Line\n{\n}\n\nclass Ticket\n{\n    public Ticket(public int serial { get; })\n    {\n    }\n\n    public static bool operator ==(Ticket a, Ticket b) => a.serial == b.serial;\n\n    public int hash() => this.serial;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Shelf.sharp", sharp), &[]),
@@ -6558,10 +6564,20 @@ fn a_search_needs_equality_on_the_element_type() {
             "7:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "9:34 not-supported-yet `contains` on `List<List<int>>` is not supported yet: `==` on a collection is not supported yet. | Compare the elements one by one.",
-            "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take two `Coin`. | Make the `operator ==` of `Coin` take two `Coin`.",
+            "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
             "14:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
             "15:35 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
+            "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
+            "20:37 invalid-operand `==` cannot compare `Line` with `Line`: `Line` declares no `operator ==`. | Use `===` to test whether both sides are the same object.",
+            "21:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Money` does not take `Line|Money` and `Money`. | Make the `operator ==` of `Money` take `Line|Money` and `Money`.",
+            "21:63 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Money.op_Equality`: expected `Money`, but possibly received `Line|Money`. | Ensure the argument always has the expected type using checks or assertions.",
+            "22:36 mixed-operand Each element of `List<Any?>` is `Any?`, which compares by value only with a string, a number or an enum case. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "23:40 invalid-argument `indexOf` compares elements with `==`, and the `operator ==` of `Money` does not take `int|Money` and `Money`. | Make the `operator ==` of `Money` take `int|Money` and `Money`.",
+            "24:37 invalid-argument `remove` compares elements with `==`, and the `operator ==` of `Money` does not take `Ticket|Money` and `Money`. | Make the `operator ==` of `Money` take `Ticket|Money` and `Money`.",
+            "25:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Line|Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Line|Coin` and `Coin`.",
         ]
     );
 }
@@ -6659,12 +6675,12 @@ fn collection_methods_take_any_value_of_a_type_the_elements_are_literals_of() {
     assert_eq!(issues(("src/Demo/Tray.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// A method that changes a collection writes it back where it lives, so spec section 12 allows it only on a place
-/// the caller can write: a local, a parameter, or a property whose `set` the caller reaches. The runtime never meets
-/// a write the checker accepts and it refuses.
+/// A method that changes a collection, as `add`, `insert`, a `List`'s `remove` and `clear` do, writes it back where
+/// it lives, so spec section 12 allows it only on a place the caller can write: a local, a parameter, or a property
+/// whose `set` the caller reaches. The runtime never meets a write the checker accepts and it refuses.
 #[test]
 fn a_changing_collection_method_needs_a_place_the_caller_can_write() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<int> lines { get; private set; } = [];\n    public List<int> fixed { get; } = [];\n    public List<int> computed => [1];\n}\n\nclass Shop\n{\n    public int change(Order order, Map<string, List<int>> groups)\n    {\n        order.lines.add(1);\n        order.fixed.add(1);\n        order.computed.add(1);\n        this.make().add(1);\n        return count(order.lines.entries()) + (order.fixed.get(0) ?? 0) + count(groups);\n    }\n\n    public List<int> make()\n    {\n        return [];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<int> lines { get; private set; } = [];\n    public List<int> fixed { get; } = [];\n    public List<int> computed => [1];\n}\n\nclass Shop\n{\n    public int change(Order order, Map<string, List<int>> groups)\n    {\n        order.lines.add(1);\n        order.fixed.add(1);\n        order.computed.add(1);\n        this.make().add(1);\n        this.make().insert(0, 1);\n        this.make().remove(1);\n        this.make().clear();\n        return count(order.lines.entries()) + (order.fixed.get(0) ?? 0) + count(groups);\n    }\n\n    public List<int> make()\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Shop.sharp", sharp), &[]),
@@ -6672,7 +6688,10 @@ fn a_changing_collection_method_needs_a_place_the_caller_can_write() {
             "14:15 invalid-property-write",
             "15:15 invalid-property-write",
             "16:15 invalid-property-write",
-            "17:9 invalid-pass-by-reference"
+            "17:9 invalid-pass-by-reference",
+            "18:9 invalid-pass-by-reference",
+            "19:9 invalid-pass-by-reference",
+            "20:9 invalid-pass-by-reference"
         ]
     );
 }
@@ -6681,7 +6700,7 @@ fn a_changing_collection_method_needs_a_place_the_caller_can_write() {
 /// may run on it where its `set` is reachable.
 #[test]
 fn a_changing_collection_method_may_run_on_a_property_with_a_set_hook() {
-    let sharp = "namespace Demo;\n\nimport Lib.Box;\n\nclass Shop\n{\n    public void fill(Box box)\n    {\n        box.items.add(1);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Box;\n\nclass Shop\n{\n    public void fill(Box box)\n    {\n        box.items.add(1);\n        box.items.insert(0, 1);\n        box.items.remove(1);\n        box.items.clear();\n    }\n}\n";
     let box_class = "<?php\n\nnamespace Lib;\n\nfinal class Box\n{\n    /** @var list<int> */\n    public array $items = [] {\n        get => $this->items;\n        set(array $value) {\n            $this->items = $value;\n        }\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shop.sharp", sharp), &[("src/Lib/Box.php", box_class)]), Vec::<String>::new());
@@ -9418,18 +9437,25 @@ fn an_extern_written_with_a_renamed_import_declares_the_same_target() {
     assert_eq!(refused, ["5:1 duplicate-extern `Client` already has an `extern` declaration."]);
 }
 
-/// An `extern` target that names no class, method or function is reported with the code a call of it would get.
+/// An `extern` target that names no class, method or function is reported with the code a call of it would get. An
+/// `extern event` names a class, spec section 15.
 #[test]
 fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_function() {
     let stub = (
         "app/Stubs/Stripe.sharp",
-        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Stripe.Missing;\n\nextern Missing;\nextern StripeClient.refund;\nextern nowhere;\n",
+        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Stripe.Missing;\n\nextern Missing;\nextern StripeClient.refund;\nextern nowhere;\nextern event Nowhere;\n",
     );
 
     assert_eq!(
         issues(stub, &[STRIPE]),
-        ["6:8 non-existent-class-like", "7:8 non-existent-method", "8:8 non-existent-function"]
+        [
+            "6:8 non-existent-class-like",
+            "7:8 non-existent-method",
+            "8:8 non-existent-function",
+            "9:14 non-existent-class-like"
+        ]
     );
+    assert_eq!(messages(stub, &[STRIPE])[3], "Cannot find class, interface, enum, or type alias `Nowhere`.");
 }
 
 /// PHP# infers the effects of PHP# code, so an `extern` names only plain PHP.
@@ -10437,19 +10463,43 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
     );
     let writer = (
         "app/Shop/Writer.sharp",
-        "namespace App.Shop;\n\npublic class Writer\n{\n    public void write(Order.Paid paid)\n    {\n        paid.orderId = 2;\n    }\n\n    public Order.Paid make() => new Order.Paid(\"one\");\n}\n",
+        "namespace App.Shop;\n\npublic class Writer\n{\n    public void write(Order.Paid paid, Order.Event event)\n    {\n        paid.orderId = 2;\n        event.orderId = 2;\n    }\n\n    public Order.Paid make() => new Order.Paid(\"one\");\n}\n",
     );
+    let sub = ("app/Shop/Sub.sharp", "namespace App.Shop;\n\npublic class Sub : Order.Paid\n{\n}\n");
 
     assert_eq!(worded(reader, &[ORDER_EVENTS]), Vec::<String>::new());
-    assert_eq!(issues(writer, &[ORDER_EVENTS]), ["7:14 invalid-property-write", "10:48 invalid-argument"]);
+    assert_eq!(
+        issues(writer, &[ORDER_EVENTS]),
+        ["7:14 invalid-property-write", "8:15 invalid-property-write", "11:48 invalid-argument"]
+    );
     assert_eq!(
         worded(writer, &[ORDER_EVENTS])[0],
         "7:14 invalid-property-write Event `Order.Paid` sets `orderId` once, by `new`. | Written here. | An event's parameters are its properties, and nothing changes them after `new`. | Create a new event with the value instead."
     );
     assert_eq!(
-        messages(writer, &[ORDER_EVENTS])[1],
-        "Invalid argument type for argument #1 of `Order.Paid.__construct`: expected `int`, but found `string`."
+        messages(writer, &[ORDER_EVENTS])[1..],
+        [
+            "Cannot write to read-only property `Order.Event.orderId` - property only has a get hook.",
+            "Invalid argument type for argument #1 of `Order.Paid.__construct`: expected `int`, but found `string`."
+        ]
     );
+    assert_eq!(messages(sub, &[ORDER_EVENTS]), ["Class `Sub` cannot extend final class `Order.Paid`"]);
+}
+
+/// A type a class nests is a class-like of its own, spec section 15, so the class keeps its constructor around it.
+#[test]
+fn a_class_keeps_its_constructor_around_the_types_it_nests() {
+    let interface = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept\n{\n    public required Kept(int id) { }\n\n    public interface Event\n    {\n    }\n\n    public static Kept make() => new Kept();\n}\n",
+    );
+    let event = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept\n{\n    public required Kept(int id) { }\n\n    public event Made(int id);\n\n    public static Kept make() => new Kept();\n}\n",
+    );
+
+    assert_eq!(issues(interface, &[]), ["11:42 too-few-arguments"]);
+    assert_eq!(issues(event, &[]), ["9:42 too-few-arguments"]);
 }
 
 /// Spec section 15: no event extends another, so an event's header names interfaces only, in a file and in a class
@@ -10466,7 +10516,17 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
         "app/Shop/Cart.sharp",
         "namespace App.Shop;\n\npublic class Cart\n{\n    public interface Event : Cart\n    {\n    }\n\n    public event Filled(int id) : Cart;\n}\n",
     );
+    let interface = (
+        "app/Shop/Cart.sharp",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public interface Moved { }\n\n    public event Moved(int id);\n}\n",
+    );
+    let class = (
+        "app/Shop/Cart.sharp",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public event Moved(int id);\n}\n\npublic event Cart(int id);\n",
+    );
 
+    assert_eq!(messages(interface, &[]), ["Event `Cart.Moved` is already defined elsewhere."]);
+    assert_eq!(messages(class, &[]), ["Event `Cart` is already defined elsewhere."]);
     assert_eq!(
         worded(based, &[ORDER_EVENTS]),
         [
@@ -10478,12 +10538,26 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 }
 
 /// Spec section 15: the interface a family of events shares states the get-only properties each event gives, so an
-/// event or a class that names it and lacks one is refused, as the engine refuses the class it runs as. An event gives
-/// a property through a parameter, and a class through a property, as each help writes it.
+/// event or a class that names it and lacks one, or gives one that is not public, on each object and of its type, is
+/// refused, as the engine refuses the class it runs as. An event gives a property through a parameter, and a class
+/// through a property, as each help writes it.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : Order.Event;\n");
     let class = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic class Moved : Order.Event\n{\n}\n");
+    let typed = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(string orderId) : Order.Event;\n");
+    let class_typed = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : Order.Event\n{\n    public string orderId { get; }\n\n    public Kept(string orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n",
+    );
+    let private = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : Order.Event\n{\n    private int orderId;\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n\n    public int read() => this.orderId;\n}\n",
+    );
+    let shared = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : Order.Event\n{\n    public static int orderId { get; } = 1;\n}\n",
+    );
     let given = (
         "app/Shop/Moved.sharp",
         "namespace App.Shop;\n\npublic event Moved(int id, int orderId) : Order.Event;\n\npublic class Kept : Order.Event\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n",
@@ -10499,6 +10573,30 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         worded(class, &[ORDER_EVENTS]),
         [
             "3:14 unimplemented-abstract-property-hook `Moved` does not give `orderId`, which `Order.Event` states. | Declared here. | Stated here. | Add the property `public int orderId { get; }`."
+        ]
+    );
+    assert_eq!(
+        worded(typed, &[ORDER_EVENTS]),
+        [
+            "3:27 incompatible-property-type `Moved` gives `orderId` as `string`, and `Order.Event` states it as `int`. | Given here. | Stated here. | Give `orderId` the type `int`."
+        ]
+    );
+    assert_eq!(
+        worded(class_typed, &[ORDER_EVENTS]),
+        [
+            "5:19 incompatible-property-type `Kept` gives `orderId` as `string`, and `Order.Event` states it as `int`. | Given here. | Stated here. | Give `orderId` the type `int`."
+        ]
+    );
+    assert_eq!(
+        worded(private, &[ORDER_EVENTS]),
+        [
+            "5:17 incompatible-property-access `Kept` gives `orderId` as `private`, and `Order.Event` states it `public`. | Given here. | Stated here. | Declare `orderId` `public`."
+        ]
+    );
+    assert_eq!(
+        worded(shared, &[ORDER_EVENTS]),
+        [
+            "5:23 incompatible-static-modifier `Kept` gives `orderId` as `static`, and `Order.Event` states it on each object. | Given here. | Stated here. | Remove `static`."
         ]
     );
     assert_eq!(worded(given, &[ORDER_EVENTS]), Vec::<String>::new());
@@ -10553,19 +10651,34 @@ fn emit_has_the_effect_events() {
 }
 
 /// `Order.Name` names the type `Order` nests, spec section 15, and otherwise the named constructor `Name` of
-/// `Order`, spec section 9.1, which is not supported yet. A type that names no nested type says which class lacks it.
+/// `Order`, spec section 9.1, which is not supported yet. A dotted type that names no nested type says which class
+/// lacks it. A namespace that shares a class's name nests nothing, so its classes and its unknown types are named as
+/// written.
 #[test]
 fn a_dotted_name_that_is_no_nested_type_is_a_named_constructor_or_an_unknown_type() {
     let shop = (
         "app/Shop/Shop.sharp",
-        "namespace App.Shop;\n\npublic class Shop\n{\n    public Order.Paid made() => new Order.fromJson(1);\n\n    public int read(Order.Fild paid) => 1;\n}\n",
+        "namespace App.Shop;\n\npublic class Shop\n{\n    public Order.Paid made() => new Order.fromJson(1);\n\n    public int read(Order.Fild paid) => 1;\n\n    public int maybe(Order.Fild? paid) => 1;\n}\n",
+    );
+    let line = ("app/Shop/Order/Line.sharp", "namespace App.Shop.Order;\n\npublic class Line\n{\n}\n");
+    let namespaced = (
+        "app/Shop/Order/Reader.sharp",
+        "namespace App.Shop.Order;\n\npublic class Reader\n{\n    public int read(Missing missing) => 1;\n\n    public int count(Line line) => line;\n}\n",
     );
 
     assert_eq!(
         worded(shop, &[ORDER_EVENTS]),
         [
             "5:37 not-supported-yet A named constructor is not supported yet in PHP#. | Not supported yet. | `Order` declares no type named `fromJson`, so `new Order.fromJson(…)` calls its named constructor `fromJson`.",
-            "7:21 non-existent-class-like `Order` has no event `Fild`. | Named here."
+            "7:21 non-existent-class-like `Order` has no event `Fild`. | Named here.",
+            "9:22 non-existent-class-like `Order` has no event `Fild`. | Named here."
+        ]
+    );
+    assert_eq!(
+        messages(namespaced, &[ORDER_EVENTS, line]),
+        [
+            "Cannot find type `Missing`.",
+            "Invalid return type for method `Reader.count`: expected `int`, but found `Line`."
         ]
     );
 }

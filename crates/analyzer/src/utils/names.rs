@@ -53,14 +53,19 @@ pub(crate) fn sharp_class_like_name(
     short_name_counts: &OnceCell<HashMap<String, u32>>,
     name: Word,
 ) -> String {
-    let name = codebase.get_class_like(name.as_bytes()).map_or(name, |m| m.original_name);
+    let metadata = codebase.get_class_like(name.as_bytes());
+    let name = metadata.map_or(name, |m| m.original_name);
     let full_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
     let separator = full_name.iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
     let outer = &full_name[..separator];
+    // A nested type is declared inside its class, unlike a class in a namespace that shares the class's name.
+    let is_nested = codebase.get_class_like(outer).zip(metadata).is_some_and(|(outer, nested)| {
+        outer.span.file_id == nested.span.file_id && outer.span.contains(&nested.span.start)
+    });
 
     if let Some(imported_name) = imported_names.get(&ascii_lowercase_word(full_name)) {
         imported_name.to_string()
-    } else if codebase.get_class_like(outer).is_some() {
+    } else if is_nested {
         let outer = sharp_class_like_name(codebase, imported_names, short_name_counts, word(outer));
 
         format!("{outer}.{}", String::from_utf8_lossy(&full_name[separator + 1..]))

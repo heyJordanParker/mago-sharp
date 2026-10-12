@@ -572,7 +572,12 @@ where
         let written = target.value();
         let class = written.split(|byte| *byte == b'.').next().unwrap_or(written);
         let (fqn, imported) = self.resolve_class(context, class);
-        if !target.is_dotted() && !imported && !self.declared_classes.contains(&IgnoringCase(class)) {
+        // An `extern event` always names a class, spec section 15.
+        if r#extern.event.is_none()
+            && !target.is_dotted()
+            && !imported
+            && !self.declared_classes.contains(&IgnoringCase(class))
+        {
             self.resolved_names.insert_at(target.span(), written, false);
 
             return;
