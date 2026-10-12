@@ -10088,6 +10088,27 @@ fn a_getter_creating_an_object_whose_named_constructor_has_an_effect_is_refused(
     );
 }
 
+/// A write runs the property's `set` or `init` body with the written value as `value`, so a body that changes `value`
+/// changes the object the caller wrote.
+#[test]
+fn a_getter_whose_new_object_changes_the_value_its_init_accessor_is_given_is_refused() {
+    let builder = (
+        "app/Shop/Builder.sharp",
+        "namespace App.Shop;\n\npublic class Builder\n{\n    private string text = \"\";\n\n    public void add(string part)\n    {\n        this.text = this.text + part;\n    }\n}\n",
+    );
+    let page = (
+        "app/Shop/Page.sharp",
+        "namespace App.Shop;\n\npublic class Box\n{\n    public Builder held { get; init { value.add(\"x\"); field = value; } }\n\n    public Box(Builder held)\n    {\n        this.held = held;\n    }\n}\n\npublic class Page\n{\n    private Builder builder = new Builder();\n\n    public bool boxed => new Box(this.builder) != null;\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[page, builder]),
+        [
+            "app/Shop/Page.sharp:17:26 impure-getter: Getter `boxed` reaches `Builder.add`, which changes `this.text`. Getters must be pure."
+        ]
+    );
+}
+
 #[test]
 fn a_getter_calling_a_virtual_method_whose_override_has_an_effect_is_refused() {
     let rates = (
