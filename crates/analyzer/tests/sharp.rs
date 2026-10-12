@@ -572,6 +572,14 @@ fn a_parameter_read_only_by_a_for_of_collection_is_used() {
 }
 
 #[test]
+fn a_parameter_read_only_by_super_is_used() {
+    let sharp = "namespace Demo;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(int id, int extra) : super(id) { }\n}\n";
+    let settings = Settings { find_unused_parameters: true, ..settings() };
+
+    assert_eq!(issues_with(settings, ("src/Demo/Order.sharp", sharp), &[]), ["10:26 unused-parameter"]);
+}
+
+#[test]
 fn null_coalescing_a_local_narrows_it_as_in_php() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total(int? first, int? second)\n    {\n        if (first != null || second != null) {\n            return first ?? second;\n        }\n        return 0;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function total(?int $first, ?int $second): int\n    {\n        if ($first !== null || $second !== null) {\n            return $first ?? $second;\n        }\n        return 0;\n    }\n}\n";
@@ -4516,14 +4524,14 @@ const CLOCK: &str = "<?php\n\nnamespace Lib;\n\nfinal class Clock\n{\n}\n";
 /// adds a parameter without a default is an error, as in PHP.
 #[test]
 fn self_and_a_required_constructor_are_checked_as_static_and_a_consistent_constructor_in_php() {
-    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row)\n    {\n        return new Self(row);\n    }\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null)\n    {\n        super.__construct(row);\n    }\n\n    public static Order make(Row row) => Order.fromSchema(row);\n\n    public static Invoice wrong(Row row) => Order.fromSchema(row);\n}\n\npublic class Invoice : DatabaseEntity\n{\n    public Invoice(Row row, Clock clock)\n    {\n        super.__construct(row);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row)\n    {\n        return new Self(row);\n    }\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n\n    public static Order make(Row row) => Order.fromSchema(row);\n\n    public static Invoice wrong(Row row) => Order.fromSchema(row);\n}\n\npublic class Invoice : DatabaseEntity\n{\n    public Invoice(Row row, Clock clock) : super(row)\n    {\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Clock;\nuse Lib\\Row;\n\n/** @consistent-constructor */\nabstract class DatabaseEntity\n{\n    public function __construct(Row $row)\n    {\n    }\n\n    public static function fromSchema(Row $row): static\n    {\n        return new static($row);\n    }\n}\n\nclass Order extends DatabaseEntity\n{\n    public function __construct(Row $row, ?Clock $clock = null)\n    {\n        parent::__construct($row);\n    }\n\n    public static function make(Row $row): Order\n    {\n        return Order::fromSchema($row);\n    }\n\n    public static function wrong(Row $row): Invoice\n    {\n        return Order::fromSchema($row);\n    }\n}\n\nclass Invoice extends DatabaseEntity\n{\n    public function __construct(Row $row, Clock $clock)\n    {\n        parent::__construct($row);\n    }\n}\n";
     let others = [("src/Lib/Row.php", ROW), ("src/Lib/Clock.php", CLOCK)];
 
     let sharp_issues = issues(("src/Demo/DatabaseEntity.sharp", sharp), &others);
     let php_issues = issues(("src/Demo/DatabaseEntity.php", php), &others);
 
-    assert_eq!(sharp_issues, ["27:45 invalid-return-statement", "32:12 incompatible-parameter-count"]);
+    assert_eq!(sharp_issues, ["26:45 invalid-return-statement", "31:12 incompatible-parameter-count"]);
     assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
 }
 
@@ -4531,11 +4539,11 @@ fn self_and_a_required_constructor_are_checked_as_static_and_a_consistent_constr
 /// section 25.
 #[test]
 fn every_descendant_of_a_required_constructor_keeps_a_matching_constructor() {
-    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row) => new Self(row);\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null)\n    {\n        super.__construct(row);\n    }\n}\n\npublic class Shipment : Order\n{\n    public Shipment()\n    {\n        super.__construct(new Row());\n    }\n}\n\npublic class LineItem : Order\n{\n    public LineItem(Row row, Clock clock)\n    {\n        super.__construct(row, clock);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row) => new Self(row);\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n}\n\npublic class Shipment : Order\n{\n    public Shipment() : super(new Row())\n    {\n    }\n}\n\npublic class LineItem : Order\n{\n    public LineItem(Row row, Clock clock) : super(row, clock)\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/DatabaseEntity.sharp", sharp), &[("src/Lib/Row.php", ROW), ("src/Lib/Clock.php", CLOCK)]),
-        ["25:12 incompatible-parameter-count", "33:12 incompatible-parameter-count"]
+        ["24:12 incompatible-parameter-count", "31:12 incompatible-parameter-count"]
     );
 }
 
@@ -4543,11 +4551,94 @@ fn every_descendant_of_a_required_constructor_keeps_a_matching_constructor() {
 /// parameter without a default, as in PHP.
 #[test]
 fn a_subclass_constructor_of_a_class_without_a_required_constructor_may_add_parameters() {
-    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public DatabaseEntity(Row row)\n    {\n        row;\n    }\n}\n\npublic class Invoice : DatabaseEntity\n{\n    public Invoice(Row row, Clock clock)\n    {\n        super.__construct(row);\n        clock;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Row;\n\npublic abstract class DatabaseEntity\n{\n    public DatabaseEntity(Row row)\n    {\n        row;\n    }\n}\n\npublic class Invoice : DatabaseEntity\n{\n    public Invoice(Row row, Clock clock) : super(row)\n    {\n        clock;\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/DatabaseEntity.sharp", sharp), &[("src/Lib/Row.php", ROW), ("src/Lib/Clock.php", CLOCK)]),
-        ["10:9 unused-statement", "19:9 unused-statement"]
+        ["10:9 unused-statement", "18:9 unused-statement"]
+    );
+}
+
+/// Asserts that `code`'s issues are `expected`, as `line:column code: message`.
+fn assert_messages(code: &'static str, others: &[(&'static str, &'static str)], expected: &[&str]) {
+    let found: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", code), others)
+        .iter()
+        .map(|issue| format!("{}: {}", located(code, issue), issue.message))
+        .collect();
+
+    assert_eq!(found, expected, "the issues of {code}");
+}
+
+/// Spec section 9.1: `: super(…)` runs as PHP's `parent::__construct(…)`, so its arguments are checked against the base
+/// class's constructor with PHP's codes.
+#[test]
+fn super_arguments_are_checked_against_the_base_class_constructor() {
+    let sharp = "namespace Demo;\n\nimport Lib.Row;\n\nclass Entity\n{\n    public Entity(Row row, int count) { }\n}\n\nclass Order : Entity\n{\n    public Order(Row row) : super(row, 1) { }\n}\n\nclass Few : Entity\n{\n    public Few(Row row) : super(row) { }\n}\n\nclass Wrong : Entity\n{\n    public Wrong(Row row) : super(row, \"one\") { }\n}\n\nclass Many : Entity\n{\n    public Many(Row row) : super(row, 1, 2) { }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Entity.sharp", sharp), &[("src/Lib/Row.php", ROW)]),
+        ["17:32 too-few-arguments", "22:40 invalid-argument", "27:42 too-many-arguments"]
+    );
+}
+
+/// `: super(…)` is the call of the base class's constructor the readonly check tracks, so a promoted get-only
+/// property the base class's constructor also sets is set twice, as with PHP's `parent::__construct(…)`.
+#[test]
+fn super_is_the_base_class_constructor_call_the_readonly_check_tracks() {
+    let sharp = "namespace Demo;\n\nimport Lib.Row;\n\nclass Entity\n{\n    public Entity(public Row row { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(public Row row { get; }) : super(row) { }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Entity.sharp", sharp), &[("src/Lib/Row.php", ROW)]), ["12:29 invalid-property-write"]);
+}
+
+/// A base class without a constructor takes `: super()`, which does nothing, and no arguments, as C#'s `object()`. A
+/// base class the checker cannot find gets only its own error.
+#[test]
+fn super_without_a_constructor_above_takes_no_arguments() {
+    let sharp = "namespace Demo;\n\nclass Entity\n{\n}\n\nclass Order : Entity\n{\n    public Order() : super() { }\n}\n\nclass Line : Entity\n{\n    public Line(int count) : super(count) { }\n}\n\nclass Root\n{\n    public Root(int count) : super(count) { }\n}\n\nclass Lost : Missing\n{\n    public Lost(int count) : super(count) { }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "14:35 too-many-arguments: `Entity` has no constructor to call: remove the arguments.",
+            "19:35 too-many-arguments: `Root` has no base class to call: remove the arguments.",
+            "22:14 non-existent-class-like: Class `Lost` cannot implement unknown type `Missing`",
+        ],
+    );
+}
+
+/// The interim ruling on an implicit `super()`: the constructor of a class whose base class has one, its own or
+/// inherited, plain PHP's included, calls it with `: super(…)`.
+#[test]
+fn a_constructor_without_super_under_a_base_class_constructor_is_missing_super_call() {
+    let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function __construct()\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(int id) { }\n}\n\nclass Shipment : Order\n{\n    public Shipment() { }\n}\n\nclass Saved : Model\n{\n    public Saved() { }\n}\n\nclass Middle : Entity\n{\n}\n\nclass Leaf : Middle\n{\n    public Leaf() { }\n}\n\nclass Plain\n{\n}\n\nclass Free : Plain\n{\n    public Free() { }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[("src/Lib/Model.php", model)],
+        &[
+            "12:12 missing-super-call: `Order`'s constructor must call `Entity`'s with `: super(…)`.",
+            "17:12 missing-super-call: `Shipment`'s constructor must call `Order`'s with `: super(…)`.",
+            "22:12 missing-super-call: `Saved`'s constructor must call `Model`'s with `: super(…)`.",
+            "31:12 missing-super-call: `Leaf`'s constructor must call `Middle`'s with `: super(…)`.",
+        ],
+    );
+}
+
+/// A class without a constructor gets one for its initial values that run in the constructor, which calls the base
+/// class's constructor without arguments. So that is not supported yet when the base class's constructor takes any.
+#[test]
+fn initial_values_in_the_constructor_under_a_base_class_constructor_with_parameters_are_not_supported_yet() {
+    let sharp = "namespace Demo;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n}\n\nclass Constant : Entity\n{\n    protected string label = \"x\";\n}\n\nclass Blank\n{\n    public Blank() { }\n}\n\nclass Filled : Blank\n{\n    protected string label = strtoupper(\"x\");\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "8:7 not-supported-yet: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Labeled`'s initial values run in its constructor.",
+            "13:7 not-supported-yet: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Pinned`'s initial values run in its constructor.",
+        ],
     );
 }
 
@@ -9763,6 +9854,24 @@ fn a_getter_building_and_changing_a_new_object_passes() {
         Effects::solve(&codebase, &summaries).impurity(&codebase, &add).as_deref(),
         Some("changes `this.text`"),
         "the getter calls a method that changes its object, and the object is the getter's own"
+    );
+}
+
+/// `: super(…)` runs in the constructor, so `new` reaches the effects of its arguments and of the base class's
+/// constructor, as it reaches the constructor body's.
+#[test]
+fn a_getter_creating_an_object_whose_super_call_has_an_effect_is_refused() {
+    let stamps = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n}\n\npublic class Late : Stamp\n{\n    public Late() : super(now()) { }\n}\n\npublic class Timed\n{\n    public Timed() { now(); }\n}\n\npublic class Child : Timed\n{\n    public Child() : super() { }\n}\n\npublic class Card\n{\n    public int late => new Late().at;\n\n    public bool child => new Child() != null;\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[stamps, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Stamp.sharp:25:24 impure-getter: Getter `late` reaches `Late.Late`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:27:26 impure-getter: Getter `child` reaches `Timed.Timed`, which calls `now` with the effect `Clock`. Getters must be pure.",
+        ]
     );
 }
 

@@ -463,15 +463,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A class sets the initial values PHP takes as no default, those that are not constant or belong to a `readonly`
     /// property, at the start of its constructor, in declaration order. A class without a constructor gets a public
-    /// one that spans the class. The property of each promoted `Set` parameter comes just before the constructor.
+    /// one that spans the class, and calls `parent::__construct()` after them when a constructor exists above the
+    /// class, which the checker allows only when that constructor takes no parameters. The property of each promoted
+    /// `Set` parameter comes just before the constructor.
     fn class(&mut self, class: &Class) -> u32 {
         self.class = self.names.get(&class.name);
         self.enter(class.name.value);
         let mut initial_values = Vec::new();
         for member in &class.members {
             if let ClassLikeMember::Property(property) = member
+                && property.initial_value_runs_in_constructor()
                 && let Some(value) = property.initial_value()
-                && !is_default(property, value)
             {
                 initial_values.push(self.initial_value(property.first_variable(), value));
             }
@@ -523,6 +525,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         if !has_constructor && !initial_values.is_empty() {
             let line = self.line(class.left_brace);
+            if self.types.parent_constructor(self.class).is_some() {
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+                initial_values.push(self.parent_construct(line, arguments));
+            }
             let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
             let body = self.node(SHARP_AST_STMT_LIST, 0, line, &initial_values);
 
@@ -721,7 +727,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// no return type. Its body starts with `first_statements`: the class's initial values that are not constant in
     /// the constructor, or the call of an `extern` method's native function, which is that method's whole body. Any
     /// other abstract method has no statement list. A method with statements makes each `Set` parameter a `Set` before
-    /// them.
+    /// them. A constructor's `: super(…)` runs after them as `parent::__construct(…)`, and does nothing when no
+    /// constructor exists above the class.
     fn method(&mut self, method: &Method, flags: u32, first_statements: &[u32]) -> u32 {
         if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 {
             unreachable!("check_slice refuses a method without an access modifier");
@@ -740,6 +747,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.set_parameters(&method.parameter_list)
         };
         statements.extend_from_slice(first_statements);
+        if let Some(initializer) = &method.initializer
+            && self.types.parent_constructor(self.class).is_some()
+        {
+            let arguments = self.arguments(&initializer.argument_list, &[]);
+            statements.push(self.parent_construct(self.line(initializer), arguments));
+        }
         let body = self.method_body(&method.body, method.returns_value(), statements);
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
@@ -756,6 +769,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             php_method_name(method),
             &[parameters, NULL, body, return_type, attributes],
         )
+    }
+
+    /// `parent::__construct(…)` with `arguments`, the call `: super(…)` runs as, a static call of `parent` as
+    /// `super.m()`'s is.
+    fn parent_construct(&mut self, line: u32, arguments: u32) -> u32 {
+        let class = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
+        let method = self.string(0, line, b"__construct");
+
+        self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
     }
 
     /// A method's statement list: `statements`, then its block's statements, or its expression body, which it returns
@@ -1003,7 +1025,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let name = self.string(0, line, variable.name);
         let default = match property.initial_value() {
-            Some(value) if is_default(property, value) => self.expression(value),
+            Some(value) if !property.initial_value_runs_in_constructor() => self.expression(value),
             None if is_null_by_default(property, self.names) => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
             _ => NULL,
         };
@@ -3097,13 +3119,6 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
     flags
 }
 
-/// Whether PHP takes an initial value as the property's default: a constant expression without `new`, on a property
-/// that is not `readonly`, which takes no default.
-fn is_default(property: &Property, value: &Expression) -> bool {
-    !matches!(property, Property::Hooked(hooked) if is_readonly(&hooked.hook_list))
-        && value.is_constant(&PHPVersion::PHP85, false)
-}
-
 /// Whether `parameter` is a `Set`, as `Some` of whether it is nullable.
 fn set_parameter(parameter: &FunctionLikeParameter) -> Option<bool> {
     match &parameter.hint {
@@ -3113,13 +3128,6 @@ fn set_parameter(parameter: &FunctionLikeParameter) -> Option<bool> {
         }
         _ => None,
     }
-}
-
-/// Whether a property runs as `readonly`: a get-only auto-property, which spec section 6.1 sets in the constructor.
-/// PHP refuses hooks on a `readonly` property.
-fn is_readonly(accessors: &PropertyHookList) -> bool {
-    accessors.is_get_only()
-        && !accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
 }
 
 /// Whether a member without an initial value starts as null, as in C# and Swift: a field, or a property with storage
@@ -3142,7 +3150,7 @@ fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
 /// property. PHP drops a set visibility equal to the property's own, so a private property, or a protected one with
 /// `protected(set)`, takes none, and the flags carry only what the engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
-    if is_readonly(accessors) {
+    if accessors.is_readonly() {
         return ZEND_ACC_READONLY;
     }
 

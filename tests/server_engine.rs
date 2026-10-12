@@ -301,6 +301,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
                 inputs.insert(String::from_utf8_lossy(path).into_owned(), input.clone());
                 Ok(input)
             },
+            |_| Ok(Vec::new()),
             |_| Ok(Default::default()),
         )
         .expect("the compile runs");

@@ -54,6 +54,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Statement;
@@ -75,6 +76,7 @@ use crate::resolver::property::resolve_declared_property;
 use crate::statement::analyze_statements;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
+use crate::statement::class_like::method::analyze_constructor_initializer;
 use crate::statement::class_like::property::analyze_property_hook;
 use crate::statement::r#return::handle_return_value;
 use crate::statement::r#static::infer_static_local_types;
@@ -286,6 +288,7 @@ pub fn analyze_function_like<'ctx, 'ast, 'arena, A>(
     block_context: &mut BlockContext<'ctx>,
     function_like_metadata: &'ctx FunctionLikeMetadata,
     parameter_list: &'ast FunctionLikeParameterList<'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
     body: FunctionLikeBody<'ast, 'arena>,
     inferred_parameter_types: Option<HashMap<usize, TUnion>>,
 ) -> Result<AnalysisArtifacts, AnalysisError>
@@ -405,6 +408,10 @@ where
     }
 
     if !function_like_metadata.flags.is_unchecked() {
+        if let Some(initializer) = initializer {
+            analyze_constructor_initializer(context, block_context, &mut artifacts, initializer)?;
+        }
+
         match body {
             FunctionLikeBody::Statements(statements, _) => {
                 artifacts.static_local_types =
