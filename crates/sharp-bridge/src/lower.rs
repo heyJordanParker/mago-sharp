@@ -1603,26 +1603,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
             // `new Artifact.fromJson(…)` calls the static method the named constructor runs as, spec section 9.1.
-            Expression::Instantiation(
-                instantiation @ Instantiation {
-                    class: Expression::Identifier(class),
-                    argument_list: Some(arguments),
-                    ..
-                },
-            ) => {
-                let class_line = self.line(class);
-                let (kind, mut children) = match self.types.named_constructor(instantiation) {
-                    Some(constructor) => {
-                        let class = self.string(ZEND_NAME_FQ, class_line, constructor.class.as_bytes());
-                        let method = self.string(0, class_line, constructor.name.as_bytes());
+            Expression::Instantiation(Instantiation {
+                class: Expression::Identifier(class),
+                constructor: Some(constructor),
+                argument_list: Some(arguments),
+                ..
+            }) => {
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+                let method = self.string(0, self.line(constructor), constructor.name.value);
+                let arguments = self.arguments(arguments, &[]);
 
-                        (SHARP_AST_STATIC_CALL, vec![class, method])
-                    }
-                    None => (SHARP_AST_NEW, vec![self.string(ZEND_NAME_FQ, class_line, self.names.get(class))]),
-                };
-                children.push(self.arguments(arguments, &[]));
+                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+            }
+            Expression::Instantiation(Instantiation {
+                class: Expression::Identifier(class),
+                constructor: None,
+                argument_list: Some(arguments),
+                ..
+            }) => {
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+                let arguments = self.arguments(arguments, &[]);
 
-                self.node(kind, 0, line, &children)
+                self.node(SHARP_AST_NEW, 0, line, &[class, arguments])
             }
             // `new Self(…)` is `new static(…)`, the name php-src's grammar writes with `ZEND_NAME_NOT_FQ`.
             Expression::Instantiation(Instantiation {

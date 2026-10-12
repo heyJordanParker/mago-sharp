@@ -282,24 +282,10 @@ impl<'arena> NameWalker<'arena> {
 
     /// Resolves a name written where a class goes. In a PHP# file a bare name of the standard library is the class in
     /// the `Sharp` namespace, unless the file imports or declares a class-like of that name, spec section 23.
-    ///
-    /// A PHP# dotted name after `new`, `Report.fromJson`, resolves its first part as any class name does, and its last
-    /// part follows as a name inside it: the analysis decides whether that names a type or a named constructor.
     fn resolve_class<A>(&self, context: &NameResolutionContext<'arena, A>, name: &[u8]) -> (&'arena [u8], bool)
     where
         A: Arena,
     {
-        if self.sharp {
-            let mut parts = name.split(|byte| *byte == b'.');
-            let first = parts.next().unwrap_or(name);
-            if first.len() < name.len() {
-                let (outer, imported) = self.resolve_class(context, first);
-                let nested: std::vec::Vec<&[u8]> = std::iter::once(outer).chain(parts).collect();
-
-                return (context.intern(&concat_with_sep(&nested, b'\\')), imported);
-            }
-        }
-
         let (fqn, imported) = context.resolve(NameKind::Default, name);
         if !self.sharp || imported || self.declared_classes.contains(&IgnoringCase(name)) {
             return (fqn, imported);

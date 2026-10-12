@@ -44,6 +44,7 @@ pub use crate::cst::cst::class_like::Trait;
 pub use crate::cst::cst::class_like::constant::ClassLikeConstant;
 pub use crate::cst::cst::class_like::constant::ClassLikeConstantItem;
 pub use crate::cst::cst::class_like::constructor::ConstructorInitializer;
+pub use crate::cst::cst::class_like::constructor::ConstructorName;
 pub use crate::cst::cst::class_like::constructor::NamedConstructor;
 pub use crate::cst::cst::class_like::enum_case::EnumCase;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseBackedItem;
