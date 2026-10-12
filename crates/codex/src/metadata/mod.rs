@@ -511,6 +511,17 @@ impl CodebaseMetadata {
         )
     }
 
+    /// Retrieves the constructor `parent::__construct` reaches from `class`: the one its direct parent class declares
+    /// or inherits.
+    #[inline]
+    #[must_use]
+    pub fn get_parent_constructor(&self, class: &[u8]) -> Option<&FunctionLikeMetadata> {
+        let parent = self.get_class_like(class)?.direct_parent_class?;
+        let constructor = self.get_class_like(parent.as_bytes())?.declaring_method_ids.get(&word("__construct"))?;
+
+        self.get_method_by_id(constructor)
+    }
+
     /// Retrieves metadata for any function-like construct (function, method, or closure).
     /// This is a convenience method that delegates to the appropriate getter based on the identifier type.
     #[inline]

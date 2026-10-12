@@ -236,6 +236,7 @@ where
             Body::InitialValue(class_metadata.name, php_variable_name(variable_name)),
             word(variable_name.strip_prefix(b"$").unwrap_or(variable_name)),
             Vec::new(),
+            None,
             FunctionLikeBody::Expression(value),
         );
     }
@@ -390,6 +391,7 @@ fn record_accessor_summary<'arena, A>(
         Body::Accessor(class_like.name, property_name, word(accessor)),
         word(property),
         parameters,
+        None,
         code,
     );
 }

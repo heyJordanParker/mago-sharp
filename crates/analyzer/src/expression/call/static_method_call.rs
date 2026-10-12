@@ -52,7 +52,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodCall<'arena> {
 /// Analyzes a static method call from its parts, whether PHP wrote it as `Class::m()` or PHP# as `Class.m()`, with
 /// the type arguments PHP# writes as `Class.m<A>()`.
 #[allow(clippy::expect_used)]
-pub(super) fn analyze_static_method_call<'ctx, 'arena, A>(
+pub(crate) fn analyze_static_method_call<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,

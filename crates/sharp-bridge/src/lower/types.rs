@@ -3,6 +3,7 @@ use mago_analyzer::artifacts::CallTarget;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::misc::GenericParent;
@@ -278,6 +279,13 @@ impl<'analysis> Types<'analysis> {
     pub(crate) fn backed_enum(&self, r#type: &TUnion) -> Option<&'analysis [u8]> {
         get_sole_backed_enum(r#type, self.codebase, Dialect::Sharp)
             .map(|backed_enum| backed_enum.original_name.as_bytes())
+    }
+
+    /// The constructor `parent::__construct` reaches from the fully qualified class name `class`, as
+    /// [`CodebaseMetadata::get_parent_constructor`] finds it.
+    #[must_use]
+    pub fn parent_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+        self.codebase.get_parent_constructor(class)
     }
 
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,

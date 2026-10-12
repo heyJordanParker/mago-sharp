@@ -166,6 +166,66 @@ pub(crate) fn deleted_law(span: Span, proof: &str, line: u32, statement: &str, s
     .with_annotation(Annotation::primary(span))
 }
 
+/// A fact that breaks a structure rule, on the code that holds it: `This import of App.Tenant.Store.Receipts breaks
+/// the structure rule neverReachesTenant in app/Shared/Module.lean.`
+pub(crate) fn broken_rule(span: Span, fact: &str, rule: &str, rules: &str) -> Issue {
+    Issue::error(format!("This {fact} breaks the structure rule {rule} in {rules}."))
+        .with_code(IssueCode::BrokenRule.as_str())
+        .with_annotation(Annotation::primary(span))
+}
+
+/// A `Module.lean` Lean rejected, on each file of the namespace its rules constrain, since no rule of it can check them.
+pub(crate) fn rejected_rules(span: Span, rules: &str, namespace: &str, line: u32, message: &str) -> Issue {
+    let first = message.lines().next().unwrap_or(message);
+
+    Issue::error(format!(
+        "This file is in {namespace}, whose structure rules {rules} holds, and Lean rejected {rules} line {line}: {first}."
+    ))
+    .with_code(IssueCode::BrokenRule.as_str())
+    .with_annotation(Annotation::primary(span))
+    .with_note(message.to_owned())
+}
+
+/// A `Module.lean` that imports a workspace Lean file Lean rejected, on each file of the namespace its rules constrain,
+/// with the first error of the file whose own error it is.
+pub(crate) fn rejected_rules_import(
+    span: Span,
+    rules: &str,
+    namespace: &str,
+    imported: &str,
+    line: u32,
+    message: &str,
+) -> Issue {
+    let first = message.lines().next().unwrap_or(message);
+
+    Issue::error(format!(
+        "This file is in {namespace}, whose structure rules {rules} holds, and {rules} imports {imported}, which Lean rejected at line {line}: {first}."
+    ))
+    .with_code(IssueCode::BrokenRule.as_str())
+    .with_annotation(Annotation::primary(span))
+    .with_note(message.to_owned())
+}
+
+/// A Lean file in a PSR-4 folder that no Lean file imports and Lean rejected, such as one that holds a `@[rule]` but is
+/// no `Module.lean`, on each file of the namespace of its folder.
+pub(crate) fn rejected_lean(span: Span, file: &str, namespace: &str, line: u32, message: &str) -> Issue {
+    let first = message.lines().next().unwrap_or(message);
+
+    Issue::error(format!("This file is in {namespace}, and Lean rejected {file} line {line}: {first}."))
+        .with_code(IssueCode::BrokenRule.as_str())
+        .with_annotation(Annotation::primary(span))
+        .with_note(message.to_owned())
+}
+
+/// A `Module.lean` in no PSR-4 folder, on each file under its folder, since none of its rules can run.
+pub(crate) fn no_rules_module(span: Span, rules: &str) -> Issue {
+    Issue::error(format!(
+        "{rules} is in no PSR-4 folder of composer.json, so its structure rules have no Lean module name and cannot run."
+    ))
+    .with_code(IssueCode::BrokenRule.as_str())
+    .with_annotation(Annotation::primary(span))
+}
+
 pub(crate) fn lake_not_found(span: Span) -> Issue {
     Issue::error(
         "Laws and structure rules need Lean 4.34.1, and lake was not found. Install elan from https://lean-lang.org/install, then run vendor/bin/mago compile again.",

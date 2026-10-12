@@ -135,6 +135,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrowFunction<'arena> {
             &mut inner_block_context,
             function_metadata,
             &self.parameter_list,
+            None,
             FunctionLikeBody::Expression(self.expression),
             inferred_parameter_types,
         )?;

@@ -6,6 +6,7 @@ use mago_span::Span;
 use crate::cst::Terminator;
 use crate::cst::cst::attribute::AttributeList;
 use crate::cst::cst::block::Block;
+use crate::cst::cst::class_like::constructor::ConstructorInitializer;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::function_like::r#return::FunctionLikeReturnTypeHint;
@@ -45,6 +46,8 @@ pub struct Method<'arena> {
     pub type_parameters: Option<TypeParameterList<'arena>>,
     pub parameter_list: FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<FunctionLikeReturnTypeHint<'arena>>,
+    /// A PHP# constructor's `: super(…)` or `: this(…)`. PHP never sets it.
+    pub initializer: Option<ConstructorInitializer<'arena>>,
     pub body: MethodBody<'arena>,
 }
 
