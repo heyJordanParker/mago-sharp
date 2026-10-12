@@ -310,9 +310,11 @@ where
         return Ok(());
     };
 
+    // A PHP# `init` body runs as the `set` hook it lowers to, under which the codex records it.
+    let hook_name = if context.dialect.is_sharp() && hook.is_setter() { b"set".as_slice() } else { hook.name.value };
     let parameter_name = hook.parameter_list.as_ref().and_then(|p| p.parameters.first()).map(|p| word(p.variable.name));
     let mut hook_block_context =
-        hook_block_context(hook.name.value, parameter_name, property_name, context, parent_block_context)?;
+        hook_block_context(hook_name, parameter_name, property_name, context, parent_block_context)?;
 
     match body {
         PropertyHookConcreteBody::Block(block) => {
@@ -343,14 +345,14 @@ where
             }
         }
         PropertyHookConcreteBody::Expression(expr_body) => {
-            analyze_hook_expression(hook.name.value, expr_body, context, &mut hook_block_context, artifacts)?;
+            analyze_hook_expression(hook_name, expr_body, context, &mut hook_block_context, artifacts)?;
         }
     }
 
     // A `set` accessor's value is its one parameter, written or implicit.
     let parameters = match &hook.parameter_list {
         Some(parameter_list) => parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
-        None if hook.name.value == b"set" => vec![hook.name.span],
+        None if hook_name == b"set" => vec![hook.name.span],
         None => Vec::new(),
     };
     let code = match body {
@@ -359,7 +361,7 @@ where
         }
         PropertyHookConcreteBody::Expression(expr_body) => FunctionLikeBody::Expression(expr_body.expression),
     };
-    record_accessor_summary(hook.name.value, property_name, parameters, code, context, parent_block_context, artifacts);
+    record_accessor_summary(hook_name, property_name, parameters, code, context, parent_block_context, artifacts);
 
     Ok(())
 }
