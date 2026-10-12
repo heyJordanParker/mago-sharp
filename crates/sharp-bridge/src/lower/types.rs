@@ -227,15 +227,12 @@ impl<'analysis> Types<'analysis> {
     /// or `List`.
     pub(crate) fn map_key_type(&self, r#type: &TUnion) -> Option<TUnion> {
         let mut key_type = None;
-        for atomic in r#type.types.iter() {
-            match atomic {
-                TAtomic::Array(array) => {
-                    let (key, _) = get_array_parameters(array, self.codebase);
-                    key_type = Some(add_optional_union_type(key, key_type.as_ref(), self.codebase));
-                }
-                TAtomic::Null => {}
-                _ => return None,
-            }
+        for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
+            let TAtomic::Array(array) = atomic else {
+                return None;
+            };
+            let (key, _) = get_array_parameters(array, self.codebase);
+            key_type = Some(add_optional_union_type(key, key_type.as_ref(), self.codebase));
         }
 
         key_type
