@@ -38,41 +38,54 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Struct<'arena> {
     where
         A: Arena,
     {
+        // The scanner registers every struct, or the class-like declared first under its name.
         let name = context.resolved_names.get(&self.name);
-        let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
-            tracing::warn!("Struct {} not found in codebase", BytesDisplay(name));
 
-            return Ok(());
-        };
-
-        analyze_class_like_attributes(context, artifacts, self.attribute_lists.as_slice(), class_like_metadata)?;
-
-        if class_like_metadata.span != self.span() {
-            report_duplicate_definition(context, "Struct", "struct", name, self.span(), class_like_metadata.span);
-            return Ok(());
-        }
-
-        // The class the header names is the struct's parent, which every other check would read.
-        if !check_struct(self, class_like_metadata, context) {
-            return Ok(());
-        }
-
-        analyze_class_like(
-            context,
-            artifacts,
-            Some(self.name.span),
-            self.span(),
-            None,
-            None,
-            self.inheritance.as_ref(),
-            class_like_metadata,
-            self.members.as_slice(),
-        )?;
-
-        override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
-
-        Ok(())
+        context
+            .codebase
+            .get_class_like(name)
+            .map_or(Ok(()), |class_like_metadata| analyze_struct(self, class_like_metadata, context, artifacts))
     }
+}
+
+fn analyze_struct<'ctx, 'arena, A>(
+    r#struct: &Struct<'arena>,
+    class_like_metadata: &'ctx ClassLikeMetadata,
+    context: &mut Context<'ctx, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    analyze_class_like_attributes(context, artifacts, r#struct.attribute_lists.as_slice(), class_like_metadata)?;
+
+    // A class-like declared first in the file under the struct's name keeps it.
+    if class_like_metadata.span != r#struct.span() {
+        let name = context.resolved_names.get(&r#struct.name);
+        report_duplicate_definition(context, "Struct", "struct", name, r#struct.span(), class_like_metadata.span);
+        return Ok(());
+    }
+
+    // The class the header names is the struct's parent, which every other check would read.
+    if !check_struct(r#struct, class_like_metadata, context) {
+        return Ok(());
+    }
+
+    analyze_class_like(
+        context,
+        artifacts,
+        Some(r#struct.name.span),
+        r#struct.span(),
+        None,
+        None,
+        r#struct.inheritance.as_ref(),
+        class_like_metadata,
+        r#struct.members.as_slice(),
+    )?;
+
+    override_attribute::check_override_attribute(class_like_metadata, r#struct.members.as_slice(), context);
+
+    Ok(())
 }
 
 /// Reports what a struct's declaration may not hold, spec section 10, and whether the rest of it can be analyzed as
@@ -174,7 +187,8 @@ pub(crate) fn check_struct_parse<A>(
 /// Reports each struct in `key_type` that holds a class instance at any depth, spec section 10: a `Map` holds a struct
 /// key, and a `Set` a struct element, as its key text, built from its values, while a class instance compares through
 /// its own `==`, which no text matches. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's
-/// `Dictionary` needs `Hashable`. `in_set` names a `Set` element. Returns whether it reported one.
+/// `Dictionary` needs `Hashable`. `key_type` runs as an array key, so each class it names is a struct. `in_set` names a
+/// `Set` element. Returns whether it reported one.
 pub(crate) fn report_class_held_by_key<A>(
     context: &mut Context<'_, '_, A>,
     key_type: &TUnion,
@@ -184,17 +198,14 @@ pub(crate) fn report_class_held_by_key<A>(
 where
     A: Arena,
 {
+    let codebase = context.codebase;
+    let structs = key_type.types.iter().filter_map(|atomic| match atomic {
+        TAtomic::Object(TObject::Named(object)) => codebase.get_class_like(object.name.as_bytes()),
+        _ => None,
+    });
     let mut reported = false;
-    for atomic in key_type.types.iter() {
-        let TAtomic::Object(TObject::Named(object)) = atomic else {
-            continue;
-        };
-        let Some(r#struct) =
-            context.codebase.get_class_like(object.name.as_bytes()).filter(|r#struct| r#struct.flags.is_struct())
-        else {
-            continue;
-        };
-        let Some((property, held, is_direct)) = held_class(context.codebase, r#struct, &mut vec![r#struct.name]) else {
+    for r#struct in structs {
+        let Some((property, held, is_direct)) = held_class(codebase, r#struct, &mut vec![r#struct.name]) else {
             continue;
         };
 
@@ -205,9 +216,6 @@ where
             TAtomic::Object(TObject::Named(named)) => {
                 match context.codebase.get_class_like(named.name.as_bytes()).map(|class_like| class_like.kind) {
                     Some(kind) if kind.is_interface() => format!("{article} `{held_name}`, an interface"),
-                    _ if named.name.as_bytes().eq_ignore_ascii_case(b"Closure") => {
-                        format!("{article} `{held_name}`, a function")
-                    }
                     _ => format!("{article} `{held_name}`, a class"),
                 }
             }
@@ -273,12 +281,8 @@ fn held_class(
 fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {
     r#type.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) => {
-            let Some(class_like) = codebase.get_class_like(object.name.as_bytes()) else {
-                return Some(atomic.clone());
-            };
-            if class_like.kind.is_enum() {
-                return None;
-            }
+            // A type that names no class is reported where it is written.
+            let class_like = codebase.get_class_like(object.name.as_bytes())?;
             if !class_like.flags.is_struct() {
                 return Some(atomic.clone());
             }
@@ -312,9 +316,6 @@ fn unreadable_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut 
             .filter(|r#enum| r#enum.enum_type.is_none())
             .map(|_| atomic.clone()),
         TAtomic::Callable(_) => Some(atomic.clone()),
-        TAtomic::Object(TObject::Named(object)) if object.name.as_bytes().eq_ignore_ascii_case(b"Closure") => {
-            Some(atomic.clone())
-        }
         TAtomic::Object(TObject::Named(object))
             if !visiting.contains(&object.name)
                 && codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| class.flags.is_struct()) =>

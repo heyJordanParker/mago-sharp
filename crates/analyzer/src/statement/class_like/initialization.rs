@@ -50,18 +50,21 @@ where
             continue;
         }
 
+        let Some(span) = property.name_span else {
+            unreachable!("every property a PHP# class declares has its name's span");
+        };
         let property_name = String::from_utf8_lossy(name.as_bytes().strip_prefix(b"$").unwrap_or(name.as_bytes()));
-        let mut issue = Issue::error(format!(
-            "`{property_name}` is get-only and never set: set it in the main constructor, or give it an initial value."
-        ))
-        .with_note(
-            "A get-only property is set only while its object is created, and no constructor sets it on every path.",
-        );
-        if let Some(span) = property.name_span {
-            issue = issue.with_annotation(Annotation::primary(span).with_message("Declared here."));
-        }
 
-        context.collector.report_with_code(IssueCode::UninitializedProperty, issue);
+        context.collector.report_with_code(
+            IssueCode::UninitializedProperty,
+            Issue::error(format!(
+                "`{property_name}` is get-only and never set: set it in the main constructor, or give it an initial value."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Declared here."))
+            .with_note(
+                "A get-only property is set only while its object is created, and no constructor sets it on every path.",
+            ),
+        );
     }
 }
 

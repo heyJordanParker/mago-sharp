@@ -264,7 +264,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// `r#type` as the type text generics R3c's walk reads, php-sharp's decision 72: a class by its full dotted name as
-    /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `Object`, `List<T>`, `Set<T>`, `Map<K, V>`, and `T?`,
+    /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `List<T>`, `Set<T>`, `Map<K, V>`, and `T?`,
     /// `A|B` and `(A|B)?` with union members sorted by their text. These are the types a struct's `parse` reads.
     pub(crate) fn type_text(&self, r#type: &TUnion) -> String {
         if let Some(TAtomic::Mixed(mixed)) = r#type.types.iter().find(|atomic| atomic.is_mixed()) {
@@ -290,7 +290,7 @@ impl<'analysis> Types<'analysis> {
             TAtomic::Scalar(TScalar::Float(_)) => "float".to_owned(),
             TAtomic::Scalar(TScalar::String(_)) => "string".to_owned(),
             TAtomic::Scalar(TScalar::Bool(_)) => "bool".to_owned(),
-            TAtomic::Object(TObject::Any) => "Object".to_owned(),
+
             TAtomic::Object(TObject::Enum(r#enum)) => self.class_text(r#enum.name),
             TAtomic::Object(TObject::Named(object)) => self.class_text(object.name),
             TAtomic::Array(array) => {

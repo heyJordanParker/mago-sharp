@@ -564,10 +564,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Place::Struct)
         }
-        // `check_struct_declaration` reports every modifier but `public`, and `check_struct` a backing type other than
-        // `int` or `string`. A struct's members are a class's.
+        // `check_struct_declaration` reports every modifier but `public`. A struct's members are a class's.
         (Node::Modifier(modifier), Place::Struct) => matches!(modifier, Modifier::Public(_)).then_some(Place::Struct),
-        (Node::EnumBackingTypeHint(_), Place::Struct) => None,
         (Node::AttributeList(_), Place::Struct) => Some(Attribute),
         (Node::ClassLikeMember(_), Place::Struct) => enter(node, Class, context),
         // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
@@ -3461,7 +3459,7 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 }
 
 /// What the slice has at a place, as the note of a refusal there.
-const fn supported(place: Place) -> &'static str {
+fn supported(place: Place) -> &'static str {
     match place {
         Place::File => {
             "At file level, PHP# supports `namespace`, `import`, `class`, `struct`, `interface`, `enum` and `event`."
@@ -3481,9 +3479,7 @@ const fn supported(place: Place) -> &'static str {
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
-        Place::Struct => {
-            "A PHP# struct has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, and a class's members."
-        }
+        Place::Struct => unreachable!("the walk enters every part of a struct"),
         Place::Module => "A PHP# module states laws.",
         Place::FieldOrProperty => {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."

@@ -1026,7 +1026,7 @@ fn a_member_of_self_read_or_written_is_not_supported_yet() {
 /// PHP's `self` is removed, spec section 25: a class writes its own name, or `Self` where `Self` goes.
 #[test]
 fn self_names_the_class_and_self_where_it_goes() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n\nstruct Spot\n{\n    public self moved() => this;\n}\n";
     let without_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class.";
     let with_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.";
 
@@ -1041,6 +1041,7 @@ fn self_names_the_class_and_self_where_it_goes() {
             format!("16:20 {with_self}"),
             format!("16:25 {without_self}"),
             "22:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            "27:12 PHP# has no `self`: write the class's own name, `Spot`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
         ]
     );
 }
@@ -1086,10 +1087,10 @@ fn a_required_property_has_init_or_set() {
 }
 
 /// Spec section 10: every struct is already read-only, and a struct is a value with no subclasses, so `public` is its
-/// only modifier. Each refusal's fix, a plain `public struct`, compiles.
+/// only modifier. Each refusal's fix, a plain `public struct`, compiles, and so does a struct's attribute.
 #[test]
 fn a_struct_takes_only_public() {
-    let code = "namespace App.Tenant;\n\npublic readonly struct Size { }\n\nabstract struct Area { }\n\nfinal struct Shape { }\n\npublic struct Width { }\n";
+    let code = "namespace App.Tenant;\n\npublic readonly struct Size { }\n\nabstract struct Area { }\n\nfinal struct Shape { }\n\npublic struct Width { }\n\n[Stable]\npublic struct Height { }\n";
 
     assert_eq!(
         issues(code),
@@ -1117,10 +1118,11 @@ fn a_struct_property_takes_init_not_set() {
 }
 
 /// Spec section 10: a struct can't be inherited, so a member modifier only a subclass reads is refused, on a property,
-/// a method, an operator and a main constructor parameter. The fix, `private`, compiles.
+/// a method, an operator, a constant, a named constructor and a main constructor parameter. The fix, `private`, and a
+/// law, which takes no modifier, compile.
 #[test]
 fn a_struct_member_is_private_where_a_class_would_be_protected() {
-    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    protected int width { get; init; }\n    public virtual int area() => 1;\n    public override string toString() => \"\";\n    private int depth { get; init; }\n\n    public Size(protected int height { get; }) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    protected int width { get; init; }\n    public virtual int area() => 1;\n    public override string toString() => \"\";\n    private int depth { get; init; }\n    protected const int LIMIT = 1;\n\n    public Size(protected int height { get; }) { }\n\n    protected Size.tall() : this(10) { }\n\n    law positive(int a) => a == a;\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1128,7 +1130,9 @@ fn a_struct_member_is_private_where_a_class_would_be_protected() {
             "5:5 A struct has no subclasses, so write `private`.",
             "6:12 A struct has no subclasses, so write `private`.",
             "7:12 A struct has no subclasses, so write `private`.",
-            "10:17 A struct has no subclasses, so write `private`.",
+            "9:5 A struct has no subclasses, so write `private`.",
+            "13:5 A struct has no subclasses, so write `private`.",
+            "11:17 A struct has no subclasses, so write `private`.",
         ]
     );
 }

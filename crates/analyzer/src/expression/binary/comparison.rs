@@ -785,6 +785,7 @@ fn collection_refusal(
     lhs_type: &TUnion,
     rhs_type: &TUnion,
     codebase: &CodebaseMetadata,
+    visiting: &mut Vec<Word>,
 ) -> Option<Refusal> {
     let (Some((lhs_map, _, lhs_value)), Some((rhs_map, _, rhs_value))) =
         (collection_parts(lhs_type, codebase), collection_parts(rhs_type, codebase))
@@ -795,7 +796,7 @@ fn collection_refusal(
         return Some(Refusal::DifferentTypes);
     }
 
-    sharp_refusal(operator, &lhs_value, &rhs_value, codebase).map(|_| Refusal::CollectionElement)
+    refusal(operator, &lhs_value, &rhs_value, codebase, visiting).map(|_| Refusal::CollectionElement)
 }
 
 /// Why `operator` cannot compare the elements of a collection of `lhs_type` with those of one of `rhs_type`, read
@@ -881,6 +882,18 @@ pub(crate) fn sharp_refusal(
     rhs_type: &TUnion,
     codebase: &CodebaseMetadata,
 ) -> Option<Refusal> {
+    refusal(operator, lhs_type, rhs_type, codebase, &mut Vec::new())
+}
+
+/// [`sharp_refusal`] inside the structs `visiting` holds, whose properties are being compared, so a struct that holds
+/// itself, as in `Node? next`, compares by the rest.
+fn refusal(
+    operator: &BinaryOperator<'_>,
+    lhs_type: &TUnion,
+    rhs_type: &TUnion,
+    codebase: &CodebaseMetadata,
+    visiting: &mut Vec<Word>,
+) -> Option<Refusal> {
     // A comparison no source writes, as the `===` a value pattern runs as, has no operator token to refuse.
     if operator.span().length() == 0 {
         return None;
@@ -911,7 +924,7 @@ pub(crate) fn sharp_refusal(
                 })
                 .collect();
             if has(Comparand::Collection) {
-                collection_refusal(operator, lhs_type, rhs_type, codebase)
+                collection_refusal(operator, lhs_type, rhs_type, codebase, visiting)
             } else if let Some(&name) = structs.first() {
                 // A struct equals only an instance of the same struct, or an `Any` that holds one.
                 let same = lhs
@@ -921,7 +934,7 @@ pub(crate) fn sharp_refusal(
 
                 if !same {
                     Some(Refusal::DifferentTypes)
-                } else if struct_property_refusal(name, codebase, &mut Vec::new()).is_some() {
+                } else if struct_property_refusal(name, codebase, visiting).is_some() {
                     Some(Refusal::StructProperty)
                 } else {
                     None
@@ -1310,17 +1323,13 @@ fn struct_property_refusal<'codebase>(
 
     let refused = class.struct_properties().into_iter().find_map(|property| {
         let r#type = &property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?.type_union;
-        let equality = BinaryOperator::Equal(property.span?);
-        let nested = comparands(r#type, codebase).into_iter().find_map(|comparand| match comparand {
-            Comparand::Any => Some(None),
-            Comparand::Struct(nested) => struct_property_refusal(nested, codebase, visiting).map(|_| None),
-            _ => None,
-        });
-
-        match nested {
-            Some(reason) => Some((property, reason)),
-            None => sharp_refusal(&equality, r#type, r#type, codebase).map(|refusal| (property, Some(refusal))),
+        // `==` on two `Any` values compiles, and compares by value only a string, a number or an enum case.
+        if comparands(r#type, codebase).contains(&Comparand::Any) {
+            return Some((property, None));
         }
+        let equality = BinaryOperator::Equal(property.span?);
+
+        refusal(&equality, r#type, r#type, codebase, visiting).map(|refusal| (property, Some(refusal)))
     });
     visiting.pop();
 
@@ -1351,18 +1360,19 @@ where
         .as_ref()
         .or(property.type_declaration_metadata.as_ref())
         .map_or_else(|| "Any?".to_owned(), |r#type| display_operand(context, &r#type.type_union.to_non_nullable()));
+    let article = if r#type.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
     let why = match reason {
         Some(Refusal::Instance) => "which declares no `operator ==`",
         Some(Refusal::Collection) => "and `==` on a collection is not supported yet",
         Some(Refusal::CollectionElement) => "whose elements `==` cannot compare",
+        Some(Refusal::StructProperty) => "which can't compare by value",
         Some(_) => "which `==` cannot compare with another of its type",
-        None if r#type.starts_with("Any") => "which compares by value only with a string, a number or an enum case",
-        None => "which can't compare by value",
+        None => "which compares by value only with a string, a number or an enum case",
     };
     let property_name = property.name.0.as_bytes();
 
     Issue::error(format!(
-        "`{}` can't compare by value: `{}` is a `{type}`, {why}.",
+        "`{}` can't compare by value: `{}` is {article} `{type}`, {why}.",
         display_operand(context, &get_named_object(name, None)),
         BytesDisplay(property_name.strip_prefix(b"$").unwrap_or(property_name)),
         type = r#type
