@@ -16,11 +16,14 @@ use crate::cst::cst::uses::Uses;
 /// extern StripeClient uses Http;
 /// extern Carbon.now uses Clock;
 /// extern BigDecimal;
+/// extern event JobFailed;
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Extern<'arena> {
     pub r#extern: Keyword<'arena>,
+    /// `event`, which marks the plain PHP class as an event, spec section 15.
+    pub event: Option<Keyword<'arena>>,
     pub target: Identifier<'arena>,
     pub uses: Option<Uses<'arena>>,
     pub terminator: Terminator<'arena>,

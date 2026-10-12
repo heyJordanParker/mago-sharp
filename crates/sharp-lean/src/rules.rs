@@ -212,7 +212,7 @@ pub(crate) fn check(
         translations.iter().map(|translation| String::from_utf8_lossy(&translation.name).into_owned()).collect();
     let facts: Vec<(&str, &Facts)> =
         names.iter().zip(translations).map(|(name, translation)| (name.as_str(), &translation.facts)).collect();
-    for broken in runner::rules(library, &package.directory, &modules, &facts)? {
+    for broken in runner::rules(library, package, &modules, &facts)? {
         for (file, fact) in broken.facts {
             let translation = &translations[file];
             let fact = &translation.facts.list[fact];

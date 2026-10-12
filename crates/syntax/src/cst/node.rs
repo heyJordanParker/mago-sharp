@@ -73,6 +73,7 @@ use crate::cst::cst::EnumCaseBackedItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
 use crate::cst::cst::EvalConstruct;
+use crate::cst::cst::Event;
 use crate::cst::cst::ExitConstruct;
 use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
@@ -332,6 +333,7 @@ pub enum NodeKind {
     Operator,
     Law,
     ConstructorInitializer,
+    Event,
     ComputedProperty,
     HookedProperty,
     PlainProperty,
@@ -606,6 +608,7 @@ pub enum Node<'ast, 'arena> {
     Operator(&'ast Operator<'arena>),
     Law(&'ast Law<'arena>),
     ConstructorInitializer(&'ast ConstructorInitializer<'arena>),
+    Event(&'ast Event<'arena>),
     ComputedProperty(&'ast ComputedProperty<'arena>),
     HookedProperty(&'ast HookedProperty<'arena>),
     PlainProperty(&'ast PlainProperty<'arena>),
@@ -846,6 +849,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Interface(_)
                 | Self::Trait(_)
                 | Self::Enum(_)
+                | Self::Event(_)
                 | Self::Function(_)
                 | Self::Method(_)
                 | Self::Operator(_)
@@ -871,6 +875,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Interface(_)
                 | Self::Trait(_)
                 | Self::Enum(_)
+                | Self::Event(_)
                 | Self::Block(_)
                 | Self::Constant(_)
                 | Self::Function(_)
@@ -962,6 +967,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Operator(_) => NodeKind::Operator,
             Self::Law(_) => NodeKind::Law,
             Self::ConstructorInitializer(_) => NodeKind::ConstructorInitializer,
+            Self::Event(_) => NodeKind::Event,
             Self::ComputedProperty(_) => NodeKind::ComputedProperty,
             Self::HookedProperty(_) => NodeKind::HookedProperty,
             Self::PlainProperty(_) => NodeKind::PlainProperty,
@@ -1469,6 +1475,21 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
                 f(Node::MethodExpressionBody(&node.body));
+            }
+            Node::Event(node) => {
+                for item in node.attribute_lists.iter() {
+                    f(Node::AttributeList(item));
+                }
+                for item in node.modifiers.iter() {
+                    f(Node::Modifier(item));
+                }
+                f(Node::Keyword(&node.event));
+                f(Node::LocalIdentifier(&node.name));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+                if let Some(inheritance) = &node.inheritance {
+                    f(Node::Inheritance(inheritance));
+                }
+                f(Node::Terminator(&node.terminator));
             }
             Node::ComputedProperty(node) => {
                 for item in node.attribute_lists.iter() {
@@ -2577,6 +2598,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }),
             Node::Extern(node) => {
                 f(Node::Keyword(&node.r#extern));
+                if let Some(event) = &node.event {
+                    f(Node::Keyword(event));
+                }
                 f(Node::Identifier(&node.target));
 
                 if let Some(uses) = &node.uses {
@@ -2635,6 +2659,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Statement::Interface(node) => f(Node::Interface(node)),
                 Statement::Trait(node) => f(Node::Trait(node)),
                 Statement::Enum(node) => f(Node::Enum(node)),
+                Statement::Event(node) => f(Node::Event(node)),
                 Statement::Block(node) => f(Node::Block(node)),
                 Statement::Constant(node) => f(Node::Constant(node)),
                 Statement::Function(node) => f(Node::Function(node)),
@@ -2886,6 +2911,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Operator(node) => node.span(),
             Self::Law(node) => node.span(),
             Self::ConstructorInitializer(node) => node.span(),
+            Self::Event(node) => node.span(),
             Self::ComputedProperty(node) => node.span(),
             Self::HookedProperty(node) => node.span(),
             Self::PlainProperty(node) => node.span(),

@@ -1657,11 +1657,11 @@ fn an_override_of_a_plain_php_method_takes_no_assertion_from_the_parent() {
 /// A parse error reports its spot once, so returning what failed to parse adds no `never-return`, in PHP# and PHP.
 #[test]
 fn returning_a_value_that_failed_to_parse_adds_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public Report make(string json)\n    {\n        return new Report.fromJson(json);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int make()\n    {\n        return );\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfunction make(): int\n{\n    return );\n}\n";
 
     assert_eq!(issues(("src/Demo/make.php", php), &[]), ["7:12 parse"]);
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:20 parse"]);
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:16 parse"]);
 }
 
 /// `super` names the base class, so a class whose header names only interfaces has none, as `parent::` in a PHP
@@ -9505,18 +9505,25 @@ fn an_extern_written_with_a_renamed_import_declares_the_same_target() {
     assert_eq!(refused, ["5:1 duplicate-extern `Client` already has an `extern` declaration."]);
 }
 
-/// An `extern` target that names no class, method or function is reported with the code a call of it would get.
+/// An `extern` target that names no class, method or function is reported with the code a call of it would get. An
+/// `extern event` names a class, spec section 15.
 #[test]
 fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_function() {
     let stub = (
         "app/Stubs/Stripe.sharp",
-        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Stripe.Missing;\n\nextern Missing;\nextern StripeClient.refund;\nextern nowhere;\n",
+        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Stripe.Missing;\n\nextern Missing;\nextern StripeClient.refund;\nextern nowhere;\nextern event Nowhere;\n",
     );
 
     assert_eq!(
         issues(stub, &[STRIPE]),
-        ["6:8 non-existent-class-like", "7:8 non-existent-method", "8:8 non-existent-function"]
+        [
+            "6:8 non-existent-class-like",
+            "7:8 non-existent-method",
+            "8:8 non-existent-function",
+            "9:14 non-existent-class-like"
+        ]
     );
+    assert_eq!(messages(stub, &[STRIPE])[3], "Cannot find class, interface, enum, or type alias `Nowhere`.");
 }
 
 /// PHP# infers the effects of PHP# code, so an `extern` names only plain PHP.
@@ -9535,6 +9542,37 @@ fn an_extern_of_a_plain_php_class_is_accepted() {
         ("app/Stubs/Stripe.sharp", "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient;\n");
 
     assert_eq!(issues(stub, &[STRIPE]), Vec::<String>::new());
+}
+
+/// An `extern event` gives the plain PHP class it marks the effects its `uses` lists, spec section 15, as an `extern`
+/// of the class does, so creating the event has them.
+#[test]
+fn an_extern_event_gives_its_class_the_effects_it_lists() {
+    let events = (
+        "src/Queue/Events.php",
+        "<?php\n\nnamespace Illuminate\\Queue\\Events;\n\nfinal class JobFailed\n{\n    public function __construct(public int $id) {}\n}\n",
+    );
+    let failure = (
+        "app/Shop/Failure.sharp",
+        "namespace App.Shop;\n\nimport Illuminate.Queue.Events.JobFailed;\n\npublic class Failure\n{\n    public JobFailed last => new JobFailed(1);\n}\n",
+    );
+    let pure = (
+        "app/Stubs/Queue.sharp",
+        "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed;\n",
+    );
+    let database = (
+        "app/Stubs/Queue.sharp",
+        "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed uses Database;\n",
+    );
+
+    assert_eq!(issues(database, &[events]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[failure, events, pure]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[failure, events, database]),
+        [
+            "app/Shop/Failure.sharp:7:30 impure-getter: Getter `last` calls `JobFailed`, which has the effect `Database`. Getters must be pure."
+        ]
+    );
 }
 
 const LABEL: (&str, &str) = (
@@ -10504,4 +10542,203 @@ fn a_getter_applying_a_pure_operator_passes() {
     );
 
     assert_eq!(effect_issues(&[cart, money]), Vec::<String>::new());
+}
+
+/// Spec section 15: the interface a family of events shares and one of its events, each declared at file level in its
+/// own file.
+const ORDER_EVENTS: [(&str, &str); 2] = [
+    (
+        "app/Shop/OrderEvent.sharp",
+        "namespace App.Shop;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n",
+    ),
+    (
+        "app/Shop/OrderPaid.sharp",
+        "namespace App.Shop;\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n",
+    ),
+];
+
+/// Spec section 15: an event is a final class whose parameters are its public get-only properties, and its header
+/// names the interfaces it gives. So its properties read by name and its interface types it, a write is refused, and
+/// `new` checks its arguments as a constructor's.
+#[test]
+fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
+    let reader = (
+        "app/Shop/Reader.sharp",
+        "namespace App.Shop;\n\npublic class Reader\n{\n    public int read(OrderPaid paid) => paid.orderId + paid.amount;\n\n    public int family(OrderEvent event) => event.orderId;\n\n    public OrderEvent make() => new OrderPaid(1, amount: 2);\n}\n",
+    );
+    let writer = (
+        "app/Shop/Writer.sharp",
+        "namespace App.Shop;\n\npublic class Writer\n{\n    public void write(OrderPaid paid, OrderEvent event)\n    {\n        paid.orderId = 2;\n        event.orderId = 2;\n    }\n\n    public OrderPaid make() => new OrderPaid(\"one\");\n}\n",
+    );
+    let sub = ("app/Shop/Sub.sharp", "namespace App.Shop;\n\npublic class Sub : OrderPaid\n{\n}\n");
+
+    assert_eq!(worded(reader, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(
+        issues(writer, &ORDER_EVENTS),
+        ["7:14 invalid-property-write", "8:15 invalid-property-write", "11:46 invalid-argument"]
+    );
+    assert_eq!(
+        messages(writer, &ORDER_EVENTS),
+        [
+            "Cannot initialize readonly property `OrderPaid.orderId` from within `Writer`.",
+            "Cannot write to read-only property `OrderEvent.orderId` - property only has a get hook.",
+            "Invalid argument type for argument #1 of `OrderPaid.__construct`: expected `int`, but found `string`."
+        ]
+    );
+    assert_eq!(messages(sub, &ORDER_EVENTS), ["Class `Sub` cannot extend final class `OrderPaid`"]);
+}
+
+/// Spec section 15: no event extends another, so an event's header names interfaces only, and a type names an event
+/// only once: an interface, a class or another event of the same full name keeps the name.
+#[test]
+fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
+    let based = (
+        "app/Shop/Moved.sharp",
+        "namespace App.Shop;\n\npublic class Base\n{\n}\n\npublic event Moved(int id) : Base, OrderEvent;\n",
+    );
+    let twice =
+        ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id);\n\npublic event Moved(int id);\n");
+    let interface =
+        ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic interface Moved { }\n\npublic event Moved(int id);\n");
+    let class =
+        ("app/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n\npublic event Cart(int id);\n");
+
+    assert_eq!(messages(interface, &[]), ["Event `Moved` is already defined elsewhere."]);
+    assert_eq!(messages(class, &[]), ["Event `Cart` is already defined elsewhere."]);
+    assert_eq!(
+        worded(based, &ORDER_EVENTS),
+        [
+            "7:30 invalid-event An event's header names interfaces only, and `Base` is not one. | Named here. | No event extends another: a family of events shares an interface."
+        ]
+    );
+    assert_eq!(messages(twice, &ORDER_EVENTS), ["Event `Moved` is already defined elsewhere."]);
+}
+
+/// Spec section 15: the interface a family of events shares states the get-only properties each event gives, so an
+/// event or a class that names it and lacks one, or gives one that is not public, on each object and of its type, is
+/// refused, as the engine refuses the class it runs as. A get-only property may give a narrower type, and a PHP
+/// interface's property with `set` takes its type exactly. A class that names the interface answers for the property
+/// it inherits too, from a PHP# or a plain PHP base class, a base's `private` field included.
+#[test]
+fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
+    let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : OrderEvent;\n");
+    let class = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic class Moved : OrderEvent\n{\n}\n");
+    let typed = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(string orderId) : OrderEvent;\n");
+    let class_typed = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : OrderEvent\n{\n    public string orderId { get; }\n\n    public Kept(string orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n",
+    );
+    let private = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : OrderEvent\n{\n    private int orderId;\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n\n    public int read() => this.orderId;\n}\n",
+    );
+    let shared = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : OrderEvent\n{\n    public static int orderId { get; } = 1;\n}\n",
+    );
+    let named = (
+        "src/Shop/Named.php",
+        "<?php\n\nnamespace App\\Shop;\n\ninterface Named\n{\n    public int|string $id { get; set; }\n}\n",
+    );
+    let settable = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag : Named\n{\n    public int id { get; set; } = 0;\n}\n",
+    );
+    let given = (
+        "app/Shop/Moved.sharp",
+        "namespace App.Shop;\n\npublic event Moved(int orderId) : OrderEvent;\n\npublic class Kept : OrderEvent\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n\npublic interface Priced\n{\n    public int? total { get; }\n}\n\npublic class Bill : Priced\n{\n    public int total { get; }\n\n    public Bill(int total)\n    {\n        this.total = total;\n    }\n}\n",
+    );
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let string_base = (
+        "app/Shop/StringBase.sharp",
+        "namespace App.Shop;\n\npublic class StringBase\n{\n    public string orderId { get; } = \"x\";\n}\n",
+    );
+    let private_base = (
+        "app/Shop/PrivateBase.sharp",
+        "namespace App.Shop;\n\npublic class PrivateBase\n{\n    private int orderId = 1;\n\n    public int read() => this.orderId;\n}\n",
+    );
+    let legacy_base = (
+        "src/Legacy/LegacyBase.php",
+        "<?php\n\nnamespace Legacy;\n\nclass LegacyBase\n{\n    public string $orderId = 'x';\n}\n",
+    );
+    let int_base = (
+        "app/Shop/IntBase.sharp",
+        "namespace App.Shop;\n\npublic class IntBase\n{\n    public int orderId { get; } = 7;\n}\n",
+    );
+    let from_string =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : StringBase, OrderEvent\n{\n}\n");
+    let from_private =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : PrivateBase, OrderEvent\n{\n}\n");
+    let from_legacy = (
+        "app/Shop/Child.sharp",
+        "namespace App.Shop;\n\nimport Legacy.LegacyBase;\n\npublic class Child : LegacyBase, OrderEvent\n{\n}\n",
+    );
+    let from_int = ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : IntBase, OrderEvent\n{\n}\n");
+    let paid_event =
+        ("app/Shop/PaidEvent.sharp", "namespace App.Shop;\n\npublic interface PaidEvent : OrderEvent\n{\n}\n");
+    let below_named =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : StringBase, PaidEvent\n{\n}\n");
+    let wrong_base = (
+        "app/Shop/WrongBase.sharp",
+        "namespace App.Shop;\n\npublic class WrongBase : OrderEvent\n{\n    public string orderId { get; } = \"x\";\n}\n",
+    );
+    let from_wrong = ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : WrongBase\n{\n}\n");
+
+    assert_eq!(issues(event, &ORDER_EVENTS), ["3:14 unimplemented-abstract-property-hook"]);
+    assert_eq!(issues(class, &ORDER_EVENTS), ["3:14 unimplemented-abstract-property-hook"]);
+    assert_eq!(
+        worded(typed, &ORDER_EVENTS),
+        [
+            "3:27 incompatible-property-type `Moved` gives `orderId` as `string`, and `OrderEvent` states it as `int`. | Given here. | Stated here. | Give `orderId` the type `int`."
+        ]
+    );
+    assert_eq!(
+        worded(class_typed, &ORDER_EVENTS),
+        [
+            "5:19 incompatible-property-type `Kept` gives `orderId` as `string`, and `OrderEvent` states it as `int`. | Given here. | Stated here. | Give `orderId` the type `int`."
+        ]
+    );
+    assert_eq!(
+        worded(private, &ORDER_EVENTS),
+        [
+            "5:17 incompatible-property-access `Kept` gives `orderId` as `private`, and `OrderEvent` states it `public`. | Given here. | Stated here. | Declare `orderId` `public`."
+        ]
+    );
+    assert_eq!(
+        worded(shared, &ORDER_EVENTS),
+        [
+            "5:23 incompatible-static-modifier `Kept` gives `orderId` as `static`, and `OrderEvent` states it on each object. | Given here. | Stated here. | Remove `static`."
+        ]
+    );
+    assert_eq!(
+        worded(settable, &[named]),
+        [
+            "5:16 incompatible-property-type `Tag` gives `id` as `int`, and `Named` states it as `int|string`. | Given here. | Stated here. | Give `id` the type `int|string`."
+        ]
+    );
+    assert_eq!(worded(given, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(
+        worded(from_string, &[order_event, order_paid, string_base]),
+        [
+            "3:14 incompatible-property-type `Child` gives `orderId` as `string`, from `StringBase`, and `OrderEvent` states it as `int`. | Inherited here. | Declared here. | Stated here. | Give `orderId` the type `int` in `StringBase`."
+        ]
+    );
+    assert_eq!(
+        worded(from_private, &[order_event, order_paid, private_base]),
+        [
+            "3:14 incompatible-property-access `Child` gives `orderId` as `private`, from `PrivateBase`, and `OrderEvent` states it `public`. | Inherited here. | Declared here. | Stated here. | Declare `orderId` `public` in `PrivateBase`."
+        ]
+    );
+    assert_eq!(
+        worded(from_legacy, &[order_event, order_paid, legacy_base]),
+        [
+            "5:14 incompatible-property-type `Child` gives `orderId` as `string`, from `LegacyBase`, and `OrderEvent` states it as `int`. | Inherited here. | Declared here. | Stated here. | Give `orderId` the type `int` in `LegacyBase`."
+        ]
+    );
+    assert_eq!(worded(from_int, &[order_event, order_paid, int_base]), Vec::<String>::new());
+    assert_eq!(
+        issues(below_named, &[order_event, order_paid, string_base, paid_event]),
+        ["3:14 incompatible-property-type"]
+    );
+    assert_eq!(issues(from_wrong, &[order_event, order_paid, wrong_base]), Vec::<String>::new());
 }

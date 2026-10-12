@@ -273,10 +273,23 @@ fn compile_lines(root: &Path) -> Output {
     command(root, "never").env("MAGO_REPORTING_FORMAT", "emacs").output().unwrap()
 }
 
-/// `mago compile` with no `lake`, nor any other program, on the `PATH`.
+/// A cache folder whose `mago` is a file, so Mago cannot install Lean into it.
+fn unwritable_cache() -> PathBuf {
+    let cache = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unwritable-cache");
+    write(&cache, "mago", "");
+    cache
+}
+
+/// `mago compile` with no `lake`, nor any other program, on the `PATH`, and a cache folder Mago cannot install Lean
+/// into.
 fn compile_without_lean(root: &Path) -> Output {
     let empty = tempfile::tempdir().unwrap();
-    command(root, "never").env("MAGO_REPORTING_FORMAT", "emacs").env("PATH", empty.path()).output().unwrap()
+    command(root, "never")
+        .env("MAGO_REPORTING_FORMAT", "emacs")
+        .env("PATH", empty.path())
+        .env("XDG_CACHE_HOME", unwritable_cache())
+        .output()
+        .unwrap()
 }
 
 fn read(root: &Path, name: &str) -> String {
@@ -539,6 +552,28 @@ fn compile_runs_the_runners_of_two_stale_law_files_at_the_same_time() {
     assert_eq!(read(root, "app/Shared/Wallet.lean"), MONEY_PROOF.replace("Money", "Wallet"));
 }
 
+/// A `lake` on the `PATH` builds the Lean code, so CI's and a user's own elan keep working, and Mago installs no Lean.
+#[cfg(unix)]
+#[test]
+fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let lake = tempfile::tempdir().unwrap();
+    write(lake.path(), "lake", "#!/bin/sh\necho \"the lake on the PATH ran $*\"\n[ \"$1\" = --version ]\n");
+    std::fs::set_permissions(lake.path().join("lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+
+    let output = command(directory.path(), "never")
+        .env("PATH", lake.path())
+        .env("XDG_CACHE_HOME", cache.path())
+        .output()
+        .unwrap();
+
+    assert!(printed(&output).contains("the lake on the PATH ran build"), "{}", printed(&output));
+    assert!(!cache.path().join("mago/elan").exists(), "{}", printed(&output));
+}
+
 #[test]
 fn compile_refuses_a_gap_every_time_and_never_leaves_a_current_compiled_file() {
     let directory = lawful_project(&[
@@ -644,11 +679,18 @@ fn compile_reports_the_proof_of_a_deleted_law() {
     }
 }
 
-/// A file whose law needs proving, or that a structure rule judges, needs Lean; with no `lake`, each such file is
-/// refused with `missing-lean`, and every other file compiles.
+/// A file whose law needs proving, or that a structure rule judges, needs Lean; with no `lake` and no Lean Mago can
+/// install, each such file is refused with `missing-lean`, which names what failed, and every other file compiles.
 #[test]
 fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_file_is_not_current() {
-    const MISSING: &str = "error - missing-lean: Laws and structure rules need Lean 4.34.1, and lake was not found. Install elan from https://lean-lang.org/install, then run vendor/bin/mago compile again.";
+    let missing = if cfg!(target_env = "musl") {
+        "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. This musl build of Mago can't install Lean, because Lean has no musl build. On glibc Linux, Mago's glibc build installs Lean itself.".to_owned()
+    } else {
+        format!(
+            "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. Mago could not install Lean into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
+            unwritable_cache().join("mago/elan").display()
+        )
+    };
     let shared = rules("App.Shared", "@[rule] def neverReachesTenant : Rule := .neverImports App.Tenant");
     for (files, refused) in [
         (
@@ -670,7 +712,7 @@ fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_
         let output = compile_without_lean(root);
 
         assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
-        let expected: Vec<String> = refused.iter().map(|place| format!("{place}:{MISSING}")).collect();
+        let expected: Vec<String> = refused.iter().map(|place| format!("{place}:{missing}")).collect();
         assert_eq!(issue_lines(&output), expected, "{}", printed(&output));
         assert!(compiled(root, "app/Order.sharp").exists());
     }
