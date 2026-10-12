@@ -4065,6 +4065,77 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 }
 
 /// ```php
+/// $this->sizes->put('a', $extra);
+/// $this->sizes['b'] ?? $this->sizes->put('b', 2);
+/// (${'receiver#1'} = $this->me())->sizes['c'] ?? ${'receiver#1'}->sizes->put('c', 3);
+/// ```
+///
+/// A write into a `Map` a property holds reaches the property, and its hooks, only through the engine's collection of
+/// the property, as a change through a `List` index reaches the element. So it is a `put` on the property, and a `??=`
+/// puts only for a missing key, holding an object that runs something in a hidden variable.
+#[test]
+fn a_write_into_a_map_a_property_holds_puts_it_through_the_property() {
+    assert_eq!(
+        child_body(
+            "void run(int extra)",
+            "        this.sizes[\"a\"] = extra;\n        this.sizes[\"b\"] ??= 2;\n        this.me().sizes[\"c\"] ??= 3;\n    }\n\n    private Report me()\n    {\n        return this;\n",
+            "<?php namespace App\\Tenant; class Base { /** @var array<string, int> */ public array $sizes = ['a' => 0]; }"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "sizes"
+                ZVAL "put"
+                ARG_LIST
+                  ZVAL "a"
+                  VAR
+                    ZVAL "extra"
+              COALESCE
+                DIM
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "sizes"
+                  ZVAL "b"
+                METHOD_CALL
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "sizes"
+                  ZVAL "put"
+                  ARG_LIST
+                    ZVAL "b"
+                    ZVAL 2
+              COALESCE
+                DIM
+                  PROP
+                    ASSIGN
+                      VAR
+                        ZVAL "receiver#1"
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "me"
+                        ARG_LIST
+                    ZVAL "sizes"
+                  ZVAL "c"
+                METHOD_CALL
+                  PROP
+                    VAR
+                      ZVAL "receiver#1"
+                    ZVAL "sizes"
+                  ZVAL "put"
+                  ARG_LIST
+                    ZVAL "c"
+                    ZVAL 3
+        "#}
+    );
+}
+
+/// ```php
 /// $lines = ($holder === null) ? null : \count($holder->lines);
 /// $next = (($nullsafe#1 = $other->next) === null) ? null : \count($nullsafe#1->lines);
 /// $made = ($holder === null) ? null : \count($holder->make());
@@ -4964,8 +5035,7 @@ fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
 /// $numbers = [1, $extra];
 /// $named = ['a' => 1, 2 => $numbers[0]];
 /// $empty = [];
-/// $named['b'] = $numbers[0];
-/// $this->sizes['a'] = ($this->sizes['a'] ?? 0) + 1;
+/// $named['b'] = ($this->sizes['a'] ?? 0) + $numbers[0];
 /// return $numbers[1];
 /// ```
 ///
@@ -4976,7 +5046,7 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
     assert_eq!(
         child_body(
             RUN,
-            "        List<int> numbers = [1, extra];\n        const named = [\"a\": 1, 2: numbers[0]];\n        const Map<string, int> empty = [:];\n        named[\"b\"] = numbers[0];\n        this.sizes[\"a\"] = (this.sizes[\"a\"] ?? 0) + 1;\n        return numbers[1];\n",
+            "        List<int> numbers = [1, extra];\n        const named = [\"a\": 1, 2: numbers[0]];\n        const Map<string, int> empty = [:];\n        named[\"b\"] = (this.sizes[\"a\"] ?? 0) + numbers[0];\n        return numbers[1];\n",
             "<?php namespace App\\Tenant; class Base { /** @var array<string, int> */ public array $sizes = ['a' => 0]; }"
         ),
         indoc! {r#"
@@ -5014,17 +5084,6 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
                   VAR
                     ZVAL "named"
                   ZVAL "b"
-                DIM
-                  VAR
-                    ZVAL "numbers"
-                  ZVAL 0
-              ASSIGN
-                DIM
-                  PROP
-                    VAR
-                      ZVAL "this"
-                    ZVAL "sizes"
-                  ZVAL "a"
                 BINARY_OP [1]
                   COALESCE
                     DIM
@@ -5034,7 +5093,10 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
                         ZVAL "sizes"
                       ZVAL "a"
                     ZVAL 0
-                  ZVAL 1
+                  DIM
+                    VAR
+                      ZVAL "numbers"
+                    ZVAL 0
               RETURN
                 DIM
                   VAR
