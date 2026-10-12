@@ -838,7 +838,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
     }
 
     if let Some((local_type, _)) = block_context.local_types.get(&variable_id) {
-        if let Some(value) = source_expression.filter(|_| context.dialect.is_sharp() && !destructuring) {
+        if let Some(value) = source_expression {
             let span = value.span();
             artifacts.local_value_types.insert((span.start.offset, span.end.offset), local_type.as_ref().clone());
         }

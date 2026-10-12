@@ -5872,7 +5872,7 @@ fn a_value_from_plain_php_is_checked_where_a_typed_local_or_property_takes_it() 
 
             public Box<Order>? logged
             {
-                get;
+                get => field;
                 set { field = value; }
             }
 
@@ -5988,9 +5988,10 @@ fn a_value_from_plain_php_is_checked_where_a_typed_local_or_property_takes_it() 
     }
     assert!(tree.contains("ZVAL \"property App\\\\Shelf::$promoted\""), "{tree}");
     assert_eq!(tree.matches("VERIFY_TYPE_ARGS [1]").count(), 5, "{tree}");
-    // Each check is a `set` hook, and an auto `get` beside it stays PHP's read of the storage.
+    // Each check is a `set` hook. A `get` body runs unchecked, and an auto `get` beside a check stays PHP's read of the
+    // storage.
     assert_eq!(tree.matches("PROPERTY_HOOK \"set\"").count(), 5, "{tree}");
-    assert_eq!(tree.matches("PROPERTY_HOOK \"get\"").count(), 0, "{tree}");
+    assert_eq!(tree.matches("PROPERTY_HOOK \"get\"").count(), 1, "{tree}");
     // The element's last child is its hook list.
     for (property, default) in
         [("hidden", "ZVAL null"), ("fixed", "ZVAL null"), ("count", "null"), ("latest", "ZVAL null")]
