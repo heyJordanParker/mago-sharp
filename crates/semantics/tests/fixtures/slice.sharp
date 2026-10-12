@@ -435,7 +435,7 @@ public static class Slug
 
 public interface OrderEvent
 {
-    public int orderId { get; }
+    int orderId { get; }
 }
 
 public event OrderPaid(int orderId, int amount = 0) : OrderEvent;

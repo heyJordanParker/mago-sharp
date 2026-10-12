@@ -10898,7 +10898,7 @@ fn a_getter_applying_a_pure_operator_passes() {
 const ORDER_EVENTS: [(&str, &str); 2] = [
     (
         "app/Shop/OrderEvent.sharp",
-        "namespace App.Shop;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n",
+        "namespace App.Shop;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n",
     ),
     (
         "app/Shop/OrderPaid.sharp",
@@ -11012,7 +11012,7 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     );
     let given = (
         "app/Shop/Moved.sharp",
-        "namespace App.Shop;\n\npublic event Moved(int id, int orderId) : OrderEvent;\n\npublic class Kept : OrderEvent\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n\npublic interface Priced\n{\n    public int? total { get; }\n}\n\npublic class Bill : Priced\n{\n    public int total { get; }\n\n    public Bill(int total)\n    {\n        this.total = total;\n    }\n}\n",
+        "namespace App.Shop;\n\npublic event Moved(int id, int orderId) : OrderEvent;\n\npublic class Kept : OrderEvent\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n\npublic interface Priced\n{\n    int? total { get; }\n}\n\npublic class Bill : Priced\n{\n    public int total { get; }\n\n    public Bill(int total)\n    {\n        this.total = total;\n    }\n}\n",
     );
     let [order_event, order_paid] = ORDER_EVENTS;
     let string_base = (
@@ -11198,6 +11198,29 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
             "5:16 incompatible-property-access `Guarded` gives `total` with `init`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
         ]
     );
+}
+
+/// An interface member is public, written bare: a class gives a bare property and a bare method as public ones, an
+/// event gives the property, and other code reads and calls them through the interface.
+#[test]
+fn a_bare_interface_member_is_public() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let named = (
+        "app/Shop/Named.sharp",
+        "namespace App.Shop;\n\npublic interface Named\n{\n    int orderId { get; }\n\n    string label();\n}\n",
+    );
+    let ticket = (
+        "app/Shop/Ticket.sharp",
+        "namespace App.Shop;\n\npublic class Ticket : Named\n{\n    public int orderId { get; }\n\n    public Ticket(int orderId)\n    {\n        this.orderId = orderId;\n    }\n\n    public string label() => \"ticket\";\n}\n",
+    );
+    let desk = (
+        "app/Shop/Desk.sharp",
+        "namespace App.Shop;\n\npublic class Desk\n{\n    public string read(Named named, OrderEvent paid) => `${named.label()} ${named.orderId} ${paid.orderId}`;\n}\n",
+    );
+
+    assert_eq!(worded(ticket, &[named]), Vec::<String>::new());
+    assert_eq!(worded(order_paid, &[order_event]), Vec::<String>::new());
+    assert_eq!(worded(desk, &[named, ticket, order_event, order_paid]), Vec::<String>::new());
 }
 
 /// Spec section 15: `emit` raises an event, one an `event` declares or a plain PHP class an `extern event` marks. Any

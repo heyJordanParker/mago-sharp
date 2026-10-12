@@ -939,13 +939,13 @@ fn a_named_constructor_shares_no_name_with_a_method() {
 /// Spec section 9.1: only a class has constructors, so an interface, an enum and a static class declare no named one.
 #[test]
 fn only_a_class_with_instances_declares_a_named_constructor() {
-    let interface = "namespace App.Tenant;\n\npublic interface Priced\n{\n    public Priced.free() : this() { }\n}\n";
+    let interface = "namespace App.Tenant;\n\npublic interface Priced\n{\n    Priced.free() : this() { }\n}\n";
     let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit.red() : this() { }\n}\n";
     let r#static = "namespace App.Tenant;\n\npublic static class Text\n{\n    public Text.empty() : this() { }\n}\n";
 
     assert_eq!(
         issues(interface),
-        ["5:19 An interface has no constructor: a named constructor creates an object of its own class."]
+        ["5:12 An interface has no constructor: a named constructor creates an object of its own class."]
     );
     assert_eq!(issues(r#enum), ["7:17 An enum has no constructor: its cases are its only values."]);
     assert_eq!(issues(r#static), ["5:17 A static class has no constructor."]);
@@ -1104,18 +1104,37 @@ fn an_interface_method_takes_union_types_and_a_variadic_parameter() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// An interface member is public, written bare, so an access modifier on a property or a method is one error. A
+/// `.php` interface keeps PHP's own checks.
 #[test]
-fn a_modifier_on_an_interface_member_is_an_error() {
-    let code =
-        "namespace App.Tenant;\n\ninterface Measured\n{\n    public float area();\n\n    static float unit();\n}\n";
+fn an_interface_member_is_public_written_bare() {
+    let bare =
+        "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n\n    string label(int digits);\n}\n";
+    assert_eq!(issues(bare), Vec::<String>::new());
 
+    let message = "An interface member is always public, so it takes no access modifier.";
+    for modifier in ["public", "protected", "private"] {
+        let code = leak(bare.replace("    string", &format!("    {modifier} string")));
+
+        assert_eq!(issues(code), [format!("5:5 {message}"), format!("7:5 {message}")], "{modifier}");
+    }
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Named\n{\n    protected string $name { get; }\n\n    private function label(int $digits): string;\n}\n";
     assert_eq!(
-        issues(code),
+        issues_in("src/Named.php", php),
         [
-            "5:5 An interface method takes no modifier: every interface method is public.",
-            "7:5 An interface method takes no modifier: every interface method is public."
+            "7:5 Interface virtual property `Named::$name` cannot have `protected` modifier.",
+            "7:5 Interface virtual property `Named::$name` must be declared public.",
+            "9:5 Interface method `Named::label` cannot have `private` modifier."
         ]
     );
+}
+
+#[test]
+fn another_modifier_on_an_interface_method_is_an_error() {
+    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    static float unit();\n}\n";
+
+    assert_eq!(issues(code), ["5:5 An interface method takes no modifier: every interface method is public."]);
 }
 
 #[test]
@@ -1128,18 +1147,16 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
     );
 }
 
-/// An interface states a `public` get-only property its classes give, as `OrderEvent` states the `orderId` its events
-/// give, spec section 15. A `set` accessor or an accessor body is not supported yet, and PHP's own check asks for
-/// `public`.
+/// An interface states a get-only property its classes give, as `OrderEvent` states the `orderId` its events give,
+/// spec section 15. A `set` accessor or an accessor body is not supported yet.
 #[test]
-fn an_interface_property_is_public_and_get_only() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    public string name { get; }\n    public string label { get => \"label\"; }\n    public string title { get; set; }\n    string code { get; }\n}\n";
+fn an_interface_property_is_get_only() {
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "6:31 Interface virtual property `Named.label` must be abstract.",
-            "8:5 Interface virtual property `Named.code` must be declared public.",
+            "6:24 Interface virtual property `Named.label` must be abstract.",
             "6:5 This class member is not supported yet in PHP#.",
             "7:5 This class member is not supported yet in PHP#."
         ]
@@ -4247,7 +4264,7 @@ fn an_operator_body_is_a_method_body() {
 #[test]
 fn an_interface_or_an_enum_declares_no_operator() {
     let interface =
-        "namespace App;\n\npublic interface Priced\n{\n    public static int operator +(Priced a, Priced b) => 0;\n}\n";
+        "namespace App;\n\npublic interface Priced\n{\n    static int operator +(Priced a, Priced b) => 0;\n}\n";
     let r#enum = "namespace App;\n\npublic enum Suit\n{\n    case Hearts;\n\n    public static int operator +(Suit a, Suit b) => 0;\n}\n";
 
     assert_eq!(issues_in("src/Priced.sharp", interface), ["5:5 This class member is not supported yet in PHP#."]);

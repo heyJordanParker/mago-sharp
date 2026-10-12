@@ -432,9 +432,12 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                 let method_name_bytes: &[u8] = method.name.value;
                 let method_display = context.display_member(interface_name_bytes, BytesDisplay(method_name_bytes));
 
+                // A PHP# interface member is public, written bare, and `check_slice` refuses any access modifier on it.
                 let mut visibilities = vec![];
                 for modifier in &method.modifiers {
-                    if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)) {
+                    if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_))
+                        && !context.program.dialect.is_sharp()
+                    {
                         visibilities.push(modifier);
                     }
                 }
@@ -531,6 +534,9 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                         let property_display = context
                             .display_member(interface_name_bytes, BytesDisplay(hooked_property.item.variable().name));
 
+                        // A PHP# interface member is public, written bare, and `check_slice` refuses any access
+                        // modifier on it.
+                        let is_sharp = context.program.dialect.is_sharp();
                         let mut found_public = false;
                         let mut non_public_read_visibilities = vec![];
                         let mut write_visibilities = vec![];
@@ -539,7 +545,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                                 found_public = true;
                             }
 
-                            if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)) {
+                            if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)) && !is_sharp {
                                 non_public_read_visibilities.push(modifier);
                             }
 
@@ -591,7 +597,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                             );
                         }
 
-                        if !found_public {
+                        if !found_public && !is_sharp {
                             context.report(
                                 Issue::error(format!(
                                     "Interface virtual property `{property_display}` must be declared public."

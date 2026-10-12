@@ -254,10 +254,7 @@ const NOTICES: &str = "namespace App;\n\npublic class OrderNotices\n{\n    publi
 #[test]
 fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     let directory = lawful_project(&[
-        (
-            "app/OrderEvent.sharp",
-            "namespace App;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n",
-        ),
+        ("app/OrderEvent.sharp", "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n"),
         ("app/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId) : OrderEvent;\n"),
         (
             "app/Receipts.sharp",

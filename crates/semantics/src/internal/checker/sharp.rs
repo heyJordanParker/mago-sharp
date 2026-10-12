@@ -141,9 +141,11 @@ const ANY: &[u8] = b"Any";
 /// - A static class, `public static class Text`, as spec sections 26 and 29 write it: `static` and an optional
 ///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
 ///   PHP class.
-/// - An interface: an optional `public`, a name, an optional `: Interface` header and methods, with no attributes,
-///   other modifiers or `extends`. An interface method has parameters, a return type and no body, as spec section 29
-///   writes `Money quote(Cart cart);`. A modifier on it is an error, because every interface method is public.
+/// - An interface: an optional `public`, a name, an optional `: Interface` header, methods and get-only properties,
+///   with no attributes, other modifiers or `extends`. An interface method has parameters, a return type and no body,
+///   as spec section 29 writes `Money quote(Cart cart);`, and a property is written `int orderId { get; }`. Every
+///   interface member is public, written bare, so an access modifier on one is an error, and so is any other modifier
+///   on a method.
 /// - An enum: attributes, an optional `public`, a name, an optional `: string, Interface` header, constants, cases,
 ///   methods and laws, with no other modifiers or `implements`. A leading `int` or `string` in the header is the backing type,
 ///   and every class name is an interface. A constant follows a class constant's rules. A case has attributes as a
@@ -614,7 +616,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
             if is_interface_property(property) =>
         {
+            property.modifiers.iter().for_each(|modifier| report_interface_member_access(modifier, context));
+
             Some(FieldOrProperty)
+        }
+        (Node::Modifier(modifier @ (Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_))), Signature) => {
+            report_interface_member_access(modifier, context);
+
+            None
         }
         (Node::Modifier(modifier), Signature) => {
             context.report(
@@ -1797,13 +1806,16 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
     report_refusal(issue, parameter.span(), Place::Parameter, context)
 }
 
-/// Whether the slice has an interface property: `public`, a type, a name and `{ get; }`, which PHP runs as an
-/// interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15.
-/// PHP's own check reports one without `public`.
+/// Whether the slice has an interface property: a type, a name and `{ get; }`, which PHP runs as a public interface
+/// property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15. An access
+/// modifier keeps it in the slice, and `enter` reports the modifier.
 fn is_interface_property(property: &HookedProperty) -> bool {
     property.attribute_lists.is_empty()
         && property.var.is_none()
-        && property.modifiers.iter().all(|modifier| matches!(modifier, Modifier::Public(_)))
+        && property
+            .modifiers
+            .iter()
+            .all(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)))
         && property.hint.is_some()
         && matches!(property.item, PropertyItem::Abstract(_))
         && property.initial_value.is_none()
@@ -1811,6 +1823,16 @@ fn is_interface_property(property: &HookedProperty) -> bool {
             property.hook_list.hooks.as_slice(),
             [accessor] if accessor.name.value == b"get" && is_slice_accessor(accessor) && matches!(accessor.body, PropertyHookBody::Abstract(_))
         )
+}
+
+/// Reports an access modifier on an interface member. A member is public, written bare, as TypeScript and Swift
+/// write it.
+fn report_interface_member_access(modifier: &Modifier, context: &mut Context<'_, '_, '_>) {
+    context.report(
+        Issue::error("An interface member is always public, so it takes no access modifier.")
+            .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
+            .with_help(format!("Remove `{}`.", BytesDisplay(modifier.get_keyword().value))),
+    );
 }
 
 /// Reports each name in a `uses` that is no effect, spec section 29. A name is an effect when it resolves to one of the
@@ -3340,7 +3362,7 @@ const fn supported(place: Place) -> &'static str {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header, methods and `public` get-only properties, as in `public int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
+            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
             "A PHP# interface method has no modifier, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
