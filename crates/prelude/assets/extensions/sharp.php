@@ -109,6 +109,33 @@ final class ListMethods
     public function count(): int {}
 
     /**
+     * @param T $value
+     *
+     * @return bool whether an element equals `$value` by `==`.
+     *
+     * @mutation-free
+     */
+    public function contains(mixed $value): bool {}
+
+    /**
+     * @param T $value
+     *
+     * @return int|null the index of the first element that equals `$value` by `==`, or null when none does.
+     *
+     * @mutation-free
+     */
+    public function indexOf(mixed $value): ?int {}
+
+    /**
+     * @return T the last element.
+     *
+     * @throws \OutOfRangeException when the list is empty.
+     *
+     * @mutation-free
+     */
+    public function last(): mixed {}
+
+    /**
      * @param \Closure(T): bool $predicate
      *
      * @return list<T> the elements `$predicate` keeps, in order.
