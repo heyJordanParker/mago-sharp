@@ -684,7 +684,7 @@ fn compile_reports_the_proof_of_a_deleted_law() {
 #[test]
 fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_file_is_not_current() {
     let missing = if cfg!(target_env = "musl") {
-        "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. This musl build of Mago can't install Lean, because Lean has no musl build. Put a lake on the PATH, or use Mago's glibc Linux build, which installs Lean itself.".to_owned()
+        "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. This musl build of Mago can't install Lean, because Lean has no musl build. On glibc Linux, Mago's glibc build installs Lean itself.".to_owned()
     } else {
         format!(
             "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. Mago could not install Lean into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
