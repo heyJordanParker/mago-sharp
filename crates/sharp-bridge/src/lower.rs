@@ -40,6 +40,7 @@ use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::ExitConstruct;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::For;
@@ -50,6 +51,7 @@ use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Inheritance;
@@ -453,6 +455,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Class(class) => statements.push(self.class(class)),
             Statement::Interface(interface) => statements.push(self.interface(interface)),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
+            Statement::Event(event) => statements.push(self.event(event)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
         }
     }
@@ -593,6 +596,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
         for member in &interface.members {
+            if let ClassLikeMember::Property(Property::Hooked(property)) = member {
+                members.push(self.interface_property(property));
+                continue;
+            }
             let ClassLikeMember::Method(method) = member else {
                 unreachable!("check_slice refuses the interface member `{member}`");
             };
@@ -609,6 +616,64 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             interface.interface.span,
             interface.right_brace,
             interface.name.value,
+            &[NULL, header, members, NULL, NULL],
+        )
+    }
+
+    /// An interface property is `public` with the abstract hook `get`, as php-src's grammar builds
+    /// `public int $orderId { get; }`. PHP has no `readonly` interface property, and a `readonly` property implements
+    /// it.
+    fn interface_property(&mut self, property: &HookedProperty) -> u32 {
+        let variable = property.item.variable();
+        let line = self.line(variable);
+        let hint = property.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
+        let name = self.string(0, line, variable.name);
+        let mut hooks = Vec::new();
+        for accessor in &property.hook_list.hooks {
+            hooks.push(self.hook(accessor.name.value, accessor.name, accessor, NULL));
+        }
+
+        let hooks = self.node(SHARP_AST_STMT_LIST, 0, self.line(&property.hook_list), &hooks);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
+    }
+
+    /// An event is a final class, whose constructor promotes each parameter to a `public readonly` property, with its
+    /// header as its interface list, as php-src's grammar builds
+    /// `final class OrderPaid implements \App\OrderEvent { public function __construct(public readonly int $orderId) {} }`.
+    /// The constructor spans the event's name and parameters.
+    fn event(&mut self, event: &Event) -> u32 {
+        self.class = self.names.get(&event.name);
+        self.enter(b"__construct");
+        let mut parameters = Vec::new();
+        for parameter in &event.parameter_list.parameters {
+            let index = self.parameter(parameter);
+            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            parameters.push(index);
+        }
+
+        let line = self.line(&event.parameter_list);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+        let constructor = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            event.name.span,
+            &event.parameter_list,
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        );
+        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &[constructor]);
+        let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+
+        self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_FINAL,
+            event.event.span,
+            event.terminator,
+            event.name.value,
             &[NULL, header, members, NULL, NULL],
         )
     }

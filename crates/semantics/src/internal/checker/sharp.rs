@@ -38,7 +38,9 @@ use mago_syntax::cst::Construct;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DirectVariable;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOf;
@@ -48,6 +50,7 @@ use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Global;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
@@ -394,6 +397,8 @@ pub enum Place {
     Signature,
     /// An enum and its members.
     Enum,
+    /// An event, spec section 15: its modifiers, parameters and header.
+    Event,
     /// A module and its members.
     Module,
     /// A field or a property, both of which the CST calls a property: its modifiers, type and name.
@@ -502,6 +507,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Keyword(_) | Node::LocalIdentifier(_) | Node::Identifier(Identifier::Local(_)), _) => Some(place),
         (Node::Terminator(Terminator::Semicolon(_)), _) => Some(place),
+        (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
 
         (
             Node::Program(_)
@@ -512,7 +518,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Statement::Module(_)
                 | Statement::Class(_)
                 | Statement::Interface(_)
-                | Statement::Enum(_),
+                | Statement::Enum(_)
+                | Statement::Event(_),
             )
             | Node::Namespace(_)
             | Node::NamespaceBody(_)
@@ -542,12 +549,24 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Class)
         }
-        // The walk checks a class's, an interface's and an enum's name in `check_class_name`.
+        // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
+        (Node::Event(_), File) => Some(Place::Event),
+        (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
+        (Node::Modifier(modifier), Place::Event) => {
+            context.report(
+                Issue::error("An event takes only `public`.")
+                    .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier."))
+                    .with_note("An event runs as a final class, and its parameters are its public get-only properties."),
+            );
+
+            None
+        }
+        (Node::FunctionLikeParameter(parameter), Place::Event) => check_event_parameter(parameter, context),
         (Node::Module(module), File) => check_module_file_name(module, context),
         (Node::ModuleMember(ModuleMember::Law(_)), Place::Module) => Some(Place::Module),
-        (Node::FunctionLikeParameterList(parameters), Method | Signature) => {
+        (Node::FunctionLikeParameterList(parameters), Method | Signature | Place::Event) => {
             report_optional_before_required(parameters, context);
 
             Some(place)
@@ -584,13 +603,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Class,
         ) => Some(Class),
-        (Node::Inheritance(inheritance), Class | Interface | Enum) => {
+        (Node::Inheritance(inheritance), Class | Interface | Enum | Place::Event) => {
             check_header(inheritance, place, context);
 
             Some(place)
         }
         (Node::Modifier(Modifier::Public(_)), Interface | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
+        // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
+        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
+            if is_interface_property(property) =>
+        {
+            Some(FieldOrProperty)
+        }
         (Node::Modifier(modifier), Signature) => {
             context.report(
                 Issue::error("An interface method takes no modifier: every interface method is public.")
@@ -1720,6 +1745,67 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
         Place::Method,
         context,
     )
+}
+
+/// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
+/// effects its `uses` lists.
+fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let Identifier::Dotted(target) = &r#extern.target else {
+        return Some(Place::File);
+    };
+
+    let issue =
+        Issue::error(format!("An `extern event` names a class, and `{}` names a member.", BytesDisplay(target.value)))
+            .with_annotation(Annotation::primary(target.span).with_message("Named here."))
+            .with_help("Name the event's class, as in `extern event JobFailed;`.");
+
+    report_refusal(issue, r#extern.span(), Place::File, context)
+}
+
+/// Decides an event's parameter, which runs as a public get-only property of the event, spec section 15: a type, a
+/// name and an optional default. PHP refuses a variadic promoted property, and the event decides the property's
+/// access, so a modifier, accessors and `...` are refused. The rest is checked as a method's parameter.
+fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let remove = |span: Span, message: &str| {
+        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
+    };
+    let issue = if let Some(modifier) = parameter.modifiers.first() {
+        remove(
+            modifier.span(),
+            "An event's parameter takes no modifier: it is a public get-only property of the event.",
+        )
+    } else if let Some(accessors) = &parameter.hooks {
+        remove(accessors.span(), "An event's parameter takes no accessors: it is a get-only property of the event.")
+    } else if let Some(ellipsis) = parameter.ellipsis {
+        remove(ellipsis, "An event's parameter cannot be variadic: it is one property of the event.")
+    } else if let Some(Hint::Generic(set) | Hint::Nullable(NullableHint { hint: Hint::Generic(set), .. })) =
+        &parameter.hint
+        && set.name.value == b"Set"
+    {
+        Issue::error("A `Set` parameter of an event is not supported yet in PHP#.")
+            .with_annotation(Annotation::primary(set.span()).with_message("Not supported yet."))
+            .with_note("An event's parameter is its property, and an event cannot yet make its argument a `Set`.")
+    } else {
+        return enter(Node::FunctionLikeParameter(parameter), Place::Method, context);
+    };
+
+    report_refusal(issue, parameter.span(), Place::Parameter, context)
+}
+
+/// Whether the slice has an interface property: `public`, a type, a name and `{ get; }`, which PHP runs as an
+/// interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15.
+/// PHP's own check reports one without `public`.
+fn is_interface_property(property: &HookedProperty) -> bool {
+    property.attribute_lists.is_empty()
+        && property.var.is_none()
+        && property.modifiers.iter().all(|modifier| matches!(modifier, Modifier::Public(_)))
+        && property.hint.is_some()
+        && matches!(property.item, PropertyItem::Abstract(_))
+        && property.initial_value.is_none()
+        && matches!(
+            property.hook_list.hooks.as_slice(),
+            [accessor] if accessor.name.value == b"get" && is_slice_accessor(accessor) && matches!(accessor.body, PropertyHookBody::Abstract(_))
+        )
 }
 
 /// Reports each name in a `uses` that is no effect, spec section 29. A name is an effect when it resolves to one of the
@@ -3244,18 +3330,21 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// What the slice has at a place, as the note of a refusal there.
 const fn supported(place: Place) -> &'static str {
     match place {
-        Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface` and `enum`.",
+        Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
         Place::Class => {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header and methods, with no attributes, other modifiers, `extends`, constants or properties."
+            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header, methods and `public` get-only properties, as in `public int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
             "A PHP# interface method has no modifier, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
         }
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`."
+        }
+        Place::Event => {
+            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
         Place::Module => "A PHP# module states laws.",
         Place::FieldOrProperty => {
@@ -3489,6 +3578,27 @@ pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, 
     } else {
         check_capitalized(class_name.value, class_name.span, context);
     }
+}
+
+/// Checks an event's name as a class's: PHP refuses a class named with a reserved keyword, as `Empty`, and an event
+/// runs as a class, spec section 15.
+#[inline]
+pub fn check_event_name(event: &Event, context: &mut Context<'_, '_, '_>) {
+    let name = event.name.value;
+    if RESERVED_KEYWORDS
+        .iter()
+        .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
+        .any(|keyword| keyword.eq_ignore_ascii_case(name))
+    {
+        context.report(
+            Issue::error(format!("Event `{}` name cannot be a reserved keyword.", BytesDisplay(name)))
+                .with_annotation(Annotation::primary(event.name.span).with_message("A reserved keyword."))
+                .with_note("An event runs as a class, and PHP reserves this name.")
+                .with_help("Rename the event."),
+        );
+    }
+
+    check_class_name(&event.name, context);
 }
 
 /// Reports a type name or a namespace part a PHP# file gives that does not start with a capital letter, A to Z, as

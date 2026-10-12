@@ -74,6 +74,7 @@ enum NodeKind: string
     case ConstructorInitializer = 'ConstructorInitializer';
     case NamedConstructor = 'NamedConstructor';
     case ConstructorName = 'ConstructorName';
+    case Event = 'Event';
     case ComputedProperty = 'ComputedProperty';
     case HookedProperty = 'HookedProperty';
     case PlainProperty = 'PlainProperty';

@@ -89,6 +89,13 @@ pub enum ParseError {
     /// Anything but `super(…)` or `this(…)` after a PHP# constructor's `:`, as in `: parent(row)`, `: super { }` or
     /// `: ?Type`, from the `:` up to the body.
     ConstructorInitializerInSharp(Span),
+    /// A body written after a PHP# event's parameters, as in `public event Paid(int orderId) { }`, at the body. Spec
+    /// section 15: an event's parameters are its whole declaration.
+    EventBodyInSharp(Span),
+    /// A type declared inside a PHP# class-like, as in `class Order { public event Paid(int id); }`, with the
+    /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
+    /// interfaces included, is declared in its own file.
+    NestedTypeInSharp(&'static str, Box<str>, Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -125,7 +132,9 @@ impl HasFileId for ParseError {
             | ParseError::UsesAfterFunctionTypeInSharp(span)
             | ParseError::NonLawInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
-            | ParseError::ConstructorInitializerInSharp(span) => span.file_id,
+            | ParseError::ConstructorInitializerInSharp(span)
+            | ParseError::EventBodyInSharp(span)
+            | ParseError::NestedTypeInSharp(_, _, span) => span.file_id,
         }
     }
 }
@@ -166,7 +175,9 @@ impl HasSpan for ParseError {
             | ParseError::UsesAfterFunctionTypeInSharp(span)
             | ParseError::NonLawInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
-            | ParseError::ConstructorInitializerInSharp(span) => *span,
+            | ParseError::ConstructorInitializerInSharp(span)
+            | ParseError::EventBodyInSharp(span)
+            | ParseError::NestedTypeInSharp(_, _, span) => *span,
         }
     }
 }
@@ -284,6 +295,13 @@ impl std::fmt::Display for ParseError {
             ParseError::ConstructorInitializerInSharp(_) => {
                 "A constructor passes control to its base class with `: super(…)`, and a named constructor to the main one with `: this(…)`.".to_string()
             }
+            ParseError::EventBodyInSharp(_) => {
+                "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`."
+                    .to_string()
+            }
+            ParseError::NestedTypeInSharp(owner, name, _) => {
+                format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
+            }
         };
 
         write!(f, "{message}")
@@ -336,7 +354,9 @@ impl From<&ParseError> for Issue {
             | ParseError::UsesAfterFunctionTypeInSharp(..)
             | ParseError::NonLawInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)
-            | ParseError::ConstructorInitializerInSharp(..) => Issue::error(error.to_string())
+            | ParseError::ConstructorInitializerInSharp(..)
+            | ParseError::EventBodyInSharp(..)
+            | ParseError::NestedTypeInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())
