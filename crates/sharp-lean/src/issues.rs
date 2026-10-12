@@ -226,12 +226,28 @@ pub(crate) fn no_rules_module(span: Span, rules: &str) -> Issue {
     .with_annotation(Annotation::primary(span))
 }
 
-pub(crate) fn lake_not_found(span: Span) -> Issue {
-    Issue::error(
-        "Laws and structure rules need Lean 4.34.1, and lake was not found. Install elan from https://lean-lang.org/install, then run vendor/bin/mago compile again.",
-    )
+/// No `lake` is on the `PATH`, and Mago could not install Lean, with what failed.
+pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
+    Issue::error(format!(
+        "Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {failure}. Run vendor/bin/mago compile again to retry."
+    ))
     .with_code(IssueCode::MissingLean.as_str())
     .with_annotation(Annotation::primary(span))
+}
+
+/// No `lake` is on the `PATH`, and the Mago build pins no elan for its target, so it cannot install Lean. The message
+/// describes the build, never the host, and gives only advice true on every host it runs on: a musl build also runs on
+/// glibc Linux, where Lean runs, and on Alpine, where neither Mago's glibc build nor Lean starts.
+pub(crate) fn uninstallable_lean(span: Span) -> Issue {
+    let reason = if cfg!(target_env = "musl") {
+        "This musl build of Mago can't install Lean, because Lean has no musl build. On glibc Linux, Mago's glibc build installs Lean itself.".to_owned()
+    } else {
+        format!("This {} {} build of Mago can't install Lean.", std::env::consts::OS, std::env::consts::ARCH)
+    };
+
+    Issue::error(format!("Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {reason}"))
+        .with_code(IssueCode::MissingLean.as_str())
+        .with_annotation(Annotation::primary(span))
 }
 
 pub(crate) fn elan_failed(span: Span, message: &str) -> Issue {
