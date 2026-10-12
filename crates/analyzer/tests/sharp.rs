@@ -10595,7 +10595,7 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
 fn a_dotted_name_that_is_no_nested_type_is_a_named_constructor_or_an_unknown_type() {
     let shop = (
         "app/Shop/Shop.sharp",
-        "namespace App.Shop;\n\npublic class Shop\n{\n    public Order.Paid made() => new Order.fromJson(1);\n\n    public int read(Order.Fild paid) => 1;\n}\n",
+        "namespace App.Shop;\n\npublic class Shop\n{\n    public Order.Paid made() => new Order.fromJson(1);\n\n    public int read(Order.Fild paid) => 1;\n\n    public int maybe(Order.Fild? paid) => 1;\n}\n",
     );
     let line = ("app/Shop/Order/Line.sharp", "namespace App.Shop.Order;\n\npublic class Line\n{\n}\n");
     let namespaced = (
@@ -10607,7 +10607,8 @@ fn a_dotted_name_that_is_no_nested_type_is_a_named_constructor_or_an_unknown_typ
         worded(shop, &[ORDER_EVENTS]),
         [
             "5:37 not-supported-yet A named constructor is not supported yet in PHP#. | Not supported yet. | `Order` declares no type named `fromJson`, so `new Order.fromJson(…)` calls its named constructor `fromJson`.",
-            "7:21 non-existent-class-like `Order` has no event `Fild`. | Named here."
+            "7:21 non-existent-class-like `Order` has no event `Fild`. | Named here.",
+            "9:22 non-existent-class-like `Order` has no event `Fild`. | Named here."
         ]
     );
     assert_eq!(
