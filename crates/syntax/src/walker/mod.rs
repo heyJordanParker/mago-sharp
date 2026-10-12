@@ -46,6 +46,7 @@ use crate::cst::cst::Constant;
 use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::ConstantItem;
 use crate::cst::cst::Construct;
+use crate::cst::cst::ConstructorInitializer;
 use crate::cst::cst::Continue;
 use crate::cst::cst::Declare;
 use crate::cst::cst::DeclareBody;
@@ -1257,7 +1258,16 @@ generate_ast_walker! {
             walker.walk_function_like_parameter_list(&method.parameter_list, context);
         }
 
+        if let Some(initializer) = &method.initializer {
+            walker.walk_constructor_initializer(initializer, context);
+        }
+
         walker.walk_method_body(&method.body, context);
+    }
+
+    'arena ConstructorInitializer as constructor_initializer => {
+        walker.walk_keyword(&constructor_initializer.keyword, context);
+        walker.walk_argument_list(&constructor_initializer.argument_list, context);
     }
 
     'arena MethodBody as method_body => {

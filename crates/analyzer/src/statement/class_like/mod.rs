@@ -967,6 +967,9 @@ where
     }
 
     let has_complete_hierarchy = !class_like_metadata.has_incomplete_hierarchy();
+    if context.dialect.is_sharp() && has_complete_hierarchy && class_like_metadata.kind.is_class() {
+        method::check_super_call(context, class_like_metadata, members, name_span.unwrap_or(declaration_span));
+    }
 
     if has_complete_hierarchy && !class_like_metadata.kind.is_trait() && !class_like_metadata.flags.is_abstract() {
         for (method_name, method_id) in &class_like_metadata.declaring_method_ids {

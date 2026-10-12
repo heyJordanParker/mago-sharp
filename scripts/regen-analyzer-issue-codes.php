@@ -366,6 +366,7 @@ final class AnalyzerCodeModuleGenerator
         'missing-lean',
         'unmodeled-construct',
         'broken-rule',
+        'missing-super-call',
     ];
 
     /**
