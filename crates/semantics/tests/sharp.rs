@@ -810,7 +810,7 @@ fn isset_empty_unset_array_and_list_written_as_calls_name_the_php_sharp_form() {
         [
             "7:21 PHP# has no `isset`: test it against null, as in `value != null`.",
             "8:23 PHP# has no `empty`: compare the value itself, as in `items.count() == 0`.",
-            "9:9 PHP# has no `unset`: a local ends at the `}` that closes its block.",
+            "9:9 PHP# has no `unset`: a local ends at the `}` that closes its block, and `map.remove(key)` removes a Map's entry.",
             "10:23 PHP# has no `array`: write a list literal, as in `[1, 2]`.",
             "11:9 PHP# has no `list`: read each element into its own local, as in `const first = pair[0];`.",
         ]

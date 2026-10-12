@@ -375,11 +375,11 @@ fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_a_class() {
     );
 }
 
-/// The PHP# form each refusal of `isset`, `empty`, `array` and `list` quotes compiles.
+/// The PHP# form each refusal of `isset`, `empty`, `unset`, `array` and `list` quotes compiles.
 #[test]
 fn the_php_sharp_form_a_refused_php_construct_names_compiles() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(int? value, List<int> items, List<int> pair)\n    {\n        const listed = [1, 2];\n        const first = pair[0];\n        return value != null && items.count() == 0 && listed.count() == first;\n    }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(int? value, List<int> items, List<int> pair, Map<string, int> map, string key)\n    {\n        const listed = [1, 2];\n        const first = pair[0];\n        map.remove(key);\n        return value != null && items.count() == 0 && listed.count() == first;\n    }\n}\n",
     );
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());

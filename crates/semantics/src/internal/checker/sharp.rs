@@ -3302,7 +3302,11 @@ const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
         "compare the value itself, as in `items.count() == 0`.",
         "PHP's `empty` is true for `0`, `\"0\"`, `\"\"`, `[]` and null alike.",
     ),
-    (b"unset", "a local ends at the `}` that closes its block.", "A PHP# local never becomes undefined."),
+    (
+        b"unset",
+        "a local ends at the `}` that closes its block, and `map.remove(key)` removes a Map's entry.",
+        "A PHP# local never becomes undefined.",
+    ),
     (b"array", "write a list literal, as in `[1, 2]`.", "PHP# writes a list or a map literal in square brackets."),
     (
         b"list",
