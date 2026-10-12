@@ -1584,4 +1584,50 @@ mod tests {
             assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
         }
     }
+
+    /// A project whose `Shelf` and `Orders` read the bounds of the type parameters of `Box`, `Source` and `Tools.same`.
+    fn bounds() -> Vec<(&'static str, String)> {
+        vec![
+            ("app/Shop/Entity.sharp", "namespace App.Shop;\n\npublic abstract class Entity\n{\n}\n".to_string()),
+            ("app/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order : Entity\n{\n}\n".to_string()),
+            ("app/Shop/Customer.sharp", "namespace App.Shop;\n\npublic class Customer\n{\n}\n".to_string()),
+            ("app/Shop/Box.sharp", "namespace App.Shop;\n\npublic class Box<TItem : Entity>\n{\n    public Box() { }\n}\n".to_string()),
+            ("app/Shop/Source.sharp", "namespace App.Shop;\n\npublic interface Source<TItem : Entity>\n{\n    TItem? first();\n}\n".to_string()),
+            ("app/Shop/Tools.sharp", "namespace App.Shop;\n\npublic class Tools\n{\n    public static T same<T : Entity>(T value) => value;\n}\n".to_string()),
+            ("app/Shop/Shelf.sharp", "namespace App.Shop;\n\npublic class Shelf\n{\n    public Box<Order> box() => new Box<Order>();\n\n    public Order same(Order order) => Tools.same(order);\n}\n".to_string()),
+            ("app/Shop/Orders.sharp", "namespace App.Shop;\n\npublic class Orders : Source<Order>\n{\n    public Order? first() => null;\n}\n".to_string()),
+        ]
+    }
+
+    #[test]
+    fn a_compile_after_an_edit_to_a_type_parameter_bound_matches_a_clean_compile() {
+        let base = shop_project(&bounds());
+
+        for (edited_file, from, to) in [
+            ("app/Shop/Box.sharp", "<TItem : Entity>", "<TItem : Customer>"),
+            ("app/Shop/Source.sharp", "<TItem : Entity>", "<TItem : Customer>"),
+            ("app/Shop/Tools.sharp", "<T : Entity>", "<T : Customer>"),
+        ] {
+            let mut files = bounds();
+            let (_, contents) =
+                files.iter_mut().find(|(name, _)| *name == edited_file).expect("the edited file exists");
+            assert!(contents.contains(from), "{edited_file} holds `{from}`");
+            *contents = contents.replace(from, to);
+            let edited = shop_project(&files);
+
+            let mut warm = analyzed(&base);
+            compile(&mut warm, empty_stamp);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm = compile(&mut warm, empty_stamp);
+            let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+            assert!(
+                outcomes(&clean).iter().any(|(name, outcome)| *name != edited_file && outcome.is_err()),
+                "`{to}` refuses a file that reads {edited_file}: {:#?}",
+                outcomes(&clean)
+            );
+            assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
 }

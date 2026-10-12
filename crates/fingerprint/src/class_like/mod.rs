@@ -576,6 +576,7 @@ impl Fingerprintable for Method<'_> {
             "by_ref".hash(hasher);
         }
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.type_parameters.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
 
@@ -720,6 +721,7 @@ impl Fingerprintable for Class<'_> {
         }
         crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.type_parameters.fingerprint_with_hasher(hasher, resolved_names, options);
         self.extends.fingerprint_with_hasher(hasher, resolved_names, options);
         self.implements.fingerprint_with_hasher(hasher, resolved_names, options);
         self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
@@ -751,6 +753,7 @@ impl Fingerprintable for Interface<'_> {
             attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
         }
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.type_parameters.fingerprint_with_hasher(hasher, resolved_names, options);
         self.extends.fingerprint_with_hasher(hasher, resolved_names, options);
         self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {

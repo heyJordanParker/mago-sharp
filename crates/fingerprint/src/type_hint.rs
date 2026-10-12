@@ -7,6 +7,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::IntersectionHint;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::ParenthesizedHint;
+use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::UnionHint;
 
 use crate::FingerprintOptions;
@@ -92,6 +93,28 @@ impl Fingerprintable for GenericHint<'_> {
         self.name.value.hash(hasher);
         for argument in &self.type_arguments.arguments {
             argument.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for TypeParameterList<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "type_parameters".hash(hasher);
+        for parameter in &self.parameters {
+            parameter.variance.fingerprint_with_hasher(hasher, resolved_names, options);
+            parameter.name.fingerprint_with_hasher(hasher, resolved_names, options);
+            if let Some(bound) = &parameter.bound {
+                "bound".hash(hasher);
+                bound.hint.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
         }
     }
 }
