@@ -8962,19 +8962,25 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 /// $names = \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($skus));
 /// $ids = \array_keys($keys);
 /// $maybe = ($optional === null) ? null : \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($optional));
+/// foreach (\Lib\Calc::rows() as $row => $n) {
+/// }
 /// ```
 ///
 /// A `Map` keyed by a backed enum holds each key as its backing value, so a loop and `keys()` read each key back as
 /// its case, through `from` on the enum. PHP stores an all-digit `string` key as an `int`, so a loop over a
 /// `Map<string, V>` and its `keys()` read each key back through `(string)`, a null-safe `keys()` too. Both follow the
-/// `Map`'s key type, written on the key or not. An `int` key type changes nothing.
+/// `Map`'s key type, written on the key or not. An `int` key type changes nothing, and a loop over a PHP iterable that
+/// is no array, such as a `Generator`, takes each key as it comes.
 #[test]
 fn a_map_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
     assert_eq!(
         body_in(
             "int run(int extra, Map<Calc, int> statuses, Map<string, int> skus, Map<int, int> keys, Map<string, int>? optional)",
-            "        for (const [status, int n] of statuses) {\n            extra += n;\n        }\n        for (const [string sku, n] of skus) {\n        }\n        for (const [key, n] of keys) {\n        }\n        const cases = statuses.keys();\n        const names = skus.keys();\n        const ids = keys.keys();\n        const maybe = optional?.keys();\n        return 1;\n",
-            &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
+            "        for (const [status, int n] of statuses) {\n            extra += n;\n        }\n        for (const [string sku, n] of skus) {\n        }\n        for (const [key, n] of keys) {\n        }\n        const cases = statuses.keys();\n        const names = skus.keys();\n        const ids = keys.keys();\n        const maybe = optional?.keys();\n        for (const [row, n] of Calc.rows()) {\n        }\n        return 1;\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; /** @return \\Generator<string, int> */ public static function rows(): \\Generator { yield 'a' => 1; } }"
+            )]
         ),
         indoc! {r#"
             STMT_LIST
@@ -9119,6 +9125,16 @@ fn a_map_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
                         ARG_LIST
                           VAR
                             ZVAL "optional"
+              FOREACH
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "rows"
+                  ARG_LIST
+                VAR
+                  ZVAL "n"
+                VAR
+                  ZVAL "row"
+                STMT_LIST
               RETURN
                 ZVAL 1
         "#}
