@@ -4065,16 +4065,6 @@ fn check_class_like_properties<'ctx, A>(
                 continue;
             };
 
-            if context.dialect.is_sharp() {
-                report_unfit_interface_property(
-                    context,
-                    class_like_metadata,
-                    interface_metadata,
-                    property_metadata,
-                    interface_property,
-                );
-            }
-
             for (hook_name, interface_hook) in &interface_property.hooks {
                 if !interface_hook.returns_by_ref {
                     continue;
@@ -4124,14 +4114,57 @@ fn check_class_like_properties<'ctx, A>(
             }
         }
     }
+
+    if context.dialect.is_sharp() {
+        check_interface_properties(context, class_like_metadata);
+    }
 }
 
-/// Reports a PHP# class's or event's property that does not fit the property `interface` states, as the engine refuses
-/// the class: it is public, on each object, and of the stated type or a narrower one for a get-only property. Every
-/// interface property is virtual, so its hooks alone say whether it is get-only.
+/// Checks each property a PHP# class or event ends up with against the property each interface above it states, as
+/// the engine links the class against it. A property the class declares answers to every interface above it. One it
+/// inherits answers to the interfaces the class names itself, because a base class that names an interface answers for
+/// it there. A base class's `private` property counts, as PHP links against it too.
+fn check_interface_properties<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let names_itself = |interface_name: &Word| {
+        class_like_metadata.direct_parent_interfaces.iter().any(|named| {
+            named == interface_name
+                || codebase.get_class_like(named.as_bytes()).is_some_and(|named| named.has_parent(*interface_name))
+        })
+    };
+
+    for interface_name in &class_like_metadata.all_parent_interfaces {
+        let Some(interface) = codebase.get_class_like(interface_name.as_bytes()) else {
+            continue;
+        };
+
+        for (property_name, stated) in &interface.properties {
+            let owner = std::iter::successors(Some(class_like_metadata), |metadata| {
+                metadata.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+            })
+            .find_map(|metadata| metadata.properties.get(property_name).map(|property| (metadata, property)));
+            let Some((owner, property)) = owner else {
+                continue;
+            };
+
+            if owner.name == class_like_metadata.name || names_itself(interface_name) {
+                report_unfit_interface_property(context, class_like_metadata, owner, interface, property, stated);
+            }
+        }
+    }
+}
+
+/// Reports a PHP# class's or event's property, declared by `owner`, that does not fit the property `interface` states,
+/// as the engine refuses the class: it is public, on each object, and of the stated type or a narrower one for a
+/// get-only property. Every interface property is virtual, so its hooks alone say whether it is get-only. A property
+/// the class inherits is reported on the class's name, naming the base class to change.
 fn report_unfit_interface_property<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
+    owner: &ClassLikeMetadata,
     interface: &ClassLikeMetadata,
     property: &PropertyMetadata,
     stated: &PropertyMetadata,
@@ -4141,28 +4174,44 @@ fn report_unfit_interface_property<A>(
     let name = display_class_like_name(context, class_like_metadata.original_name);
     let interface_name = display_class_like_name(context, interface.original_name);
     let property_name = display_property_name(context, property.name.0);
-    let span = property.name_span.unwrap_or(class_like_metadata.span);
+    let property_span = property.name_span.unwrap_or(owner.span);
     let stated_span = stated.name_span.unwrap_or(interface.span);
+    let (from, place) = if owner.name == class_like_metadata.name {
+        (String::new(), String::new())
+    } else {
+        let owner_name = display_class_like_name(context, owner.original_name);
+
+        (format!(", from `{owner_name}`"), format!(" in `{owner_name}`"))
+    };
     let report = |context: &mut Context<'_, '_, A>, code: IssueCode, given: String, stated: String, help: String| {
+        let issue = Issue::error(format!(
+            "`{name}` gives `{property_name}` {given}{from}, and `{interface_name}` states it {stated}."
+        ));
+        let issue = if from.is_empty() {
+            issue.with_annotation(Annotation::primary(property_span).with_message("Given here."))
+        } else {
+            issue
+                .with_annotation(
+                    Annotation::primary(class_like_metadata.name_span.unwrap_or(class_like_metadata.span))
+                        .with_message("Inherited here."),
+                )
+                .with_annotation(Annotation::secondary(property_span).with_message("Declared here."))
+        };
+
         context.collector.report_with_code(
             code,
-            Issue::error(format!(
-                "`{name}` gives `{property_name}` {given}, and `{interface_name}` states it {stated}."
-            ))
-            .with_annotation(Annotation::primary(span).with_message("Given here."))
-            .with_annotation(Annotation::secondary(stated_span).with_message("Stated here."))
-            .with_help(help),
+            issue.with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")).with_help(help),
         );
     };
 
     if property.read_visibility != stated.read_visibility {
         let (given, stated) = (property.read_visibility, stated.read_visibility);
-        let help = format!("Declare `{property_name}` `{stated}`.");
+        let help = format!("Declare `{property_name}` `{stated}`{place}.");
         report(context, IssueCode::IncompatiblePropertyAccess, format!("as `{given}`"), format!("`{stated}`"), help);
     }
 
     if property.flags.is_static() != stated.flags.is_static() {
-        let (given, help) = ("as `static`".to_owned(), "Remove `static`.".to_owned());
+        let (given, help) = ("as `static`".to_owned(), format!("Remove `static`{place}."));
         report(context, IssueCode::IncompatibleStaticModifier, given, "on each object".to_owned(), help);
     }
 
@@ -4178,7 +4227,7 @@ fn report_unfit_interface_property<A>(
     {
         let stated_type = display_type(context, &stated_type.type_union);
         let given = format!("as `{}`", display_type(context, &given.type_union));
-        let help = format!("Give `{property_name}` the type `{stated_type}`.");
+        let help = format!("Give `{property_name}` the type `{stated_type}`{place}.");
         report(context, IssueCode::IncompatiblePropertyType, given, format!("as `{stated_type}`"), help);
     }
 }

@@ -10553,7 +10553,8 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 /// event or a class that names it and lacks one, or gives one that is not public, on each object and of its type, is
 /// refused, as the engine refuses the class it runs as. An event gives a property through a parameter, and a class
 /// through a property, as each help writes it. A get-only property may give a narrower type, and a PHP interface's
-/// property with `set` takes its type exactly.
+/// property with `set` takes its type exactly. A class that names the interface answers for the property it inherits
+/// too, from a PHP# or a plain PHP base class, a base's `private` field included.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : OrderEvent;\n");
@@ -10583,6 +10584,41 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         "app/Shop/Moved.sharp",
         "namespace App.Shop;\n\npublic event Moved(int id, int orderId) : OrderEvent;\n\npublic class Kept : OrderEvent\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n\npublic interface Priced\n{\n    public int? total { get; }\n}\n\npublic class Bill : Priced\n{\n    public int total { get; }\n\n    public Bill(int total)\n    {\n        this.total = total;\n    }\n}\n",
     );
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let string_base = (
+        "app/Shop/StringBase.sharp",
+        "namespace App.Shop;\n\npublic class StringBase\n{\n    public string orderId { get; } = \"x\";\n}\n",
+    );
+    let private_base = (
+        "app/Shop/PrivateBase.sharp",
+        "namespace App.Shop;\n\npublic class PrivateBase\n{\n    private int orderId = 1;\n\n    public int read() => this.orderId;\n}\n",
+    );
+    let legacy_base = (
+        "src/Legacy/LegacyBase.php",
+        "<?php\n\nnamespace Legacy;\n\nclass LegacyBase\n{\n    public string $orderId = 'x';\n}\n",
+    );
+    let int_base = (
+        "app/Shop/IntBase.sharp",
+        "namespace App.Shop;\n\npublic class IntBase\n{\n    public int orderId { get; } = 7;\n}\n",
+    );
+    let from_string =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : StringBase, OrderEvent\n{\n}\n");
+    let from_private =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : PrivateBase, OrderEvent\n{\n}\n");
+    let from_legacy = (
+        "app/Shop/Child.sharp",
+        "namespace App.Shop;\n\nimport Legacy.LegacyBase;\n\npublic class Child : LegacyBase, OrderEvent\n{\n}\n",
+    );
+    let from_int = ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : IntBase, OrderEvent\n{\n}\n");
+    let paid_event =
+        ("app/Shop/PaidEvent.sharp", "namespace App.Shop;\n\npublic interface PaidEvent : OrderEvent\n{\n}\n");
+    let below_named =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : StringBase, PaidEvent\n{\n}\n");
+    let wrong_base = (
+        "app/Shop/WrongBase.sharp",
+        "namespace App.Shop;\n\npublic class WrongBase : OrderEvent\n{\n    public string orderId { get; } = \"x\";\n}\n",
+    );
+    let from_wrong = ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : WrongBase\n{\n}\n");
 
     assert_eq!(
         worded(event, &ORDER_EVENTS),
@@ -10627,6 +10663,30 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         ]
     );
     assert_eq!(worded(given, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(
+        worded(from_string, &[order_event, order_paid, string_base]),
+        [
+            "3:14 incompatible-property-type `Child` gives `orderId` as `string`, from `StringBase`, and `OrderEvent` states it as `int`. | Inherited here. | Declared here. | Stated here. | Give `orderId` the type `int` in `StringBase`."
+        ]
+    );
+    assert_eq!(
+        worded(from_private, &[order_event, order_paid, private_base]),
+        [
+            "3:14 incompatible-property-access `Child` gives `orderId` as `private`, from `PrivateBase`, and `OrderEvent` states it `public`. | Inherited here. | Declared here. | Stated here. | Declare `orderId` `public` in `PrivateBase`."
+        ]
+    );
+    assert_eq!(
+        worded(from_legacy, &[order_event, order_paid, legacy_base]),
+        [
+            "5:14 incompatible-property-type `Child` gives `orderId` as `string`, from `LegacyBase`, and `OrderEvent` states it as `int`. | Inherited here. | Declared here. | Stated here. | Give `orderId` the type `int` in `LegacyBase`."
+        ]
+    );
+    assert_eq!(worded(from_int, &[order_event, order_paid, int_base]), Vec::<String>::new());
+    assert_eq!(
+        issues(below_named, &[order_event, order_paid, string_base, paid_event]),
+        ["3:14 incompatible-property-type"]
+    );
+    assert_eq!(issues(from_wrong, &[order_event, order_paid, wrong_base]), Vec::<String>::new());
 }
 
 /// Spec section 15: `emit` raises an event, one an `event` declares or a plain PHP class an `extern event` marks. Any
