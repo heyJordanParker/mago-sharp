@@ -7446,9 +7446,9 @@ fn a_spread_of_a_value_that_is_neither_a_list_nor_a_map_is_an_error() {
     );
 }
 
-/// The generic declarations of spec section 11: classes and interfaces with type parameters, their bounds and
-/// variance, a generic method, and headers that pass type arguments to a generic base.
-const PAGING: &str = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Shareable\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class SharedOrder : DatabaseEntity, Shareable\n{\n}\n\npublic class Line\n{\n}\n\npublic interface Query<TItem>\n{\n    List<TItem> rows();\n}\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    private List<TItem> rows;\n\n    public PaginatedList(List<TItem> rows)\n    {\n        this.rows = rows;\n    }\n\n    public TItem first() => this.rows[0];\n\n    public TItem head()\n    {\n        TItem item = this.first();\n        return item;\n    }\n}\n\npublic interface Shelf<TItem : DatabaseEntity & Shareable>\n{\n    TItem top();\n}\n\npublic interface Feed<out TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Repository\n{\n    PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query);\n}\n\npublic class Lists\n{\n    public static T first<T>(List<T> items) => items[0];\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class OrderList<TItem : DatabaseEntity> : PaginatedList<TItem>\n{\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(Any? item) => true;\n}\n";
+/// The generic declarations of spec section 11: classes and interfaces with type parameters and their bounds, a
+/// generic method, and headers that pass type arguments to a generic base.
+const PAGING: &str = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Shareable\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class SharedOrder : DatabaseEntity, Shareable\n{\n}\n\npublic class Line\n{\n}\n\npublic interface Query<TItem>\n{\n    List<TItem> rows();\n}\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    private List<TItem> rows;\n\n    public PaginatedList(List<TItem> rows)\n    {\n        this.rows = rows;\n    }\n\n    public TItem first() => this.rows[0];\n\n    public TItem head()\n    {\n        TItem item = this.first();\n        return item;\n    }\n}\n\npublic interface Shelf<TItem : DatabaseEntity & Shareable>\n{\n    TItem top();\n}\n\npublic interface Feed<TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Repository\n{\n    PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query);\n}\n\npublic class Lists\n{\n    public static T first<T>(List<T> items) => items[0];\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class OrderList<TItem : DatabaseEntity> : PaginatedList<TItem>\n{\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(Any? item) => true;\n}\n";
 
 /// The generic declarations read as Mago's templates, so a type parameter, a type argument, a bound and a typed local
 /// inside a generic class add no issue.
@@ -7551,18 +7551,6 @@ fn a_type_argument_report_names_type_arguments_and_short_class_names() {
     );
 }
 
-/// `out TItem` lets a `Feed<Order>` pass as a `Feed<DatabaseEntity>`, `in TItem` lets a `Validator<DatabaseEntity>`
-/// pass as a `Validator<Order>`, and an invariant `PaginatedList<Order>` passes as neither, spec section 11.1.
-#[test]
-fn variance_decides_which_type_arguments_substitute() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any feed(Feed<DatabaseEntity> feed) => feed;\n\n    public static Any page(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any check(Validator<Order> validator) => validator;\n\n    public static Any covariant(Feed<Order> feed) => Report.feed(feed);\n\n    public static Any invariant(PaginatedList<Order> page) => Report.page(page);\n\n    public static Any contravariant(Validator<DatabaseEntity> validator) => Report.check(validator);\n}\n";
-
-    assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        ["13:75 less-specific-argument"]
-    );
-}
-
 /// A header's type arguments are the `@extends` and `@implements` of its PHP twin: `OrderPage : PaginatedList<Order>`
 /// returns an `Order` from `first()`, `OrderList<TItem> : PaginatedList<TItem>` forwards its own type parameter, and
 /// `OrderValidator : Validator<Order>` is a `Validator<Order>` and not a `Validator<Line>`.
@@ -7652,7 +7640,7 @@ fn a_pattern_or_as_of_a_type_parameter_adds_no_issue() {
     assert_eq!(issues(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// Generics are erased when PHP# compiles, so `Validator<in TItem>` takes `mixed`, and PHP refuses a parameter
+/// Generics are erased when PHP# compiles, so `Validator<TItem>` takes `mixed`, and PHP refuses a parameter
 /// narrower than the one it overrides when it links the class. The parameter is refused where it is written, with the
 /// type it must take and the bound that lets it keep its type.
 #[test]
@@ -7662,7 +7650,7 @@ fn a_parameter_narrower_than_the_erased_parent_parameter_is_an_error() {
     assert_eq!(
         explained(("src/Demo/StrictValidator.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
         [
-            "5:32 incompatible-parameter-type Parameter `item` of `StrictValidator.validate` must take at least `Any?`, the type `Validator.validate` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Validator<in TItem : Order>`, so both sides erase to the bound."
+            "5:32 incompatible-parameter-type Parameter `item` of `StrictValidator.validate` must take at least `Any?`, the type `Validator.validate` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Validator<TItem : Order>`, so both sides erase to the bound."
         ]
     );
 }
@@ -7674,7 +7662,7 @@ fn a_parameter_narrower_than_the_erased_parent_parameter_is_an_error() {
 #[test]
 fn a_return_type_that_would_erase_wider_than_the_parent_return_type_is_an_error() {
     let picker = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Picker\n{\n    T pick<T : DatabaseEntity>(T item);\n}\n\npublic class AnyPicker : Picker\n{\n    public T pick<T>(T item) => item;\n}\n";
-    let feed = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Feed<out TItem : DatabaseEntity>\n{\n    TItem next();\n}\n\npublic abstract class Wrapper<TItem> : Feed<TItem>\n{\n    public abstract TItem next();\n}\n";
+    let feed = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Feed<TItem : DatabaseEntity>\n{\n    TItem next();\n}\n\npublic abstract class Wrapper<TItem> : Feed<TItem>\n{\n    public abstract TItem next();\n}\n";
     let errors = |analyzed: (&'static str, &'static str)| {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[])
             .iter()
@@ -7716,7 +7704,7 @@ fn a_field_whose_type_erases_to_another_type_than_the_parent_field_is_an_error()
 /// link a constructor against a parent's constructor that is not abstract, `required` or not.
 #[test]
 fn a_signature_that_links_once_erased_has_no_issue() {
-    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic interface Validator<in TItem : DatabaseEntity>\n{\n    bool validate(TItem item);\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(DatabaseEntity item) => true;\n}\n\npublic interface Feed<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderFeed : Feed<Order>\n{\n    public Order next() => new Order();\n}\n\npublic class Box<TItem>\n{\n    public required Box(TItem item)\n    {\n    }\n}\n\npublic class OrderBox : Box<Order>\n{\n    public required OrderBox(Order item)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic interface Validator<TItem : DatabaseEntity>\n{\n    bool validate(TItem item);\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(DatabaseEntity item) => true;\n}\n\npublic interface Feed<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderFeed : Feed<Order>\n{\n    public Order next() => new Order();\n}\n\npublic class Box<TItem>\n{\n    public required Box(TItem item)\n    {\n    }\n}\n\npublic class OrderBox : Box<Order>\n{\n    public required OrderBox(Order item)\n    {\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Entities.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -8065,83 +8053,6 @@ fn the_type_arguments_written_from_sharp_fix_a_php_template() {
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING), ("src/Lib/Holder.php", holder)]),
         ["7:60 invalid-argument", "11:70 invalid-argument"]
-    );
-}
-
-/// Spec section 11.1 checks `out` and `in` on every member another class reaches: a parameter takes its type in, a
-/// return hands it out, a property hands it out and takes it in when its `set` is reachable, and a type argument keeps,
-/// flips or doubles the position by the variance of its type parameter. A private member and the constructor are exempt.
-#[test]
-fn out_and_in_are_checked_on_every_member() {
-    let sharp = "namespace Demo;\n\npublic abstract class Feed<out TItem>\n{\n    private List<TItem> items;\n\n    public Feed(List<TItem> items)\n    {\n        this.items = this.kept(items);\n    }\n\n    public abstract void add(TItem item);\n\n    public abstract void each(Function<void(TItem)> visit);\n\n    public List<TItem> all() => this.items;\n\n    public abstract void addAll(List<TItem> items);\n\n    public TItem? current { get; set; }\n\n    private List<TItem> kept(List<TItem> items) => items;\n}\n\npublic interface Validator<in TItem>\n{\n    TItem last();\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Feed.sharp", sharp), &[]),
-        [
-            "12:26 invalid-template-parameter `TItem` is declared `out`, so `add` cannot take it in.",
-            "18:26 invalid-template-parameter `TItem` is declared `out`, so `addAll` cannot take it in.",
-            "20:19 invalid-template-parameter `TItem` is declared `out`, so the property `current` cannot take it in.",
-            "27:11 invalid-template-parameter `TItem` is declared `in`, so `last` cannot hand it out.",
-        ]
-    );
-    assert!(analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Feed.sharp", sharp), &[]).iter().all(|issue| issue.notes
-        == ["An `out` type parameter is only handed out, and an `in` type parameter is only taken in."]),);
-}
-
-/// A header hands its type arguments out, as C# (CS1961) and Kotlin check a base type's: `Sink<in TItem> :
-/// Source<TItem>` hands `TItem` out through `Source<out TItem>`, and `Reader<out TItem> : Slot<TItem>` passes it to an
-/// invariant type parameter, which takes it in too, so each is reported once on its header. `Feed<out TItem> :
-/// Source<TItem>` and `Check<in TItem> : Validator<TItem>` keep their markers.
-#[test]
-fn out_and_in_are_checked_on_the_type_arguments_of_the_header() {
-    let sharp = "namespace Demo;\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Slot<TItem>\n{\n    TItem get();\n}\n\npublic interface Sink<in TItem> : Source<TItem>\n{\n}\n\npublic interface Reader<out TItem> : Slot<TItem>\n{\n}\n\npublic interface Feed<out TItem> : Source<TItem>\n{\n}\n\npublic interface Check<in TItem> : Validator<TItem>\n{\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Streams.sharp", sharp), &[]),
-        [
-            "18:35 invalid-template-parameter `TItem` is declared `in`, so the header `Source<TItem>` cannot hand it out.",
-            "22:38 invalid-template-parameter `TItem` is declared `out`, so the header `Slot<TItem>` cannot take it in.",
-        ]
-    );
-}
-
-/// `Class<TItem>` hands `TItem` out, as `typeof` of a subclass passes where the class is expected, so `out TItem`
-/// refuses it as a parameter type and `in TItem` as a return type.
-#[test]
-fn out_and_in_are_checked_on_a_class_type() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker<out TItem>\n{\n    public abstract TItem make(Class<TItem> type);\n}\n\npublic abstract class Kind<in TItem>\n{\n    public abstract Class<TItem> kind();\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Makers.sharp", sharp), &[]),
-        [
-            "5:27 invalid-template-parameter `TItem` is declared `out`, so `make` cannot take it in.",
-            "10:34 invalid-template-parameter `TItem` is declared `in`, so `kind` cannot hand it out.",
-        ]
-    );
-}
-
-/// Spec section 11.1 lets a private member break the marker, as Scala's object-private members do, and reaches it only
-/// through `this`: another instance's field, written or read, another instance's method, called or read as a value, and
-/// the private `set` of another instance's property are refused where they are reached, for `out` and `in` alike, and a
-/// property whose `get` is public is written only through `this`, as its `get` stays reachable.
-#[test]
-fn a_variance_breaking_private_member_is_reachable_only_through_this() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Cell<out TItem>\n{\n    private TItem? value = null;\n\n    public TItem? get() => this.value;\n\n    public void poison(Cell<Any?> target)\n    {\n        target.value = 1;\n    }\n\n    public Any? peek(Cell<Any?> other) => other.value;\n}\n\npublic class Stack<out TItem>\n{\n    private void push(TItem item)\n    {\n    }\n\n    public void fill(Stack<Any?> other)\n    {\n        other.push(1);\n    }\n\n    public Any? grab(Stack<Any?> other) => other.push;\n}\n\npublic class Sink<in TItem>\n{\n    private TItem? last = null;\n\n    public void take(TItem item)\n    {\n        this.last = item;\n    }\n\n    public Any? leak(Sink<Order> other) => other.last;\n}\n\npublic class Slot<out TItem>\n{\n    public TItem? held { get; private set; } = null;\n\n    public void swap(Slot<Any?> other)\n    {\n        other.held = 1;\n    }\n\n    public Any? read(Slot<Any?> other) => other.held;\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Cell.sharp", sharp), &[]),
-        [
-            "15:16 invalid-template-parameter `value` breaks `out TItem`, so it is reachable only through `this`.",
-            "18:49 invalid-template-parameter `value` breaks `out TItem`, so it is reachable only through `this`.",
-            "29:15 invalid-template-parameter `push` breaks `out TItem`, so it is reachable only through `this`.",
-            "32:50 invalid-template-parameter `push` breaks `out TItem`, so it is reachable only through `this`.",
-            "44:50 invalid-template-parameter `last` breaks `in TItem`, so it is reachable only through `this`.",
-            "53:15 invalid-template-parameter `held` breaks `out TItem`, so it is written only through `this`.",
-        ]
-    );
-    assert!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Cell.sharp", sharp), &[]).iter().all(|issue| issue.notes
-            == ["A private member may break the marker, and is then reachable only through `this`."]),
     );
 }
 
@@ -9249,7 +9160,7 @@ fn a_method_value_of_a_subclass_that_adds_a_type_parameter_is_its_receiver() {
 /// it is called or read as a method value. The PHP twin's `static` keeps Mago's issues.
 #[test]
 fn self_in_a_receivers_type_argument_stays_the_class_that_wrote_it() {
-    let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public Function<Tree<Node>?()> wrong() => this.children().first;\n\n    public Tree<Node>? called() => this.children().first();\n}\n\npublic abstract class Tree<out TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public Function<Tree<Node>?()> wrong() => this.children().first;\n\n    public Tree<Node>? called() => this.children().first();\n}\n\npublic abstract class Tree<TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nabstract class Node\n{\n    /** @return Tree<static> */\n    abstract public function children(): Tree;\n\n    /** @return \\Closure(): (Tree<Node>|null) */\n    public function wrong(): \\Closure\n    {\n        return $this->children()->first(...);\n    }\n\n    /** @return Tree<Node>|null */\n    public function called(): ?Tree\n    {\n        return $this->children()->first();\n    }\n}\n\n/** @template-covariant TItem */\nabstract class Tree extends Node\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n";
 
     assert_eq!(
@@ -9278,7 +9189,7 @@ fn self_in_a_receivers_type_argument_stays_the_class_that_wrote_it() {
 #[test]
 fn a_call_and_its_method_value_give_one_type_on_every_receiver() {
     let invoice = "<?php\n\nnamespace Lib;\n\ntrait Fluent\n{\n    public function me(): self\n    {\n        return $this;\n    }\n}\n\nclass Invoice\n{\n    use Fluent;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Invoice;\n\npublic class Order\n{\n}\n\npublic interface Named\n{\n    public string name();\n}\n\npublic interface Copyable\n{\n    public Self copy();\n}\n\npublic class Plain\n{\n    public Self same() => this;\n}\n\npublic class Box<TItem>\n{\n    public Self same() => this;\n\n    public bool nested(Box<List<TItem>> boxes) => boxes.same();\n\n    public Function<bool()> nestedValue(Box<List<TItem>> boxes) => boxes.same;\n\n    public bool own() => this.same();\n\n    public Function<bool()> ownValue() => this.same;\n}\n\npublic class OrderBox : Box<Order>\n{\n}\n\npublic class Pair<TKey, TValue> : Box<TKey>\n{\n    public TValue? value() => null;\n}\n\npublic abstract class Node\n{\n    public Self same() => this;\n\n    public abstract Tree<Self> children();\n\n    public bool tree() => this.children().same();\n\n    public Function<bool()> treeValue() => this.children().same;\n\n    public bool item() => this.children().first();\n\n    public Function<bool()> itemValue() => this.children().first;\n\n    public bool stored()\n    {\n        let first = this.children().first;\n        return first();\n    }\n}\n\npublic abstract class Tree<out TItem> : Node\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static bool plain(Plain plain) => plain.same();\n\n    public static Function<bool()> plainValue(Plain plain) => plain.same;\n\n    public static bool boxed(Box<int> box) => box.same();\n\n    public static Function<bool()> boxedValue(Box<int> box) => box.same;\n\n    public static bool orders(OrderBox orders) => orders.same();\n\n    public static Function<bool()> ordersValue(OrderBox orders) => orders.same;\n\n    public static bool pairs(Pair<int, string> pair) => pair.same();\n\n    public static Function<bool()> pairsValue(Pair<int, string> pair) => pair.same;\n\n    public static bool bounded<TBox : Box<int>>(TBox box) => box.same();\n\n    public static Function<bool()> boundedValue<TBox : Box<int>>(TBox box) => box.same;\n\n    public static bool named<TBox : Box<int> & Named>(TBox box) => box.same();\n\n    public static Function<bool()> namedValue<TBox : Box<int> & Named>(TBox box) => box.same;\n\n    public static bool copied<TItem : Order & Copyable>(TItem item) => item.copy();\n\n    public static Function<bool()> copiedValue<TItem : Order & Copyable>(TItem item) => item.copy;\n\n    public static bool copiedBox<TBox : Box<int> & Copyable>(TBox box) => box.copy();\n\n    public static Function<bool()> copiedBoxValue<TBox : Box<int> & Copyable>(TBox box) => box.copy;\n\n    public static bool fluent(Invoice invoice) => invoice.me();\n\n    public static Function<bool()> fluentValue(Invoice invoice) => invoice.me;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Invoice;\n\npublic class Order\n{\n}\n\npublic interface Named\n{\n    public string name();\n}\n\npublic interface Copyable\n{\n    public Self copy();\n}\n\npublic class Plain\n{\n    public Self same() => this;\n}\n\npublic class Box<TItem>\n{\n    public Self same() => this;\n\n    public bool nested(Box<List<TItem>> boxes) => boxes.same();\n\n    public Function<bool()> nestedValue(Box<List<TItem>> boxes) => boxes.same;\n\n    public bool own() => this.same();\n\n    public Function<bool()> ownValue() => this.same;\n}\n\npublic class OrderBox : Box<Order>\n{\n}\n\npublic class Pair<TKey, TValue> : Box<TKey>\n{\n    public TValue? value() => null;\n}\n\npublic abstract class Node\n{\n    public Self same() => this;\n\n    public abstract Tree<Self> children();\n\n    public bool tree() => this.children().same();\n\n    public Function<bool()> treeValue() => this.children().same;\n\n    public bool item() => this.children().first();\n\n    public Function<bool()> itemValue() => this.children().first;\n\n    public bool stored()\n    {\n        let first = this.children().first;\n        return first();\n    }\n}\n\npublic abstract class Tree<TItem> : Node\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static bool plain(Plain plain) => plain.same();\n\n    public static Function<bool()> plainValue(Plain plain) => plain.same;\n\n    public static bool boxed(Box<int> box) => box.same();\n\n    public static Function<bool()> boxedValue(Box<int> box) => box.same;\n\n    public static bool orders(OrderBox orders) => orders.same();\n\n    public static Function<bool()> ordersValue(OrderBox orders) => orders.same;\n\n    public static bool pairs(Pair<int, string> pair) => pair.same();\n\n    public static Function<bool()> pairsValue(Pair<int, string> pair) => pair.same;\n\n    public static bool bounded<TBox : Box<int>>(TBox box) => box.same();\n\n    public static Function<bool()> boundedValue<TBox : Box<int>>(TBox box) => box.same;\n\n    public static bool named<TBox : Box<int> & Named>(TBox box) => box.same();\n\n    public static Function<bool()> namedValue<TBox : Box<int> & Named>(TBox box) => box.same;\n\n    public static bool copied<TItem : Order & Copyable>(TItem item) => item.copy();\n\n    public static Function<bool()> copiedValue<TItem : Order & Copyable>(TItem item) => item.copy;\n\n    public static bool copiedBox<TBox : Box<int> & Copyable>(TBox box) => box.copy();\n\n    public static Function<bool()> copiedBoxValue<TBox : Box<int> & Copyable>(TBox box) => box.copy;\n\n    public static bool fluent(Invoice invoice) => invoice.me();\n\n    public static Function<bool()> fluentValue(Invoice invoice) => invoice.me;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Invoice;\n\nclass Order\n{\n}\n\ninterface Named\n{\n    public function name(): string;\n}\n\ninterface Copyable\n{\n    public function copy(): static;\n}\n\nclass Plain\n{\n    public function same(): static\n    {\n        return $this;\n    }\n}\n\n/** @template TItem */\nclass Box\n{\n    public function same(): static\n    {\n        return $this;\n    }\n\n    /** @param Box<list<TItem>> $boxes */\n    public function nested(Box $boxes): bool\n    {\n        return $boxes->same();\n    }\n\n    /**\n     * @param Box<list<TItem>> $boxes\n     * @return \\Closure(): bool\n     */\n    public function nestedValue(Box $boxes): \\Closure\n    {\n        return $boxes->same(...);\n    }\n\n    public function own(): bool\n    {\n        return $this->same();\n    }\n\n    /** @return \\Closure(): bool */\n    public function ownValue(): \\Closure\n    {\n        return $this->same(...);\n    }\n}\n\n/** @extends Box<Order> */\nclass OrderBox extends Box\n{\n}\n\n/**\n * @template TKey\n * @template TValue\n * @extends Box<TKey>\n */\nclass Pair extends Box\n{\n    /** @return TValue|null */\n    public function value(): mixed\n    {\n        return null;\n    }\n}\n\nabstract class Node\n{\n    public function same(): static\n    {\n        return $this;\n    }\n\n    /** @return Tree<static> */\n    abstract public function children(): Tree;\n\n    public function tree(): bool\n    {\n        return $this->children()->same();\n    }\n\n    /** @return \\Closure(): bool */\n    public function treeValue(): \\Closure\n    {\n        return $this->children()->same(...);\n    }\n\n    public function item(): bool\n    {\n        return $this->children()->first();\n    }\n\n    /** @return \\Closure(): bool */\n    public function itemValue(): \\Closure\n    {\n        return $this->children()->first(...);\n    }\n\n    public function stored(): bool\n    {\n        $first = $this->children()->first(...);\n        return $first();\n    }\n}\n\n/** @template-covariant TItem */\nabstract class Tree extends Node\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    public static function plain(Plain $plain): bool\n    {\n        return $plain->same();\n    }\n\n    /** @return \\Closure(): bool */\n    public static function plainValue(Plain $plain): \\Closure\n    {\n        return $plain->same(...);\n    }\n\n    /** @param Box<int> $box */\n    public static function boxed(Box $box): bool\n    {\n        return $box->same();\n    }\n\n    /**\n     * @param Box<int> $box\n     * @return \\Closure(): bool\n     */\n    public static function boxedValue(Box $box): \\Closure\n    {\n        return $box->same(...);\n    }\n\n    public static function orders(OrderBox $orders): bool\n    {\n        return $orders->same();\n    }\n\n    /** @return \\Closure(): bool */\n    public static function ordersValue(OrderBox $orders): \\Closure\n    {\n        return $orders->same(...);\n    }\n\n    /** @param Pair<int, string> $pair */\n    public static function pairs(Pair $pair): bool\n    {\n        return $pair->same();\n    }\n\n    /**\n     * @param Pair<int, string> $pair\n     * @return \\Closure(): bool\n     */\n    public static function pairsValue(Pair $pair): \\Closure\n    {\n        return $pair->same(...);\n    }\n\n    /**\n     * @template TBox of Box<int>\n     * @param TBox $box\n     */\n    public static function bounded(Box $box): bool\n    {\n        return $box->same();\n    }\n\n    /**\n     * @template TBox of Box<int>\n     * @param TBox $box\n     * @return \\Closure(): bool\n     */\n    public static function boundedValue(Box $box): \\Closure\n    {\n        return $box->same(...);\n    }\n\n    /**\n     * @template TBox of Box<int>&Named\n     * @param TBox $box\n     */\n    public static function named(Box $box): bool\n    {\n        return $box->same();\n    }\n\n    /**\n     * @template TBox of Box<int>&Named\n     * @param TBox $box\n     * @return \\Closure(): bool\n     */\n    public static function namedValue(Box $box): \\Closure\n    {\n        return $box->same(...);\n    }\n\n    /**\n     * @template TItem of Order&Copyable\n     * @param TItem $item\n     */\n    public static function copied(Order $item): bool\n    {\n        return $item->copy();\n    }\n\n    /**\n     * @template TItem of Order&Copyable\n     * @param TItem $item\n     * @return \\Closure(): bool\n     */\n    public static function copiedValue(Order $item): \\Closure\n    {\n        return $item->copy(...);\n    }\n\n    /**\n     * @template TBox of Box<int>&Copyable\n     * @param TBox $box\n     */\n    public static function copiedBox(Box $box): bool\n    {\n        return $box->copy();\n    }\n\n    /**\n     * @template TBox of Box<int>&Copyable\n     * @param TBox $box\n     * @return \\Closure(): bool\n     */\n    public static function copiedBoxValue(Box $box): \\Closure\n    {\n        return $box->copy(...);\n    }\n\n    public static function fluent(Invoice $invoice): bool\n    {\n        return $invoice->me();\n    }\n\n    /** @return \\Closure(): bool */\n    public static function fluentValue(Invoice $invoice): \\Closure\n    {\n        return $invoice->me(...);\n    }\n}\n";
     let others = [("src/Lib/Invoice.php", invoice)];
     let gives = |method: &str, found: &str| {
@@ -9479,7 +9390,7 @@ fn a_conditional_return_of_a_receiver_naming_its_own_type_parameter_replaces_it_
 /// CS0411. The PHP twin's `static` keeps Mago's issues.
 #[test]
 fn calling_a_stored_method_value_keeps_the_self_of_its_receiver() {
-    let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public T pick<T>(T value) => value;\n\n    public bool called()\n    {\n        let first = this.children().first;\n        return first();\n    }\n\n    public bool picked()\n    {\n        let pick = this.pick;\n        return pick(5);\n    }\n}\n\npublic abstract class Tree<out TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public T pick<T>(T value) => value;\n\n    public bool called()\n    {\n        let first = this.children().first;\n        return first();\n    }\n\n    public bool picked()\n    {\n        let pick = this.pick;\n        return pick(5);\n    }\n}\n\npublic abstract class Tree<TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nabstract class Node\n{\n    /** @return Tree<static> */\n    abstract public function children(): Tree;\n\n    /**\n     * @template T\n     * @param T $value\n     * @return T\n     */\n    public function pick(mixed $value): mixed\n    {\n        return $value;\n    }\n\n    public function called(): bool\n    {\n        $first = $this->children()->first(...);\n        return $first();\n    }\n\n    public function picked(): bool\n    {\n        $pick = $this->pick(...);\n        return $pick(5);\n    }\n}\n\n/** @template-covariant TItem */\nabstract class Tree extends Node\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n";
 
     assert_eq!(

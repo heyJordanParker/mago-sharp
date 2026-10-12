@@ -54,7 +54,6 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Extends;
-use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
@@ -65,7 +64,6 @@ use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
 use mago_word::Word;
-use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -87,8 +85,6 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
 use crate::utils::names::display_type;
-use crate::utils::template::find_broken_marker;
-use crate::utils::template::find_template_uses;
 
 pub mod constant;
 pub mod enum_case;
@@ -1161,7 +1157,6 @@ where
     check_trait_property_conflicts(context, class_like_metadata, members);
     check_readonly_class_trait_properties(context, class_like_metadata, members);
     if class_like_metadata.flags.is_sharp() {
-        check_sharp_template_variance(context, class_like_metadata, inheritance_ast);
         check_sharp_serializable(context, class_like_metadata);
     } else {
         check_template_variance_positions(context, class_like_metadata);
@@ -1950,12 +1945,10 @@ fn check_template_parameters<'ctx, A>(
 
             let extended_type_str = display_type(context, &extended_type);
 
-            // `check_sharp_template_variance` checks a PHP# header's type arguments against spec section 11.1.
-            if !class_like_metadata.flags.is_sharp()
-                && parent_metadata
-                    .template_variance
-                    .get(i)
-                    .is_some_and(mago_codex::ttype::template::variance::Variance::is_invariant)
+            if parent_metadata
+                .template_variance
+                .get(i)
+                .is_some_and(mago_codex::ttype::template::variance::Variance::is_invariant)
             {
                 for extended_type_atomic in extended_type.types.as_ref() {
                     let TAtomic::GenericParameter(generic_parameter) = extended_type_atomic else {
@@ -2232,51 +2225,6 @@ fn check_template_variance_positions<'ctx, A>(
                 );
             }
         }
-    }
-}
-
-/// Checks spec section 11.1 on every member of a PHP# class or interface another class reaches, and on the generic
-/// types of its header: an `out` type parameter is only handed out, and an `in` type parameter is only taken in.
-fn check_sharp_template_variance<A>(
-    context: &mut Context<'_, '_, A>,
-    class_like_metadata: &ClassLikeMetadata,
-    inheritance: Option<&Inheritance<'_>>,
-) where
-    A: Arena,
-{
-    if !class_like_metadata.template_variance.iter().any(|variance| !variance.is_invariant()) {
-        return;
-    }
-
-    let header_spans: WordMap<Span> = inheritance
-        .iter()
-        .flat_map(|inheritance| inheritance.types.iter())
-        .filter_map(|hint| match hint {
-            Hint::Generic(generic) => {
-                Some((ascii_lowercase_word(context.resolved_names.resolve(&generic.name)?), generic.span()))
-            }
-            _ => None,
-        })
-        .collect();
-    for template_use in find_template_uses(context, class_like_metadata, &header_spans) {
-        let Some(marker) = find_broken_marker(class_like_metadata, template_use.template, template_use.position) else {
-            continue;
-        };
-        let refused = if marker == "out" { "take it in" } else { "hand it out" };
-
-        let template_name = template_use.template;
-        context.collector.report_with_code(
-            IssueCode::InvalidTemplateParameter,
-            Issue::error(format!(
-                "`{template_name}` is declared `{marker}`, so {} cannot {refused}.",
-                template_use.member
-            ))
-            .with_annotation(
-                Annotation::primary(template_use.span)
-                    .with_message(format!("{} uses `{template_name}` here", template_use.member)),
-            )
-            .with_note("An `out` type parameter is only handed out, and an `in` type parameter is only taken in."),
-        );
     }
 }
 

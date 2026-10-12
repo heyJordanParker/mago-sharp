@@ -63,7 +63,6 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_method_name;
 use crate::utils::names::display_sharp_collection;
 use crate::utils::names::display_type;
-use crate::utils::template::check_private_method_reach;
 use crate::visibility::check_method_visibility;
 use crate::visibility::is_method_visible;
 use crate::visibility::is_visible_from_scope;
@@ -455,15 +454,14 @@ where
                     }
                 }
 
-                for resolved_method in &mut resolved_methods {
-                    check_private_method_reach(context, object, &resolved_method.method_identifier, selector.span());
-
-                    // `Self` on a PHP# receiver typed by a type parameter is that type parameter, spec section 11.
-                    if context.dialect.is_sharp()
-                        && resolved_method.declaring_object.is_none()
-                        && let TAtomic::GenericParameter(parameter) = written_atomic
-                    {
-                        resolved_method.static_class_type = StaticClassType::Generic(parameter.clone());
+                // `Self` on a PHP# receiver typed by a type parameter is that type parameter, spec section 11.
+                if context.dialect.is_sharp()
+                    && let TAtomic::GenericParameter(parameter) = written_atomic
+                {
+                    for resolved_method in &mut resolved_methods {
+                        if resolved_method.declaring_object.is_none() {
+                            resolved_method.static_class_type = StaticClassType::Generic(parameter.clone());
+                        }
                     }
                 }
                 result.resolved_methods.extend(resolved_methods);

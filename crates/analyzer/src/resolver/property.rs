@@ -67,8 +67,6 @@ use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_type;
-use crate::utils::template::check_private_method_reach;
-use crate::utils::template::check_private_property_reach;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -854,13 +852,6 @@ where
                 read_span,
             )
         {
-            check_private_method_reach(
-                context,
-                object_expr,
-                &MethodIdentifier::new(class_id, method_name),
-                selector.span(),
-            );
-
             return Some(ResolvedProperty {
                 property_span: None,
                 property_name: prop_name,
@@ -1118,15 +1109,6 @@ where
 
         return None;
     }
-
-    check_private_property_reach(
-        context,
-        object_expr,
-        declaring_class_metadata,
-        property_metadata,
-        for_assignment,
-        selector.span(),
-    );
 
     Some(ResolvedProperty {
         property_span: property_metadata.name_span.or(property_metadata.span),
