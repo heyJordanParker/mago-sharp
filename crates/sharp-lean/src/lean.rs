@@ -26,6 +26,7 @@ use crate::package::Program;
 use crate::package::Root;
 use crate::package::Toolchain;
 use crate::rules;
+use crate::rules::Unbuilt;
 use crate::runner;
 use crate::runner::Answer;
 use crate::runner::Question;
@@ -65,21 +66,28 @@ impl Lean {
 
     /// Proves the laws of `translations`, which hold every accepted `.sharp` file, checks the structure rules of every
     /// `Module.lean` over their facts, and returns the issues that refuse each file whose law is not proved or that
-    /// breaks a rule.
+    /// breaks a rule. `namespaces` holds the namespace of every class-like the codebase declares, accepted or not,
+    /// which a rule names.
     ///
     /// A file whose `.sharpc` is current is proved: the `.sharpc` lists its proof file and every source its laws reach
     /// as inputs, and the build ID it records covers the runtime library. Every rule runs over every file's facts
-    /// whenever one `.sharpc` is not current, so a compile checks every rule exactly, and every Lean file of a PSR-4
-    /// folder that no Lean file imports is built then too, so a `@[rule]` outside a `Module.lean` is an error. A
-    /// `Module.lean` in no PSR-4 folder refuses each file under its folder. No Lean process starts when no file states
-    /// a law or has a proof file and no workspace Lean file is left to build, nor when each `.sharpc` is current. When
-    /// none of those remains, `.sharp/.lean/` is deleted.
+    /// whenever one `.sharpc` is not current, the namespaces changed, or a workspace Lean file the check builds changed,
+    /// joined or left, so a compile checks every rule exactly. Every Lean file of a PSR-4 folder that no Lean file
+    /// imports is built then too, so a `@[rule]` outside a `Module.lean` is an error, though no `.sharpc` lists that
+    /// file. A `Module.lean` in no PSR-4 folder, and a Lean file in a PSR-4 folder under a root Lean or Mago owns, each
+    /// refuse every file under their folder. No Lean process starts when no file
+    /// states a law or has a proof file and no workspace Lean file is left to build, nor when each `.sharpc` is current
+    /// and neither the namespaces nor those Lean files changed. When none of those remains, `.sharp/.lean/` is deleted.
     ///
     /// # Errors
     ///
     /// Returns an error when a file cannot be read or written, when the runtime library does not build, or when the
     /// runner fails.
-    pub fn check(&self, translations: Vec<Translation>) -> io::Result<HashMap<FileId, IssueCollection>> {
+    pub fn check(
+        &self,
+        translations: Vec<Translation>,
+        namespaces: &[String],
+    ) -> io::Result<HashMap<FileId, IssueCollection>> {
         let mut package = Package::new(&self.root);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
 
@@ -103,14 +111,20 @@ impl Lean {
             }
         }
         let roots = self.roots(translations.iter())?;
-        let (files, unnamed) = rules::find(&self.root, &roots, &translations)?;
-        for path in &unnamed {
-            let folder = path.strip_suffix("Module.lean").unwrap_or(path).as_bytes();
+        let (files, unbuilt) = rules::find(&self.root, &roots, &translations)?;
+        for unbuilt in &unbuilt {
+            let (Unbuilt::Unnamed(path) | Unbuilt::Owned(path, _)) = unbuilt;
+            let folder = &path.as_bytes()[..path.rfind('/').map_or(0, |end| end + 1)];
             for translation in translations
                 .iter()
                 .filter(|translation| translation.name.starts_with(folder) && !translation.name.starts_with(VENDOR))
             {
-                report(&mut issues, translation, issues::no_rules_module(translation.facts.anchor, path));
+                let anchor = translation.facts.anchor;
+                let issue = match unbuilt {
+                    Unbuilt::Unnamed(path) => issues::no_rules_module(anchor, path),
+                    Unbuilt::Owned(path, namespace) => issues::owned_lean(anchor, namespace, path),
+                };
+                report(&mut issues, translation, issue);
             }
         }
         if candidates.is_empty() && files.is_empty() {
@@ -126,7 +140,13 @@ impl Lean {
                 stale.push(candidate);
             }
         }
-        let check_rules = !files.is_empty() && (!stale.is_empty() || self.any_stale(&translations)?);
+        let declared = package::namespaces(namespaces);
+        let sources = rules::sources(&self.root, &files)?;
+        let check_rules = !files.is_empty()
+            && (!stale.is_empty()
+                || !package.holds(&declared)
+                || !package.checked(&sources)
+                || self.any_stale(&translations)?);
         if stale.is_empty() && !check_rules {
             return Ok(issues);
         }
@@ -155,8 +175,14 @@ impl Lean {
                 continue;
             }
 
+            let file = String::from_utf8_lossy(&proof);
+            if let Some(owned) = package::owned_root(&roots, &self.path(&proof)) {
+                for law in &translation.laws {
+                    report(&mut issues, translation, issues::owned_proof(law, &owned.namespace, &file));
+                }
+                continue;
+            }
             let Some(module) = package::proof_module(&roots, &self.path(&proof)) else {
-                let file = String::from_utf8_lossy(&proof);
                 for law in &translation.laws {
                     report(&mut issues, translation, issues::no_module(law, &file));
                 }
@@ -190,16 +216,18 @@ impl Lean {
         }
 
         let library = library::build(&package.lake)?;
-        let modules = program.modules(
+        let mut modules = program.modules(
             &work.iter().map(|item| item.translation.file).collect::<Vec<_>>(),
             &files.iter().map(|file| file.module.as_str()).collect::<Vec<_>>(),
         );
+        modules.push(declared);
         package.write(&library, &roots, &modules)?;
         if !work.is_empty() {
             self.prove(&package, &library, &program, &modules, work, &mut issues)?;
         }
         if check_rules {
             rules::check(&self.root, &roots, &library, &package, &files, &translations, &mut issues)?;
+            package.record_checked(&sources)?;
         }
 
         Ok(issues)
@@ -521,7 +549,7 @@ mod tests {
     #[test]
     fn each_theorem_is_found_with_its_lines_and_type() {
         let proof = "import Code.App.Shared.Money\nopen Sharp\n\ntheorem addKeepsCurrency : App.Shared.Money.addKeepsCurrency := by\n  simp\n";
-        let rules = "import Code.App.Shared.Module\nopen Sharp\n\ntheorem same : App.Shared.Module.same := by\n  simp\n\n@[rule] def neverReachesTenant : Rule := .neverImports \"App.Tenant\"\n";
+        let rules = "import Code.App.Shared.Module\nopen Sharp\n\ntheorem same : App.Shared.Module.same := by\n  simp\n\n@[rule] def neverReachesTenant : Rule := .neverImports App.Tenant\n";
 
         for (text, expected) in
             [(proof, (4..=5, "App.Shared.Money.addKeepsCurrency")), (rules, (4..=6, "App.Shared.Module.same"))]

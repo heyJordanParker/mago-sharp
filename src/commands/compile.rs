@@ -99,7 +99,7 @@ impl CompileCommand {
         let compilations = server.compile(
             |path| unit::stamp(&root, path),
             |name| rules_files(&root, name),
-            |translations| lean.check(translations),
+            |translations, namespaces| lean.check(translations, namespaces),
         )?;
         let database = server.database();
 

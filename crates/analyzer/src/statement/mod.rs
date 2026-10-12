@@ -7,6 +7,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::scanner::get_union_from_hint;
+use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
@@ -36,7 +37,6 @@ use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ExpressionStatement;
 use mago_syntax::cst::ForOf;
-use mago_syntax::cst::ForOfKeyValueTarget;
 use mago_syntax::cst::ForOfTarget;
 use mago_syntax::cst::ForOfVariable;
 use mago_syntax::cst::Foreach;
@@ -67,7 +67,9 @@ use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
+use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_map_keys_without_backing_value;
+use crate::statement::function_like::report_undefined_types;
 use crate::statement::function_like::report_unsupported_set_elements;
 use crate::utils::docblock::populate_docblock_variables;
 use crate::utils::docblock::populate_docblock_variables_excluding;
@@ -77,6 +79,7 @@ use crate::utils::expression::get_function_like_id_from_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_sharp_type;
+use crate::utils::quoted_source;
 
 pub mod attributes;
 pub mod class_like;
@@ -394,9 +397,10 @@ where
         &TypeExpansionOptions { self_class: block_context.scope.get_class_like_name(), ..Default::default() },
     );
 
-    let local_type = (Rc::new(local_type), hint.span());
-    report_map_keys_without_backing_value(context, &local_type.0, local_type.1);
-    report_unsupported_set_elements(context, &local_type.0, local_type.1);
+    report_undefined_types(context, &local_type, hint.span());
+    report_map_keys_without_backing_value(context, &local_type, hint.span());
+    report_unsupported_set_elements(context, &local_type, hint.span());
+    let local_type = (Rc::new(known_type_or_error(local_type)), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
     Some(local_type)
@@ -440,58 +444,70 @@ where
 
     foreach.analyze(context, block_context, artifacts)?;
 
-    if let ForOfTarget::KeyValue(pair) = &for_of.target {
-        report_key_mixing_a_backed_enum(context, artifacts, for_of, pair);
+    if let ForOfTarget::KeyValue(pair) = &for_of.target
+        && artifacts
+            .get_expression_type(for_of.expression)
+            .is_some_and(|map_type| keys_mix_a_backed_enum(context, map_type))
+    {
+        report_keys_read_back(context, IssueCode::InvalidForeachKey, for_of.expression, "the loop", pair.key.span());
     }
 
     Ok(())
 }
 
-/// Reports a loop over a `Map` whose key type mixes a backed enum with other types. The engine holds each key as its
-/// backing value, and the lowering reads it back as a case only through one enum's `from`.
-fn report_key_mixing_a_backed_enum<A>(
+/// Whether the keys of the `Map`s that `map_type` may be, taken together, mix a backed enum with other types, as
+/// `Status|int` or `Status|Rank` do. The engine holds each key of a `Map` as its backing value, and reads it back as a
+/// case only through one enum.
+pub(crate) fn keys_mix_a_backed_enum<A>(context: &Context<'_, '_, A>, map_type: &TUnion) -> bool
+where
+    A: Arena,
+{
+    let key_type = map_type.types.iter().fold(None, |key_type, atomic| match atomic {
+        TAtomic::Array(map @ TArray::Keyed(_)) => {
+            let key = get_array_parameters(map, context.codebase).0;
+            Some(add_optional_union_type(key, key_type.as_ref(), context.codebase))
+        }
+        _ => key_type,
+    });
+
+    key_type.is_some_and(|key_type| key_type_mixes_a_backed_enum(context, &key_type))
+}
+
+/// Whether `key_type` mixes a backed enum with other types, as `Status|int` or `Status|Rank` do.
+pub(crate) fn key_type_mixes_a_backed_enum<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
+where
+    A: Arena,
+{
+    let mut keys = key_type.types.iter().filter(|atomic| !atomic.is_null());
+    let is_one_enum = match keys.next() {
+        Some(TAtomic::Object(TObject::Enum(first))) => {
+            keys.all(|atomic| matches!(atomic, TAtomic::Object(TObject::Enum(other)) if other.name == first.name))
+        }
+        _ => false,
+    };
+
+    matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_enum
+}
+
+/// Reports the `Map` `collection`, whose keys mix a backed enum with other types, where `reader`, the loop or `keys()`,
+/// reads them back at `span`.
+pub(crate) fn report_keys_read_back<A>(
     context: &mut Context<'_, '_, A>,
-    artifacts: &AnalysisArtifacts,
-    for_of: &ForOf<'_>,
-    pair: &ForOfKeyValueTarget<'_>,
+    code: IssueCode,
+    collection: &Expression<'_>,
+    reader: &str,
+    span: Span,
 ) where
     A: Arena,
 {
-    let Some(collection_type) = artifacts.get_expression_type(for_of.expression) else {
-        return;
-    };
-    let is_one_enum = |key_type: &TUnion| match key_type.types.first() {
-        Some(TAtomic::Object(TObject::Enum(first))) => key_type
-            .types
-            .iter()
-            .all(|atomic| matches!(atomic, TAtomic::Object(TObject::Enum(other)) if other.name == first.name)),
-        _ => false,
-    };
-    let mixes_a_backed_enum = collection_type.types.iter().any(|atomic| match atomic {
-        TAtomic::Array(TArray::Keyed(keyed_array)) => {
-            keyed_array.get_generic_parameters().is_some_and(|(key_type, _)| {
-                matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_enum(key_type)
-            })
-        }
-        _ => false,
-    });
-    if !mixes_a_backed_enum {
-        return;
-    }
-
-    let collection = context
-        .source_file
-        .contents
-        .get(for_of.expression.span().start.offset as usize..for_of.expression.span().end.offset as usize)
-        .map(|text| String::from_utf8_lossy(text).into_owned())
-        .unwrap_or_default();
+    let collection = quoted_source(context, collection.span());
 
     context.collector.report_with_code(
-        IssueCode::InvalidForeachKey,
+        code,
         Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so the loop cannot read them back."
+            "The keys of `{collection}` mix a backed enum with other types, so {reader} cannot read them back."
         ))
-        .with_annotation(Annotation::primary(pair.key.span()).with_message("Its key is read here."))
+        .with_annotation(Annotation::primary(span).with_message("Its key is read here."))
         .with_note(
             "The engine holds each key as its backing value, and reads it back as a case through one enum's `from`.",
         )
@@ -499,8 +515,35 @@ fn report_key_mixing_a_backed_enum<A>(
     );
 }
 
+/// Reports the `Map` at `collection`, whose keys mix a backed enum with other types, where `finder`, such as `has`,
+/// an index or a literal, looks a key up or puts one in, as `annotation` marks it.
+pub(crate) fn report_keys_sharing_entries<A>(
+    context: &mut Context<'_, '_, A>,
+    code: IssueCode,
+    collection: Span,
+    finder: &str,
+    annotation: Annotation,
+) where
+    A: Arena,
+{
+    let collection = quoted_source(context, collection);
+
+    context.collector.report_with_code(
+        code,
+        Issue::error(format!(
+            "The keys of `{collection}` mix a backed enum with other types, so {finder} cannot tell them apart."
+        ))
+        .with_annotation(annotation)
+        .with_note(
+            "The engine holds each key as its backing value, so a case and the `int` or `string` key of its backing value share one entry.",
+        )
+        .with_help("Key the `Map` by one backed enum alone."),
+    );
+}
+
 /// Analyzes a PHP# `emit`, spec section 15: it raises an event, so its value's type is an event. A refused value is
-/// `never`, and a type that names no class stays a reference: the error where each was written already reports it.
+/// `never`, and a value of a type that names no type is the error type: the error where each was written already
+/// reports it.
 fn analyze_emit<'ctx, 'arena, A>(
     emit: &Emit<'arena>,
     context: &mut Context<'ctx, 'arena, A>,
@@ -515,10 +558,7 @@ where
     let codebase = context.codebase;
     let not_an_event = artifacts.get_expression_type(emit.value).filter(|value_type| {
         !value_type.is_never()
-            && !value_type
-                .types
-                .iter()
-                .all(|atomic| matches!(atomic, TAtomic::Reference(_)) || is_event(codebase, atomic))
+            && !value_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Error) || is_event(codebase, atomic))
     });
     if let Some(value_type) = not_an_event {
         context.collector.report_with_code(

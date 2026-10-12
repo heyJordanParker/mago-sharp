@@ -2,6 +2,7 @@
 //! every `.sharp` file under that namespace.
 
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -11,12 +12,14 @@ use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_database::file::FileId;
 use mago_reporting::IssueCollection;
+use mago_sharp_bridge::unit;
 
 use crate::facts::Facts;
 use crate::issues;
 use crate::lean::VENDOR;
 use crate::lean::proof_file;
 use crate::package;
+use crate::package::Message;
 use crate::package::Package;
 use crate::package::Root;
 use crate::runner;
@@ -44,6 +47,16 @@ pub(crate) enum Role {
     /// A Lean file in a PSR-4 folder that is neither a `Module.lean` nor the proof file of a `.sharp` file, and that no
     /// Lean file imports. It is built so that a `@[rule]` in it is an error.
     Unreached,
+}
+
+/// A Lean file of the workspace that cannot be built, which refuses each `.sharp` file under its folder.
+#[derive(Debug)]
+pub(crate) enum Unbuilt {
+    /// A `Module.lean` in no PSR-4 folder, whose rules have no Lean module name.
+    Unnamed(String),
+    /// A Lean file, other than a proof file, in a PSR-4 folder under a root Lean or Mago owns, with the namespace of
+    /// that folder.
+    Owned(String, String),
 }
 
 /// The files whose structure rules may judge the workspace-relative file `name`.
@@ -86,12 +99,13 @@ pub fn rules_files(root: &Path, name: &[u8]) -> io::Result<Vec<Vec<u8>>> {
 
 /// Every Lean file of the workspace the structure rules step builds, in path order: each of the `rules_files` of the
 /// `.sharp` files of `translations` outside `vendor/`, and each unreached Lean file in a PSR-4 folder of `roots`. Also
-/// returns each `Module.lean` of those `rules_files` that no PSR-4 folder names a module for.
+/// returns each Lean file that cannot be built: each `Module.lean` of those `rules_files` that no PSR-4 folder names a
+/// module for, and each Lean file other than a proof file in a PSR-4 folder under a root Lean or Mago owns.
 pub(crate) fn find(
     root: &Path,
     roots: &[Root],
     translations: &[Translation],
-) -> io::Result<(Vec<LeanFile>, Vec<String>)> {
+) -> io::Result<(Vec<LeanFile>, Vec<Unbuilt>)> {
     let mut paths = BTreeSet::new();
     for translation in translations.iter().filter(|translation| !translation.name.starts_with(VENDOR)) {
         for path in rules_files(root, &translation.name)? {
@@ -100,23 +114,24 @@ pub(crate) fn find(
     }
 
     let mut found = Vec::new();
-    let mut unnamed = Vec::new();
+    let mut unbuilt = Vec::new();
     for path in paths {
         let file = root.join(&path);
-        if !file.is_file() {
+        if !file.is_file() || package::owned_root(roots, &file).is_some() {
             continue;
         }
         let role = if is_module_lean(&path) { Role::Rules } else { Role::Imported };
         match package::proof_module(roots, &file) {
             Some(module) => found.push(lean_file(path, module, role)),
-            None if role == Role::Rules => unnamed.push(path),
+            None if role == Role::Rules => unbuilt.push(Unbuilt::Unnamed(path)),
             None => {}
         }
     }
 
+    let vendor = root.join("vendor");
     let mut walked = Vec::new();
     for linked in package::linked_roots(roots) {
-        walk(&linked.directory, &root.join("vendor"), &mut walked)?;
+        walk(&linked.directory, &vendor, &mut walked)?;
     }
     let mut imported = HashSet::default();
     for file in &walked {
@@ -133,6 +148,7 @@ pub(crate) fn find(
         if is_module_lean(&path)
             || file.with_extension("sharp").is_file()
             || imported.contains(&module)
+            || package::owned_root(roots, &file).is_some()
             || found.iter().any(|found| found.path == path)
         {
             continue;
@@ -141,7 +157,35 @@ pub(crate) fn find(
     }
     found.sort_by(|a, b| a.path.cmp(&b.path));
 
-    Ok((found, unnamed))
+    let mut owned = Vec::new();
+    for folder in package::owned_roots(roots).filter(|owned| owned.directory.is_dir()) {
+        walk(&folder.directory, &vendor, &mut owned)?;
+    }
+    owned.sort();
+    owned.dedup();
+    for file in owned {
+        if let (Ok(relative), Some(folder)) = (file.strip_prefix(root), package::owned_root(roots, &file))
+            && !file.with_extension("sharp").is_file()
+        {
+            unbuilt.push(Unbuilt::Owned(slashed(relative), folder.namespace.clone()));
+        }
+    }
+
+    Ok((found, unbuilt))
+}
+
+/// Each of `files` with the hash of its source, one per line. The structure rules check reads them, and an unreached
+/// Lean file is the input of no `.sharpc`, so the check runs again whenever they differ from what the last check read.
+pub(crate) fn sources(root: &Path, files: &[LeanFile]) -> io::Result<String> {
+    let mut sources = String::new();
+    for file in files {
+        for byte in unit::source_hash(&fs::read(root.join(&file.path))?) {
+            let _ = write!(sources, "{byte:02x}");
+        }
+        let _ = writeln!(sources, " {}", file.path);
+    }
+
+    Ok(sources)
 }
 
 /// Whether `file` judges `translation`: `file` is a `Module.lean` or an unreached Lean file, and `translation`'s
@@ -152,7 +196,8 @@ pub(crate) fn judges(file: &LeanFile, translation: &Translation) -> bool {
 
 /// Builds every one of `files` in `package`, refuses every file under the namespace of a `Module.lean` or an unreached
 /// Lean file Lean rejects, and runs every rule of the other `Module.lean` files over the facts of every file of
-/// `translations`. `root` is the workspace's, and `roots` its PSR-4 folders.
+/// `translations`. A rule the runner does not run refuses every file its `Module.lean` judges. `root` is the
+/// workspace's, and `roots` its PSR-4 folders.
 pub(crate) fn check(
     root: &Path,
     roots: &[Root],
@@ -184,19 +229,21 @@ pub(crate) fn check(
         if judged.is_empty() {
             continue;
         }
-        let (cause, line, message) = first_error(root, roots, package, files, &failed, file)?;
+        let (cause, errors) = errors(root, roots, package, files, &failed, file)?;
         for translation in judged {
             let anchor = translation.facts.anchor;
-            let issue = match file.role {
-                Role::Rules if cause.path == file.path => {
-                    issues::rejected_rules(anchor, &file.path, &file.namespace, line, &message)
-                }
-                Role::Rules => {
-                    issues::rejected_rules_import(anchor, &file.path, &file.namespace, &cause.path, line, &message)
-                }
-                _ => issues::rejected_lean(anchor, &cause.path, &file.namespace, line, &message),
-            };
-            issues.entry(translation.file).or_default().push(issue);
+            for error in &errors {
+                let issue = match file.role {
+                    Role::Rules if cause.path == file.path => {
+                        issues::rejected_rules(anchor, &file.path, &file.namespace, error)
+                    }
+                    Role::Rules => {
+                        issues::rejected_rules_import(anchor, &file.path, &file.namespace, &cause.path, error)
+                    }
+                    _ => issues::rejected_lean(anchor, &cause.path, &file.namespace, error),
+                };
+                issues.entry(translation.file).or_default().push(issue);
+            }
         }
     }
     if built.is_empty() {
@@ -210,10 +257,23 @@ pub(crate) fn check(
     let facts: Vec<(&str, &Facts)> =
         names.iter().zip(translations).map(|(name, translation)| (name.as_str(), &translation.facts)).collect();
     for broken in runner::rules(library, package, &modules, &facts)? {
+        let rules = built[broken.module];
+        if let Some(refused) = &broken.refused {
+            for translation in translations.iter().filter(|translation| judges(rules, translation)) {
+                let issue = issues::refused_rule(
+                    translation.facts.anchor,
+                    &rules.path,
+                    &rules.namespace,
+                    &broken.rule,
+                    refused,
+                );
+                issues.entry(translation.file).or_default().push(issue);
+            }
+        }
         for (file, fact) in broken.facts {
             let translation = &translations[file];
             let fact = &translation.facts.list[fact];
-            let issue = issues::broken_rule(fact.span, &fact.describe(), &broken.rule, &built[broken.module].path);
+            let issue = issues::broken_rule(fact.span, &fact.describe(), &broken.rule, &rules.path);
             issues.entry(translation.file).or_default().push(issue);
         }
     }
@@ -221,30 +281,36 @@ pub(crate) fn check(
     Ok(())
 }
 
-/// The first error that made `file` fail, with its line and the file that holds it: the import of a workspace Lean
-/// file that does not exist, whose build output an earlier build may have left for Lean to read, else the first error
-/// of the first of `files` it imports that failed, followed down, else Lean's first error in `file`.
-fn first_error<'file>(
+/// The errors that made `file` fail, and the file that holds them: the import of a Lean file in a PSR-4 folder under a
+/// root Lean or Mago owns, which cannot be built, or of a workspace Lean file that does not exist, whose build output an
+/// earlier build may have left for Lean to read, else the errors of the first of `files` it imports that failed,
+/// followed down, else Lean's errors in `file`.
+fn errors<'file>(
     root: &Path,
     roots: &[Root],
     package: &Package,
     files: &'file [LeanFile],
     failed: &[String],
     file: &'file LeanFile,
-) -> io::Result<(&'file LeanFile, u32, String)> {
+) -> io::Result<(&'file LeanFile, Vec<Message>)> {
     let mut cause = file;
     // Lean refuses an import cycle, so a cycle among failed files is followed at most once around.
     for _ in 0..files.len() {
         let text = fs::read_to_string(root.join(&cause.path))?;
         for (line, import) in imports(&text) {
+            for owned in package::owned_roots(roots) {
+                if let Some(path) = file_in(root, owned, import)
+                    && root.join(&path).is_file()
+                {
+                    return Ok((cause, vec![Message::error(line, issues::owned_root(&owned.namespace, &path))]));
+                }
+            }
             if let Some(path) = workspace_file(root, roots, import)
                 && !root.join(String::from_utf8_lossy(&path).as_ref()).is_file()
             {
-                return Ok((
-                    cause,
-                    line,
-                    format!("bad import {import}: {} does not exist", String::from_utf8_lossy(&path)),
-                ));
+                let message = format!("bad import {import}: {} does not exist", String::from_utf8_lossy(&path));
+
+                return Ok((cause, vec![Message::error(line, message)]));
             }
         }
         let Some(imported) = imports(&text)
@@ -254,9 +320,12 @@ fn first_error<'file>(
         };
         cause = imported;
     }
-    let errors = package.errors(&package::source_of(&cause.module))?;
+    let mut errors = package.errors(&package::source_of(&cause.module))?;
+    if errors.is_empty() {
+        errors.push(Message::error(0, "Lake failed".to_owned()));
+    }
 
-    Ok(errors.first().map_or((cause, 0, "Lake failed".to_owned()), |error| (cause, error.pos.line, error.data.clone())))
+    Ok((cause, errors))
 }
 
 fn lean_file(path: String, module: String, role: Role) -> LeanFile {
@@ -271,12 +340,15 @@ fn is_module_lean(path: &str) -> bool {
 
 /// The workspace-relative path of the Lean module `module`, in the PSR-4 folder Lake links its namespace to.
 fn workspace_file(root: &Path, roots: &[Root], module: &str) -> Option<Vec<u8>> {
-    package::linked_roots(roots).into_iter().find_map(|linked| {
-        let rest = module.strip_prefix(linked.namespace.as_str())?.strip_prefix('.')?;
-        let file = rest.split('.').fold(linked.directory.clone(), |path, name| path.join(name)).with_extension("lean");
+    package::linked_roots(roots).into_iter().find_map(|linked| Some(file_in(root, linked, module)?.into_bytes()))
+}
 
-        Some(slashed(file.strip_prefix(root).ok()?).into_bytes())
-    })
+/// The workspace-relative path the Lean module `module` would have in the PSR-4 folder `folder`.
+fn file_in(root: &Path, folder: &Root, module: &str) -> Option<String> {
+    let rest = module.strip_prefix(folder.namespace.as_str())?.strip_prefix('.')?;
+    let file = rest.split('.').fold(folder.directory.clone(), |path, name| path.join(name)).with_extension("lean");
+
+    Some(slashed(file.strip_prefix(root).ok()?))
 }
 
 /// Each `.lean` file under `folder`, apart from hidden entries, linked folders and the `vendor` folder.
