@@ -52,6 +52,7 @@ use crate::external::PropertyAccessKind;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
+use crate::statement::function_like::known_type_or_error;
 use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
@@ -665,10 +666,12 @@ impl DeclaredProperty<'_> {
             }
         }
 
-        annotation_type_metadata(self.property, for_write)
+        let declared = annotation_type_metadata(self.property, for_write)
             .or(self.property.type_declaration_metadata.as_ref())
             .map(|tm| tm.type_union.clone())
-            .unwrap_or_else(get_mixed)
+            .unwrap_or_else(get_mixed);
+
+        if self.declaring_class.flags.is_sharp() { known_type_or_error(declared) } else { declared }
     }
 }
 
