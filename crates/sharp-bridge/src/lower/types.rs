@@ -245,6 +245,11 @@ impl<'analysis> Types<'analysis> {
             .collect()
     }
 
+    /// The backing type of the struct `class`, or none when `class` is no struct or declares no backing type.
+    pub(crate) fn struct_backing_type(&self, class: &[u8]) -> Option<&'analysis TAtomic> {
+        self.codebase.get_class_like(class).filter(|metadata| metadata.flags.is_struct())?.enum_type.as_ref()
+    }
+
     /// The type of the keys a value of `r#type` holds, or none when part of it is no `Map` or `List`.
     pub(crate) fn map_key_type(&self, r#type: &TUnion) -> Option<TUnion> {
         let mut key_type = None;

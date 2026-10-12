@@ -2684,10 +2684,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.stored_key(key, lowered)
     }
 
-    /// `lowered`, a read of `key`, as the key a `Map` or a `Set` holds. One keyed by a backed enum holds each case as its
-    /// backing value, so a case goes in as its `->value`.
+    /// `lowered`, a read of `key`, as the key a `Map` or a `Set` holds. One keyed by a backed enum or a backed struct
+    /// holds each key as its backing value, so a key goes in as its `->value`.
     fn stored_key(&mut self, key: &Expression, lowered: u32) -> u32 {
-        if self.backed_enum(self.types.expression_type(key)).is_none() {
+        if self.backed(self.types.expression_type(key)).is_none() {
             return lowered;
         }
 
@@ -2698,33 +2698,40 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The loop key `key` of a `Map` keyed by `key_type`, read back as the value the `Map` was given: the case of a
-    /// backed enum through its `from`, or a `string` through `(string)`. None when the stored key is that value.
+    /// backed enum through its `from`, a backed struct through its main constructor, as `new \App\Username((string)
+    /// $key)`, or a `string` through `(string)`. None when the stored key is that value.
     fn key_read_back(&mut self, key: &ForOfVariable, key_type: &TUnion) -> Option<u32> {
         let line = self.line(key);
-        if let Some(class) = self.backed_enum(key_type) {
-            let stored_key = self.variable(key.name.span, key.name.value);
-            let class = self.string(ZEND_NAME_FQ, line, class);
+        let stored_key = self.variable(key.name.span, key.name.value);
+        let Some(class) = self.backed(key_type) else {
+            return key_type.is_string().then(|| self.node(SHARP_AST_CAST, IS_STRING, line, &[stored_key]));
+        };
+        let class_name = self.string(ZEND_NAME_FQ, line, class);
+        let Some(backing_type) = self.types.struct_backing_type(class) else {
             let from = self.string(0, line, b"from");
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[stored_key]);
 
-            return Some(self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, from, arguments]));
-        }
-        if !key_type.is_string() {
-            return None;
-        }
+            return Some(self.node(SHARP_AST_STATIC_CALL, 0, line, &[class_name, from, arguments]));
+        };
+        // PHP stores a numeric string key as an int, so a `string` backing value is cast back.
+        let value = if backing_type.is_string() {
+            self.node(SHARP_AST_CAST, IS_STRING, line, &[stored_key])
+        } else {
+            stored_key
+        };
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
 
-        let stored_key = self.variable(key.name.span, key.name.value);
-
-        Some(self.node(SHARP_AST_CAST, IS_STRING, line, &[stored_key]))
+        Some(self.node(SHARP_AST_NEW, 0, line, &[class_name, arguments]))
     }
 
-    /// The backed enum every value of `r#type` is a case of, if there is one.
-    fn backed_enum<'r#type>(&self, r#type: &'r#type TUnion) -> Option<&'r#type [u8]> {
+    /// The backed enum or backed struct every value of `r#type` is, if there is one.
+    fn backed<'r#type>(&self, r#type: &'r#type TUnion) -> Option<&'r#type [u8]> {
         let classes = receiver_classes(r#type)?;
         let class = classes[0];
 
         (classes.iter().all(|other| other.eq_ignore_ascii_case(class))
-            && self.types.class_declaration(class).kind == DeclarationKind::Enum { backed: true })
+            && (self.types.class_declaration(class).kind == DeclarationKind::Enum { backed: true }
+                || self.types.struct_backing_type(class).is_some()))
         .then_some(class)
     }
 

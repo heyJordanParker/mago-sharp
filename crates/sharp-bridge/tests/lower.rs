@@ -12390,6 +12390,87 @@ fn a_value_pattern_on_a_struct_runs_its_op_equality() {
     );
 }
 
+/// ```php
+/// $counts[(new \App\Username("ada"))->value] = 1;
+/// foreach ($counts as $user => $n) {
+///     $user = new \App\Username((string) $user);
+/// }
+/// foreach ($seats as $seat => $n) {
+///     $seat = new \App\Seat($seat);
+/// }
+/// return 1;
+/// ```
+///
+/// A `Map` keyed by a backed struct holds each key as its `value`, and a loop reads each key back through the struct's
+/// main constructor. PHP stores an all-digit `string` key as an `int`, so a `string` backing value is cast back first.
+#[test]
+fn a_backed_struct_key_goes_in_as_its_value_and_comes_back_through_its_main_constructor() {
+    assert_eq!(
+        Lowered::with(
+            "namespace App;\n\nclass Report\n{\n    public int run(Map<Username, int> counts, Map<Seat, int> seats)\n    {\n        counts[new Username(\"ada\")] = 1;\n        for (const [user, n] of counts) {\n        }\n        for (const [seat, n] of seats) {\n        }\n        return 1;\n    }\n}\n",
+            &[
+                (
+                    "src/App/Username.sharp",
+                    "namespace App;\n\npublic struct Username : string\n{\n    public Username(public string value { get; }) { }\n}\n"
+                ),
+                ("src/App/Seat.sharp", "namespace App;\n\npublic struct Seat : int\n{\n    public Seat(public int value { get; }) { }\n}\n"),
+            ]
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                DIM
+                  VAR
+                    ZVAL "counts"
+                  PROP
+                    NEW
+                      ZVAL "App\\Username"
+                      ARG_LIST
+                        ZVAL "ada"
+                    ZVAL "value"
+                ZVAL 1
+              FOREACH
+                VAR
+                  ZVAL "counts"
+                VAR
+                  ZVAL "n"
+                VAR
+                  ZVAL "user"
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "user"
+                    NEW
+                      ZVAL "App\\Username"
+                      ARG_LIST
+                        CAST [6]
+                          VAR
+                            ZVAL "user"
+                  STMT_LIST
+              FOREACH
+                VAR
+                  ZVAL "seats"
+                VAR
+                  ZVAL "n"
+                VAR
+                  ZVAL "seat"
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "seat"
+                    NEW
+                      ZVAL "App\\Seat"
+                      ARG_LIST
+                        VAR
+                          ZVAL "seat"
+                  STMT_LIST
+              RETURN
+                ZVAL 1
+        "#}
+    );
+}
+
 const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(public int x { get; }, public float y { get; }, public Money? total { get; }) { }\n\n    public Point moved(int dx) => new Point(this.x + dx, this.y, this.total);\n}\n";
 
 /// ```php

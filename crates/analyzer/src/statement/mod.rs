@@ -443,15 +443,16 @@ where
     foreach.analyze(context, block_context, artifacts)?;
 
     if let ForOfTarget::KeyValue(pair) = &for_of.target {
-        report_key_mixing_a_backed_enum(context, artifacts, for_of, pair);
+        report_key_mixing_a_backed_type(context, artifacts, for_of, pair);
     }
 
     Ok(())
 }
 
-/// Reports a loop over a `Map` whose key type mixes a backed enum with other types. The engine holds each key as its
-/// backing value, and the lowering reads it back as a case only through one enum's `from`.
-fn report_key_mixing_a_backed_enum<A>(
+/// Reports a loop over a `Map` whose key type mixes a backed enum or a backed struct with other types. The engine holds
+/// each key as its backing value, and the lowering reads it back only through one enum's `from` or one struct's main
+/// constructor.
+fn report_key_mixing_a_backed_type<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
     for_of: &ForOf<'_>,
@@ -462,17 +463,22 @@ fn report_key_mixing_a_backed_enum<A>(
     let Some(collection_type) = artifacts.get_expression_type(for_of.expression) else {
         return;
     };
-    let is_one_enum = |key_type: &TUnion| match key_type.types.first() {
-        Some(TAtomic::Object(TObject::Enum(first))) => key_type
+    let name = |atomic: &TAtomic| match atomic {
+        TAtomic::Object(TObject::Enum(object)) => Some(object.name),
+        TAtomic::Object(TObject::Named(object)) => Some(object.name),
+        _ => None,
+    };
+    let is_one_type = |key_type: &TUnion| {
+        key_type
             .types
-            .iter()
-            .all(|atomic| matches!(atomic, TAtomic::Object(TObject::Enum(other)) if other.name == first.name)),
-        _ => false,
+            .first()
+            .and_then(name)
+            .is_some_and(|first| key_type.types.iter().all(|atomic| name(atomic) == Some(first)))
     };
     let mixes_a_backed_enum = collection_type.types.iter().any(|atomic| match atomic {
         TAtomic::Array(TArray::Keyed(keyed_array)) => {
             keyed_array.get_generic_parameters().is_some_and(|(key_type, _)| {
-                matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_enum(key_type)
+                matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_type(key_type)
             })
         }
         _ => false,
@@ -491,13 +497,13 @@ fn report_key_mixing_a_backed_enum<A>(
     context.collector.report_with_code(
         IssueCode::InvalidForeachKey,
         Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so the loop cannot read them back."
+            "The keys of `{collection}` mix a backed type with other types, so the loop cannot read them back."
         ))
         .with_annotation(Annotation::primary(pair.key.span()).with_message("Its key is read here."))
         .with_note(
-            "The engine holds each key as its backing value, and reads it back as a case through one enum's `from`.",
+            "The engine holds each key as its backing value, and reads it back through one enum's `from` or one struct's main constructor.",
         )
-        .with_help("Key the `Map` by one backed enum alone."),
+        .with_help("Key the `Map` by one backed enum or one backed struct alone."),
     );
 }
 
