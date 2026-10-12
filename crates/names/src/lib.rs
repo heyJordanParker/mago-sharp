@@ -39,8 +39,11 @@ pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "delete", "rem
 ///
 /// The bridge lowers each of them from the checker's types, so the checker refuses one on a value that can also be an
 /// object, whose own method would not run.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 9] = [
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 12] = [
     ("List", "count"),
+    ("List", "contains"),
+    ("List", "indexOf"),
+    ("List", "last"),
     ("Map", "count"),
     ("Set", "count"),
     ("Set", "add"),
