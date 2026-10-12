@@ -11,17 +11,11 @@ use mago_span::HasSpan;
 use mago_span::Position;
 use mago_span::Span;
 use mago_syntax::cst::Class;
-use mago_syntax::cst::Constant;
 use mago_syntax::cst::Enum;
-use mago_syntax::cst::Function;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::Namespace;
-use mago_syntax::cst::Trait;
-use mago_syntax::cst::Use;
 use mago_syntax::cst::UseItem;
-use mago_syntax::cst::UseItems;
-use mago_syntax::cst::UseType;
 use mago_syntax::walker::MutWalker;
 
 /// The facts of one `.sharp` file.
@@ -47,29 +41,18 @@ pub(crate) struct Fact {
 #[derive(Debug)]
 pub(crate) enum Kind {
     Declaration(DeclarationKind),
-    /// The namespace whose code holds the import, and what it imports.
-    Import(String, SymbolKind),
+    /// The namespace whose code holds the import of a class-like, the only symbol a `.sharp` file imports.
+    Import(String),
     /// The namespace whose code holds the reference.
     Reference(String),
 }
 
-/// As `Sharp.DeclarationKind` numbers them.
+/// As `Sharp.DeclarationKind` numbers them: what a `.sharp` file declares.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DeclarationKind {
     Class = 0,
     Interface = 1,
-    Trait = 2,
-    Enum = 3,
-    Function = 4,
-    Constant = 5,
-}
-
-/// As `Sharp.SymbolKind` numbers them.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum SymbolKind {
-    ClassLike = 0,
-    Function = 1,
-    Constant = 2,
+    Enum = 2,
 }
 
 /// Where a fact sits, as `Sharp.Location` holds it: 1-based and inclusive, with columns counting bytes.
@@ -166,18 +149,6 @@ impl Collector<'_, '_> {
     fn declare(&mut self, name: &impl HasSpan, kind: DeclarationKind) {
         self.add(name.span(), Kind::Declaration(kind));
     }
-
-    fn import(&mut self, item: &UseItem<'_>, kind: SymbolKind) {
-        self.add(item.name.span(), Kind::Import(self.namespace.clone(), kind));
-    }
-}
-
-const fn symbol_kind(r#type: Option<&UseType<'_>>) -> SymbolKind {
-    match r#type {
-        None => SymbolKind::ClassLike,
-        Some(UseType::Function(_)) => SymbolKind::Function,
-        Some(UseType::Const(_)) => SymbolKind::Constant,
-    }
 }
 
 impl<'ast, 'input, 'arena> MutWalker<'ast, 'arena, Collector<'input, 'arena>> for Walk {
@@ -192,31 +163,9 @@ impl<'ast, 'input, 'arena> MutWalker<'ast, 'arena, Collector<'input, 'arena>> fo
         collector.namespace.clear();
     }
 
-    fn walk_in_use(&mut self, r#use: &'ast Use<'arena>, collector: &mut Collector<'input, 'arena>) {
-        match &r#use.items {
-            UseItems::Sequence(sequence) => {
-                for item in &sequence.items {
-                    collector.import(item, SymbolKind::ClassLike);
-                }
-            }
-            UseItems::TypedSequence(sequence) => {
-                for item in &sequence.items {
-                    collector.import(item, symbol_kind(Some(&sequence.r#type)));
-                }
-            }
-            UseItems::TypedList(list) => {
-                collector.claimed.insert(list.namespace.span().start.offset);
-                for item in &list.items {
-                    collector.import(item, symbol_kind(Some(&list.r#type)));
-                }
-            }
-            UseItems::MixedList(list) => {
-                collector.claimed.insert(list.namespace.span().start.offset);
-                for item in &list.items {
-                    collector.import(&item.item, symbol_kind(item.r#type.as_ref()));
-                }
-            }
-        }
+    /// Each name of an `import`, the only form of `use` a `.sharp` file writes.
+    fn walk_in_use_item(&mut self, item: &'ast UseItem<'arena>, collector: &mut Collector<'input, 'arena>) {
+        collector.add(item.name.span(), Kind::Import(collector.namespace.clone()));
     }
 
     fn walk_in_class(&mut self, class: &'ast Class<'arena>, collector: &mut Collector<'input, 'arena>) {
@@ -227,22 +176,8 @@ impl<'ast, 'input, 'arena> MutWalker<'ast, 'arena, Collector<'input, 'arena>> fo
         collector.declare(&interface.name, DeclarationKind::Interface);
     }
 
-    fn walk_in_trait(&mut self, r#trait: &'ast Trait<'arena>, collector: &mut Collector<'input, 'arena>) {
-        collector.declare(&r#trait.name, DeclarationKind::Trait);
-    }
-
     fn walk_in_enum(&mut self, r#enum: &'ast Enum<'arena>, collector: &mut Collector<'input, 'arena>) {
         collector.declare(&r#enum.name, DeclarationKind::Enum);
-    }
-
-    fn walk_in_function(&mut self, function: &'ast Function<'arena>, collector: &mut Collector<'input, 'arena>) {
-        collector.declare(&function.name, DeclarationKind::Function);
-    }
-
-    fn walk_in_constant(&mut self, constant: &'ast Constant<'arena>, collector: &mut Collector<'input, 'arena>) {
-        for item in &constant.items {
-            collector.declare(&item.name, DeclarationKind::Constant);
-        }
     }
 
     /// A module's name is its namespace's `Module` class-like, which the file declares by its name.

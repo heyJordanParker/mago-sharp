@@ -35,7 +35,7 @@ use crate::translate::Translation;
 use crate::translate::names;
 
 /// The folder Composer installs packages into. Mago never writes a proof there.
-const VENDOR: &[u8] = b"vendor/";
+pub(crate) const VENDOR: &[u8] = b"vendor/";
 
 /// The comment above a proof Lean's steps did not find.
 const NO_PROOF_FOUND: &str = "-- PHP#: no automatic proof found";
@@ -69,9 +69,11 @@ impl Lean {
     ///
     /// A file whose `.sharpc` is current is proved: the `.sharpc` lists its proof file and every source its laws reach
     /// as inputs, and the build ID it records covers the runtime library. Every rule runs over every file's facts
-    /// whenever one `.sharpc` is not current, so a compile checks every rule exactly. No Lean process starts when no
-    /// file states a law or has a proof file and no `Module.lean` holds rules, nor when each `.sharpc` is current. When
-    /// no law, proof file or `Module.lean` remains, `.sharp/.lean/` is deleted.
+    /// whenever one `.sharpc` is not current, so a compile checks every rule exactly, and every Lean file of a PSR-4
+    /// folder that no Lean file imports is built then too, so a `@[rule]` outside a `Module.lean` is an error. A
+    /// `Module.lean` in no PSR-4 folder refuses each file under its folder. No Lean process starts when no file states
+    /// a law or has a proof file and no workspace Lean file is left to build, nor when each `.sharpc` is current. When
+    /// none of those remains, `.sharp/.lean/` is deleted.
     ///
     /// # Errors
     ///
@@ -101,8 +103,17 @@ impl Lean {
             }
         }
         let roots = self.roots(translations.iter())?;
-        let rules = rules::find(&self.root, &roots, &translations);
-        if candidates.is_empty() && rules.is_empty() {
+        let (files, unnamed) = rules::find(&self.root, &roots, &translations)?;
+        for path in &unnamed {
+            let folder = path.strip_suffix("Module.lean").unwrap_or(path).as_bytes();
+            for translation in translations
+                .iter()
+                .filter(|translation| translation.name.starts_with(folder) && !translation.name.starts_with(VENDOR))
+            {
+                report(&mut issues, translation, issues::no_rules_module(translation.facts.anchor, path));
+            }
+        }
+        if candidates.is_empty() && files.is_empty() {
             match fs::remove_dir_all(&package.directory) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
                 _ => return Ok(issues),
@@ -115,7 +126,7 @@ impl Lean {
                 stale.push(candidate);
             }
         }
-        let check_rules = !rules.is_empty() && (!stale.is_empty() || self.any_stale(&translations)?);
+        let check_rules = !files.is_empty() && (!stale.is_empty() || self.any_stale(&translations)?);
         if stale.is_empty() && !check_rules {
             return Ok(issues);
         }
@@ -162,7 +173,7 @@ impl Lean {
             let mut waiting: Vec<(&Translation, Span)> =
                 work.iter().filter_map(|item| Some((item.translation, anchor(item.translation)?))).collect();
             for translation in &translations {
-                let judged = check_rules && rules.iter().any(|rules| rules::judges(rules, translation));
+                let judged = check_rules && files.iter().any(|file| rules::judges(file, translation));
                 if judged && !waiting.iter().any(|(waiting, _)| waiting.file == translation.file) {
                     waiting.push((translation, translation.facts.anchor));
                 }
@@ -180,14 +191,14 @@ impl Lean {
         let library = library::build()?;
         let modules = program.modules(
             &work.iter().map(|item| item.translation.file).collect::<Vec<_>>(),
-            &rules.iter().map(|rules| rules.module.as_str()).collect::<Vec<_>>(),
+            &files.iter().map(|file| file.module.as_str()).collect::<Vec<_>>(),
         );
         package.write(&library, &roots, &modules)?;
         if !work.is_empty() {
             self.prove(&package, &library, &program, &modules, work, &mut issues)?;
         }
         if check_rules {
-            rules::check(&self.root, &library, &package, &rules, &translations, &mut issues)?;
+            rules::check(&self.root, &roots, &library, &package, &files, &translations, &mut issues)?;
         }
 
         Ok(issues)

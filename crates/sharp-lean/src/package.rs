@@ -154,11 +154,11 @@ impl<'program> Program<'program> {
     }
 
     /// The generated module of each translation that names one and declares something or is in `proved`, whose proof
-    /// file imports it, and an empty one for each of `rules`, the modules of the `Module.lean` files, that no
-    /// translation names. A declaration that cannot be written to Lean is left out. Files whose declarations use each
-    /// other form one group, whose declarations all live in the module that sorts first; each other module of the
-    /// group imports it, so no two modules import each other, as Lean requires.
-    pub(crate) fn modules(&self, proved: &[FileId], rules: &[&str]) -> Vec<Module> {
+    /// file imports it, and an empty one for each of `workspace`, the modules of the workspace Lean files the structure
+    /// rules step builds, that no translation names. A declaration that cannot be written to Lean is left out. Files
+    /// whose declarations use each other form one group, whose declarations all live in the module that sorts first;
+    /// each other module of the group imports it, so no two modules import each other, as Lean requires.
+    pub(crate) fn modules(&self, proved: &[FileId], workspace: &[&str]) -> Vec<Module> {
         let sound: HashSet<&str> =
             self.declarations.keys().copied().filter(|key| self.problems(key).is_empty()).collect();
 
@@ -228,8 +228,8 @@ impl<'program> Program<'program> {
             }
             modules.push(Module { name: host.clone(), host, text });
         }
-        for rules in rules {
-            let name = format!("Code.{rules}");
+        for module in workspace {
+            let name = format!("Code.{module}");
             if !modules.iter().any(|module| module.name == name) {
                 modules.push(Module { name: name.clone(), host: name, text: format!("{HEADER}open Sharp\n") });
             }
@@ -525,7 +525,7 @@ impl Package {
 
 /// The roots that get a link: each with a namespace, apart from one whose link would sit inside another's, since that
 /// link would be written into the linked folder of the project.
-fn linked_roots(roots: &[Root]) -> Vec<&Root> {
+pub(crate) fn linked_roots(roots: &[Root]) -> Vec<&Root> {
     let mut linked: Vec<&Root> =
         roots.iter().filter(|root| !root.namespace.is_empty() && root.directory.is_dir()).collect();
     linked.sort_by(|a, b| a.namespace.cmp(&b.namespace));

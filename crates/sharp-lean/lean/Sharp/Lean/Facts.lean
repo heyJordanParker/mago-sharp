@@ -23,12 +23,8 @@ structure Location where
   endColumn : Nat
   deriving Repr, DecidableEq, Inhabited
 
-inductive SymbolKind where
-  | classLike | function | constant
-  deriving Repr, DecidableEq, Inhabited
-
 inductive DeclarationKind where
-  | «class» | interface | «trait» | «enum» | function | constant
+  | «class» | interface | «enum»
   deriving Repr, DecidableEq, Inhabited
 
 structure Declaration where
@@ -42,9 +38,8 @@ structure Declaration where
 structure Import where
   /-- The namespace whose code holds the import. "" is the global namespace. -/
   namespace_ : String
-  /-- The imported name, fully qualified and dot separated. -/
+  /-- The imported class-like, fully qualified and dot separated. -/
   name : String
-  kind : SymbolKind
   /-- The imported name inside the import. -/
   location : Location
   deriving Repr, DecidableEq, Inhabited
@@ -159,9 +154,11 @@ def Rule.importsIn (breaks : (ns : String) → Graph → Import → Bool) : Rule
 def Rule.neverImports (forbidden : String) : Rule :=
   .imports fun _ i => under i.name forbidden
 
-/-- Breaks every import of a name outside the rule's own namespace and outside every namespace in `allowed`. -/
+/-- Breaks every import of a name outside the rule's own namespace, outside every namespace in `allowed`, and outside
+`Sharp`: the standard library is always in reach, as a language's standard library is. `neverImports` still forbids a
+part of it. -/
 def Rule.importsOnly (allowed : List String) : Rule :=
-  .imports fun ns i => !under i.name ns && !allowed.any (under i.name ·)
+  .imports fun ns i => !(ns :: "Sharp" :: allowed).any (under i.name ·)
 
 /-- Breaks every import whose edge lies on a cycle of the namespace import graph. -/
 def Rule.noImportCycles : Rule :=

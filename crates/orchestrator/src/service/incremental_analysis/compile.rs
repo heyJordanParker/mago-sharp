@@ -40,7 +40,6 @@ use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_lean::Reach;
 use mago_sharp_lean::Translation;
 use mago_sharp_lean::proof_file;
-use mago_sharp_lean::rules_files;
 use mago_sharp_lean::translate;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file_with_settings;
@@ -83,7 +82,7 @@ impl IncrementalAnalysisService {
     /// file's own inputs.
     ///
     /// A file that states a law also lists its proof file and every source its laws reach. A file outside `vendor/`
-    /// lists the `Module.lean` of its folder and of each folder above it, whose structure rules may judge it. `check`
+    /// lists the workspace-relative Lean files `rules` gives for its name, whose structure rules may judge it. `check`
     /// gets the Lean translation of every accepted file and returns the issues of each file whose law is not proved
     /// or that breaks a structure rule, which refuse that file whatever pragma, ignore entry or baseline the analysis
     /// honors. It runs before any input is stamped, so a proof file it creates is stamped present.
@@ -94,11 +93,12 @@ impl IncrementalAnalysisService {
     ///
     /// # Errors
     ///
-    /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `stamp` or
-    /// `check` fails.
+    /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `stamp`, `rules`
+    /// or `check` fails.
     pub fn compile(
         &mut self,
         mut stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
+        mut rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
         check: impl FnOnce(Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
         if !self.initialized {
@@ -188,14 +188,18 @@ impl IncrementalAnalysisService {
             sources.insert(file.id);
 
             let proof = (!reach.files(file.id).is_empty() && is_source(file)).then(|| proof_file(&file.name));
-            let rules = if is_source(file) { rules_files(&file.name) } else { Vec::new() };
+            let lean = if is_source(file) {
+                rules(&file.name).map_err(mago_database::error::DatabaseError::from)?
+            } else {
+                Vec::new()
+            };
             let mut paths: Vec<Vec<u8>> = sources
                 .into_iter()
                 .filter_map(|source| self.database.get(&source).ok())
                 .filter(|source| source.id == file.id || is_source(source))
                 .map(|source| source.name.to_vec())
                 .chain(proof)
-                .chain(rules)
+                .chain(lean)
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .collect();
             paths.sort_unstable();
@@ -676,6 +680,12 @@ mod tests {
         }
     }
 
+    /// The Lean files whose structure rules may judge the file `name`, as `mago compile` lists them, in a workspace whose
+    /// folders hold no Lean file.
+    fn module_leans(name: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
+        mago_sharp_lean::rules_files(Path::new("/project"), name)
+    }
+
     /// Proves every law, as a Lean step that refuses nothing.
     fn proved(_: Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>> {
         Ok(HashMap::default())
@@ -686,7 +696,7 @@ mod tests {
         service: &mut IncrementalAnalysisService,
         stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
     ) -> std::collections::BTreeMap<String, Compilation> {
-        let compiled = service.compile(stamp, proved).expect("the compile runs");
+        let compiled = service.compile(stamp, module_leans, proved).expect("the compile runs");
         let database = service.database();
 
         compiled
@@ -753,7 +763,7 @@ mod tests {
         let database = project(&[("app/Order.sharp", ORDER)]);
         let mut service = analyzed(&database);
 
-        let compiled = service.compile(empty_stamp, proved).expect("the compile runs");
+        let compiled = service.compile(empty_stamp, module_leans, proved).expect("the compile runs");
 
         assert_eq!(compiled.len(), 1, "{compiled:?}");
         let (file_id, Compilation::Accepted(bytes)) = &compiled[0] else {
@@ -1455,6 +1465,7 @@ mod tests {
                     let present = path != b"app/Shared/Money.lean" || created.get();
                     Ok(present.then(|| Input { path: path.to_vec(), size: 1, mtime_ns: 0, hash: [1; 16] }))
                 },
+                module_leans,
                 |translations| {
                     assert_eq!(translations.len(), 4);
                     created.set(true);
@@ -1479,7 +1490,7 @@ mod tests {
         let money = FileId::new(b"app/Shared/Money.sharp");
 
         let compiled = service
-            .compile(empty_stamp, |_| {
+            .compile(empty_stamp, module_leans, |_| {
                 let mut issues = IssueCollection::default();
                 issues.push(Issue::error("Law addKeepsCurrency is not proven."));
                 Ok(HashMap::from_iter([(money, issues)]))
@@ -1503,7 +1514,7 @@ mod tests {
         let mut service = analyzed(&database);
 
         let error = service
-            .compile(empty_stamp, |_| Err(std::io::Error::other("lake crashed")))
+            .compile(empty_stamp, module_leans, |_| Err(std::io::Error::other("lake crashed")))
             .expect_err("the Lean step failed");
 
         assert_eq!(error.to_string(), "The Lean step failed: lake crashed.");

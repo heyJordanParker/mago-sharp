@@ -111,18 +111,21 @@ impl Server {
 
     /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file, or the errors that
     /// refuse it. `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or
-    /// none when no file is there. `check` gets the Lean translation of every accepted file and returns the issues
-    /// of each file whose law is not proved or that breaks a structure rule.
+    /// none when no file is there. `rules` gives the workspace-relative Lean files whose structure rules may judge the
+    /// `.sharp` file at a workspace-relative path. `check` gets the Lean translation of every accepted file and
+    /// returns the issues of each file whose law is not proved or that breaks a structure rule.
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `stamp` or `check` fails.
+    /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `stamp`, `rules` or `check`
+    /// fails.
     pub fn compile(
         &mut self,
         stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
+        rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
         check: impl FnOnce(Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
     ) -> Result<Vec<(FileId, Compilation)>, ServerError> {
-        self.service.compile(stamp, check).map_err(ServerError::from)
+        self.service.compile(stamp, rules, check).map_err(ServerError::from)
     }
 
     /// Run one analysis pass with the node-analysis hooks only in the scope's files, and report

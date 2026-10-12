@@ -217,19 +217,13 @@ def location (file : String) : Decode Location :=
 
 def declarationKind : Decode DeclarationKind := do
   match ← u8 with
-  | 0 => return .class | 1 => return .interface | 2 => return .trait
-  | 3 => return .enum | 4 => return .function | 5 => return .constant
+  | 0 => return .class | 1 => return .interface | 2 => return .enum
   | k => throw s!"unknown declaration kind {k}"
-
-def symbolKind : Decode SymbolKind := do
-  match ← u8 with
-  | 0 => return .classLike | 1 => return .function | 2 => return .constant
-  | k => throw s!"unknown symbol kind {k}"
 
 def fact (path : String) : Decode Fact := do
   match ← u8 with
   | 0 => return .declaration ⟨← string, ← declarationKind, ← location path⟩
-  | 1 => return .import ⟨← string, ← string, ← symbolKind, ← location path⟩
+  | 1 => return .import ⟨← string, ← string, ← location path⟩
   | 2 => return .reference ⟨← string, ← string, ← location path⟩
   | k => throw s!"unknown fact {k}"
 

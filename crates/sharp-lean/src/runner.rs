@@ -227,11 +227,10 @@ fn encode_rules(modules: &[(&str, &str)], files: &[(&str, &Facts)]) -> io::Resul
                     writer.write_string(&fact.name).map_err(io::Error::other)?;
                     writer.write_u8(*kind as u8);
                 }
-                Kind::Import(namespace, kind) => {
+                Kind::Import(namespace) => {
                     writer.write_u8(1);
                     writer.write_string(namespace).map_err(io::Error::other)?;
                     writer.write_string(&fact.name).map_err(io::Error::other)?;
-                    writer.write_u8(*kind as u8);
                 }
                 Kind::Reference(namespace) => {
                     writer.write_u8(2);
