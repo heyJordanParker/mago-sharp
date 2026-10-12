@@ -10535,7 +10535,8 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 
 /// Spec section 15: the interface a family of events shares states the get-only properties each event gives, so an
 /// event or a class that names it and lacks one, or gives one that is not public, on each object and of its type, is
-/// refused, as the engine refuses the class it runs as.
+/// refused, as the engine refuses the class it runs as. A get-only property may give a narrower type, and a PHP
+/// interface's property with `set` takes its type exactly.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : Order.Event;\n");
@@ -10553,9 +10554,17 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         "app/Shop/Kept.sharp",
         "namespace App.Shop;\n\npublic class Kept : Order.Event\n{\n    public static int orderId { get; } = 1;\n}\n",
     );
+    let named = (
+        "src/Shop/Named.php",
+        "<?php\n\nnamespace App\\Shop;\n\ninterface Named\n{\n    public int|string $id { get; set; }\n}\n",
+    );
+    let settable = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag : Named\n{\n    public int id { get; set; } = 0;\n}\n",
+    );
     let given = (
         "app/Shop/Moved.sharp",
-        "namespace App.Shop;\n\npublic event Moved(int orderId) : Order.Event;\n\npublic class Kept : Order.Event\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n",
+        "namespace App.Shop;\n\npublic event Moved(int orderId) : Order.Event;\n\npublic class Kept : Order.Event\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n\npublic interface Priced\n{\n    public int? total { get; }\n}\n\npublic class Bill : Priced\n{\n    public int total { get; }\n\n    public Bill(int total)\n    {\n        this.total = total;\n    }\n}\n",
     );
 
     assert_eq!(issues(event, &[ORDER_EVENTS]), ["3:14 unimplemented-abstract-property-hook"]);
@@ -10582,6 +10591,12 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         worded(shared, &[ORDER_EVENTS]),
         [
             "5:23 incompatible-static-modifier `Kept` gives `orderId` as `static`, and `Order.Event` states it on each object. | Given here. | Stated here. | Remove `static`."
+        ]
+    );
+    assert_eq!(
+        worded(settable, &[named]),
+        [
+            "5:16 incompatible-property-type `Tag` gives `id` as `int`, and `Named` states it as `int|string`. | Given here. | Stated here. | Give `id` the type `int|string`."
         ]
     );
     assert_eq!(worded(given, &[ORDER_EVENTS]), Vec::<String>::new());
