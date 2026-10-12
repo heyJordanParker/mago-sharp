@@ -564,7 +564,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             r#struct.right_brace,
         );
         members.push(self.struct_equality(r#struct.name.span));
-        members.push(self.struct_parse(r#struct.name.span));
+        members.push(self.struct_parse(r#struct));
         members.push(self.struct_try_parse(r#struct.name.span));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None);
@@ -659,7 +659,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// foreach ($properties#4 as $name#6 => $property#7) { $object#5->$name#6 = $property#7; }
     /// return $object#5;
     /// ```
-    fn struct_parse(&mut self, span: Span) -> u32 {
+    fn struct_parse(&mut self, r#struct: &Struct) -> u32 {
+        let span = r#struct.name.span;
         self.enter(b"parse");
         let line = self.line(span);
         let taken = self.temporaries;
@@ -681,7 +682,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let collected = if field.is_parameter { &arguments } else { &properties };
             let target = Place::element(collected, Index::Text(field.name.to_vec()));
             let source = Place::element(&input, Index::Text(field.key.to_vec()));
-            let read = self.parse_field(span, field.r#type, &source, field.key, &target, &fields);
+            let hint = written_hint(&r#struct.members, field.name);
+            let read = self.parse_field(span, field.r#type, hint, &source, field.key, &target, &fields);
             let key = self.string(0, line, field.key);
             let input_read = self.variable(span, &input);
             let present = self.global_call(line, b"array_key_exists", &[key, input_read]);
@@ -798,7 +800,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// the whole value against `r#type`, adding each bad value's problem to `fields` under its path, which starts at
     /// `key`. The walk takes only a struct object where a struct is expected, so where a nested `parse` already moved
     /// its problems under a path, the walk's own problem at that path is dropped. Once the walk accepts the value, each
-    /// `Set` in it holds its elements under their keys. `Any?` takes the value as it is.
+    /// `Set` in it holds its elements under their keys. `Any?` takes the value as it is. `hint` is the type as the
+    /// field writes it, which orders a union of structs.
     ///
     /// ```php
     /// $read#N = $input#1['addresses'];
@@ -808,10 +811,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// foreach ($failed#N as $path#N) { unset($fields#2[$path#N]); }
     /// $arguments#3['addresses'] = $read#N;
     /// ```
+    #[allow(clippy::too_many_arguments)]
     fn parse_field(
         &mut self,
         span: Span,
         r#type: &TUnion,
+        hint: Option<&Hint>,
         source: &Place,
         key: &[u8],
         target: &Place,
@@ -828,7 +833,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let value = self.place(span, source);
         let mut statements = vec![self.assign(span, &Place::variable(&read), value)];
         let mut moves = false;
-        let built = self.parse_build(span, r#type, &read, &[PathPart::Text(key.to_vec())], fields, &failed, &mut moves);
+        let path = [PathPart::Text(key.to_vec())];
+        let built = self.parse_build(span, r#type, hint, &read, &path, fields, &failed, &mut moves);
         if moves {
             let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
             statements.push(self.assign(span, &Place::variable(&failed), empty));
@@ -866,7 +872,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `tryFrom` from its backing value, inside a `List`, `Set` or `Map` element by element. A value that builds
     /// nothing stays as it is, for the walk to report. Where the value can only be the one struct, that struct's
     /// problems move under `path`, which `failed` records, and `moves` becomes true. Where it may be one of several, the
-    /// first that builds is taken.
+    /// first that builds is taken, in the order `hint`, the type as the source writes it, names them, as serde's
+    /// untagged enums try their variants. The checker's union holds its members sorted, so only `hint` keeps that order.
     ///
     /// ```php
     /// if (!$read#N instanceof \App\Address && (\is_array($read#N) || \is_object($read#N))) {
@@ -884,6 +891,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         &mut self,
         span: Span,
         r#type: &TUnion,
+        hint: Option<&Hint>,
         variable: &[u8],
         path: &[PathPart],
         fields: &[u8],
@@ -893,9 +901,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(span);
         let value = Place::variable(variable);
         let members: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
+        let written = hint.map(written_members).unwrap_or_default();
         let mut statements = Vec::new();
 
-        let structs: Vec<&[u8]> = members
+        let mut structs: Vec<&[u8]> = members
             .iter()
             .filter_map(|atomic| match atomic {
                 TAtomic::Object(TObject::Named(object)) if self.types.is_struct(object.name.as_bytes()) => {
@@ -904,6 +913,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 _ => None,
             })
             .collect();
+        structs.sort_by_key(|class| {
+            written.iter().position(
+                |member| matches!(member, Hint::Identifier(name) if self.names.get(name).eq_ignore_ascii_case(class)),
+            )
+        });
         if !structs.is_empty() {
             let readable =
                 [self.global_call_of(span, b"is_array", &value), self.global_call_of(span, b"is_object", &value)];
@@ -971,7 +985,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 &[PathPart::Text(open.to_vec()), PathPart::Variable(key.clone()), PathPart::Text(close.to_vec())],
             ]
             .concat();
-            let mut each = self.parse_build(span, &element_type, &element, &element_path, fields, failed, moves);
+            let element_hint = written.iter().find_map(|member| element_hint(member, array));
+            let mut each =
+                self.parse_build(span, &element_type, element_hint, &element, &element_path, fields, failed, moves);
             let element_read = self.variable(span, &element);
             each.push(self.assign(span, &Place::element(variable, Index::Variable(key.clone())), element_read));
             let each = self.node(SHARP_AST_STMT_LIST, 0, line, &each);
@@ -4243,6 +4259,49 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn line(&self, node: impl HasSpan) -> u32 {
         self.lines.line(node.span().start.offset)
     }
+}
+
+/// The type the struct field `name` writes: its main constructor parameter's, or its property's.
+fn written_hint<'hint, 'arena>(
+    members: &'hint Sequence<'arena, ClassLikeMember<'arena>>,
+    name: &[u8],
+) -> Option<&'hint Hint<'arena>> {
+    let named = |variable: &DirectVariable| variable.name.strip_prefix(b"$").unwrap_or(variable.name) == name;
+
+    members.iter().find_map(|member| match member {
+        ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => method
+            .parameter_list
+            .parameters
+            .iter()
+            .find(|parameter| named(&parameter.variable))
+            .and_then(|parameter| parameter.hint.as_ref()),
+        ClassLikeMember::Property(property) if named(property.first_variable()) => property.hint(),
+        _ => None,
+    })
+}
+
+/// The members of a written type in the order they are written, seen through `?` and parentheses.
+fn written_members<'hint, 'arena>(hint: &'hint Hint<'arena>) -> Vec<&'hint Hint<'arena>> {
+    match hint {
+        Hint::Nullable(nullable) => written_members(nullable.hint),
+        Hint::Parenthesized(parenthesized) => written_members(parenthesized.hint),
+        _ => union_members(hint),
+    }
+}
+
+/// The written element type of `member` when it is the collection `array`: a `List`'s or a `Set`'s one type
+/// argument, or a `Map`'s value type.
+fn element_hint<'hint, 'arena>(member: &'hint Hint<'arena>, array: &TArray) -> Option<&'hint Hint<'arena>> {
+    let Hint::Generic(generic) = member else {
+        return None;
+    };
+    let (name, index): (&[u8], usize) = match array {
+        TArray::List(_) => (b"List", 0),
+        TArray::Set(_) => (b"Set", 0),
+        TArray::Keyed(_) => (b"Map", 1),
+    };
+
+    (generic.name.value == name).then(|| generic.arguments.iter().nth(index)).flatten()
 }
 
 /// The types of a union in the order they are written, or the one type that is not a union. The parser nests a
