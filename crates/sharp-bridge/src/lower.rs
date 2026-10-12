@@ -2764,8 +2764,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ("List" | "Set", b"clear") => {
                 let place = self.read_collection(&mut collection, line, false);
                 match collection {
-                    // The receiver lives nowhere, so clearing it changes nothing anyone reads.
-                    CollectionReceiver::Value(Reread { hidden: None, .. }) => place,
+                    CollectionReceiver::Value(_) => {
+                        unreachable!("the checker refuses a change to a value with no place")
+                    }
                     CollectionReceiver::Index(..) => {
                         let clear = self.string(0, line, b"clear");
                         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
