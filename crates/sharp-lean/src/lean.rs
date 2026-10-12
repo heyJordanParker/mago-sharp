@@ -80,7 +80,7 @@ impl Lean {
     /// Returns an error when a file cannot be read or written, when the runtime library does not build, or when the
     /// runner fails.
     pub fn check(&self, translations: Vec<Translation>) -> io::Result<HashMap<FileId, IssueCollection>> {
-        let package = Package::new(&self.root);
+        let mut package = Package::new(&self.root);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
 
         let mut candidates = Vec::new();
@@ -181,14 +181,15 @@ impl Lean {
             for (translation, span) in waiting {
                 let issue = match &toolchain {
                     Toolchain::Failed(message) => issues::elan_failed(span, message),
-                    _ => issues::lake_not_found(span),
+                    Toolchain::Missing(failure) => issues::lake_not_found(span, failure),
+                    _ => issues::no_elan_build(span),
                 };
                 report(&mut issues, translation, issue);
             }
             return Ok(issues);
         }
 
-        let library = library::build()?;
+        let library = library::build(&package.lake)?;
         let modules = program.modules(
             &work.iter().map(|item| item.translation.file).collect::<Vec<_>>(),
             &files.iter().map(|file| file.module.as_str()).collect::<Vec<_>>(),
@@ -289,7 +290,7 @@ impl Lean {
                     (package::module_name(item.translation), String::new())
                 };
 
-                runner::check(library, &package.directory, &module, &proof_module, &questions)
+                runner::check(library, package, &module, &proof_module, &questions)
             })
             .collect();
 

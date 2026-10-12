@@ -5,7 +5,6 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::str::FromStr;
 
 use foldhash::HashMap;
@@ -21,6 +20,7 @@ use serde::Serialize;
 
 use crate::issues;
 use crate::library;
+use crate::library::Lake;
 use crate::translate::Declaration;
 use crate::translate::Translation;
 use crate::translate::Unmodeled;
@@ -384,39 +384,55 @@ pub(crate) struct Position {
 /// What `lake` answered when asked its version.
 pub(crate) enum Toolchain {
     Ready,
-    /// `lake` is not on the `PATH`.
-    Missing,
+    /// No `lake` is on the `PATH`, and Mago could not install Lean, with what failed.
+    Missing(String),
+    /// No `lake` is on the `PATH`, and elan ships no build for the platform Mago is built for.
+    Unsupported,
     /// elan could not install the pinned Lean version, with its message.
     Failed(String),
 }
 
-/// The package in `.sharp/.lean/` under a workspace root.
+/// The package in `.sharp/.lean/` under a workspace root, and the `lake` that builds it.
 pub(crate) struct Package {
     pub(crate) directory: PathBuf,
+    pub(crate) lake: Lake,
 }
 
 impl Package {
-    /// The package of the workspace at `root`, in `.sharp/.lean/` apart from the `.sharpc` mirror of the sources. The
-    /// folder is joined one name at a time, since `cmd` reads a `/` in a Windows path as a switch.
+    /// The package of the workspace at `root`, in `.sharp/.lean/` apart from the `.sharpc` mirror of the sources, built
+    /// by the `lake` on the `PATH`. The folder is joined one name at a time, since `cmd` reads a `/` in a Windows path
+    /// as a switch.
     pub(crate) fn new(root: &Path) -> Self {
-        Self { directory: plain(root).join(COMPILED_FOLDER).join(PACKAGE_FOLDER) }
+        Self { directory: plain(root).join(COMPILED_FOLDER).join(PACKAGE_FOLDER), lake: Lake::on_path() }
     }
 
-    /// Writes the package's Lean version, so elan installs it on first use, and asks `lake` for its version there.
-    pub(crate) fn toolchain(&self) -> io::Result<Toolchain> {
+    /// Writes the package's Lean version, so elan installs it on first use, and asks `lake` for its version there. With
+    /// no `lake` on the `PATH`, the package is built by the `lake` of the elan Mago installs in its cache folder.
+    pub(crate) fn toolchain(&mut self) -> io::Result<Toolchain> {
         fs::create_dir_all(&self.directory)?;
         write_if_changed(&self.directory.join("lean-toolchain"), library::TOOLCHAIN.as_bytes())?;
 
-        match Command::new("lake").arg("--version").current_dir(&self.directory).output() {
-            Ok(output) if output.status.success() => Ok(Toolchain::Ready),
-            Ok(output) => Ok(Toolchain::Failed(
+        let output = match self.lake.command().arg("--version").current_dir(&self.directory).output() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.lake = match library::install() {
+                    Ok(Some(lake)) => lake,
+                    Ok(None) => return Ok(Toolchain::Unsupported),
+                    Err(error) => return Ok(Toolchain::Missing(error.to_string())),
+                };
+                self.lake.command().arg("--version").current_dir(&self.directory).output()?
+            }
+            output => output?,
+        };
+
+        Ok(if output.status.success() {
+            Toolchain::Ready
+        } else {
+            Toolchain::Failed(
                 format!("{}{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout))
                     .trim()
                     .to_owned(),
-            )),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Toolchain::Missing),
-            Err(error) => Err(error),
-        }
+            )
+        })
     }
 
     /// Writes `lakefile.toml`, which requires the runtime library by path, each generated module whose bytes changed,
@@ -487,7 +503,7 @@ impl Package {
     }
 
     fn lake_build(&self, modules: &[String]) -> io::Result<Result<(), String>> {
-        let output = Command::new("lake").arg("build").args(modules).current_dir(&self.directory).output()?;
+        let output = self.lake.command().arg("build").args(modules).current_dir(&self.directory).output()?;
 
         Ok(if output.status.success() {
             Ok(())
@@ -500,7 +516,7 @@ impl Package {
     /// `lake env lean --json`: Lake's own log keeps a message's position only inside its text.
     pub(crate) fn errors(&self, source: &Path) -> io::Result<Vec<Message>> {
         let output =
-            Command::new("lake").args(["env", "lean", "--json"]).arg(source).current_dir(&self.directory).output()?;
+            self.lake.command().args(["env", "lean", "--json"]).arg(source).current_dir(&self.directory).output()?;
 
         let mut errors = Vec::new();
         for line in String::from_utf8_lossy(&output.stdout).lines().filter(|line| line.starts_with('{')) {
@@ -605,7 +621,8 @@ fn link_directory(target: &Path, link: &Path) -> io::Result<()> {
 /// A directory junction, which Windows lets every user create, unlike a symbolic link.
 #[cfg(windows)]
 fn link_directory(target: &Path, link: &Path) -> io::Result<()> {
-    let output = Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(link).arg(plain(target)).output()?;
+    let output =
+        std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(link).arg(plain(target)).output()?;
     if output.status.success() {
         return Ok(());
     }

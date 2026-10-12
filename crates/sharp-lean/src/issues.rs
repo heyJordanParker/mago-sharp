@@ -226,10 +226,23 @@ pub(crate) fn no_rules_module(span: Span, rules: &str) -> Issue {
     .with_annotation(Annotation::primary(span))
 }
 
-pub(crate) fn lake_not_found(span: Span) -> Issue {
-    Issue::error(
-        "Laws and structure rules need Lean 4.34.1, and lake was not found. Install elan from https://lean-lang.org/install, then run vendor/bin/mago compile again.",
-    )
+/// No `lake` is on the `PATH`, and Mago could not install Lean, with what failed.
+pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
+    Issue::error(format!(
+        "Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {failure}. Run vendor/bin/mago compile again to retry."
+    ))
+    .with_code(IssueCode::MissingLean.as_str())
+    .with_annotation(Annotation::primary(span))
+}
+
+/// No `lake` is on the `PATH`, on a platform elan ships no build for, so Mago cannot install Lean.
+pub(crate) fn no_elan_build(span: Span) -> Issue {
+    let libc = if cfg!(target_env = "musl") { " with musl" } else { "" };
+    let platform = format!("{} {}{libc}", std::env::consts::OS, std::env::consts::ARCH);
+
+    Issue::error(format!(
+        "Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. Mago installs Lean with elan, which ships no build for {platform}. Install elan where it runs with `curl https://elan.lean-lang.org/elan-init.sh -sSf | sh`, then run vendor/bin/mago compile again."
+    ))
     .with_code(IssueCode::MissingLean.as_str())
     .with_annotation(Annotation::primary(span))
 }
