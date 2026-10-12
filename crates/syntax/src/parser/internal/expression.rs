@@ -22,6 +22,7 @@ use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FunctionCall;
 use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::Instantiation;
 use crate::cst::cst::MethodCall;
 use crate::cst::cst::MethodPartialApplication;
 use crate::cst::cst::NullSafeMethodCall;
@@ -260,25 +261,20 @@ where
             return self.parse_arrow_function_or_closure();
         }
 
-        // `new Report.fromJson(…)` calls a named constructor, spec section 9.1: in PHP# a name after `new` is a class,
-        // so a `.` after it names the constructor. It parses whole as one error, and its value is the error expression.
+        // In PHP# a name after `new` is a class, so a `.` after it names either a type nested in the class,
+        // `new Order.Paid(…)` in spec section 15, or a named constructor, `new Report.fromJson(…)` in section 9.1.
+        // Only the class's declaration tells them apart, so the name parses as one dotted name.
         if self.dialect.is_sharp()
             && token.kind == T!["new"]
             && next == Some(T![Identifier])
             && self.stream.peek_kind(2)? == Some(T!["."])
             && self.stream.peek_kind(3)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
         {
-            let new = self.stream.consume_span()?;
-            let class = self.parse_local_identifier()?;
-            self.stream.consume()?;
-            let name = self.parse_local_identifier()?;
-            let end = match self.parse_optional_argument_list()? {
-                Some(arguments) => arguments.span(),
-                None => name.span,
-            };
-            self.errors.push(ParseError::NotSupportedYetInSharp("A named constructor", class.span.join(name.span)));
-
-            return Ok(self.arena.alloc(Expression::Error(new.join(end))));
+            return Ok(self.arena.alloc(Expression::Instantiation(Instantiation {
+                new: self.expect_any_keyword()?,
+                class: self.arena.alloc(Expression::Identifier(self.parse_dotted_identifier()?)),
+                argument_list: self.parse_optional_argument_list()?,
+            })));
         }
 
         if self.is_at_type_of()? {

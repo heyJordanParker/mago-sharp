@@ -40,6 +40,16 @@ where
         })
     }
 
+    /// Parses a class name where a type goes. In PHP# a type nested in a class is written with a dot, `Order.Paid`, as
+    /// spec section 15 writes it.
+    pub(crate) fn parse_type_name(&mut self) -> Result<Identifier<'arena>, ParseError> {
+        if self.dialect.is_sharp() && self.stream.peek_kind(0)? == Some(T![Identifier]) {
+            return self.parse_dotted_identifier();
+        }
+
+        self.parse_identifier()
+    }
+
     /// Parses a PHP# name for a `namespace` or `import` line, such as `App.Tenant.Store`.
     ///
     /// A `.` joins two parts only when it touches both of them, so the name's value is its source text.

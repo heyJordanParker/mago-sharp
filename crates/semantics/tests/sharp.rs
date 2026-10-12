@@ -112,6 +112,58 @@ fn an_extern_uses_only_effects() {
     assert_eq!(issues(class), [format!("6:21 `Order` {NOT_AN_EFFECT}")]);
 }
 
+/// `extern event` marks a plain PHP class as an event, spec section 15, so it names a class. Its `uses` is not
+/// supported yet.
+#[test]
+fn an_extern_event_names_a_class_without_uses() {
+    let code = "namespace App.Stubs;\n\nimport Carbon.Carbon;\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed;\nextern event JobFailed uses Database;\nextern event Carbon.now;\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:24 An `extern event` with `uses` is not supported yet in PHP#.",
+            "8:14 An `extern event` names a class, and `Carbon.now` names a member."
+        ]
+    );
+}
+
+/// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
+/// `public`, and each parameter is a type, a name and an optional default.
+#[test]
+fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
+    let code = "namespace App.Shop;\n\npublic class Order\n{\n    private event Hidden(int id);\n    static event Shared(int id);\n    public event Typed(public int id, int ...rest);\n    public event Tagged(Set<string> tags);\n    [Logged] public event Noted(int id);\n    public event Tracked(int id { get; });\n    public event Maybe(int id, Set<int>? tags);\n    public event Paid(int orderId, string note = \"\") : Placed;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:5 An event takes only `public`.",
+            "6:5 An event takes only `public`.",
+            "7:24 An event's parameter takes no modifier: it is a public get-only property of the event.",
+            "7:43 An event's parameter cannot be variadic: it is one property of the event.",
+            "8:25 A `Set` parameter of an event is not supported yet in PHP#.",
+            "9:5 This construct is not supported yet in PHP#.",
+            "10:33 An event's parameter takes no accessors: it is a get-only property of the event.",
+            "11:32 A `Set` parameter of an event is not supported yet in PHP#."
+        ]
+    );
+}
+
+/// Spec section 15 nests an event or an interface in a class, and nothing else nests a type: an interface, an enum or
+/// a nested interface holds neither.
+#[test]
+fn only_events_and_interfaces_nest_in_a_class() {
+    let code = "namespace App.Shop;\n\npublic class Order\n{\n    public interface Event\n    {\n        public int orderId { get; }\n\n        public event Inside(int id);\n    }\n\n    public event Paid(int orderId) : Event;\n}\n\npublic interface Priced\n{\n    public interface Rated { }\n}\n\npublic enum Status\n{\n    case Open;\n\n    public event Opened(int id);\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "9:9 This class member is not supported yet in PHP#.",
+            "17:5 This class member is not supported yet in PHP#.",
+            "24:5 This class member is not supported yet in PHP#."
+        ]
+    );
+}
+
 /// An import of a class named like an effect shadows the effect, spec section 23, so the refusal names the imported
 /// class and the import that frees the name. A class the file declares under that name keeps the plain refusal.
 #[test]
@@ -972,16 +1024,20 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
     );
 }
 
+/// An interface states a `public` get-only property its classes give, as `Order.Event` states the `orderId` its events
+/// give, spec section 15. A `set` accessor or an accessor body is not supported yet, and PHP's own check asks for
+/// `public`.
 #[test]
-fn an_interface_property_is_not_supported_yet_with_or_without_accessor_bodies() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    public string name { get; }\n    public string label { get => \"label\"; }\n}\n";
+fn an_interface_property_is_public_and_get_only() {
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    public string name { get; }\n    public string label { get => \"label\"; }\n    public string title { get; set; }\n    string code { get; }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "6:31 Interface virtual property `Named.label` must be abstract.",
-            "5:5 This class member is not supported yet in PHP#.",
-            "6:5 This class member is not supported yet in PHP#."
+            "8:5 Interface virtual property `Named.code` must be declared public.",
+            "6:5 This class member is not supported yet in PHP#.",
+            "7:5 This class member is not supported yet in PHP#."
         ]
     );
 
@@ -1247,19 +1303,22 @@ fn a_clashing_import_is_helped_with_the_import_renamed() {
 }
 
 /// Spec section 24 capitalizes every type but the built-in ones, and the parser reads a capitalized name before `<` as
-/// a type with type arguments. So a class, an interface and an enum start with a capital letter.
+/// a type with type arguments. So a class, an interface, an enum and an event start with a capital letter.
 #[test]
 fn a_class_interface_or_enum_name_starts_with_a_capital_letter() {
-    let lowercase =
-        "namespace App.Tenant;\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n";
-    let capitalized =
-        "namespace App.Tenant;\n\nclass Box\n{\n}\n\ninterface Priced\n{\n}\n\nenum Status\n{\n    case Open;\n}\n";
+    let lowercase = "namespace App.Tenant;\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n\nevent paid(int id);\n";
+    let capitalized = "namespace App.Tenant;\n\nclass Box\n{\n}\n\ninterface Priced\n{\n}\n\nenum Status\n{\n    case Open;\n}\n\nevent Paid(int id);\n";
     let rule =
         "must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones.";
 
     assert_eq!(
         issues(lowercase),
-        [format!("3:7 `box` {rule}"), format!("7:11 `priced` {rule}"), format!("11:6 `status` {rule}")]
+        [
+            format!("3:7 `box` {rule}"),
+            format!("7:11 `priced` {rule}"),
+            format!("11:6 `status` {rule}"),
+            format!("16:7 `paid` {rule}")
+        ]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
 }

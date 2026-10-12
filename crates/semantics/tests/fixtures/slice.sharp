@@ -422,3 +422,19 @@ public static class Slug
 
     public static string join(string title) => title + Slug.SEPARATOR;
 }
+
+public class Order
+{
+    public interface Event
+    {
+        public int orderId { get; }
+    }
+
+    public event Paid(int orderId, int amount = 0) : Event;
+
+    public Order.Paid pay(int orderId) => new Order.Paid(orderId);
+
+    public int amountOf(Paid paid) => paid.amount;
+}
+
+public event Shipped(int shipmentId);

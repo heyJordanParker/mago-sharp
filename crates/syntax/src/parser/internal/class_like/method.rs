@@ -46,8 +46,10 @@ where
     /// The type is parsed once, and the name after it decides: a name followed by `(` makes a method, anything else
     /// a field. A type has no length limit, so no fixed lookahead can decide before it. A PHP property, which starts
     /// with `var` or a `$` variable, still parses so the rest of the class does, and its PHP syntax is an error. So do
-    /// a named constructor and `required` on any member but the constructor, which are one "not supported yet" error
-    /// each.
+    /// a named constructor, a nested class, enum or trait, and `required` on any member but the constructor, which are
+    /// one "not supported yet" error each.
+    ///
+    /// An event and an interface nest in a class, spec section 15.
     pub(crate) fn parse_sharp_member_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -57,6 +59,32 @@ where
             return Ok(ClassLikeMember::Property(
                 self.parse_property_with_attributes_and_modifiers(attributes, modifiers)?,
             ));
+        }
+        if self.is_at_event()? {
+            return Ok(ClassLikeMember::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
+        }
+        match self.stream.peek_kind(0)? {
+            Some(T!["interface"]) => {
+                return Ok(ClassLikeMember::Interface(
+                    self.parse_interface_with_attributes_and_modifiers(attributes, modifiers)?,
+                ));
+            }
+            Some(T!["class"]) => {
+                let class = self.parse_class_with_attributes_and_modifiers(attributes, modifiers)?;
+
+                return Err(ParseError::NotSupportedYetInSharp("A nested class", class.span()));
+            }
+            Some(T!["enum"]) => {
+                let r#enum = self.parse_enum_with_attributes_and_modifiers(attributes, modifiers)?;
+
+                return Err(ParseError::NotSupportedYetInSharp("A nested enum", r#enum.span()));
+            }
+            Some(T!["trait"]) => {
+                let r#trait = self.parse_trait_with_attributes_and_modifiers(attributes, modifiers)?;
+
+                return Err(ParseError::NotSupportedYetInSharp("A nested trait", r#trait.span()));
+            }
+            _ => {}
         }
 
         // `required` or `extern` written before any other modifier starts the member's modifiers.
@@ -73,13 +101,11 @@ where
 
         let hint = self.parse_type_hint()?;
         // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1, parses whole
-        // and is left out of the class, which parses on.
-        if let Hint::Identifier(Identifier::Local(class)) = hint
-            && self.stream.is_at(T!["."])?
-            && self.stream.peek_kind(2)? == Some(T!["("])
+        // and is left out of the class, which parses on. Its name reads as a nested type's, until `(` follows it.
+        if let Hint::Identifier(Identifier::Dotted(name)) = hint
+            && self.stream.is_at(T!["("])?
         {
-            self.stream.consume()?;
-            let name = class.span.join(self.parse_local_identifier()?.span);
+            let name = name.span;
             self.parse_function_like_parameter_list()?;
             if self.stream.is_at(T![":"])? {
                 self.stream.consume()?;

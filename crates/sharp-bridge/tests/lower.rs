@@ -438,12 +438,16 @@ fn a_file_declares_strict_types_then_its_namespace_and_classes() {
 /// An `extern` declaration only tells the checker what plain PHP does, so the engine gets the same tree without it.
 #[test]
 fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them() {
-    let library = [("vendor/acme/Mailer.php", "<?php\n\nnamespace Acme;\n\nclass Mailer\n{\n}\n")];
+    let library =
+        [("vendor/acme/Mailer.php", "<?php\n\nnamespace Acme;\n\nclass Mailer\n{\n}\n\nclass Failed\n{\n}\n")];
     let with = Lowered::with(
-        "namespace App.Tenant;\n\nimport Acme.Mailer;\n\nextern Mailer uses Mail, Http;\nextern trim;\n\nclass Report\n{\n}\n",
+        "namespace App.Tenant;\n\nimport Acme.Failed;\nimport Acme.Mailer;\n\nextern Mailer uses Mail, Http;\nextern trim;\nextern event Failed;\n\nclass Report\n{\n}\n",
         &library,
     );
-    let without = Lowered::with("namespace App.Tenant;\n\nimport Acme.Mailer;\n\n\n\n\nclass Report\n{\n}\n", &library);
+    let without = Lowered::with(
+        "namespace App.Tenant;\n\nimport Acme.Failed;\nimport Acme.Mailer;\n\n\n\n\n\nclass Report\n{\n}\n",
+        &library,
+    );
 
     assert_eq!(with.tree(), without.tree());
 }
@@ -4538,6 +4542,146 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
                 NAME_LIST
                   ZVAL "App\\Tenant\\Linkable"
                 STMT_LIST
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// final class Shipped
+/// {
+///     public function __construct(public readonly int $shipmentId) {}
+/// }
+/// class Order
+/// {
+///     public function pay(int $orderId): \App\Order\Paid { return new \App\Order\Paid($orderId); }
+/// }
+/// interface Order\Event
+/// {
+///     public int $orderId { get; }
+/// }
+/// final class Order\Paid implements \App\Order\Event
+/// {
+///     public function __construct(public readonly int $orderId, public readonly int $amount = 0) {}
+/// }
+/// ```
+///
+/// Spec section 15: an event is a final class, `[32]` `ZEND_ACC_FINAL`, whose constructor promotes each parameter to a
+/// public get-only property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and its header is the `implements` name
+/// list. A type nested in a class is declared after it, under the class's name, as `Order\Paid`, which the engine
+/// declares in the namespace, and an interface's get-only property is a public property, `[1]`, with an abstract
+/// `get` hook. A dotted type names the nested type in full.
+#[test]
+fn an_event_is_a_final_class_and_a_nested_type_is_declared_after_its_class() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic event Shipped(int shipmentId);\n\npublic class Order\n{\n    public interface Event\n    {\n        public int orderId { get; }\n    }\n\n    public event Paid(int orderId, int amount = 0) : Event;\n\n    public Order.Paid pay(int orderId) => new Paid(orderId);\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [32] "Shipped" @3-3
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "__construct" @3-3
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "shipmentId"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                null
+                null
+              CLASS "Order" @5-15
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "pay" @14-14
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "int"
+                        ZVAL "orderId"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        NEW
+                          ZVAL "App\\Order\\Paid"
+                          ARG_LIST
+                            VAR
+                              ZVAL "orderId"
+                    ZVAL "App\\Order\\Paid"
+                    null
+                null
+                null
+              CLASS [1] "Order\\Event" @7-10
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [1]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "orderId"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @9-9
+                            null
+                            null
+                            null
+                            null
+                            null
+                    null
+                null
+                null
+              CLASS [32] "Order\\Paid" @12-12
+                null
+                NAME_LIST
+                  ZVAL "App\\Order\\Event"
+                STMT_LIST
+                  METHOD [1] "__construct" @12-12
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "orderId"
+                        null
+                        null
+                        null
+                        null
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "amount"
+                        ZVAL 0
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
                 null
                 null
         "#}

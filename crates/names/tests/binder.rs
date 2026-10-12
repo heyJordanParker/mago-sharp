@@ -480,6 +480,29 @@ fn an_extern_target_binds_an_imported_class_and_keeps_its_member_name() {
     assert_eq!(resolved(&names, CODE, "StripeClient uses", 0), b"Stripe\\StripeClient");
 }
 
+/// Spec section 15 nests an event or an interface in a class, as `Order.Paid`. Inside the class a bare name is its
+/// nested type first, even beside a top-level type of the same name, as C# looks up a nested type. Outside it, the
+/// dotted name resolves through the class's own resolution, an import among them.
+#[test]
+fn a_nested_type_resolves_inside_its_class_first() {
+    const CODE: &str = "namespace App;\n\nimport App.Shop.Cart;\n\npublic class Order\n{\n    public event Paid(int orderId) : Event;\n\n    public interface Event { }\n\n    public Paid make() => new Paid(1);\n}\n\npublic event Paid(int id);\n\npublic class Audit\n{\n    public Order.Paid read(Order.Event e, Cart.Line line) => new Order.Paid(2);\n\n    public Paid other() => new Paid(3);\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(resolved(&names, CODE, "Paid(int orderId)", 0), b"App\\Order\\Paid");
+    assert_eq!(resolved(&names, CODE, "Event;", 0), b"App\\Order\\Event");
+    assert_eq!(resolved(&names, CODE, "Event { }", 0), b"App\\Order\\Event");
+    assert_eq!(resolved(&names, CODE, "Paid make", 0), b"App\\Order\\Paid");
+    assert_eq!(resolved(&names, CODE, "Paid(1)", 0), b"App\\Order\\Paid");
+    assert_eq!(resolved(&names, CODE, "Paid(int id)", 0), b"App\\Paid");
+    assert_eq!(resolved(&names, CODE, "Order.Paid read", 0), b"App\\Order\\Paid");
+    assert_eq!(resolved(&names, CODE, "Order.Event", 0), b"App\\Order\\Event");
+    assert_eq!(resolved(&names, CODE, "Cart.Line", 0), b"App\\Shop\\Cart\\Line");
+    assert_eq!(resolved(&names, CODE, "Order.Paid(2)", 0), b"App\\Order\\Paid");
+    assert_eq!(resolved(&names, CODE, "Paid other", 0), b"App\\Paid");
+    assert_eq!(resolved(&names, CODE, "Paid(3)", 0), b"App\\Paid");
+}
+
 /// A law binds as a static method does, spec section 28: its parameters are locals of that law alone, and their types
 /// resolve through the file's imports.
 #[test]

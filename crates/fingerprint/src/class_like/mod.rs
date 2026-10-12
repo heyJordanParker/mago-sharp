@@ -13,6 +13,7 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Implements;
@@ -130,6 +131,35 @@ impl Fingerprintable for ClassLikeMember<'_> {
             ClassLikeMember::Law(law) => {
                 law.fingerprint_with_hasher(hasher, resolved_names, options);
             }
+            ClassLikeMember::Event(event) => {
+                event.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            ClassLikeMember::Interface(interface) => {
+                interface.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+        }
+    }
+}
+
+impl Fingerprintable for Event<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "event".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        for type_name in self.inheritance.iter().flat_map(|inheritance| inheritance.types.iter()) {
+            type_name.fingerprint_with_hasher(hasher, resolved_names, options);
         }
     }
 }

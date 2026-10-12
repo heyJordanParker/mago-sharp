@@ -1649,11 +1649,11 @@ fn an_override_of_a_plain_php_method_takes_no_assertion_from_the_parent() {
 /// A parse error reports its spot once, so returning what failed to parse adds no `never-return`, in PHP# and PHP.
 #[test]
 fn returning_a_value_that_failed_to_parse_adds_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public Report make(string json)\n    {\n        return new Report.fromJson(json);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int make()\n    {\n        return );\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfunction make(): int\n{\n    return );\n}\n";
 
     assert_eq!(issues(("src/Demo/make.php", php), &[]), ["7:12 parse"]);
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:20 parse"]);
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:16 parse"]);
 }
 
 /// `super` names the base class, so a class whose header names only interfaces has none, as `parent::` in a PHP
@@ -10274,4 +10274,76 @@ fn a_getter_applying_a_pure_operator_passes() {
     );
 
     assert_eq!(effect_issues(&[cart, money]), Vec::<String>::new());
+}
+
+/// Spec section 15 nests an event and the interface its family shares in a class, and names them `Order.Paid` and
+/// `Order.Event`, inside the class bare.
+const ORDER_EVENTS: (&str, &str) = (
+    "app/Shop/Order.sharp",
+    "namespace App.Shop;\n\npublic class Order\n{\n    public interface Event\n    {\n        public int orderId { get; }\n    }\n\n    public event Paid(int orderId, int amount = 0) : Event;\n\n    public Paid pay(int orderId) => new Paid(orderId, amount: 2);\n}\n",
+);
+
+/// Spec section 15: an event is a final class whose parameters are its public get-only properties, and its header
+/// names the interfaces it gives. So its properties read by name and its interface types it, a write is refused, and
+/// `new` checks its arguments as a constructor's.
+#[test]
+fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
+    let reader = (
+        "app/Shop/Reader.sharp",
+        "namespace App.Shop;\n\npublic class Reader\n{\n    public int read(Order.Paid paid) => paid.orderId + paid.amount;\n\n    public int family(Order.Event event) => event.orderId;\n\n    public Order.Event make() => new Order.Paid(1);\n}\n\npublic event Shipped(int shipmentId);\n",
+    );
+    let writer = (
+        "app/Shop/Writer.sharp",
+        "namespace App.Shop;\n\npublic class Writer\n{\n    public void write(Order.Paid paid)\n    {\n        paid.orderId = 2;\n    }\n\n    public Order.Paid make() => new Order.Paid(\"one\");\n}\n",
+    );
+
+    assert_eq!(worded(reader, &[ORDER_EVENTS]), Vec::<String>::new());
+    assert_eq!(issues(writer, &[ORDER_EVENTS]), ["7:14 invalid-property-write", "10:48 invalid-argument"]);
+    assert_eq!(
+        messages(writer, &[ORDER_EVENTS]),
+        [
+            "Cannot initialize readonly property `Order.Paid.orderId` from within `Writer`.",
+            "Invalid argument type for argument #1 of `Order.Paid.__construct`: expected `int`, but found `string`."
+        ]
+    );
+}
+
+/// Spec section 15: no event extends another, so an event's header names interfaces only, and a type names an event
+/// only once.
+#[test]
+fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
+    let based = (
+        "app/Shop/Moved.sharp",
+        "namespace App.Shop;\n\npublic class Base\n{\n}\n\npublic event Moved(int id) : Base, Order.Event;\n",
+    );
+    let twice =
+        ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id);\n\npublic event Moved(int id);\n");
+    let fixed = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int orderId) : Order.Event;\n");
+
+    assert_eq!(
+        worded(based, &[ORDER_EVENTS]),
+        [
+            "7:30 invalid-event An event's header names interfaces only, and `Base` is not one. | Named here. | No event extends another: a family of events shares an interface."
+        ]
+    );
+    assert_eq!(messages(twice, &[ORDER_EVENTS]), ["Event `Moved` is already defined elsewhere."]);
+    assert_eq!(worded(fixed, &[ORDER_EVENTS]), Vec::<String>::new());
+}
+
+/// `Order.Name` names the type `Order` nests, spec section 15, and otherwise the named constructor `Name` of
+/// `Order`, spec section 9.1, which is not supported yet. A type that names no nested type says which class lacks it.
+#[test]
+fn a_dotted_name_that_is_no_nested_type_is_a_named_constructor_or_an_unknown_type() {
+    let shop = (
+        "app/Shop/Shop.sharp",
+        "namespace App.Shop;\n\npublic class Shop\n{\n    public Order.Paid made() => new Order.fromJson(1);\n\n    public int read(Order.Fild paid) => 1;\n}\n",
+    );
+
+    assert_eq!(
+        worded(shop, &[ORDER_EVENTS]),
+        [
+            "5:37 not-supported-yet A named constructor is not supported yet in PHP#. | Not supported yet. | `Order` declares no type named `fromJson`, so `new Order.fromJson(…)` calls its named constructor `fromJson`.",
+            "7:21 non-existent-class-like `Order` has no event `Fild`. | Named here."
+        ]
+    );
 }

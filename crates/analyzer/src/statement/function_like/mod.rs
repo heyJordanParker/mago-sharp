@@ -1744,7 +1744,17 @@ where
             continue;
         };
 
-        let issue = if context.dialect.is_sharp() {
+        let separator = name.as_bytes().iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
+        let (outer, nested) = name.as_bytes().split_at(separator);
+        let issue = if context.dialect.is_sharp() && context.codebase.get_class_like(outer).is_some() {
+            // A dotted type names a type nested in its class, spec section 15.
+            Issue::error(format!(
+                "`{}` has no event `{}`.",
+                display_class_like_name(context, word(outer)),
+                String::from_utf8_lossy(&nested[1..])
+            ))
+            .with_annotation(Annotation::primary(type_metadata.span).with_message("Named here."))
+        } else if context.dialect.is_sharp() {
             let name = display_class_like_name(context, *name);
             Issue::error(format!("Cannot find type `{name}`."))
                 .with_annotation(

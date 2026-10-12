@@ -217,6 +217,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
 
                     r#enum.analyze(context, block_context, artifacts)
                 }
+                Statement::Event(event) => {
+                    let event_name = context.resolved_names.get(&event.name);
+
+                    Arc::make_mut(&mut context.scope).add(NameKind::Default, event_name, &None::<&str>);
+
+                    event.analyze(context, block_context, artifacts)
+                }
                 Statement::Constant(constant) => {
                     for item in &constant.items {
                         let constant_item_name = context.resolved_names.get(&item.name);

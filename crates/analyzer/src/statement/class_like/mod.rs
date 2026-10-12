@@ -49,6 +49,7 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
@@ -72,6 +73,8 @@ use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
+use crate::statement::function_like::FunctionLikeBody;
+use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
@@ -90,7 +93,7 @@ pub mod override_attribute;
 pub mod property;
 pub mod unused_members;
 
-/// Reports a duplicate definition issue for class-like types.
+/// Reports a duplicate definition issue for class-like types, naming the class-like as the analyzed file writes it.
 fn report_duplicate_definition<A>(
     context: &mut Context<'_, '_, A>,
     title: &str,
@@ -101,7 +104,11 @@ fn report_duplicate_definition<A>(
 ) where
     A: Arena,
 {
-    let name = BytesDisplay(name);
+    let name = if context.dialect.is_sharp() {
+        display_class_like_name(context, word(name)).to_string()
+    } else {
+        BytesDisplay(name).to_string()
+    };
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
         Issue::error(format!("{title} `{name}` is already defined elsewhere."))
@@ -549,6 +556,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
             }
         }
 
+        // A type nested in the class, spec section 15, is a class-like of its own beside it.
+        for member in &self.members {
+            match member {
+                ClassLikeMember::Event(event) => event.analyze(context, block_context, artifacts)?,
+                ClassLikeMember::Interface(interface) => interface.analyze(context, block_context, artifacts)?,
+                _ => {}
+            }
+        }
+
         Ok(())
     }
 }
@@ -631,6 +647,104 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
 
         Ok(())
     }
+}
+
+/// A PHP# event, spec section 15, analyzes as the final class it runs as, whose constructor's parameters are its
+/// get-only properties. Its header names interfaces only, because no event extends another.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Event<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        _block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        // The scanner registers every event, with its constructor.
+        let name = context.resolved_names.get(&self.name);
+        let codebase = context.codebase;
+        if let Some(class_like_metadata) = codebase.get_class_like(name)
+            && let Some(constructor) = codebase.get_method(name, b"__construct")
+        {
+            analyze_event(self, class_like_metadata, constructor, context, artifacts)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn analyze_event<'ctx, 'arena, A>(
+    event: &Event<'arena>,
+    class_like_metadata: &'ctx ClassLikeMetadata,
+    constructor: &'ctx FunctionLikeMetadata,
+    context: &mut Context<'ctx, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    if class_like_metadata.span != event.span() {
+        let name = class_like_metadata.original_name.as_bytes();
+        report_duplicate_definition(context, "Event", "event", name, event.span(), class_like_metadata.span);
+        return Ok(());
+    }
+
+    let codebase = context.codebase;
+    let named_class_likes: Vec<_> = event
+        .inheritance
+        .iter()
+        .flat_map(|inheritance| inheritance.types.iter())
+        .filter_map(|type_name| Some((type_name, codebase.get_class_like(context.resolved_names.get(type_name))?)))
+        .filter(|(_, named)| !named.kind.is_interface())
+        .collect();
+
+    for (type_name, named) in &named_class_likes {
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!(
+                "An event's header names interfaces only, and `{}` is not one.",
+                display_class_like_name(context, named.original_name)
+            ))
+            .with_annotation(Annotation::primary(type_name.span()).with_message("Named here."))
+            .with_note("No event extends another: a family of events shares an interface."),
+        );
+    }
+
+    // The class the header names is the event's parent, which every other check would read.
+    if !named_class_likes.is_empty() {
+        return Ok(());
+    }
+
+    analyze_class_like(
+        context,
+        artifacts,
+        Some(event.name.span),
+        event.span(),
+        None,
+        None,
+        event.inheritance.as_ref(),
+        class_like_metadata,
+        &[],
+    )?;
+
+    // The constructor has no body: its parameters' types and defaults are checked as a method's.
+    let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, constructor.name)));
+    scope.set_class_like(Some(class_like_metadata));
+    scope.set_function_like(Some(constructor));
+
+    let mut constructor_block_context = BlockContext::new(scope, context.settings.register_super_globals);
+    analyze_function_like(
+        context,
+        artifacts,
+        &mut constructor_block_context,
+        constructor,
+        &event.parameter_list,
+        FunctionLikeBody::Statements(&[], event.parameter_list.span()),
+        None,
+    )?;
+
+    Ok(())
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {

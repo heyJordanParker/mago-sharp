@@ -26,6 +26,8 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::PartialArgumentList;
 use mago_word::WordMap;
@@ -63,6 +65,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     where
         A: Arena,
     {
+        if report_named_constructor(context, self) {
+            self.argument_list.as_ref().analyze(context, block_context, artifacts)?;
+            artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+            return Ok(());
+        }
+
         let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
         if classnames.is_empty() {
             return Ok(());
@@ -131,6 +140,39 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
 
         Ok(())
     }
+}
+
+/// Spec sections 9.1 and 15: `new Report.fromJson(…)` calls the named constructor `fromJson` of `Report`, unless
+/// `Report` declares a type of that name, as `new Order.Paid(…)` creates `Order.Paid`. Reports the named constructor,
+/// which is not supported yet, and returns whether it did.
+fn report_named_constructor<A>(context: &mut Context<'_, '_, A>, instantiation: &Instantiation<'_>) -> bool
+where
+    A: Arena,
+{
+    let Expression::Identifier(name @ Identifier::Dotted(dotted)) = instantiation.class else {
+        return false;
+    };
+
+    // A dotted name resolves to a name with a namespace separator before its last part.
+    let full_name = context.resolved_names.get(name);
+    let separator = full_name.iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
+    let (class, constructor) = (&full_name[..separator], &full_name[separator + 1..]);
+    if context.codebase.get_class_like(full_name).is_some() || context.codebase.get_class_like(class).is_none() {
+        return false;
+    }
+
+    let class = display_class_like_name(context, word(class));
+    let constructor = String::from_utf8_lossy(constructor);
+    context.collector.report_with_code(
+        IssueCode::NotSupportedYet,
+        Issue::error("A named constructor is not supported yet in PHP#.")
+            .with_annotation(Annotation::primary(dotted.span).with_message("Not supported yet."))
+            .with_note(format!(
+                "`{class}` declares no type named `{constructor}`, so `new {class}.{constructor}(…)` calls its named constructor `{constructor}`."
+            )),
+    );
+
+    true
 }
 
 fn analyze_class_instantiation<'ctx, 'arena, A>(

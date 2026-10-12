@@ -43,9 +43,10 @@ where
 
 /// Returns the case-preserved name of the class-like `name` as a `.sharp` file names it, given the `imported_names` of
 /// the file: the name the file's import gives it, as in `Rx` for `import Sharp.Text.Regex as Rx;` and `Order` for
-/// `import App.Orders.Order;`. A class the file doesn't import is named by its short name, or, when another class-like
-/// of `codebase` has the same short name, by its full name with `.` between its parts, so `Billing.Order` and
-/// `App.Orders.Order` stay apart. `short_name_counts` keeps the count of each short name once it is first needed.
+/// `import App.Orders.Order;`. A type nested in a class, spec section 15, is named through its class, as in
+/// `Order.Paid`. A class the file doesn't import is named by its short name, or, when another class-like of `codebase`
+/// has the same short name, by its full name with `.` between its parts, so `Billing.Order` and `App.Orders.Order` stay
+/// apart. `short_name_counts` keeps the count of each short name once it is first needed.
 pub(crate) fn sharp_class_like_name(
     codebase: &CodebaseMetadata,
     imported_names: &WordMap<Word>,
@@ -54,9 +55,15 @@ pub(crate) fn sharp_class_like_name(
 ) -> String {
     let name = codebase.get_class_like(name.as_bytes()).map_or(name, |m| m.original_name);
     let full_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
+    let separator = full_name.iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
+    let outer = &full_name[..separator];
 
     if let Some(imported_name) = imported_names.get(&ascii_lowercase_word(full_name)) {
         imported_name.to_string()
+    } else if codebase.get_class_like(outer).is_some() {
+        let outer = sharp_class_like_name(codebase, imported_names, short_name_counts, word(outer));
+
+        format!("{outer}.{}", String::from_utf8_lossy(&full_name[separator + 1..]))
     } else if shares_short_name(codebase, short_name_counts, name) {
         String::from_utf8_lossy(full_name).replace('\\', ".")
     } else {

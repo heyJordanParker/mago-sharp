@@ -365,6 +365,7 @@ final class AnalyzerCodeModuleGenerator
         'non-existent-law',
         'missing-lean',
         'unmodeled-construct',
+        'invalid-event',
     ];
 
     /**
