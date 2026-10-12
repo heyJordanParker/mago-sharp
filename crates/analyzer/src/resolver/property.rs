@@ -59,6 +59,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -1575,6 +1576,19 @@ where
         None,
     ) {
         return Some(get_never());
+    }
+
+    // Spec section 9.1: a named constructor creates an object, so it is called with `new` and is no function value.
+    // The read keeps the closure's type, so the one error is this one.
+    if context.codebase.get_method_by_id(&method).is_some_and(|metadata| metadata.flags.is_named_constructor()) {
+        let constructor = quoted_source(context, access_span);
+        context.collector.report_with_code(
+            IssueCode::NamedConstructorWithoutNew,
+            Issue::error(format!(
+                "`{constructor}` is a constructor, so it is no function value: create the object with `new {constructor}(…)`."
+            ))
+            .with_annotation(Annotation::primary(access_span).with_message("Read as a value here.")),
+        );
     }
 
     artifacts.symbol_references.add_reference_to_class_member(

@@ -4,7 +4,6 @@
 use std::io;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 use std::process::Stdio;
 
 use mago_extension::PayloadReader;
@@ -13,6 +12,7 @@ use mago_extension::PayloadWriter;
 use crate::facts::Facts;
 use crate::facts::Kind;
 use crate::library;
+use crate::package::Package;
 
 const LAW_PROTOCOL_MAGIC: [u8; 4] = *b"MLAW";
 const LAW_PROTOCOL_MAJOR: u16 = 1;
@@ -70,7 +70,7 @@ pub(crate) struct Broken {
 /// question, counting only the theorems of `proof_module`, or none when it is empty.
 pub(crate) fn check(
     library: &Path,
-    package: &Path,
+    package: &Package,
     module: &str,
     proof_module: &str,
     questions: &[Question<'_>],
@@ -84,7 +84,7 @@ pub(crate) fn check(
 /// with the namespace its rules constrain, and answers with each rule and the facts of `files` that break it.
 pub(crate) fn rules(
     library: &Path,
-    package: &Path,
+    package: &Package,
     modules: &[(&str, &str)],
     files: &[(&str, &Facts)],
 ) -> io::Result<Vec<Broken>> {
@@ -98,11 +98,13 @@ pub(crate) fn rules(
 /// Each call runs its own runner, since Lean cannot free an imported environment in a process that elaborated with
 /// it. `lake env` gives the runner the package's search path, and on Windows the folder of Lean's shared libraries,
 /// which an executable that interprets Lean links to there.
-fn run(library: &Path, package: &Path, request: &[u8]) -> io::Result<Vec<u8>> {
-    let mut runner = Command::new("lake")
+fn run(library: &Path, package: &Package, request: &[u8]) -> io::Result<Vec<u8>> {
+    let mut runner = package
+        .lake
+        .command()
         .arg("env")
         .arg(library::runner(library))
-        .current_dir(package)
+        .current_dir(&package.directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

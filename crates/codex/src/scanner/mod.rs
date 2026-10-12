@@ -843,7 +843,8 @@ where
     }
 
     /// A PHP# named constructor registers as the public static method it runs as, spec section 9.1, which returns an
-    /// object of the class that declares it.
+    /// object of the class that declares it. It is not inherited, so a subclass may declare its own of the same name:
+    /// the method is neither final, as a PHP# method without `virtual` is, nor abstract, as one without a body is.
     #[inline]
     fn walk_in_named_constructor(
         &mut self,
@@ -858,6 +859,8 @@ where
             && let Some(method_metadata) = &mut method.method_metadata
         {
             method_metadata.is_static = true;
+            method_metadata.is_final = false;
+            method_metadata.is_abstract = false;
             method.flags |= MetadataFlags::NAMED_CONSTRUCTOR;
             method.set_return_type_declaration_metadata(Some(TypeMetadata::new(
                 get_named_object(class.original_name, None),
