@@ -61,7 +61,12 @@ pub fn check_listener<'ctx, 'arena, A>(
     }
 
     for (method, on) in std::iter::once((first, first_on)).chain(listeners) {
-        let Some(method_metadata) = context.codebase.get_method(metadata.name.as_bytes(), method.name.value) else {
+        // A second method of the same name has no metadata of its own: semantics reports it.
+        let Some(method_metadata) = context
+            .codebase
+            .get_method(metadata.name.as_bytes(), method.name.value)
+            .filter(|method_metadata| method_metadata.span == method.span())
+        else {
             continue;
         };
 

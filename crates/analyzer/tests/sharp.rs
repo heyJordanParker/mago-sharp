@@ -9711,7 +9711,9 @@ fn listened() -> [(&'static str, &'static str); 7] {
 }
 
 /// Spec section 15: a trailing `on` clause makes a method listen to the events it lists. The method takes no parameter,
-/// or one that every listed event is, and nothing else. A `private` listener counts as used, because the engine runs it.
+/// or one that every listed event is, and nothing else. The help names the most specific interface every listed event
+/// implements, when every listed name is a type. A `private` listener counts as used, because the engine runs it. A
+/// parameter without a type and a second method of one name report only their own errors.
 #[test]
 fn a_listener_takes_no_parameter_or_one_that_every_listed_event_is() {
     let notices = (
@@ -9720,18 +9722,45 @@ fn a_listener_takes_no_parameter_or_one_that_every_listed_event_is() {
     );
     let errors = (
         "app/Shop/Errors.sharp",
-        "namespace App.Shop;\n\npublic class Errors\n{\n    public void send(OrderPaid e) on OrderPaid, OrderRefunded { }\n\n    public void ship(OrderPaid e) on OrderPaid, Shipped { }\n\n    public void log(OrderPaid e, Logger logger) on OrderPaid { }\n}\n",
+        "namespace App.Shop;\n\npublic class Errors\n{\n    public void send(OrderPaid e) on OrderPaid, OrderRefunded { }\n\n    public void ship(OrderPaid e) on OrderPaid, Shipped { }\n\n    public void log(OrderPaid e, Logger logger) on OrderPaid { }\n\n    public void settle(OrderPaid e) on OrderRefunded, OrderSettled { }\n\n    public void bill(Charge e) on Charge, Credit { }\n}\n",
     );
+    let billed = ("app/Shop/Billed.sharp", "namespace App.Shop;\n\npublic interface Billed\n{\n}\n");
+    let charged = ("app/Shop/Charged.sharp", "namespace App.Shop;\n\npublic interface Charged : Billed\n{\n}\n");
+    let charge = ("app/Shop/Charge.sharp", "namespace App.Shop;\n\npublic event Charge(int id) : Billed, Charged;\n");
+    let credit = ("app/Shop/Credit.sharp", "namespace App.Shop;\n\npublic event Credit(int id) : Billed, Charged;\n");
+    let billing = (
+        "app/Shop/Billing.sharp",
+        "namespace App.Shop;\n\npublic class Billing\n{\n    public void bill(Charged e) on Charge, Credit { }\n}\n",
+    );
+    let untyped = (
+        "app/Shop/Untyped.sharp",
+        "namespace App.Shop;\n\npublic class Untyped\n{\n    public void send(e) on OrderPaid { }\n}\n",
+    );
+    let twice = (
+        "app/Shop/Twice.sharp",
+        "namespace App.Shop;\n\npublic class Twice\n{\n    public void send(OrderPaid e) on OrderPaid { }\n\n    public void send(OrderPaid e, Logger logger) on OrderPaid { }\n}\n",
+    );
+    let [order_event, order_paid, refunded, shipped, events, queue, logger] = listened();
+    let others = [order_event, order_paid, refunded, shipped, events, queue, logger, billed, charged, charge, credit];
 
     assert_eq!(worded(notices, &listened()), Vec::<String>::new());
     assert_eq!(
-        worded(errors, &listened()),
+        worded(errors, &others),
         [
             "5:49 invalid-event `send` takes an `OrderPaid`, and it listens to `OrderRefunded`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `OrderEvent`, or take no parameter.",
             "7:49 invalid-event `ship` takes an `OrderPaid`, and it listens to `Shipped`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, or take no parameter.",
             "9:34 invalid-event A listener takes only its event, and `log` also takes `logger`. | Not the event. | A listener gets everything else through its class's constructor.",
+            "11:55 non-existent-class-like Cannot find type `OrderSettled`. | `OrderSettled` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            "11:40 invalid-event `settle` takes an `OrderPaid`, and it listens to `OrderRefunded`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, or take no parameter.",
+            "13:43 invalid-event `bill` takes a `Charge`, and it listens to `Credit`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `Charged`, or take no parameter.",
         ]
     );
+    assert_eq!(worded(billing, &others), Vec::<String>::new());
+    assert_eq!(
+        worded(untyped, &listened()),
+        ["5:22 parse A PHP# parameter needs a type, as in `int extra`. | Written here."]
+    );
+    assert_eq!(worded(twice, &listened()), Vec::<String>::new());
 }
 
 /// Spec section 15: an `on` clause lists events, which `event` or `extern event` declares, or interfaces an event
