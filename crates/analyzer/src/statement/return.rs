@@ -68,18 +68,28 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     where
         A: Arena,
     {
-        // A PHP# named constructor returns the object it creates, spec section 9.1, so its `return;` takes no value.
+        // A PHP# constructor creates the object, spec section 9.1, so its `return;` takes no value: a named constructor
+        // returns the object, and PHP discards a value the main constructor returns.
         if let Some(return_value) = self.value.as_ref()
-            && block_context
-                .scope
-                .get_function_like()
-                .is_some_and(|function_like| function_like.flags.is_named_constructor())
+            && let Some(function_like) = block_context.scope.get_function_like()
         {
-            context.collector.report_with_code(
-                IssueCode::InvalidReturnStatement,
-                Issue::error("A named constructor returns the object it creates: write `return;`.")
-                    .with_annotation(Annotation::primary(return_value.span()).with_message("Returned here.")),
-            );
+            let message = if function_like.flags.is_named_constructor() {
+                Some("A named constructor returns the object it creates: write `return;`.")
+            } else if context.dialect.is_sharp()
+                && function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
+            {
+                Some("A constructor creates its object and returns nothing: write `return;`.")
+            } else {
+                None
+            };
+
+            if let Some(message) = message {
+                context.collector.report_with_code(
+                    IssueCode::InvalidReturnStatement,
+                    Issue::error(message)
+                        .with_annotation(Annotation::primary(return_value.span()).with_message("Returned here.")),
+                );
+            }
         }
 
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {

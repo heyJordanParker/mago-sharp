@@ -54,6 +54,7 @@ use crate::statement::function_like::unused_parameter;
 use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
 use crate::utils::missing_type_hints;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_type;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
     fn analyze<'ctx, A>(
@@ -387,9 +388,9 @@ where
     initializer.argument_list.analyze(context, block_context, artifacts)
 }
 
-/// Spec section 9.1, with the interim ruling on an implicit `super()`: the constructor of a class whose base class has
-/// one calls it with `: super(…)`. A class without a constructor gets one for its initial values that are not
-/// constant, which calls the base class's constructor without arguments, so that base class's constructor takes none.
+/// Spec section 9.1: PHP# has no implicit `super()`, so the constructor of a class whose base class has one calls it
+/// with `: super(…)`. A class without a constructor gets one for its initial values that are not constant, which calls
+/// the base class's constructor without arguments, so it declares its own when that base class's constructor takes any.
 pub(super) fn check_super_call<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
@@ -423,13 +424,30 @@ pub(super) fn check_super_call<A>(
                 matches!(member, ClassLikeMember::Property(property) if property.initial_value_runs_in_constructor())
             }) =>
         {
+            let mut parameters = Vec::new();
+            let mut arguments = Vec::new();
+            for parameter in &constructor_of_base.parameters {
+                let name = String::from_utf8_lossy(mago_bytes::trim_start_byte(parameter.get_name().0.as_bytes(), b'$'));
+                let spread = if parameter.flags.is_variadic() { "..." } else { "" };
+                let hint = parameter.get_type_metadata().map(|hint| display_type(context, &hint.type_union));
+                parameters.push(format!("{} {spread}{name}", hint.unwrap_or_default()));
+                arguments.push(format!("{spread}{name}"));
+            }
+
             context.collector.report_with_code(
-                IssueCode::NotSupportedYet,
+                IssueCode::MissingSuperCall,
                 Issue::error(format!(
-                    "`{class_name}` must declare a constructor that calls `{base_name}`'s with `: super(…)`: `{base_name}`'s takes arguments, and `{class_name}`'s initial values run in its constructor."
+                    "`{class_name}` must declare a constructor that calls `{base_name}`'s with `: super(…)`."
                 ))
                 .with_annotation(Annotation::primary(name_span).with_message("Declared here."))
-                .with_note("Passing the arguments on to the base class's constructor is not supported yet."),
+                .with_note(format!(
+                    "`{base_name}`'s constructor takes arguments, and `{class_name}`'s initial values run in its constructor."
+                ))
+                .with_help(format!(
+                    "Write `public {class_name}({}) : super({}) {{ }}`.",
+                    parameters.join(", "),
+                    arguments.join(", ")
+                )),
             );
         }
         _ => {}

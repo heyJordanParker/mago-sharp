@@ -295,18 +295,16 @@ fn a_law_and_a_method_named_alike_are_a_duplicate_member() {
 
 #[test]
 fn every_construct_outside_the_slice_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nlet top = 1;\necho 1;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        switch (extra) {\n            default: return 1;\n        }\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        switch (extra) {\n            default: return 1;\n        }\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:1 This statement is not supported yet in PHP#.",
-            "4:1 This statement is not supported yet in PHP#.",
-            "10:1 This statement is not supported yet in PHP#.",
-            "18:9 This statement is not supported yet in PHP#.",
-            "21:22 This `new` without arguments is not supported yet in PHP#.",
-            "22:25 This expression is not supported yet in PHP#.",
-            "23:22 This expression is not supported yet in PHP#.",
+            "7:1 This statement is not supported yet in PHP#.",
+            "15:9 This statement is not supported yet in PHP#.",
+            "18:22 This `new` without arguments is not supported yet in PHP#.",
+            "19:25 This expression is not supported yet in PHP#.",
+            "20:22 This expression is not supported yet in PHP#.",
         ]
     );
 }
@@ -416,8 +414,9 @@ fn a_catch_variable_is_out_of_scope_after_its_catch_block() {
     assert_eq!(issues(code), ["10:15 `failure` is used after the block that declares it closes."]);
 }
 
-/// The body of `if`, `else` and each loop is a block in braces, a guard clause's `return` or `throw` too. The error
-/// points at the body, and its help's braced body compiles in its place.
+/// The body of `if`, `else` and each loop is a block in braces, a guard clause's `return` or `throw` too, and PHP's
+/// colon-delimited bodies are never valid. The error points at the body, from a colon body's `:` to its `endif;`,
+/// `endwhile;` or `endfor;`, and its help's braced body compiles in its place.
 #[test]
 fn every_body_is_written_in_braces() {
     let refused = [
@@ -438,6 +437,18 @@ fn every_body_is_written_in_braces() {
         ("        do extra += 1; while (extra < 3);\n", "7:12", "{ extra += 1; }"),
         ("        for (let step = 0; step < 3; step++) extra++;\n", "7:46", "{ extra++; }"),
         ("        for (const value of Store.values()) extra += value;\n", "7:45", "{ extra += value; }"),
+        ("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n", "7:26", "{ extra -= 1; }"),
+        ("        for (;;):\n            break;\n        endfor;\n", "7:17", "{ break; }"),
+        (
+            "        if (extra > 3):\n            extra = 3;\n        elseif (extra > 2):\n            extra = 2;\n        else:\n            extra = 1;\n        endif;\n",
+            "7:23",
+            "{ extra = 3; } else if (extra > 2) { extra = 2; } else { extra = 1; }",
+        ),
+        (
+            "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2):\n            return 2;\n        endif;\n",
+            "9:30",
+            "{ return 2; }",
+        ),
     ];
 
     for (body, at, fix) in refused {
@@ -457,21 +468,12 @@ fn every_body_is_written_in_braces() {
 }
 
 #[test]
-fn elseif_and_a_colon_delimited_if_are_not_supported_yet() {
+fn elseif_is_not_supported_yet() {
     let code = leak(method(
-        "        if (extra > 1) {\n            return 1;\n        } elseif (extra > 2) {\n            return 2;\n        }\n        if (extra > 3):\n            return 3;\n        endif;\n        return extra;\n",
+        "        if (extra > 1) {\n            return 1;\n        } elseif (extra > 2) {\n            return 2;\n        }\n        return extra;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        ["9:11 This `elseif` is not supported yet in PHP#.", "12:23 This construct is not supported yet in PHP#."]
-    );
-
-    // A colon-delimited `if` after `else` is the one error, as no body is missing its braces.
-    let after_else = leak(method(
-        "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2):\n            return 2;\n        endif;\n        return extra;\n",
-    ));
-    assert_eq!(issues(after_else), ["9:30 This construct is not supported yet in PHP#."]);
+    assert_eq!(issues(code), ["9:11 This `elseif` is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -490,14 +492,6 @@ fn while_and_do_while_with_braces_are_in_the_slice() {
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
-}
-
-#[test]
-fn a_while_loop_with_a_colon_body_is_not_supported_yet() {
-    let code =
-        leak(method("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n        return extra;\n"));
-
-    assert_eq!(issues(code), ["7:26 This construct is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -550,13 +544,6 @@ fn a_for_counter_is_out_of_scope_after_its_loop_and_const_when_declared_so() {
             "7:44 Cannot increment `step`: it is declared with `const`.",
         ]
     );
-}
-
-#[test]
-fn a_for_loop_with_a_colon_body_is_not_supported_yet() {
-    let code = leak(method("        for (;;):\n            break;\n        endfor;\n        return extra;\n"));
-
-    assert_eq!(issues(code), ["7:17 This construct is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -671,6 +658,25 @@ fn a_top_level_function_is_an_error() {
     let code = "namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n";
 
     assert_eq!(issues(code), ["3:10 PHP# has no top-level functions: move `total` into a class as a static method."]);
+}
+
+/// Spec section 27: a `.sharp` file declares one type, so a statement at file level is never valid, whatever it is.
+#[test]
+fn a_statement_at_file_level_is_an_error() {
+    for statement in [
+        "let total = 1;",
+        "strlen(\"x\");",
+        "if (true) { }",
+        "while (false) { }",
+        "for (const n of [1]) { }",
+        "return;",
+        "{ }",
+        "echo 1;",
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{statement}\n\nclass Report\n{{\n}}\n"));
+
+        assert_eq!(issues(code), ["3:1 A statement cannot sit at file level in PHP#."], "{statement}");
+    }
 }
 
 #[test]
@@ -978,6 +984,28 @@ fn self_is_only_a_return_type() {
             "9:44 `Self` is only a return type in PHP#.",
         ]
     );
+}
+
+/// Spec section 9.1: a named constructor belongs to the class that declares it and is not inherited, so `Self`, which
+/// can be any subclass, cannot name one. The help names the class, and that fix compiles.
+#[test]
+fn new_self_cannot_name_a_named_constructor() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public Report.of(int count) : this(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
+    let fixed = code.replace("new Self.of(1)", "new Report.of(1)");
+
+    let issue = check("src/Report.sharp", code).remove(0);
+    assert_eq!(
+        issue.message,
+        "`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
+    );
+    assert_eq!(issue.help.as_deref(), Some("Name its class: write `new Report.of(1)`."));
+    assert_eq!(
+        issues(code),
+        [
+            "13:36 `Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
+        ]
+    );
+    assert!(issues(leak(fixed)).is_empty());
 }
 
 #[test]

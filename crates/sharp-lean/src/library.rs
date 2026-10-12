@@ -221,6 +221,14 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
     Ok(lake)
 }
 
+/// The SHA-256 of `bytes` in lowercase hex, as an archive's pinned `sha256` is written.
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().fold(String::new(), |mut digest, byte| {
+        let _ = write!(digest, "{byte:02x}");
+        digest
+    })
+}
+
 /// Downloads elan's archive from `url`, checks its SHA-256, and runs its `elan-init` with `elan.staging/` as elan's
 /// home, then renames that folder to `home`, so a dead install leaves no `home` behind.
 fn install_elan(url: &str, archive: &Archive, home: &Path) -> io::Result<()> {
@@ -229,10 +237,7 @@ fn install_elan(url: &str, archive: &Archive, home: &Path) -> io::Result<()> {
         .call()
         .and_then(|response| response.into_body().with_config().limit(ELAN_LIMIT).read_to_vec())
         .map_err(|error| io::Error::other(format!("downloading {url} failed: {error}")))?;
-    let digest = Sha256::digest(&bytes).iter().fold(String::new(), |mut digest, byte| {
-        let _ = write!(digest, "{byte:02x}");
-        digest
-    });
+    let digest = sha256_hex(&bytes);
     if digest != archive.sha256 {
         return Err(io::Error::other(format!("{url} has the SHA-256 {digest}, not the pinned {}", archive.sha256)));
     }
@@ -322,6 +327,7 @@ fn cache_root() -> io::Result<PathBuf> {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::panic_in_result_fn)]
 mod tests {
     use std::io::BufRead;
     use std::io::BufReader;
@@ -352,34 +358,36 @@ fi
 "#;
 
     /// An elan archive that holds `ELAN_INIT`, served over HTTP on a local port, and how many requests it answered.
-    fn serve_elan() -> (String, Vec<u8>, Arc<AtomicUsize>) {
+    fn serve_elan() -> io::Result<(String, Vec<u8>, Arc<AtomicUsize>)> {
         let mut tarball = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
         let mut header = tar::Header::new_gnu();
         header.set_size(ELAN_INIT.len() as u64);
         header.set_mode(0o755);
-        tarball.append_data(&mut header, "elan-init", ELAN_INIT.as_bytes()).unwrap();
-        let bytes = tarball.into_inner().unwrap().finish().unwrap();
+        tarball.append_data(&mut header, "elan-init", ELAN_INIT.as_bytes())?;
+        let bytes = tarball.into_inner()?.finish()?;
 
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let url = format!("http://{}/elan.tar.gz", listener.local_addr().unwrap());
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let url = format!("http://{}/elan.tar.gz", listener.local_addr()?);
         let requests = Arc::new(AtomicUsize::new(0));
         let (served, answered) = (bytes.clone(), Arc::clone(&requests));
-        std::thread::spawn(move || {
+        // A request the server fails to answer fails the install that sent it.
+        std::thread::spawn(move || -> io::Result<()> {
             for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
+                let mut stream = stream?;
                 let mut reader = BufReader::new(&stream);
                 let mut line = String::new();
-                while reader.read_line(&mut line).unwrap() > 2 {
+                while reader.read_line(&mut line)? > 2 {
                     line.clear();
                 }
                 answered.fetch_add(1, Ordering::SeqCst);
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", served.len())
-                    .unwrap();
-                stream.write_all(&served).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", served.len())?;
+                stream.write_all(&served)?;
             }
+
+            Ok(())
         });
 
-        (url, bytes, requests)
+        Ok((url, bytes, requests))
     }
 
     fn archive(sha256: &'static str) -> Archive {
@@ -387,69 +395,78 @@ fi
     }
 
     fn sha256(bytes: &[u8]) -> &'static str {
-        let digest = Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-
-        Box::leak(digest.into_boxed_str())
+        Box::leak(sha256_hex(bytes).into_boxed_str())
     }
 
-    fn installed(cache: &Path) -> String {
-        fs::read_to_string(cache.join("elan/installed")).unwrap()
+    fn installed(cache: &Path) -> io::Result<String> {
+        fs::read_to_string(cache.join("elan/installed"))
     }
 
     #[test]
-    fn installs_that_start_together_download_elan_and_install_lean_once() {
-        let (url, bytes, requests) = serve_elan();
+    fn installs_that_start_together_download_elan_and_install_lean_once() -> io::Result<()> {
+        let (url, bytes, requests) = serve_elan()?;
         let archive = archive(sha256(&bytes));
-        let cache = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir()?;
 
-        let lakes: Vec<Lake> = std::thread::scope(|scope| {
+        // Every install starts before any is joined, so the four run together.
+        let lakes = std::thread::scope(|scope| {
+            #[allow(clippy::needless_collect)]
             let installs: Vec<_> =
-                (0..4).map(|_| scope.spawn(|| install_from(&url, &archive, cache.path()).unwrap())).collect();
-            installs.into_iter().map(|install| install.join().unwrap()).collect()
-        });
+                std::iter::repeat_with(|| scope.spawn(|| install_from(&url, &archive, cache.path()))).take(4).collect();
+            installs
+                .into_iter()
+                .map(|install| install.join().map_err(|_| io::Error::other("an install panicked"))?)
+                .collect::<io::Result<Vec<Lake>>>()
+        })?;
 
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(installed(cache.path()), format!("{}\n", TOOLCHAIN.trim()));
+        assert_eq!(installed(cache.path())?, format!("{}\n", TOOLCHAIN.trim()));
         for lake in lakes {
             assert_eq!(lake.program, cache.path().join("elan/bin/lake"));
             assert_eq!(lake.home.as_deref(), Some(cache.path().join("elan").as_path()));
         }
         assert!(!cache.path().join("elan.staging").exists());
+
+        Ok(())
     }
 
     #[test]
-    fn an_install_whose_lean_is_missing_installs_only_lean() {
-        let (url, bytes, requests) = serve_elan();
+    fn an_install_whose_lean_is_missing_installs_only_lean() -> io::Result<()> {
+        let (url, bytes, requests) = serve_elan()?;
         let archive = archive(sha256(&bytes));
-        let cache = tempfile::tempdir().unwrap();
-        install_from(&url, &archive, cache.path()).unwrap();
-        fs::remove_file(cache.path().join("elan/installed")).unwrap();
+        let cache = tempfile::tempdir()?;
+        install_from(&url, &archive, cache.path())?;
+        fs::remove_file(cache.path().join("elan/installed"))?;
 
-        install_from(&url, &archive, cache.path()).unwrap();
+        install_from(&url, &archive, cache.path())?;
 
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(installed(cache.path()), format!("{}\n", TOOLCHAIN.trim()));
+        assert_eq!(installed(cache.path())?, format!("{}\n", TOOLCHAIN.trim()));
+
+        Ok(())
     }
 
     #[test]
-    fn an_install_of_lean_deletes_the_download_a_killed_install_left() {
-        let (url, bytes, _) = serve_elan();
+    fn an_install_of_lean_deletes_the_download_a_killed_install_left() -> io::Result<()> {
+        let (url, bytes, _) = serve_elan()?;
         let archive = archive(sha256(&bytes));
-        let cache = tempfile::tempdir().unwrap();
-        install_from(&url, &archive, cache.path()).unwrap();
-        fs::remove_file(cache.path().join("elan/installed")).unwrap();
-        fs::create_dir_all(cache.path().join("elan/tmp")).unwrap();
-        fs::write(cache.path().join("elan/tmp/jpvym4et00p_dz4p_file"), "half of Lean").unwrap();
+        let cache = tempfile::tempdir()?;
+        install_from(&url, &archive, cache.path())?;
+        fs::remove_file(cache.path().join("elan/installed"))?;
+        fs::create_dir_all(cache.path().join("elan/tmp"))?;
+        fs::write(cache.path().join("elan/tmp/jpvym4et00p_dz4p_file"), "half of Lean")?;
 
-        install_from(&url, &archive, cache.path()).unwrap();
+        install_from(&url, &archive, cache.path())?;
 
         assert!(!cache.path().join("elan/tmp").exists());
-        assert_eq!(installed(cache.path()), format!("{}\n", TOOLCHAIN.trim()));
+        assert_eq!(installed(cache.path())?, format!("{}\n", TOOLCHAIN.trim()));
+
+        Ok(())
     }
 
     #[test]
-    fn a_failed_install_leaves_no_elan_and_the_next_install_downloads_it_again() {
-        let (url, bytes, requests) = serve_elan();
+    fn a_failed_install_leaves_no_elan_and_the_next_install_downloads_it_again() -> io::Result<()> {
+        let (url, bytes, requests) = serve_elan()?;
         let digest = sha256(&bytes);
         let other = "0000000000000000000000000000000000000000000000000000000000000000";
         for (failure, pinned, broken_init, error) in [
@@ -466,21 +483,24 @@ fi
                 "elan-init failed: elan-init broke".to_owned(),
             ),
         ] {
-            let cache = tempfile::tempdir().unwrap();
+            let cache = tempfile::tempdir()?;
             if broken_init {
-                fs::write(cache.path().join("broken-init"), "").unwrap();
+                fs::write(cache.path().join("broken-init"), "")?;
             }
             let before = requests.load(Ordering::SeqCst);
 
-            assert_eq!(install_from(&url, &archive(pinned), cache.path()).unwrap_err().to_string(), error, "{failure}");
+            let failed = install_from(&url, &archive(pinned), cache.path()).err().map(|failed| failed.to_string());
+            assert_eq!(failed, Some(error), "{failure}");
             assert!(!cache.path().join("elan").exists(), "{failure}");
 
             if broken_init {
-                fs::remove_file(cache.path().join("broken-init")).unwrap();
+                fs::remove_file(cache.path().join("broken-init"))?;
             }
-            install_from(&url, &archive(digest), cache.path()).unwrap();
+            install_from(&url, &archive(digest), cache.path())?;
             assert_eq!(requests.load(Ordering::SeqCst) - before, 2, "{failure}");
-            assert_eq!(installed(cache.path()), format!("{}\n", TOOLCHAIN.trim()), "{failure}");
+            assert_eq!(installed(cache.path())?, format!("{}\n", TOOLCHAIN.trim()), "{failure}");
         }
+
+        Ok(())
     }
 }

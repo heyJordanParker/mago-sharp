@@ -504,6 +504,17 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(File)
         }
+        // Spec section 27: a `.sharp` file declares one type, so code at file level is never valid.
+        (Node::Statement(statement), File) if runs_code(statement) => {
+            context.report(
+                Issue::error("A statement cannot sit at file level in PHP#.")
+                    .with_annotation(Annotation::primary(statement.span()).with_message("Written at file level."))
+                    .with_note("A `.sharp` file holds its namespace, its imports and one type, and code runs in that type's methods.")
+                    .with_help("Move it into a method."),
+            );
+
+            None
+        }
         (Node::Keyword(_) | Node::LocalIdentifier(_) | Node::Identifier(Identifier::Local(_)), _) => Some(place),
         (Node::Terminator(Terminator::Semicolon(_)), _) => Some(place),
         (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
@@ -1026,11 +1037,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(_) | Node::DirectVariable(_), TryCatchClause) => None,
         (Node::Block(_), TryCatchClause) => Some(Body),
 
-        (Node::Statement(statement), Body) if let Some(body) = body_without_braces(statement) => {
-            let fix = format!("{{ {} }}", BytesDisplay(context.get_code_snippet(body)));
+        (Node::Statement(statement), Body) if let Some((body, fix)) = body_without_braces(statement, context) => {
             context.report(
                 Issue::error("PHP# writes the body of `if`, `else` and each loop in braces.")
-                    .with_annotation(Annotation::primary(body.span()).with_message("Written without braces."))
+                    .with_annotation(Annotation::primary(body).with_message("Written without braces."))
                     .with_help(format!("Write `{fix}`.")),
             );
 
@@ -2574,10 +2584,48 @@ fn write_target<'ast, 'arena>(node: Node<'ast, 'arena>) -> Option<&'ast Expressi
     }
 }
 
-/// The first body of an `if`, `else` or loop that is not a block in braces. An `else` may also hold the next `if`, whose
-/// body is a block too.
-fn body_without_braces<'ast, 'arena>(statement: &'ast Statement<'arena>) -> Option<&'ast Statement<'arena>> {
-    let unbraced = |body: &'ast Statement<'arena>| (!matches!(body, Statement::Block(_))).then_some(body);
+/// Whether a statement runs code, as a method body's statements do, rather than declaring something.
+const fn runs_code(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Block(_)
+            | Statement::Goto(_)
+            | Statement::Label(_)
+            | Statement::Try(_)
+            | Statement::Foreach(_)
+            | Statement::For(_)
+            | Statement::ForOf(_)
+            | Statement::While(_)
+            | Statement::DoWhile(_)
+            | Statement::Continue(_)
+            | Statement::Break(_)
+            | Statement::Switch(_)
+            | Statement::If(_)
+            | Statement::Return(_)
+            | Statement::Expression(_)
+            | Statement::Echo(_)
+            | Statement::Global(_)
+            | Statement::Static(_)
+            | Statement::Unset(_)
+            | Statement::LocalDeclaration(_)
+            | Statement::PatternMatch(_)
+    )
+}
+
+/// The first body of an `if`, `else` or loop that is not a block in braces, with the block to write in its place. An
+/// `else` may also hold the next `if`, whose body is a block too. A colon-delimited body, from its `:` to its `endif;`,
+/// `endwhile;` or `endfor;`, is written as blocks whole, its `elseif` clauses as `else if`.
+fn body_without_braces(statement: &Statement, context: &Context<'_, '_, '_>) -> Option<(Span, String)> {
+    let unbraced = |body: &Statement| {
+        (!matches!(body, Statement::Block(_)))
+            .then(|| (body.span(), format!("{{ {} }}", BytesDisplay(context.get_code_snippet(body)))))
+    };
+    let block = |statements: &Sequence<Statement>| {
+        let written: Vec<String> =
+            statements.iter().map(|statement| BytesDisplay(context.get_code_snippet(statement)).to_string()).collect();
+
+        format!("{{ {} }}", written.join(" "))
+    };
 
     match statement {
         Statement::If(If { body: IfBody::Statement(body), .. }) => {
@@ -2586,6 +2634,23 @@ fn body_without_braces<'ast, 'arena>(statement: &'ast Statement<'arena>) -> Opti
                 Statement::If(_) => None,
                 next => unbraced(next),
             })
+        }
+        Statement::If(If { body: IfBody::ColonDelimited(body), .. }) => {
+            let mut parts = vec![block(&body.statements)];
+            parts.extend(body.else_if_clauses.iter().map(|clause| {
+                let condition = BytesDisplay(context.get_code_snippet(clause.condition));
+
+                format!("else if ({condition}) {}", block(&clause.statements))
+            }));
+            parts.extend(body.else_clause.iter().map(|clause| format!("else {}", block(&clause.statements))));
+
+            Some((body.colon.join(body.terminator.span()), parts.join(" ")))
+        }
+        Statement::While(While { body: WhileBody::ColonDelimited(body), .. }) => {
+            Some((body.colon.join(body.terminator.span()), block(&body.statements)))
+        }
+        Statement::For(For { body: ForBody::ColonDelimited(body), .. }) => {
+            Some((body.colon.join(body.terminator.span()), block(&body.statements)))
         }
         Statement::While(While { body: WhileBody::Statement(body), .. })
         | Statement::For(For { body: ForBody::Statement(body), .. }) => unbraced(body),
@@ -2870,6 +2935,26 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
         context.report(
             Issue::error("An enum has no constructor: its cases are its only values.")
                 .with_annotation(Annotation::primary(instantiation.span()).with_message("Created here.")),
+        );
+
+        return None;
+    }
+
+    // A named constructor belongs to the class that declares it, spec section 9.1, and `Self` can be any subclass.
+    if let (Expression::Self_(_), Some(constructor), Some(arguments)) =
+        (instantiation.class, &instantiation.constructor, &instantiation.argument_list)
+        && let Some(class) = enclosing_class(context.program, instantiation.span())
+    {
+        let fix = format!(
+            "new {}.{}{}",
+            BytesDisplay(class.name.value),
+            BytesDisplay(constructor.name.value),
+            BytesDisplay(context.get_code_snippet(arguments))
+        );
+        context.report(
+            Issue::error("`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.")
+                .with_annotation(Annotation::primary(instantiation.span()).with_message("Created here."))
+                .with_help(format!("Name its class: write `{fix}`.")),
         );
 
         return None;

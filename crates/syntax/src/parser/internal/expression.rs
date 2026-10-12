@@ -264,15 +264,19 @@ where
         }
 
         // `new Report.fromJson(…)` calls a named constructor, spec section 9.1: in PHP# a name after `new` is a class,
-        // so a `.` after it names the constructor.
+        // so a `.` after it names the constructor. `new Self.of(…)` parses too, so the checker can refuse it by name.
         if self.dialect.is_sharp()
             && token.kind == T!["new"]
-            && next == Some(T![Identifier])
+            && matches!(next, Some(T![Identifier] | T!["self"]))
             && self.stream.peek_kind(2)? == Some(T!["."])
             && self.stream.peek_kind(3)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
         {
             let new = self.expect_keyword(T!["new"])?;
-            let class = Expression::Identifier(Identifier::Local(self.parse_local_identifier()?));
+            let class = if next == Some(T!["self"]) {
+                Expression::Self_(self.expect_any_keyword()?)
+            } else {
+                Expression::Identifier(Identifier::Local(self.parse_local_identifier()?))
+            };
 
             return Ok(self.arena.alloc(Expression::Instantiation(Instantiation {
                 new,

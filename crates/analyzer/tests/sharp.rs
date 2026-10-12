@@ -4607,7 +4607,7 @@ fn super_without_a_constructor_above_takes_no_arguments() {
     );
 }
 
-/// The interim ruling on an implicit `super()`: the constructor of a class whose base class has one, its own or
+/// Spec section 9.1: PHP# has no implicit `super()`, so the constructor of a class whose base class has one, its own or
 /// inherited, plain PHP's included, calls it with `: super(…)`.
 #[test]
 fn a_constructor_without_super_under_a_base_class_constructor_is_missing_super_call() {
@@ -4626,20 +4626,31 @@ fn a_constructor_without_super_under_a_base_class_constructor_is_missing_super_c
     );
 }
 
-/// A class without a constructor gets one for its initial values that run in the constructor, which calls the base
-/// class's constructor without arguments. So that is not supported yet when the base class's constructor takes any.
+/// Spec section 9.1: PHP# has no implicit `super()`. A class without a constructor gets one for its initial values that
+/// run in the constructor, and that one calls the base class's constructor without arguments. So when the base class's
+/// constructor takes any, the class declares its own, and the help writes it with every parameter the base one takes.
 #[test]
-fn initial_values_in_the_constructor_under_a_base_class_constructor_with_parameters_are_not_supported_yet() {
-    let sharp = "namespace Demo;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n}\n\nclass Constant : Entity\n{\n    protected string label = \"x\";\n}\n\nclass Blank\n{\n    public Blank() { }\n}\n\nclass Filled : Blank\n{\n    protected string label = strtoupper(\"x\");\n}\n";
+fn initial_values_in_the_constructor_under_a_base_class_constructor_with_parameters_need_a_constructor() {
+    let ledger = "<?php\n\nnamespace Lib;\n\nclass Ledger\n{\n    public function __construct(string $name, int ...$counts)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Ledger;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n}\n\nclass Totals : Ledger\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Constant : Entity\n{\n    protected string label = \"x\";\n}\n\nclass Blank\n{\n    public Blank() { }\n}\n\nclass Filled : Blank\n{\n    protected string label = strtoupper(\"x\");\n}\n";
+    let fixed = "namespace Demo;\n\nimport Lib.Ledger;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n\n    public Labeled(int id) : super(id) { }\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n\n    public Pinned(int id) : super(id) { }\n}\n\nclass Totals : Ledger\n{\n    protected string label = strtoupper(\"x\");\n\n    public Totals(string name, int ...counts) : super(name, ...counts) { }\n}\n";
 
-    assert_messages(
-        sharp,
-        &[],
-        &[
-            "8:7 not-supported-yet: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Labeled`'s initial values run in its constructor.",
-            "13:7 not-supported-yet: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Pinned`'s initial values run in its constructor.",
-        ],
+    let found: Vec<String> =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", sharp), &[("src/Lib/Ledger.php", ledger)])
+            .iter()
+            .map(|issue| {
+                format!("{}: {} {}", located(sharp, issue), issue.message, issue.help.as_deref().unwrap_or_default())
+            })
+            .collect();
+    assert_eq!(
+        found,
+        [
+            "10:7 missing-super-call: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Labeled(int id) : super(id) { }`.",
+            "15:7 missing-super-call: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Pinned(int id) : super(id) { }`.",
+            "20:7 missing-super-call: `Totals` must declare a constructor that calls `Ledger`'s with `: super(…)`. Write `public Totals(string name, int ...counts) : super(name, ...counts) { }`.",
+        ]
     );
+    assert_messages(fixed, &[("src/Lib/Ledger.php", ledger)], &[]);
 }
 
 /// Spec section 9.1: `new Artifact.sized(…)` calls the named constructor `sized`, so its arguments are checked against
@@ -4681,9 +4692,9 @@ fn a_method_and_a_named_constructor_of_one_name_are_one_error() {
         sharp,
         &[],
         &[
-            "21:16 incompatible-static-modifier: `Instanced.sized` cannot share its name with `Base`'s named constructor `sized`.",
-            "28:18 incompatible-static-modifier: The named constructor `Clash.copy` cannot share its name with the method `Base.copy`.",
-            "35:18 incompatible-static-modifier: The named constructor `Sheet.copy` cannot share its name with the method `Copyable.copy`.",
+            "21:16 named-constructor-clash: `Instanced.sized` cannot share its name with `Base`'s named constructor `sized`.",
+            "28:18 named-constructor-clash: The named constructor `Clash.copy` cannot share its name with the method `Base.copy`.",
+            "35:18 named-constructor-clash: The named constructor `Sheet.copy` cannot share its name with the method `Copyable.copy`.",
         ],
     );
 }
@@ -4735,6 +4746,26 @@ fn this_arguments_are_checked_against_the_main_constructor() {
         "namespace Demo;\n\nclass Plain\n{\n    public Plain.full(int count) : this(count) { }\n}\n",
         &[],
         &["5:40 too-many-arguments: `Plain` has no constructor to call: remove the arguments."],
+    );
+}
+
+/// Spec section 9.1: the main constructor creates its object, and PHP discards a value it returns, so `return;` ends it
+/// and a returned value is an error, whose fix compiles. A `.php` constructor keeps PHP's rule.
+#[test]
+fn a_main_constructor_returns_no_value() {
+    let sharp = "namespace Demo;\n\nclass Ticket\n{\n    public Ticket(int seats)\n    {\n        if (seats > 0) {\n            return 5;\n        }\n    }\n}\n";
+    let fixed = "namespace Demo;\n\nclass Ticket\n{\n    public Ticket(int seats)\n    {\n        if (seats > 0) {\n            return;\n        }\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Ticket\n{\n    public function __construct(int $seats)\n    {\n        if ($seats > 0) {\n            return 5;\n        }\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &["8:20 invalid-return-statement: A constructor creates its object and returns nothing: write `return;`."],
+    );
+    assert_messages(fixed, &[], &[]);
+    assert!(
+        !issues(("src/Demo/Ticket.php", php), &[]).iter().any(|issue| issue.ends_with("invalid-return-statement")),
+        "PHP keeps its own rule for a constructor's return"
     );
 }
 
