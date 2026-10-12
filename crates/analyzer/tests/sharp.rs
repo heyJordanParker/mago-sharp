@@ -11135,7 +11135,7 @@ fn emit_takes_an_event() {
     let [order_event, order_paid] = ORDER_EVENTS;
     let failed = (
         "src/Queue/JobFailed.php",
-        "<?php\n\nnamespace Queue;\n\nclass JobFailed\n{\n}\n\nclass Ledger\n{\n}\n\ninterface Notice\n{\n}\n",
+        "<?php\n\nnamespace Queue;\n\nclass JobFailed\n{\n}\n\nclass Ledger\n{\n}\n\ninterface Notice\n{\n}\n\ntrait Tracer\n{\n}\n\nenum Level\n{\n    case Low;\n}\n",
     );
     let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
     let raiser = (
@@ -11146,7 +11146,10 @@ fn emit_takes_an_event() {
         "app/Shop/OrderRefunded.sharp",
         "namespace App.Shop;\n\npublic event OrderRefunded(int orderId) : OrderEvent;\n",
     );
-    let notice = ("app/Stubs/Notices.sharp", "namespace App.Stubs;\n\nimport Queue.Notice;\n\nextern event Notice;\n");
+    let notice = (
+        "app/Stubs/Notices.sharp",
+        "namespace App.Stubs;\n\nimport Queue.Notice;\nimport Queue.Tracer;\nimport Queue.Level;\n\nextern event Notice;\nextern event Tracer;\nextern event Level;\n",
+    );
     let noticed = (
         "app/Shop/Noticed.sharp",
         "namespace App.Shop;\n\nimport Queue.Notice;\n\npublic class Noticed\n{\n    public void raise(Notice notice)\n    {\n        emit notice;\n    }\n}\n",
@@ -11155,7 +11158,11 @@ fn emit_takes_an_event() {
 
     assert_eq!(
         worded(notice, &[failed]),
-        ["5:14 invalid-event `extern event` marks a class, and `Notice` is an interface."]
+        [
+            "7:14 invalid-event `extern event` marks a class, and `Notice` is an interface.",
+            "8:14 invalid-event `extern event` marks a class, and `Tracer` is a trait.",
+            "9:14 invalid-event `extern event` marks a class, and `Level` is an enum.",
+        ]
     );
     assert_eq!(
         worded(noticed, &[failed, notice]),
