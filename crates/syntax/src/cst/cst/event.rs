@@ -12,13 +12,12 @@ use crate::cst::sequence::Sequence;
 
 /// Represents a PHP# event type, spec section 15: a class whose parameters become get-only properties.
 ///
-/// An event is declared on its own in its file or inside the class that raises it, beside an interface its events
-/// share.
+/// An event is declared at file level in its own file, as every type is.
 ///
 /// Example:
 ///
 /// ```csharp
-/// public event Paid(int orderId, Money amount) : Event;
+/// public event OrderPaid(int orderId, Money amount) : OrderEvent;
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

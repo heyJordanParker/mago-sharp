@@ -132,12 +132,6 @@ impl Fingerprintable for ClassLikeMember<'_> {
             ClassLikeMember::Law(law) => {
                 law.fingerprint_with_hasher(hasher, resolved_names, options);
             }
-            ClassLikeMember::Event(event) => {
-                event.fingerprint_with_hasher(hasher, resolved_names, options);
-            }
-            ClassLikeMember::Interface(interface) => {
-                interface.fingerprint_with_hasher(hasher, resolved_names, options);
-            }
         }
     }
 }

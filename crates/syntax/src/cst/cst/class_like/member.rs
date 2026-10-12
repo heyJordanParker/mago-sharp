@@ -4,7 +4,6 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::Sequence;
-use crate::cst::cst::class_like::Interface;
 use crate::cst::cst::class_like::constant::ClassLikeConstant;
 use crate::cst::cst::class_like::enum_case::EnumCase;
 use crate::cst::cst::class_like::law::Law;
@@ -12,7 +11,6 @@ use crate::cst::cst::class_like::method::Method;
 use crate::cst::cst::class_like::operator::Operator;
 use crate::cst::cst::class_like::property::Property;
 use crate::cst::cst::class_like::trait_use::TraitUse;
-use crate::cst::cst::event::Event;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::variable::Variable;
@@ -28,10 +26,6 @@ pub enum ClassLikeMember<'arena> {
     Method(Method<'arena>),
     Operator(Operator<'arena>),
     Law(Law<'arena>),
-    /// A PHP# event nested in the class that raises it, spec section 15.
-    Event(Event<'arena>),
-    /// A PHP# interface nested in a class, which the class's events share, spec section 15.
-    Interface(Interface<'arena>),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
@@ -187,8 +181,6 @@ impl HasSpan for ClassLikeMember<'_> {
             ClassLikeMember::Method(method) => method.span(),
             ClassLikeMember::Operator(operator) => operator.span(),
             ClassLikeMember::Law(law) => law.span(),
-            ClassLikeMember::Event(event) => event.span(),
-            ClassLikeMember::Interface(interface) => interface.span(),
         }
     }
 }

@@ -45,7 +45,7 @@ where
         }
 
         let colon = self.stream.consume_span()?;
-        let first = self.parse_type_name()?;
+        let first = self.parse_identifier()?;
 
         Ok(Some(self.parse_inheritance_from(colon, first)?))
     }
@@ -61,7 +61,7 @@ where
         types.push(first);
         while matches!(self.stream.peek_kind(0)?, Some(T![","])) {
             commas.push(self.stream.consume()?);
-            types.push(self.parse_type_name()?);
+            types.push(self.parse_identifier()?);
         }
 
         Ok(Inheritance { colon, types: TokenSeparatedSequence::new(types, commas) })

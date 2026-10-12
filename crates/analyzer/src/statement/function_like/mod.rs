@@ -1734,13 +1734,6 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
     context.collector.report_with_code(IssueCode::InvalidParameterDefaultValue, issue);
 }
 
-/// Whether the type `written` names `name` after a dot, as `Order.Fild` names `Fild`, and not bare.
-fn writes_after_a_dot(written: &[u8], name: &[u8]) -> bool {
-    written
-        .split(|&byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.'))
-        .any(|part| part.strip_suffix(name).is_some_and(|before| before.ends_with(b".")))
-}
-
 /// Reports errors for any undefined type references in the given type metadata.
 ///
 /// This function scans the type union for unresolved `TReference::Symbol` entries,
@@ -1758,25 +1751,7 @@ where
             continue;
         };
 
-        let separator = name.as_bytes().iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
-        let (outer, nested) = name.as_bytes().split_at(separator);
-        let span = type_metadata.span;
-        let written = (span.file_id == context.source_file.id)
-            .then(|| context.source_file.contents.get(span.start.offset as usize..span.end.offset as usize))
-            .flatten()
-            .unwrap_or_default();
-        let issue = if context.dialect.is_sharp()
-            && writes_after_a_dot(written, &nested[1..])
-            && context.codebase.get_class_like(outer).is_some()
-        {
-            // A dotted type names a type nested in its class, spec section 15.
-            Issue::error(format!(
-                "`{}` has no event `{}`.",
-                display_class_like_name(context, word(outer)),
-                String::from_utf8_lossy(&nested[1..])
-            ))
-            .with_annotation(Annotation::primary(type_metadata.span).with_message("Named here."))
-        } else if context.dialect.is_sharp() {
+        let issue = if context.dialect.is_sharp() {
             let name = display_class_like_name(context, *name);
             Issue::error(format!("Cannot find type `{name}`."))
                 .with_annotation(

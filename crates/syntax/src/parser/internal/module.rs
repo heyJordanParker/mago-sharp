@@ -35,6 +35,7 @@ where
             }
 
             let position_before = self.stream.current_position();
+            self.state.members_of = "A module";
             match self.parse_classlike_member() {
                 Ok(ClassLikeMember::Law(law)) => members.push(ModuleMember::Law(law)),
                 Ok(member) => self.errors.push(ParseError::NonLawInSharpModule(member.span())),

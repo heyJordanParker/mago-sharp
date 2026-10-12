@@ -48,10 +48,8 @@ where
     /// The type is parsed once, and the name after it decides: a name followed by `(` makes a method, anything else
     /// a field. A type has no length limit, so no fixed lookahead can decide before it. A PHP property, which starts
     /// with `var` or a `$` variable, still parses so the rest of the class does, and its PHP syntax is an error. So do
-    /// a named constructor, a nested class, enum or trait, and `required` on any member but the constructor, which are
-    /// one "not supported yet" error each.
-    ///
-    /// An event and an interface nest in a class, spec section 15.
+    /// a named constructor and `required` on any member but the constructor, which are one "not supported yet" error
+    /// each, and a type declared inside the class-like.
     pub(crate) fn parse_sharp_member_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -62,31 +60,10 @@ where
                 self.parse_property_with_attributes_and_modifiers(attributes, modifiers)?,
             ));
         }
-        if self.is_at_event()? {
-            return Ok(ClassLikeMember::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
-        }
-        match self.stream.peek_kind(0)? {
-            Some(T!["interface"]) => {
-                return Ok(ClassLikeMember::Interface(
-                    self.parse_interface_with_attributes_and_modifiers(attributes, modifiers)?,
-                ));
-            }
-            Some(T!["class"]) => {
-                let class = self.parse_class_with_attributes_and_modifiers(attributes, modifiers)?;
-
-                return Err(ParseError::NotSupportedYetInSharp("A nested class", class.span()));
-            }
-            Some(T!["enum"]) => {
-                let r#enum = self.parse_enum_with_attributes_and_modifiers(attributes, modifiers)?;
-
-                return Err(ParseError::NotSupportedYetInSharp("A nested enum", r#enum.span()));
-            }
-            Some(T!["trait"]) => {
-                let r#trait = self.parse_trait_with_attributes_and_modifiers(attributes, modifiers)?;
-
-                return Err(ParseError::NotSupportedYetInSharp("A nested trait", r#trait.span()));
-            }
-            _ => {}
+        if self.is_at_event()?
+            || matches!(self.stream.peek_kind(0)?, Some(T!["interface" | "class" | "enum" | "trait"]))
+        {
+            return Err(self.parse_nested_type(attributes, modifiers)?);
         }
 
         // `required` or `extern` written before any other modifier starts the member's modifiers.
@@ -103,11 +80,13 @@ where
 
         let hint = self.parse_type_hint()?;
         // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1, parses whole
-        // and is left out of the class, which parses on. Its name reads as a nested type's, until `(` follows it.
-        if let Hint::Identifier(Identifier::Dotted(name)) = hint
-            && self.stream.is_at(T!["("])?
+        // and is left out of the class, which parses on.
+        if let Hint::Identifier(Identifier::Local(class)) = hint
+            && self.stream.is_at(T!["."])?
+            && self.stream.peek_kind(2)? == Some(T!["("])
         {
-            let name = name.span;
+            self.stream.consume()?;
+            let name = class.span.join(self.parse_local_identifier()?.span);
             self.parse_function_like_parameter_list()?;
             if self.stream.is_at(T![":"])? {
                 self.stream.consume()?;
@@ -175,6 +154,42 @@ where
             initializer: None,
             body: self.parse_method_body()?,
         }))
+    }
+
+    /// Parses a type declared inside a PHP# class-like whole, so the class-like parses on, and returns its refusal:
+    /// every type, events and interfaces included, is declared in its own file. The caller has seen `event Name(`,
+    /// `interface`, `class`, `enum` or `trait`.
+    fn parse_nested_type(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+    ) -> Result<ParseError, ParseError> {
+        // The nested type's own members overwrite which class-like the parser reads.
+        let owner = self.state.members_of;
+        let (name, span) = match self.stream.peek_kind(0)? {
+            Some(T!["interface"]) => {
+                let interface = self.parse_interface_with_attributes_and_modifiers(attributes, modifiers)?;
+                (interface.name, interface.span())
+            }
+            Some(T!["class"]) => {
+                let class = self.parse_class_with_attributes_and_modifiers(attributes, modifiers)?;
+                (class.name, class.span())
+            }
+            Some(T!["enum"]) => {
+                let r#enum = self.parse_enum_with_attributes_and_modifiers(attributes, modifiers)?;
+                (r#enum.name, r#enum.span())
+            }
+            Some(T!["trait"]) => {
+                let r#trait = self.parse_trait_with_attributes_and_modifiers(attributes, modifiers)?;
+                (r#trait.name, r#trait.span())
+            }
+            _ => {
+                let event = self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?;
+                (event.name, event.span())
+            }
+        };
+
+        Ok(ParseError::NestedTypeInSharp(owner, String::from_utf8_lossy(name.value).into(), span))
     }
 
     /// Parses a PHP# constructor's `: super(…)` or `: this(…)`, spec section 9.1. Anything else after `:`, such as

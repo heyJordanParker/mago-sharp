@@ -770,11 +770,8 @@ where
         }
     }
 
-    /// A PHP# interface nested in a class is a class-like of its own, spec section 15, so the class's constructor is
-    /// not its.
     #[inline]
     fn walk_interface(&mut self, interface: &'arena Interface<'arena>, context: &mut Context<'ctx, 'arena, A>) {
-        let has_constructor = std::mem::take(&mut self.has_constructor);
         if let Some((id, templates, type_aliases, imported_aliases)) =
             register_interface(&mut self.codebase, interface, context, &mut self.scope)
         {
@@ -786,15 +783,11 @@ where
 
             walk_interface_mut(self, interface, context);
         }
-
-        self.has_constructor = has_constructor;
     }
 
-    /// A PHP# event registers as the final class it runs as, with its constructor, spec section 15. One nested in a
-    /// class is a class-like of its own, so the class's constructor is not its.
+    /// A PHP# event registers as the final class it runs as, with its constructor, spec section 15.
     #[inline]
     fn walk_event(&mut self, event: &'arena Event<'arena>, context: &mut Context<'ctx, 'arena, A>) {
-        let has_constructor = std::mem::take(&mut self.has_constructor);
         if let Some((id, templates, _, _)) = register_event(&mut self.codebase, event, context, &mut self.scope) {
             self.apply_polyfill_flag_to_class_like(id);
             self.stack.push(id);
@@ -803,8 +796,6 @@ where
 
             walk_event_mut(self, event, context);
         }
-
-        self.has_constructor = has_constructor;
     }
 
     #[inline]

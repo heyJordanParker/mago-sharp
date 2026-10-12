@@ -5303,33 +5303,27 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
 }
 
 /// ```php
-/// final class Shipped
-/// {
-///     public function __construct(public readonly int $shipmentId) {}
-/// }
-/// class Order
-/// {
-///     public function pay(int $orderId): \App\Order\Paid { return new \App\Order\Paid($orderId); }
-/// }
-/// interface Order\Event
+/// interface OrderEvent
 /// {
 ///     public int $orderId { get; }
 /// }
-/// final class Order\Paid implements \App\Order\Event
+/// final class OrderPaid implements \App\OrderEvent
 /// {
 ///     public function __construct(public readonly int $orderId, public readonly int $amount = 0) {}
+/// }
+/// class Order
+/// {
+///     public function pay(int $orderId): \App\OrderPaid { return new \App\OrderPaid($orderId); }
 /// }
 /// ```
 ///
 /// Spec section 15: an event is a final class, `[32]` `ZEND_ACC_FINAL`, whose constructor promotes each parameter to a
 /// public get-only property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and its header is the `implements` name
-/// list. A type nested in a class is declared after it, under the class's name, as `Order\Paid`, which the engine
-/// declares in the namespace, and an interface's get-only property is a public property, `[1]`, with an abstract
-/// `get` hook. A dotted type names the nested type in full.
+/// list. An interface's get-only property is a public property, `[1]`, with an abstract `get` hook.
 #[test]
-fn an_event_is_a_final_class_and_a_nested_type_is_declared_after_its_class() {
+fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic event Shipped(int shipmentId);\n\npublic class Order\n{\n    public interface Event\n    {\n        public int orderId { get; }\n    }\n\n    public event Paid(int orderId, int amount = 0) : Event;\n\n    public Order.Paid pay(int orderId) => new Paid(orderId);\n}\n",
+        "namespace App;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n\npublic class Order\n{\n    public OrderPaid pay(int orderId) => new OrderPaid(orderId);\n}\n",
     );
 
     assert_eq!(
@@ -5346,51 +5340,7 @@ fn an_event_is_a_final_class_and_a_nested_type_is_declared_after_its_class() {
               NAMESPACE
                 ZVAL "App"
                 null
-              CLASS [32] "Shipped" @3-3
-                null
-                null
-                STMT_LIST
-                  METHOD [1] "__construct" @3-3
-                    PARAM_LIST
-                      PARAM [129]
-                        ZVAL [1] "int"
-                        ZVAL "shipmentId"
-                        null
-                        null
-                        null
-                        null
-                    null
-                    STMT_LIST
-                    null
-                    null
-                null
-                null
-              CLASS "Order" @5-15
-                null
-                null
-                STMT_LIST
-                  METHOD [1] "pay" @14-14
-                    PARAM_LIST
-                      PARAM
-                        ZVAL [1] "int"
-                        ZVAL "orderId"
-                        null
-                        null
-                        null
-                        null
-                    null
-                    STMT_LIST
-                      RETURN
-                        NEW
-                          ZVAL "App\\Order\\Paid"
-                          ARG_LIST
-                            VAR
-                              ZVAL "orderId"
-                    ZVAL "App\\Order\\Paid"
-                    null
-                null
-                null
-              CLASS [1] "Order\\Event" @7-10
+              CLASS [1] "OrderEvent" @3-6
                 null
                 null
                 STMT_LIST
@@ -5402,7 +5352,7 @@ fn an_event_is_a_final_class_and_a_nested_type_is_declared_after_its_class() {
                         null
                         null
                         STMT_LIST
-                          PROPERTY_HOOK "get" @9-9
+                          PROPERTY_HOOK "get" @5-5
                             null
                             null
                             null
@@ -5411,12 +5361,12 @@ fn an_event_is_a_final_class_and_a_nested_type_is_declared_after_its_class() {
                     null
                 null
                 null
-              CLASS [32] "Order\\Paid" @12-12
+              CLASS [32] "OrderPaid" @8-8
                 null
                 NAME_LIST
-                  ZVAL "App\\Order\\Event"
+                  ZVAL "App\\OrderEvent"
                 STMT_LIST
-                  METHOD [1] "__construct" @12-12
+                  METHOD [1] "__construct" @8-8
                     PARAM_LIST
                       PARAM [129]
                         ZVAL [1] "int"
@@ -5435,6 +5385,31 @@ fn an_event_is_a_final_class_and_a_nested_type_is_declared_after_its_class() {
                     null
                     STMT_LIST
                     null
+                    null
+                null
+                null
+              CLASS "Order" @10-13
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "pay" @12-12
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "int"
+                        ZVAL "orderId"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        NEW
+                          ZVAL "App\\OrderPaid"
+                          ARG_LIST
+                            VAR
+                              ZVAL "orderId"
+                    ZVAL "App\\OrderPaid"
                     null
                 null
                 null

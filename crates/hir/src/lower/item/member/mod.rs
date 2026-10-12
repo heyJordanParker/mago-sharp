@@ -131,9 +131,6 @@ where
                 // A PHP# law is checked and never runs, spec section 28, so the class it states a fact about has no
                 // member for it.
                 cst::ClassLikeMember::Law(_) => {}
-                // A PHP# type nested in a class is a class-like of its own beside it, spec section 15, so the class
-                // has no member for it.
-                cst::ClassLikeMember::Event(_) | cst::ClassLikeMember::Interface(_) => {}
             }
         }
 
