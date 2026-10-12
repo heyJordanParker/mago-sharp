@@ -44,7 +44,6 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOfTarget;
-use mago_syntax::cst::ForOfVariable;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
@@ -1197,7 +1196,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 // `(string)`, as spec section 12 reads it. Both follow the `Map`'s key type, written on the key or not.
                 if let ForOfTarget::KeyValue(pair) = &for_of.target
                     && let Some(key_type) = self.types.map_key_type(self.types.expression_type(for_of.expression))
-                    && let Some(read_back) = self.key_read_back(&pair.key, &key_type)
+                    && let Some(read_back) = self.key_read_back(pair.key.name.span, pair.key.name.value, &key_type)
                 {
                     let line = self.line(&pair.key);
                     let key = self.variable(pair.key.name.span, pair.key.name.value);
@@ -2241,12 +2240,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP, 0, line, &[lowered, value])
     }
 
-    /// The loop key `key` of a `Map` keyed by `key_type`, read back as the value the `Map` was given: the case of a
-    /// backed enum through its `from`, or a `string` through `(string)`. None when the stored key is that value.
-    fn key_read_back(&mut self, key: &ForOfVariable, key_type: &TUnion) -> Option<u32> {
-        let line = self.line(key);
+    /// The variable `key`, written at `span`, holding a key a `Map` keyed by `key_type` stores, read back as the value
+    /// the `Map` was given: the case of a backed enum through its `from`, or a `string` through `(string)`. None when
+    /// the stored key is that value.
+    fn key_read_back(&mut self, span: Span, key: &[u8], key_type: &TUnion) -> Option<u32> {
+        let line = self.line(span);
         if let Some(class) = self.backed_enum(key_type) {
-            let stored_key = self.variable(key.name.span, key.name.value);
+            let stored_key = self.variable(span, key);
             let class = self.string(ZEND_NAME_FQ, line, class);
             let from = self.string(0, line, b"from");
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[stored_key]);
@@ -2257,9 +2257,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
 
-        let stored_key = self.variable(key.name.span, key.name.value);
+        let stored_key = self.variable(span, key);
 
         Some(self.node(SHARP_AST_CAST, IS_STRING, line, &[stored_key]))
+    }
+
+    /// `keys`, the list of the keys a `Map` of `map_type` stores, each read back as [`Self::key_read_back`] reads a
+    /// loop's key, as in `\array_map(fn ($key#N) => (string) $key#N, $keys)` for a `Map<string, V>`. `keys` alone
+    /// where each stored key is the key the `Map` was given.
+    fn keys_read_back(&mut self, span: Span, map_type: &TUnion, keys: u32) -> u32 {
+        self.temporaries += 1;
+        let key = format!("key#{}", self.temporaries).into_bytes();
+        let read_back =
+            self.types.map_key_type(map_type).and_then(|key_type| self.key_read_back(span, &key, &key_type));
+        self.temporaries -= 1;
+        let Some(read_back) = read_back else {
+            return keys;
+        };
+
+        let line = self.line(span);
+        let read_back = self.hidden_arrow_function(span, &key, read_back);
+        let function = self.string(ZEND_NAME_FQ, line, b"array_map");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[read_back, keys]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
     /// The backed enum every value of `r#type` is a case of, if there is one.
@@ -2332,7 +2353,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 unreachable!("the checker refuses a `Map` literal where a `Set` is declared");
             };
             let mut value = self.reread(element.value, "element");
-            let key = self.set_key(&mut value);
+            let key = self.read_key(&mut value);
             let read = self.read(&mut value);
             self.release(value);
             entries.push(self.node(SHARP_AST_ARRAY_ELEM, 0, self.line(element), &[read, key]));
@@ -2480,22 +2501,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_empty, throw, element])
             }
-            ("Set", b"contains") => {
-                let set = self.read_collection(&mut collection, line, false);
-                let key = self.key(element());
-                let entry = self.node(SHARP_AST_DIM, 0, line, &[set, key]);
-
-                self.node(SHARP_AST_ISSET, 0, line, &[entry])
+            ("Set", b"contains") | ("Map", b"has") => {
+                self.holds_key(collection_name, &mut collection, &mut Reread::once(element()), line)
             }
             ("Set", b"add") => {
                 let mut element = self.reread(element(), "element");
-                let held = self.read_collection(&mut collection, line, false);
-                let key = self.set_key(&mut element);
-                let entry = self.node(SHARP_AST_DIM, 0, line, &[held, key]);
-                let held = self.node(SHARP_AST_ISSET, 0, line, &[entry]);
+                let held = self.holds_key(collection_name, &mut collection, &mut element, line);
                 let absent = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[held]);
                 let place = self.read_collection(&mut collection, line, false);
-                let key = self.set_key(&mut element);
+                let key = self.read_key(&mut element);
                 let value = self.read(&mut element);
                 self.release(element);
                 let entry = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key]);
@@ -2504,16 +2518,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_AND, 0, line, &[absent, added])
             }
-            ("Set", b"remove") => {
-                let mut element = self.reread(element(), "element");
-                let held = self.read_collection(&mut collection, line, false);
-                let key = self.set_key(&mut element);
-                let entry = self.node(SHARP_AST_DIM, 0, line, &[held, key]);
-                let held = self.node(SHARP_AST_ISSET, 0, line, &[entry]);
+            ("Set" | "Map", b"remove") => {
+                let mut removed = self.reread(element(), if collection_name == "Set" { "element" } else { "key" });
+                let held = self.holds_key(collection_name, &mut collection, &mut removed, line);
                 let place = self.read_collection(&mut collection, line, false);
                 let delete = self.string(0, line, b"delete");
-                let key = self.set_key(&mut element);
-                self.release(element);
+                let key = self.read_key(&mut removed);
+                self.release(removed);
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[key]);
                 let deleted = self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, delete, arguments]);
                 let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
@@ -2532,20 +2543,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.node(SHARP_AST_ASSIGN, 0, line, &[place, empty])
                 }
             }
-            (_, b"count") | ("Set", b"tolist") => {
-                let function = if method == b"count" { b"count".as_slice() } else { b"array_values" };
+            (_, b"count") | ("Set", b"tolist") | ("Map", b"keys") => {
+                let function = match method.as_slice() {
+                    b"count" => b"count".as_slice(),
+                    b"tolist" => b"array_values",
+                    _ => b"array_keys",
+                };
                 let array = self.read_collection(&mut collection, line, false);
                 let function = self.string(ZEND_NAME_FQ, line, function);
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[array]);
-
-                self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+                let called = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+                if method == b"keys" {
+                    self.keys_read_back(call.span(), self.types.expression_type(receiver), called)
+                } else {
+                    called
+                }
             }
-            ("Set", b"filter") => {
-                let set = self.read_collection(&mut collection, line, false);
+            ("Set" | "Map", b"filter") => {
+                let filtered = self.read_collection(&mut collection, line, false);
                 let filter = self.string(0, line, b"filterValues");
                 let arguments = self.arguments(arguments, &[]);
 
-                self.node(SHARP_AST_METHOD_CALL, 0, line, &[set, filter, arguments])
+                self.node(SHARP_AST_METHOD_CALL, 0, line, &[filtered, filter, arguments])
             }
             _ => unreachable!(
                 "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
@@ -2585,16 +2604,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(call);
         let value_type = self.types.expression_type(value);
         // `\in_array` and `\array_search` read the value before the list, so they run only where neither side runs code.
-        let receiver_runs_nothing = match collection {
-            CollectionReceiver::Place(_) => true,
-            CollectionReceiver::Property(object, _) | CollectionReceiver::Value(object) => {
-                self.is_pure(object.expression)
-            }
-        };
         let strict = self.declared_equality(element_type, value_type).is_none()
             && !mixes_numbers(element_type, value_type)
             && self.is_pure(value)
-            && receiver_runs_nothing;
+            && self.runs_nothing(collection);
         let hidden = (matches!(search, Search::Remove) || (strict && matches!(search, Search::IndexOf))).then(|| {
             self.temporaries += 1;
 
@@ -2665,6 +2678,52 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         lowered
     }
 
+    /// Whether the `Map` or the `Set` a method call runs on holds `key`: `isset($set[$key])` for a `Set`, whose elements
+    /// are never null, and `\array_key_exists($key, $map)` for a `Map`, whose values may be. `\array_key_exists` reads
+    /// its arguments in the order they are written, so where the key or the receiver runs code, they go in by name, the
+    /// receiver first, as the call reads them: `\array_key_exists(array: $map, key: $key)`.
+    fn holds_key(
+        &mut self,
+        collection_name: &str,
+        collection: &mut CollectionReceiver,
+        key: &mut Reread,
+        line: u32,
+    ) -> u32 {
+        let in_order = self.is_pure(key.expression) && self.runs_nothing(collection);
+        let held = self.read_collection(collection, line, false);
+        let key = self.read_key(key);
+        if collection_name == "Set" {
+            let entry = self.node(SHARP_AST_DIM, 0, line, &[held, key]);
+
+            return self.node(SHARP_AST_ISSET, 0, line, &[entry]);
+        }
+
+        let arguments = if in_order {
+            vec![key, held]
+        } else {
+            let array = self.string(0, line, b"array");
+            let held = self.node(SHARP_AST_NAMED_ARG, 0, line, &[array, held]);
+            let name = self.string(0, line, b"key");
+
+            vec![held, self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, key])]
+        };
+        let function = self.string(ZEND_NAME_FQ, line, b"array_key_exists");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// Whether reading the receiver `collection` runs no code: a local, a field or a static property, or a property of
+    /// or a value that [`Self::is_pure`] reads.
+    fn runs_nothing(&self, collection: &CollectionReceiver) -> bool {
+        match collection {
+            CollectionReceiver::Place(_) => true,
+            CollectionReceiver::Property(object, _) | CollectionReceiver::Value(object) => {
+                self.is_pure(object.expression)
+            }
+        }
+    }
+
     /// `fn ($parameter) => body`, an arrow function of one untyped hidden parameter, on the line of `span`.
     fn hidden_arrow_function(&mut self, span: Span, parameter: &[u8], body: u32) -> u32 {
         let line = self.line(span);
@@ -2686,7 +2745,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
         let reads_twice =
-            matches!((collection, method.as_slice()), ("Set", b"add" | b"remove") | ("List", b"last" | b"remove"));
+            matches!((collection, method.as_slice()), (_, b"remove") | ("Set", b"add") | ("List", b"last"));
 
         Some((collection, method, reads_twice))
     }
@@ -2775,8 +2834,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_ASSIGN, 0, self.line(value.expression), &[variable, lowered])
     }
 
-    /// A read of the element `value` as the key a `Set` holds it under.
-    fn set_key(&mut self, value: &mut Reread) -> u32 {
+    /// A read of `value` as the key a `Map` or a `Set` holds it under.
+    fn read_key(&mut self, value: &mut Reread) -> u32 {
         let read = self.read(value);
 
         self.stored_key(value.expression, read)

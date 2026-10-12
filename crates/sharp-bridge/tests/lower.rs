@@ -2226,43 +2226,82 @@ fn a_backed_enum_key_goes_into_map_get_as_its_backing_value() {
 }
 
 /// ```php
-/// $counts->delete($status->value);
-/// $counts->delete(key: \Lib\Calc::Closed->value);
+/// \array_key_exists($status->value, $counts) && $counts->delete($status->value) === null;
+/// \array_key_exists(array: $counts, key: \Lib\Calc::Closed->value) && $counts->delete(\Lib\Calc::Closed->value) === null;
+/// return \array_key_exists($status->value, $counts);
 /// ```
 ///
-/// `Map.delete` declares its parameter as the `Map`'s key type, so a case going in as its key is its `->value`,
-/// passed by position or by name.
+/// `Map.has` and `Map.remove` declare their parameter as the `Map`'s key type, so a case going in as its key is its
+/// `->value`, passed by position or by name. A key that reads a class goes in by name, after the `Map`, as the call
+/// reads them.
 #[test]
-fn a_backed_enum_key_goes_into_map_delete_as_its_backing_value() {
+fn a_backed_enum_key_goes_into_map_has_and_remove_as_its_backing_value() {
     assert_eq!(
         body_in(
-            "void run(Map<Calc, int> counts, Calc status)",
-            "        counts.delete(status);\n        counts.delete(key: Calc.Closed);\n",
+            "bool run(Map<Calc, int> counts, Calc status)",
+            "        counts.remove(status);\n        counts.remove(key: Calc.Closed);\n        return counts.has(status);\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
         ),
         indoc! {r#"
             STMT_LIST
-              METHOD_CALL
-                VAR
-                  ZVAL "counts"
-                ZVAL "delete"
-                ARG_LIST
-                  PROP
-                    VAR
-                      ZVAL "status"
-                    ZVAL "value"
-              METHOD_CALL
-                VAR
-                  ZVAL "counts"
-                ZVAL "delete"
-                ARG_LIST
-                  NAMED_ARG
-                    ZVAL "key"
+              AND
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
                     PROP
-                      CLASS_CONST
-                        ZVAL "Lib\\Calc"
-                        ZVAL "Closed"
+                      VAR
+                        ZVAL "status"
                       ZVAL "value"
+                    VAR
+                      ZVAL "counts"
+                BINARY_OP [16]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "counts"
+                    ZVAL "delete"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "status"
+                        ZVAL "value"
+                  ZVAL null
+              AND
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    NAMED_ARG
+                      ZVAL "array"
+                      VAR
+                        ZVAL "counts"
+                    NAMED_ARG
+                      ZVAL "key"
+                      PROP
+                        CLASS_CONST
+                          ZVAL "Lib\\Calc"
+                          ZVAL "Closed"
+                        ZVAL "value"
+                BINARY_OP [16]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "counts"
+                    ZVAL "delete"
+                    ARG_LIST
+                      PROP
+                        CLASS_CONST
+                          ZVAL "Lib\\Calc"
+                          ZVAL "Closed"
+                        ZVAL "value"
+                  ZVAL null
+              RETURN
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "status"
+                      ZVAL "value"
+                    VAR
+                      ZVAL "counts"
         "#}
     );
 }
@@ -2875,7 +2914,8 @@ fn every_collection_counts_with_php_count() {
 }
 
 /// Each method `INLINED_COLLECTION_METHODS` names lowers to PHP on the array, never to a call of the method itself,
-/// which `Sharp\Collection` may not have. Only `filter` stays a method call, of `filterValues`, which keeps the keys.
+/// which `Sharp\Collection` may not have. Only `filter` stays a method call, of `filterValues`, which keeps the keys of
+/// a `Map` and a `Set`.
 #[test]
 fn every_inlined_collection_method_lowers_to_php_on_the_array() {
     for (collection, method) in INLINED_COLLECTION_METHODS {
@@ -2883,9 +2923,10 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
             "Map" => "Map<string, int>",
             _ => &format!("{collection}<int>"),
         };
-        let argument = match method {
-            "add" | "remove" | "contains" | "indexOf" => "1",
-            "filter" => "value => value > 0",
+        let argument = match (collection, method) {
+            ("Map", "has" | "remove") => "\"a\"",
+            (_, "add" | "remove" | "contains" | "indexOf") => "1",
+            (_, "filter") => "value => value > 0",
             _ => "",
         };
         let body = Lowered::new(&format!(
@@ -3163,14 +3204,19 @@ fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
 ///     && \array_find_key(\App\Tenant\Report::pick($xs, $x = 2), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($x)) === 0
 ///     && ((${'index#2'} = \array_find_key((${'receiver#1'} = $this->bumped())->items, (fn (${'value#3'}) => fn (${'element#4'}) =>
 ///         ${'element#4'} === ${'value#3'})($this->n))) !== null) && ${'receiver#1'}->items->removeAt(${'index#2'}) === null;
+///
+/// return \array_key_exists(array: $this->bumped()->counts, key: $this->n)
+///     && \array_key_exists(array: (${'receiver#1'} = $this->bumped())->counts, key: $this->n)
+///     && ${'receiver#1'}->counts->delete($this->n) === null;
 /// ```
 ///
-/// PHP's `in_array` and `array_search` read their value before their array, so a search whose receiver or value runs
-/// code takes the form that runs the receiver first, as the call runs it: `this.bump(xs)` changes `this.n` before
-/// `contains` reads it, `Report.pick(xs, x = 2)` assigns `x` before `indexOf` reads it, and `this.bumped()` changes
-/// `this.n` before `remove` reads it.
+/// PHP's `in_array`, `array_search` and `array_key_exists` read their value before their array, so a search whose
+/// receiver or value runs code takes the form that runs the receiver first, as the call runs it: `this.bump(xs)`
+/// changes `this.n` before `contains` reads it, `Report.pick(xs, x = 2)` assigns `x` before `indexOf` reads it, and
+/// `this.bumped()` changes `this.n` before a `List`'s `remove` reads it, and before a `Map`'s `has` and `remove`, which
+/// name `\array_key_exists`'s arguments to read the `Map` first.
 #[test]
-fn a_list_search_runs_its_receiver_before_its_value() {
+fn a_search_runs_its_receiver_before_its_value() {
     assert_eq!(
         Lowered::new(
             "namespace App.Tenant;\n\nclass Report\n{\n    private int n = 1;\n\n    public List<int> items { get; set; } = [];\n\n    public List<int> bump(List<int> xs)\n    {\n        this.n = this.n + 1;\n        return xs;\n    }\n\n    public Report bumped()\n    {\n        this.n = this.n + 1;\n        return this;\n    }\n\n    public static List<int> pick(List<int> xs, int ignored) => xs;\n\n    public bool run(List<int> xs)\n    {\n        let x = 1;\n        return this.bump(xs).contains(this.n) && Report.pick(xs, x = 2).indexOf(x) == 0 && this.bumped().items.remove(this.n);\n    }\n}\n"
@@ -3344,6 +3390,70 @@ fn a_list_search_runs_its_receiver_before_its_value() {
                         ARG_LIST
                           VAR
                             ZVAL "index#2"
+                      ZVAL null
+        "#}
+    );
+    assert_eq!(
+        Lowered::new(
+            "namespace App.Tenant;\n\nclass Report\n{\n    private int n = 1;\n\n    public Map<int, int> counts { get; set; } = [:];\n\n    public Report bumped()\n    {\n        this.n = this.n + 1;\n        return this;\n    }\n\n    public bool run()\n    {\n        return this.bumped().counts.has(this.n) && this.bumped().counts.remove(this.n);\n    }\n}\n"
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                AND
+                  CALL
+                    ZVAL "array_key_exists"
+                    ARG_LIST
+                      NAMED_ARG
+                        ZVAL "array"
+                        PROP
+                          METHOD_CALL
+                            VAR
+                              ZVAL "this"
+                            ZVAL "bumped"
+                            ARG_LIST
+                          ZVAL "counts"
+                      NAMED_ARG
+                        ZVAL "key"
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "n"
+                  AND
+                    CALL
+                      ZVAL "array_key_exists"
+                      ARG_LIST
+                        NAMED_ARG
+                          ZVAL "array"
+                          PROP
+                            ASSIGN
+                              VAR
+                                ZVAL "receiver#1"
+                              METHOD_CALL
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "bumped"
+                                ARG_LIST
+                            ZVAL "counts"
+                        NAMED_ARG
+                          ZVAL "key"
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "n"
+                    BINARY_OP [16]
+                      METHOD_CALL
+                        PROP
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "counts"
+                        ZVAL "delete"
+                        ARG_LIST
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "n"
                       ZVAL null
         "#}
     );
@@ -8848,18 +8958,22 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 /// }
 /// foreach ($keys as $key => $n) {
 /// }
+/// $cases = \array_map(fn (${'key#1'}) => \Lib\Calc::from(${'key#1'}), \array_keys($statuses));
+/// $names = \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($skus));
+/// $ids = \array_keys($keys);
+/// $maybe = ($optional === null) ? null : \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($optional));
 /// ```
 ///
-/// A `Map` keyed by a backed enum holds each key as its backing value, so a loop reads each key back as its case,
-/// through `from` on the enum. PHP stores an all-digit `string` key as an `int`, so a loop over a `Map<string, V>`
-/// reads each key back through `(string)`. Both follow the `Map`'s key type, written on the key or not. An `int` key
-/// type changes nothing.
+/// A `Map` keyed by a backed enum holds each key as its backing value, so a loop and `keys()` read each key back as
+/// its case, through `from` on the enum. PHP stores an all-digit `string` key as an `int`, so a loop over a
+/// `Map<string, V>` and its `keys()` read each key back through `(string)`, a null-safe `keys()` too. Both follow the
+/// `Map`'s key type, written on the key or not. An `int` key type changes nothing.
 #[test]
-fn a_loop_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
+fn a_map_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
     assert_eq!(
         body_in(
-            "int run(int extra, Map<Calc, int> statuses, Map<string, int> skus, Map<int, int> keys)",
-            "        for (const [status, int n] of statuses) {\n            extra += n;\n        }\n        for (const [string sku, n] of skus) {\n        }\n        for (const [key, n] of keys) {\n        }\n        return 1;\n",
+            "int run(int extra, Map<Calc, int> statuses, Map<string, int> skus, Map<int, int> keys, Map<string, int>? optional)",
+            "        for (const [status, int n] of statuses) {\n            extra += n;\n        }\n        for (const [string sku, n] of skus) {\n        }\n        for (const [key, n] of keys) {\n        }\n        const cases = statuses.keys();\n        const names = skus.keys();\n        const ids = keys.keys();\n        const maybe = optional?.keys();\n        return 1;\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
         ),
         indoc! {r#"
@@ -8910,6 +9024,101 @@ fn a_loop_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
                 VAR
                   ZVAL "key"
                 STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "cases"
+                CALL
+                  ZVAL "array_map"
+                  ARG_LIST
+                    ARROW_FUNC "" @16-16
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "key#1"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STATIC_CALL
+                        ZVAL "Lib\\Calc"
+                        ZVAL "from"
+                        ARG_LIST
+                          VAR
+                            ZVAL "key#1"
+                      null
+                      null
+                    CALL
+                      ZVAL "array_keys"
+                      ARG_LIST
+                        VAR
+                          ZVAL "statuses"
+              ASSIGN
+                VAR
+                  ZVAL "names"
+                CALL
+                  ZVAL "array_map"
+                  ARG_LIST
+                    ARROW_FUNC "" @17-17
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "key#1"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      CAST [6]
+                        VAR
+                          ZVAL "key#1"
+                      null
+                      null
+                    CALL
+                      ZVAL "array_keys"
+                      ARG_LIST
+                        VAR
+                          ZVAL "skus"
+              ASSIGN
+                VAR
+                  ZVAL "ids"
+                CALL
+                  ZVAL "array_keys"
+                  ARG_LIST
+                    VAR
+                      ZVAL "keys"
+              ASSIGN
+                VAR
+                  ZVAL "maybe"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "optional"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "array_map"
+                    ARG_LIST
+                      ARROW_FUNC "" @19-19
+                        PARAM_LIST
+                          PARAM
+                            null
+                            ZVAL "key#1"
+                            null
+                            null
+                            null
+                            null
+                        null
+                        CAST [6]
+                          VAR
+                            ZVAL "key#1"
+                        null
+                        null
+                      CALL
+                        ZVAL "array_keys"
+                        ARG_LIST
+                          VAR
+                            ZVAL "optional"
               RETURN
                 ZVAL 1
         "#}

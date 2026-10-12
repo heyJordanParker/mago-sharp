@@ -5,8 +5,10 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::template::TemplateResult;
@@ -24,6 +26,7 @@ use crate::error::AnalysisError;
 use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
 use crate::invocation::resolver::resolve_invocation_type;
+use crate::statement::function_like::map_key_error;
 use crate::utils::names::display_sharp_type;
 
 pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
@@ -48,7 +51,6 @@ where
     }
 
     if context.dialect.is_sharp()
-        && is_sorted_by(invocation)
         && let Some(selector) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
         && let Some(selector) = selector.value()
         && let Some([key_type]) = artifacts
@@ -56,7 +58,26 @@ where
             .get(&(invocation.span.start.offset, invocation.span.end.offset))
             .map(Vec::as_slice)
     {
-        check_sorted_by_key(context, selector, key_type);
+        if is_collection_method(invocation, b"sortedBy") {
+            check_sorted_by_key(context, selector, key_type);
+        } else if (is_collection_method(invocation, b"groupBy") || is_collection_method(invocation, b"associateBy"))
+            && !get_backing_key_type(key_type, context.codebase).is_always_array_key(true)
+        {
+            let key_name = display_sharp_type(context, key_type);
+            context
+                .collector
+                .report_with_code(IssueCode::TemplateConstraintViolation, map_key_error(&key_name, selector.span()));
+
+            // The refused key is an error, so the code that reads the `Map` adds no second issue.
+            let declared = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
+            let value_type = declared
+                .get_single_array()
+                .map_or_else(get_mixed, |array| get_array_parameters(array, context.codebase).1);
+            let map =
+                TKeyedArray::new_with_parameters(Arc::new(TUnion::from_atomic(TAtomic::Error)), Arc::new(value_type));
+
+            return Ok(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(map))));
+        }
     }
 
     if let Some(return_type) = fetch_invocation_provider_return_type(context, block_context, artifacts, invocation) {
@@ -161,11 +182,11 @@ where
     TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
 }
 
-/// Whether `invocation` calls `sortedBy` on a PHP# `List`, `Map` or `Set`, which orders by the key its function returns.
-fn is_sorted_by(invocation: &Invocation<'_, '_, '_>) -> bool {
+/// Whether `invocation` calls the method `method` on a PHP# `List`, `Map` or `Set`.
+fn is_collection_method(invocation: &Invocation<'_, '_, '_>, method: &[u8]) -> bool {
     [b"Sharp\\ListMethods".as_slice(), b"Sharp\\MapMethods", b"Sharp\\SetMethods"]
         .into_iter()
-        .any(|class| is_method(invocation, class, b"sortedBy"))
+        .any(|class| is_method(invocation, class, method))
 }
 
 /// Whether `invocation` calls the method `method` of the class `class`.
