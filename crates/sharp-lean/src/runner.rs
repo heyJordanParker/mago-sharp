@@ -55,7 +55,7 @@ pub(crate) struct Answer {
     pub(crate) proposal: Option<String>,
 }
 
-/// A structure rule that facts break.
+/// A structure rule the runner judged: the facts that break it, or why it did not run.
 #[derive(Debug)]
 pub(crate) struct Broken {
     /// The index of the rule's module in the request.
@@ -64,6 +64,34 @@ pub(crate) struct Broken {
     pub(crate) rule: String,
     /// Each fact that breaks it: the index of its file in the request, and its index in that file's facts.
     pub(crate) facts: Vec<(usize, usize)>,
+    pub(crate) refused: Option<Refused>,
+}
+
+/// Why the runner did not run a rule, and where its name is in its `Module.lean`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refused {
+    pub(crate) refusal: Refusal,
+    /// 1-based.
+    pub(crate) line: u32,
+    /// 0-based, counting characters.
+    pub(crate) column: u32,
+}
+
+/// What a rule reached that the runner does not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// `sorry`.
+    Gap,
+    /// An axiom beyond Lean's standard ones.
+    Axiom(String),
+    /// An `unsafe` constant.
+    Unsafe(String),
+    /// A workspace constant whose compiled code is not its definition: `implemented_by` or `extern`.
+    ImplementedBy(String),
+    /// `Sharp.Namespace.mk` or `Sharp.Rule.breaks`, which build a namespace from a string.
+    Reserved(String),
+    /// Lean's message when it could not evaluate the rule.
+    Unevaluable(String),
 }
 
 /// Runs the runner of `library` on the modules Lake built in `package`, which imports `module` and answers each
@@ -81,7 +109,8 @@ pub(crate) fn check(
 }
 
 /// Runs the runner of `library` on the modules Lake built in `package`, which imports every rules module, each named
-/// with the namespace its rules constrain, and answers with each rule and the facts of `files` that break it.
+/// with the namespace its rules constrain, and answers with each rule and the facts of `files` that break it, or why it
+/// did not run the rule.
 pub(crate) fn rules(
     library: &Path,
     package: &Package,
@@ -264,6 +293,23 @@ fn decode_broken(payload: &[u8], modules: usize, files: &[(&str, &Facts)]) -> Re
             return Err(format!("the runner answered with the rules module {module} of {modules}"));
         }
         let rule = reader.read_string("rule name").map_err(error)?;
+        let code = reader.read_u8("rule refusal").map_err(error)?;
+        if code != 0 {
+            let detail = reader.read_string("rule refusal detail").map_err(error)?;
+            let refusal = match code {
+                1 => Refusal::Gap,
+                2 => Refusal::Axiom(detail),
+                3 => Refusal::Unsafe(detail),
+                4 => Refusal::ImplementedBy(detail),
+                5 => Refusal::Reserved(detail),
+                6 => Refusal::Unevaluable(detail),
+                code => return Err(format!("the runner answered with the unknown rule refusal {code}")),
+            };
+            let line = reader.read_u32("rule line").map_err(error)?;
+            let column = reader.read_u32("rule column").map_err(error)?;
+            rules.push(Broken { module, rule, facts: Vec::new(), refused: Some(Refused { refusal, line, column }) });
+            continue;
+        }
         let fact_count = reader.read_count("broken fact count", reader.remaining()).map_err(error)?;
         let mut facts = Vec::with_capacity(fact_count);
         for _ in 0..fact_count {
@@ -276,9 +322,31 @@ fn decode_broken(payload: &[u8], modules: usize, files: &[(&str, &Facts)]) -> Re
             }
             facts.push((file, fact));
         }
-        rules.push(Broken { module, rule, facts });
+        rules.push(Broken { module, rule, facts, refused: None });
     }
     reader.finish().map_err(error)?;
 
     Ok(rules)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refusal this Mago does not know, from a runner of another build, is an error of the Lean step, never a rule
+    /// that ran and broke nothing.
+    #[test]
+    fn an_answer_with_an_unknown_refusal_is_an_error() {
+        let mut writer = header(BROKEN_RESPONSE);
+        writer.write_length(1).unwrap();
+        writer.write_u32(0);
+        writer.write_string("App.Shared.Module.neverReachesTenant").unwrap();
+        writer.write_u8(7);
+        writer.write_string("App.Shared.Ledgr").unwrap();
+
+        assert_eq!(
+            decode_broken(&writer.finish(), 1, &[]).unwrap_err(),
+            "the runner answered with the unknown rule refusal 7"
+        );
+    }
 }

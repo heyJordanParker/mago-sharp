@@ -14,6 +14,7 @@ use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
+use mago_codex::symbol::SymbolKind;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
@@ -145,6 +146,60 @@ where
         Issue::error(format!("Cannot use `{class_name}` as a class name: it is reserved."))
             .with_annotation(Annotation::primary(name_span).with_message("Class declared here."))
             .with_note("PHP# reserves this name for a type."),
+    );
+}
+
+/// Refuses a class-like whose full name is also a namespace, as `App\Tenant\Store` is beside a class in
+/// `App\Tenant\Store\`, when either is PHP#: spec section 23. A plain PHP class may still share its name with a
+/// namespace of plain PHP, as PHP allows.
+fn report_class_like_named_as_a_namespace<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    name_span: Span,
+) where
+    A: Arena,
+{
+    let name = class_like_metadata.name.as_bytes();
+    // The codebase keeps a namespace after its last class-like leaves it, so the class-likes decide.
+    if !context.codebase.namespace_exists(name) {
+        return;
+    }
+
+    let sharp = context.dialect.is_sharp();
+    let Some(inside) = context
+        .codebase
+        .class_likes
+        .values()
+        .filter(|other| {
+            (sharp || other.flags.is_sharp())
+                && other.name.as_bytes().strip_prefix(name).is_some_and(|rest| rest.starts_with(b"\\"))
+        })
+        .min_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()))
+    else {
+        return;
+    };
+
+    let (full_name, inside_name) = if sharp {
+        (
+            class_like_metadata.original_name.to_string().replace('\\', "."),
+            inside.original_name.to_string().replace('\\', "."),
+        )
+    } else {
+        (class_like_metadata.original_name.to_string(), inside.original_name.to_string())
+    };
+    let kind = class_like_metadata.kind.as_str();
+    let article = if matches!(class_like_metadata.kind, SymbolKind::Enum | SymbolKind::Interface) { "an" } else { "a" };
+
+    context.collector.report_with_code(
+        IssueCode::NameAlreadyInUse,
+        Issue::error(format!(
+            "`{full_name}` is both {article} {kind} and a namespace: rename the {kind} or the folder."
+        ))
+        .with_annotation(Annotation::primary(name_span).with_message(format!("The {kind} is declared here.")))
+        .with_annotation(
+            Annotation::secondary(inside.name_span.unwrap_or(inside.span))
+                .with_message(format!("`{inside_name}` is in the namespace `{full_name}`.")),
+        ),
     );
 }
 
@@ -1043,6 +1098,7 @@ where
     }
 
     context.prepare_class_initializers(class_like_metadata)?;
+    report_class_like_named_as_a_namespace(context, class_like_metadata, name_span.unwrap_or(declaration_span));
 
     let name = display_class_like_name(context, class_like_metadata.original_name);
 
