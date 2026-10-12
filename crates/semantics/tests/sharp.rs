@@ -416,32 +416,43 @@ fn a_catch_variable_is_out_of_scope_after_its_catch_block() {
     assert_eq!(issues(code), ["10:15 `failure` is used after the block that declares it closes."]);
 }
 
-/// The guard clause, an `if` without `else` around one `return` or `throw`, is the one body the spec writes without
-/// braces, as in `if (!tenant.active) throw new InactiveTenant(tenant);`. Every other body without braces, an `else`
-/// beside one included, is not supported yet.
+/// The body of `if`, `else` and each loop is a block in braces, a guard clause's `return` or `throw` too. The error
+/// points at the body, and its help's braced body compiles in its place.
 #[test]
-fn only_the_guard_clause_goes_without_braces() {
-    let guards = "namespace App.Tenant;\n\nclass Report\n{\n    public void run(int extra)\n    {\n        if (extra > 1) return;\n        if (extra > 2) throw new Failure(extra);\n    }\n\n    public int total(int extra)\n    {\n        if (extra > 1) return 1;\n        return extra;\n    }\n}\n";
+fn every_body_is_written_in_braces() {
     let refused = [
-        ("        if (extra > 1) return 1; else {\n            return 2;\n        }\n", "7:9"),
-        ("        if (extra > 1) {\n            return 1;\n        } else return 2;\n", "7:9"),
-        ("        if (extra > 1) {\n            return 1;\n        } else if (extra > 2) return 2;\n", "7:9"),
-        ("        if (extra > 1) extra = 1;\n", "7:9"),
-        ("        if (extra > 1) this.run(extra);\n", "7:9"),
-        ("        while (extra > 1) return 1;\n", "7:9"),
-        ("        while (extra > 1) {\n            if (extra > 2) break;\n        }\n", "8:13"),
-        ("        while (extra > 1) {\n            if (extra > 2) continue;\n        }\n", "8:13"),
+        ("        if (extra > 1) return 1;\n", "7:24", "{ return 1; }"),
+        ("        if (extra > 2) throw new Failure(extra);\n", "7:24", "{ throw new Failure(extra); }"),
+        ("        if (extra > 1) return 1; else {\n            return 2;\n        }\n", "7:24", "{ return 1; }"),
+        ("        if (extra > 1) {\n            return 1;\n        } else return 2;\n", "9:16", "{ return 2; }"),
+        (
+            "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2) return 2;\n",
+            "9:31",
+            "{ return 2; }",
+        ),
+        ("        if (extra > 1) extra = 1;\n", "7:24", "{ extra = 1; }"),
+        ("        if (extra > 1) this.run(extra);\n", "7:24", "{ this.run(extra); }"),
+        ("        while (extra > 1) return 1;\n", "7:27", "{ return 1; }"),
+        ("        while (extra > 1) {\n            if (extra > 2) break;\n        }\n", "8:28", "{ break; }"),
+        ("        while (extra > 1) {\n            if (extra > 2) continue;\n        }\n", "8:28", "{ continue; }"),
+        ("        do extra += 1; while (extra < 3);\n", "7:12", "{ extra += 1; }"),
+        ("        for (let step = 0; step < 3; step++) extra++;\n", "7:46", "{ extra++; }"),
+        ("        for (const value of Store.values()) extra += value;\n", "7:45", "{ extra += value; }"),
     ];
 
-    assert_eq!(issues(guards), Vec::<String>::new());
-    for (body, at) in refused {
+    for (body, at, fix) in refused {
         let code = leak(method(&format!("{body}        return extra;\n")));
+        let issue = check("src/Report.sharp", code).remove(0);
+        let span = issue.primary_span().expect("a primary span");
+        let fixed = leak(format!("{}{fix}{}", &code[..span.start.offset as usize], &code[span.end.offset as usize..]));
 
         assert_eq!(
             issues(code),
-            [format!("{at} This statement without braces is not supported yet in PHP#.")],
+            [format!("{at} PHP# writes the body of `if`, `else` and each loop in braces.")],
             "{body}"
         );
+        assert_eq!(issue.help, Some(format!("Write `{fix}`.")), "{body}");
+        assert_eq!(issues(fixed), Vec::<String>::new(), "{fixed}");
     }
 }
 
@@ -455,6 +466,12 @@ fn elseif_and_a_colon_delimited_if_are_not_supported_yet() {
         issues(code),
         ["9:11 This `elseif` is not supported yet in PHP#.", "12:23 This construct is not supported yet in PHP#."]
     );
+
+    // A colon-delimited `if` after `else` is the one error, as no body is missing its braces.
+    let after_else = leak(method(
+        "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2):\n            return 2;\n        endif;\n        return extra;\n",
+    ));
+    assert_eq!(issues(after_else), ["9:30 This construct is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -476,19 +493,11 @@ fn while_and_do_while_with_braces_are_in_the_slice() {
 }
 
 #[test]
-fn a_loop_without_braces_or_with_a_colon_body_is_not_supported_yet() {
-    let code = leak(method(
-        "        while (extra > 0) extra -= 1;\n        do extra += 1; while (extra < 3);\n        while (extra > 1):\n            extra -= 1;\n        endwhile;\n        return extra;\n",
-    ));
+fn a_while_loop_with_a_colon_body_is_not_supported_yet() {
+    let code =
+        leak(method("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n        return extra;\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 This statement without braces is not supported yet in PHP#.",
-            "8:9 This statement without braces is not supported yet in PHP#.",
-            "9:26 This construct is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), ["7:26 This construct is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -544,18 +553,10 @@ fn a_for_counter_is_out_of_scope_after_its_loop_and_const_when_declared_so() {
 }
 
 #[test]
-fn a_for_loop_without_braces_or_with_a_colon_body_is_not_supported_yet() {
-    let code = leak(method(
-        "        for (let step = 0; step < 3; step++) extra++;\n        for (;;):\n            break;\n        endfor;\n        return extra;\n",
-    ));
+fn a_for_loop_with_a_colon_body_is_not_supported_yet() {
+    let code = leak(method("        for (;;):\n            break;\n        endfor;\n        return extra;\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 This statement without braces is not supported yet in PHP#.",
-            "8:17 This construct is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), ["7:17 This construct is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -595,13 +596,6 @@ fn a_loop_variable_named_this_or_a_superglobal_is_an_error() {
             "9:21 `_GET` is the name of a PHP superglobal: rename this loop variable.",
         ]
     );
-}
-
-#[test]
-fn a_for_of_loop_without_braces_is_not_supported_yet() {
-    let code = leak(method("        for (const value of Store.values()) extra += value;\n        return extra;\n"));
-
-    assert_eq!(issues(code), ["7:9 This statement without braces is not supported yet in PHP#."]);
 }
 
 #[test]

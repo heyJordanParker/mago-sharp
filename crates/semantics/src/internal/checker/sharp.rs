@@ -247,10 +247,9 @@ const ANY: &[u8] = b"Any";
 /// - In a method body: blocks, expression statements, `return`, `let` and `const` declarations, `if` with `else if`
 ///   and `else`, `while`, `do … while`, `for` with a `let` or `const` counter or with expressions, `for … of` over a
 ///   value or a key and value, `break` and `continue` without a level, and `try` with `catch` clauses and `finally`.
-///   The body of `if`, `else` and each loop is a block in braces, except an `if` without `else` whose body is one
-///   `return` or `throw`, as in the guard clause `if (!tenant.active) throw new InactiveTenant(tenant);`. A catch
-///   clause names one or more classes separated by `|`, and an optional variable written without `$`, which lives
-///   until the clause's block ends. A local
+///   The body of `if`, `else` and each loop is a block in braces, the guard clause
+///   `if (!tenant.active) { throw new InactiveTenant(tenant); }` too. A catch clause names one or more classes separated
+///   by `|`, and an optional variable written without `$`, which lives until the clause's block ends. A local
 ///   statement can have its type written, as in `Money? total = null;` or `const int base = 2;`, from the types
 ///   above but `void`. An expression statement whose operator is binary, as in `flags | MASK;`, is an error that
 ///   names its compound assignment or its result, because the result is never used, except `??` and an assignment
@@ -1027,12 +1026,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(_) | Node::DirectVariable(_), TryCatchClause) => None,
         (Node::Block(_), TryCatchClause) => Some(Body),
 
-        (Node::Statement(statement), Body) if !has_braces(statement) => {
-            report_not_supported(
-                statement.span(),
-                "statement without braces",
-                "PHP# writes the body of `if`, `else` and each loop as a block in braces, except an `if` without `else` whose body is one `return` or `throw`.",
-                context,
+        (Node::Statement(statement), Body) if let Some(body) = body_without_braces(statement) => {
+            let fix = format!("{{ {} }}", BytesDisplay(context.get_code_snippet(body)));
+            context.report(
+                Issue::error("PHP# writes the body of `if`, `else` and each loop in braces.")
+                    .with_annotation(Annotation::primary(body.span()).with_message("Written without braces."))
+                    .with_help(format!("Write `{fix}`.")),
             );
 
             None
@@ -2575,33 +2574,24 @@ fn write_target<'ast, 'arena>(node: Node<'ast, 'arena>) -> Option<&'ast Expressi
     }
 }
 
-/// Whether every body of an `if`, `else` or loop is a block in braces. An `else` may also hold the next `if`, whose
-/// body is a block too. An `if` without `else` may hold one `return` or `throw`, the guard clause the spec writes.
-fn has_braces(statement: &Statement) -> bool {
-    let is_block = |statement: &Statement| matches!(statement, Statement::Block(_));
-    let is_guard = |statement: &Statement| match statement {
-        Statement::Return(_) => true,
-        Statement::Expression(statement) => matches!(statement.expression, Expression::Throw(_)),
-        _ => false,
-    };
+/// The first body of an `if`, `else` or loop that is not a block in braces. An `else` may also hold the next `if`, whose
+/// body is a block too.
+fn body_without_braces<'ast, 'arena>(statement: &'ast Statement<'arena>) -> Option<&'ast Statement<'arena>> {
+    let unbraced = |body: &'ast Statement<'arena>| (!matches!(body, Statement::Block(_))).then_some(body);
 
     match statement {
-        Statement::If(If { body: IfBody::Statement(body), .. }) => match &body.else_clause {
-            None if body.else_if_clauses.is_empty() => is_block(body.statement) || is_guard(body.statement),
-            None => is_block(body.statement),
-            Some(clause) => {
-                is_block(body.statement)
-                    && match clause.statement {
-                        Statement::If(If { body: IfBody::Statement(next), .. }) => is_block(next.statement),
-                        next => is_block(next) || matches!(next, Statement::If(_)),
-                    }
-            }
-        },
+        Statement::If(If { body: IfBody::Statement(body), .. }) => {
+            unbraced(body.statement).or_else(|| match body.else_clause.as_ref()?.statement {
+                Statement::If(If { body: IfBody::Statement(next), .. }) => unbraced(next.statement),
+                Statement::If(_) => None,
+                next => unbraced(next),
+            })
+        }
         Statement::While(While { body: WhileBody::Statement(body), .. })
-        | Statement::For(For { body: ForBody::Statement(body), .. }) => is_block(body),
-        Statement::ForOf(for_of) => is_block(for_of.body),
-        Statement::DoWhile(do_while) => is_block(do_while.statement),
-        _ => true,
+        | Statement::For(For { body: ForBody::Statement(body), .. }) => unbraced(body),
+        Statement::ForOf(for_of) => unbraced(for_of.body),
+        Statement::DoWhile(do_while) => unbraced(do_while.statement),
+        _ => None,
     }
 }
 
