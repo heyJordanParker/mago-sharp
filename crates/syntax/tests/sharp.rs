@@ -2830,6 +2830,72 @@ fn required_on_a_method_with_a_return_type_is_not_supported_yet() {
     }
 }
 
+/// `lazy` is a modifier of a member and of a parameter, spec sections 6.5 and 9, so semantics can name it, and stays a
+/// name elsewhere.
+#[test]
+fn lazy_is_a_modifier_and_stays_a_name_elsewhere() {
+    const CODE: &str = "class Store\n{\n    public Store(public lazy Planner planner { get; }) {}\n\n    public lazy Plan plan => lazy(1);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Store.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(constructor), ClassLikeMember::Property(plan)] = class_members(program).as_slice()
+    else {
+        panic!("expected a constructor and a property, got {:#?}", class_members(program));
+    };
+    let Some(parameter) = constructor.parameter_list.parameters.first() else {
+        panic!("expected a parameter, got {:#?}", constructor.parameter_list);
+    };
+    let parameter_modifiers: Vec<String> = parameter.modifiers.iter().map(ToString::to_string).collect();
+    let plan_modifiers: Vec<String> = plan.modifiers().iter().map(ToString::to_string).collect();
+    assert_eq!(parameter_modifiers, ["Public", "Lazy"]);
+    assert_eq!(plan_modifiers, ["Public", "Lazy"]);
+    let Property::Computed(computed) = plan else {
+        panic!("expected a computed property, got {plan:#?}");
+    };
+    let Expression::Call(Call::Function(call)) = computed.body.expression else {
+        panic!("expected a call, got {:#?}", computed.body.expression);
+    };
+    assert_eq!(source(CODE, call.function), "lazy");
+
+    const LAMBDA: &str = "class Store\n{\n    public bool flag(bool on)\n    {\n        Function<bool(bool, int)> pass = (lazy, int count) => lazy;\n        Function<bool(bool)> same = (lazy) => lazy;\n        return pass(on, 1) && same(on);\n    }\n}\n";
+    let program = parse(&arena, "src/Store.sharp", LAMBDA);
+    assert!(program.errors.is_empty(), "an untyped lambda parameter named `lazy`: {:#?}", program.errors);
+}
+
+/// Spec section 9: a parameter has no computed property, because it receives its value. It is one error at its `=>`,
+/// and the parameter list and the class parse on.
+#[test]
+fn a_computed_parameter_is_one_error_and_the_class_parses_on() {
+    for member in [
+        "public Store(public string slug => trim(\"x\"), int count) {}",
+        "public int run(int slug => 1, int count) => count;",
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str =
+            Box::leak(format!("class Store\n{{\n    {member}\n\n    public int total() => 1;\n}}\n").into_boxed_str());
+        let program = parse(&arena, "src/Store.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            error.to_string(),
+            "A parameter cannot be a computed property: a computed property has no incoming value to receive.",
+            "{member}"
+        );
+        assert_eq!(source(code, error), "=>", "{member}");
+        let [ClassLikeMember::Method(method), ClassLikeMember::Method(total)] = class_members(program).as_slice()
+        else {
+            panic!("expected two methods for `{member}`, got {:#?}", class_members(program));
+        };
+        let parameters: Vec<&str> =
+            method.parameter_list.parameters.iter().map(|parameter| source(code, &parameter.variable)).collect();
+        assert_eq!(parameters, ["slug", "count"], "{member}");
+        assert_eq!(source(code, &total.name), "total", "{member}");
+    }
+}
+
 /// A static class is `static` among a class's modifiers, and a method with a native body is `extern` among a member's
 /// modifiers, with no body, spec section 29. `extern` stays a name elsewhere.
 #[test]

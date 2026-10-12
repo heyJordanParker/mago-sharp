@@ -88,6 +88,13 @@ where
             self.skip_via_clause(true)?;
         }
 
+        // A computed property's body, as in `public string slug => "x"`, is skipped whole, so the class parses on.
+        if self.dialect.is_sharp() && self.stream.is_at(T!["=>"])? {
+            let arrow = self.stream.eat_span(T!["=>"])?;
+            self.parse_expression()?;
+            self.errors.push(ParseError::ComputedParameterInSharp(arrow));
+        }
+
         Ok(parameter)
     }
 
