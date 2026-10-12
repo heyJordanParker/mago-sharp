@@ -21,7 +21,10 @@ use mago_word::word;
 use crate::diff::CodebaseDiff;
 use crate::identifier::method::MethodIdentifier;
 use crate::issue::ScanningIssueKind;
+use crate::metadata::attribute::ConstantExpression;
 use crate::metadata::class_like::ClassLikeMetadata;
+use crate::metadata::class_like::ParsedField;
+
 use crate::metadata::class_like_constant::ClassLikeConstantMetadata;
 use crate::metadata::constant::ConstantMetadata;
 use crate::metadata::enum_case::EnumCaseMetadata;
@@ -625,6 +628,59 @@ impl CodebaseMetadata {
         let declaring_class =
             self.get_class_like_by_word(lowercase_class)?.declaring_property_ids.get(&property_name)?;
         self.class_likes.get(declaring_class)?.properties.get(&property_name)
+    }
+
+    /// The fields a PHP# struct's `parse` reads, spec section 10: its main constructor's parameters in order, then each
+    /// property an object initializer may set that is no constructor parameter, as creation from a `Map` is the
+    /// constructor call and then the initializer.
+    #[must_use]
+    pub fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'_>> {
+        let parameters = self.get_method(class, b"__construct").into_iter().flat_map(|constructor| {
+            constructor.parameters.iter().filter_map(move |parameter| {
+                let r#type = parameter.type_metadata.as_ref().or(parameter.type_declaration_metadata.as_ref())?;
+                let name = parameter.name.0.as_bytes();
+                let name = name.strip_prefix(b"$").unwrap_or(name);
+                let key = parameter
+                    .attributes
+                    .iter()
+                    .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Key"))
+                    .and_then(|attribute| match attribute.arguments.first()?.value.as_ref()? {
+                        ConstantExpression::String(key) => Some(key.as_bytes()),
+                        _ => None,
+                    });
+
+                Some(ParsedField {
+                    name,
+                    key: key.unwrap_or(name),
+                    r#type: &r#type.type_union,
+                    has_default: parameter.flags.has_default(),
+                    is_parameter: true,
+                    span: Some(parameter.name_span),
+                })
+            })
+        });
+        let properties = self.get_class_like(class).into_iter().flat_map(|metadata| {
+            metadata
+                .struct_properties()
+                .into_iter()
+                .filter(|property| !property.flags.is_promoted_property() && !property.flags.is_readonly())
+                .filter_map(|property| {
+                    let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
+                    let name = property.name.0.as_bytes();
+                    let name = name.strip_prefix(b"$").unwrap_or(name);
+
+                    Some(ParsedField {
+                        name,
+                        key: name,
+                        r#type: &r#type.type_union,
+                        has_default: property.flags.has_default(),
+                        is_parameter: false,
+                        span: property.name_span,
+                    })
+                })
+        });
+
+        parameters.chain(properties).collect()
     }
 
     /// Retrieves magic `@property*` metadata, potentially from an inherited tag.

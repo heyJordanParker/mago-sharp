@@ -119,6 +119,23 @@ pub struct ClassLikeMetadata {
     pub version_constraint: VersionConstraint,
 }
 
+/// A key a PHP# struct's `parse` reads, spec section 10: a main constructor parameter, or a property an object
+/// initializer may set that the constructor does not.
+#[derive(Clone, Copy, Debug)]
+pub struct ParsedField<'codebase> {
+    /// The name, without `$`.
+    pub name: &'codebase [u8],
+    /// The key `parse` reads: the name, or the one `[Key("…")]` gives a parameter.
+    pub key: &'codebase [u8],
+    pub r#type: &'codebase TUnion,
+    /// Whether a missing key leaves the field to its default value or its initial value.
+    pub has_default: bool,
+    /// Whether the main constructor takes the field, rather than a write after it runs.
+    pub is_parameter: bool,
+    /// The span of the field's name, where the codex has one.
+    pub span: Option<Span>,
+}
+
 impl ClassLikeMetadata {
     /// The properties `==` compares on a PHP# struct, spec section 10: each one with storage that is not static, in the
     /// order the struct declares them.

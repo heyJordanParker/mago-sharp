@@ -3,11 +3,13 @@ use mago_analyzer::artifacts::CallTarget;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
@@ -243,6 +245,26 @@ impl<'analysis> Types<'analysis> {
                 (name.strip_prefix(b"$").unwrap_or(name), &r#type.type_union)
             })
             .collect()
+    }
+
+    /// Whether the class-like `class` is a PHP# struct.
+    pub(crate) fn is_struct(&self, class: &[u8]) -> bool {
+        self.codebase.get_class_like(class).is_some_and(|metadata| metadata.flags.is_struct())
+    }
+
+    /// The backing type of the backed enum or the backed struct `class`, if it has one.
+    pub(crate) fn backing_type(&self, class: &[u8]) -> Option<&'analysis TAtomic> {
+        self.codebase.get_class_like(class)?.enum_type.as_ref()
+    }
+
+    /// The fields the struct `class`'s `parse` reads, as the codex gives them.
+    pub(crate) fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'analysis>> {
+        self.codebase.struct_parse_fields(class)
+    }
+
+    /// The key type and the element type of a collection.
+    pub(crate) fn array_parameters(&self, array: &TArray) -> (TUnion, TUnion) {
+        get_array_parameters(array, self.codebase)
     }
 
     /// The backing type of the struct `class`, or none when `class` is no struct or declares no backing type.

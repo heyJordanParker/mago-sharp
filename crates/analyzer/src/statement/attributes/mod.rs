@@ -258,6 +258,19 @@ where
 
         used_attributes.insert(attribute_name_bytes, attribute.name.span());
 
+        if context.dialect.is_sharp()
+            && attribute_name_bytes.eq_ignore_ascii_case(b"Sharp\\Key")
+            && !is_struct_parameter(block_context, target)
+        {
+            context.collector.report_with_code(
+                IssueCode::InvalidStruct,
+                Issue::error(
+                    "`Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
+                )
+                .with_annotation(Annotation::primary(attribute.name.span()).with_message("Written here.")),
+            );
+        }
+
         if let Some(flags) = metadata.attribute_flags {
             let is_valid_target = match target {
                 AttributeTarget::ClassLike => flags.targets_class(),
@@ -279,6 +292,15 @@ where
     }
 
     Ok(())
+}
+
+/// Whether an attribute on `target` is on a parameter of a struct's main constructor, the one place `[Key]` renames
+/// the key a struct's `parse` reads, spec section 10.
+fn is_struct_parameter(block_context: &BlockContext<'_>, target: AttributeTarget) -> bool {
+    matches!(target, AttributeTarget::Parameter | AttributeTarget::PromotedProperty)
+        && block_context.scope.get_class_like().is_some_and(|class| class.flags.is_struct())
+        && matches!(block_context.scope.get_function_like_identifier(),
+            Some(FunctionLikeIdentifier::Method(_, method)) if method.as_bytes().eq_ignore_ascii_case(b"__construct"))
 }
 
 fn analyze_attribute_argument_expressions<'ctx, 'arena, A>(
