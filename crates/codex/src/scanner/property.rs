@@ -278,6 +278,8 @@ where
                 .collect()
         }
         Property::Hooked(hooked_property) => {
+            // A PHP# interface property runs as PHP's `public int $orderId { get; }`, with no storage.
+            let is_sharp = is_sharp && !class_like_metadata.kind.is_interface();
             let verdict = evaluate_version_attributes(&hooked_property.attribute_lists, context, context.php_version);
             let attributes = scan_attribute_lists(
                 &hooked_property.attribute_lists,
@@ -445,7 +447,8 @@ fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibil
 
 /// Scans a property's hooks and whether it is virtual. A PHP# accessor without a body is storage, as an
 /// auto-property's is, so only its bodies are hooks. A PHP# property is virtual when no accessor is auto and no body
-/// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`.
+/// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`. A PHP# interface property
+/// runs as PHP's, so its accessors are abstract hooks.
 fn scan_hooks<'arena, A>(
     hook_list: &'arena PropertyHookList<'arena>,
     property: &mut PropertyMetadata,
@@ -455,7 +458,7 @@ fn scan_hooks<'arena, A>(
 ) where
     A: Arena,
 {
-    let is_sharp = context.program.dialect.is_sharp();
+    let is_sharp = context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface();
     for hook in &hook_list.hooks {
         if is_sharp && matches!(hook.body, PropertyHookBody::Abstract(_)) {
             continue;

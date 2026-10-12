@@ -146,6 +146,17 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
             "11:32 A `Set` parameter of an event is not supported yet in PHP#."
         ]
     );
+    let construct_notes: Vec<Vec<String>> = check("src/Report.sharp", code)
+        .into_iter()
+        .filter(|issue| issue.message == "This construct is not supported yet in PHP#.")
+        .map(|issue| issue.notes)
+        .collect();
+    assert_eq!(
+        construct_notes,
+        [[
+            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event Paid(int orderId) : Event;`."
+        ]]
+    );
 }
 
 /// Spec section 15 nests an event or an interface in a class, and nothing else nests a type: an interface, an enum or
@@ -3084,7 +3095,7 @@ fn a_null_start_needs_a_type() {
 
 #[test]
 fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() {
-    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d)\n    {\n        return [];\n    }\n}\n";
+    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d, Map<string, void> e)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -3094,6 +3105,7 @@ fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() 
             "3:47 This type is not supported yet in PHP#.",
             "3:65 This type is not supported yet in PHP#.",
             "3:80 This type is not supported yet in PHP#.",
+            "3:95 This type is not supported yet in PHP#.",
         ]
     );
 }

@@ -10450,8 +10450,8 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
     );
 }
 
-/// Spec section 15: no event extends another, so an event's header names interfaces only, and a type names an event
-/// only once.
+/// Spec section 15: no event extends another, so an event's header names interfaces only, in a file and in a class
+/// alike, and a type names an event only once. An interface nested in a class is checked as one in a file is.
 #[test]
 fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     let based = (
@@ -10460,7 +10460,10 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     );
     let twice =
         ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id);\n\npublic event Moved(int id);\n");
-    let fixed = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int orderId) : Order.Event;\n");
+    let nested = (
+        "app/Shop/Cart.sharp",
+        "namespace App.Shop;\n\npublic class Cart\n{\n    public interface Event : Cart\n    {\n    }\n\n    public event Filled(int id) : Cart;\n}\n",
+    );
 
     assert_eq!(
         worded(based, &[ORDER_EVENTS]),
@@ -10469,7 +10472,23 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
         ]
     );
     assert_eq!(messages(twice, &[ORDER_EVENTS]), ["Event `Moved` is already defined elsewhere."]);
-    assert_eq!(worded(fixed, &[ORDER_EVENTS]), Vec::<String>::new());
+    assert_eq!(issues(nested, &[ORDER_EVENTS]), ["5:30 invalid-extend", "9:35 invalid-event"]);
+}
+
+/// Spec section 15: the interface a family of events shares states the get-only properties each event gives, so an
+/// event or a class that names it and lacks one is refused, as the engine refuses the class it runs as.
+#[test]
+fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
+    let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : Order.Event;\n");
+    let class = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic class Moved : Order.Event\n{\n}\n");
+    let given = (
+        "app/Shop/Moved.sharp",
+        "namespace App.Shop;\n\npublic event Moved(int orderId) : Order.Event;\n\npublic class Kept : Order.Event\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n",
+    );
+
+    assert_eq!(issues(event, &[ORDER_EVENTS]), ["3:14 unimplemented-abstract-property-hook"]);
+    assert_eq!(issues(class, &[ORDER_EVENTS]), ["3:14 unimplemented-abstract-property-hook"]);
+    assert_eq!(worded(given, &[ORDER_EVENTS]), Vec::<String>::new());
 }
 
 /// `Order.Name` names the type `Order` nests, spec section 15, and otherwise the named constructor `Name` of
