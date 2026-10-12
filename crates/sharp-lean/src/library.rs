@@ -77,9 +77,6 @@ const ARCHIVE: Option<Archive> = if cfg!(all(target_os = "macos", target_arch = 
     None
 };
 
-/// The platform Mago is built for, as a message names it when Lean has no build for it.
-pub(crate) const PLATFORM: &str = if cfg!(target_env = "musl") { "musl Linux" } else { std::env::consts::OS };
-
 /// The `lake` Mago runs.
 #[derive(Debug)]
 pub(crate) struct Lake {
@@ -188,7 +185,8 @@ pub(crate) fn install() -> io::Result<Option<Lake>> {
 
 /// Installs elan from the archive at `url` into `elan/` in `cache`, then the library's Lean version with it, each once.
 /// Installs take turns under an exclusive lock on `elan.lock`, across threads and processes alike, and the first one
-/// prints what it downloads.
+/// prints what it downloads. Each Lean install first deletes elan's `tmp/`, since elan names each download anew and so
+/// never reuses or deletes the download a killed install left there.
 fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> {
     let home = cache.join("elan");
     fs::create_dir_all(cache)?;
@@ -208,6 +206,7 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
         install_elan(url, archive, &home)?;
     }
 
+    remove_folder(&home.join("tmp"))?;
     let output = elan(&home).args(["toolchain", "install", TOOLCHAIN.trim()]).output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
@@ -316,7 +315,7 @@ mod tests {
     use super::*;
 
     /// An `elan-init` that installs an `elan` whose `toolchain install` appends the toolchain to `$ELAN_HOME/installed`
-    /// and whose `toolchain list` prints that file.
+    /// and whose `toolchain list` prints that file. When the cache holds `broken-init`, it fails after it installed.
     const ELAN_INIT: &str = r#"#!/bin/sh
 mkdir -p "$ELAN_HOME/bin"
 cat > "$ELAN_HOME/bin/elan" <<'ELAN'
@@ -327,6 +326,10 @@ case "$2" in
 esac
 ELAN
 chmod +x "$ELAN_HOME/bin/elan"
+if [ -e "$ELAN_HOME/../broken-init" ]; then
+    echo "elan-init broke" >&2
+    exit 1
+fi
 "#;
 
     /// An elan archive that holds `ELAN_INIT`, served over HTTP on a local port, and how many requests it answered.
@@ -410,14 +413,55 @@ chmod +x "$ELAN_HOME/bin/elan"
     }
 
     #[test]
-    fn an_install_refuses_an_archive_whose_sha_256_is_not_the_pinned_one_and_installs_nothing() {
+    fn an_install_of_lean_deletes_the_download_a_killed_install_left() {
         let (url, bytes, _) = serve_elan();
-        let pinned = "0000000000000000000000000000000000000000000000000000000000000000";
+        let archive = archive(sha256(&bytes));
         let cache = tempfile::tempdir().unwrap();
+        install_from(&url, &archive, cache.path()).unwrap();
+        fs::remove_file(cache.path().join("elan/installed")).unwrap();
+        fs::create_dir_all(cache.path().join("elan/tmp")).unwrap();
+        fs::write(cache.path().join("elan/tmp/jpvym4et00p_dz4p_file"), "half of Lean").unwrap();
 
-        let error = install_from(&url, &archive(pinned), cache.path()).unwrap_err();
+        install_from(&url, &archive, cache.path()).unwrap();
 
-        assert_eq!(error.to_string(), format!("{url} has the SHA-256 {}, not the pinned {pinned}", sha256(&bytes)));
-        assert!(!cache.path().join("elan").exists());
+        assert!(!cache.path().join("elan/tmp").exists());
+        assert_eq!(installed(cache.path()), format!("{}\n", TOOLCHAIN.trim()));
+    }
+
+    #[test]
+    fn a_failed_install_leaves_no_elan_and_the_next_install_downloads_it_again() {
+        let (url, bytes, requests) = serve_elan();
+        let digest = sha256(&bytes);
+        let other = "0000000000000000000000000000000000000000000000000000000000000000";
+        for (failure, pinned, broken_init, error) in [
+            (
+                "an archive whose SHA-256 is not the pinned one",
+                other,
+                false,
+                format!("{url} has the SHA-256 {digest}, not the pinned {other}"),
+            ),
+            (
+                "an elan-init that fails after it installed",
+                digest,
+                true,
+                "elan-init failed: elan-init broke".to_owned(),
+            ),
+        ] {
+            let cache = tempfile::tempdir().unwrap();
+            if broken_init {
+                fs::write(cache.path().join("broken-init"), "").unwrap();
+            }
+            let before = requests.load(Ordering::SeqCst);
+
+            assert_eq!(install_from(&url, &archive(pinned), cache.path()).unwrap_err().to_string(), error, "{failure}");
+            assert!(!cache.path().join("elan").exists(), "{failure}");
+
+            if broken_init {
+                fs::remove_file(cache.path().join("broken-init")).unwrap();
+            }
+            install_from(&url, &archive(digest), cache.path()).unwrap();
+            assert_eq!(requests.load(Ordering::SeqCst) - before, 2, "{failure}");
+            assert_eq!(installed(cache.path()), format!("{}\n", TOOLCHAIN.trim()), "{failure}");
+        }
     }
 }

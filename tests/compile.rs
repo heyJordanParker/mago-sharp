@@ -683,10 +683,14 @@ fn compile_reports_the_proof_of_a_deleted_law() {
 /// install, each such file is refused with `missing-lean`, which names what failed, and every other file compiles.
 #[test]
 fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_file_is_not_current() {
-    let missing = format!(
-        "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. Mago could not install Lean into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
-        unwritable_cache().join("mago/elan").display()
-    );
+    let missing = if cfg!(target_env = "musl") {
+        "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. This musl build of Mago can't install Lean, because Lean has no musl build. Put a lake on the PATH, or use Mago's glibc Linux build, which installs Lean itself.".to_owned()
+    } else {
+        format!(
+            "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. Mago could not install Lean into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
+            unwritable_cache().join("mago/elan").display()
+        )
+    };
     let shared = rules("App.Shared", "@[rule] def neverReachesTenant : Rule := .neverImports \"App.Tenant\"");
     for (files, refused) in [
         (

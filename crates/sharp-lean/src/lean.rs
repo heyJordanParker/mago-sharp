@@ -182,7 +182,7 @@ impl Lean {
                 let issue = match &toolchain {
                     Toolchain::Failed(message) => issues::elan_failed(span, message),
                     Toolchain::Missing(failure) => issues::lake_not_found(span, failure),
-                    _ => issues::no_lean_build(span, library::PLATFORM),
+                    _ => issues::uninstallable_lean(span),
                 };
                 report(&mut issues, translation, issue);
             }

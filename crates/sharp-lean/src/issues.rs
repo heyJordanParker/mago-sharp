@@ -235,13 +235,22 @@ pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
     .with_annotation(Annotation::primary(span))
 }
 
-/// No `lake` is on the `PATH`, on a `platform` Lean has no build for, such as `musl Linux`.
-pub(crate) fn no_lean_build(span: Span, platform: &str) -> Issue {
-    Issue::error(format!(
-        "Lean has no build for {platform}, so laws and structure rules can't be checked on this system."
-    ))
-    .with_code(IssueCode::MissingLean.as_str())
-    .with_annotation(Annotation::primary(span))
+/// No `lake` is on the `PATH`, and the Mago build pins no elan for its target, so it cannot install Lean. The message
+/// describes the build, never the host, since a musl build also runs on glibc Linux, where Lean runs.
+pub(crate) fn uninstallable_lean(span: Span) -> Issue {
+    let reason = if cfg!(target_env = "musl") {
+        "This musl build of Mago can't install Lean, because Lean has no musl build. Put a lake on the PATH, or use Mago's glibc Linux build, which installs Lean itself.".to_owned()
+    } else {
+        format!(
+            "This {} {} build of Mago can't install Lean. Put a lake on the PATH.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    };
+
+    Issue::error(format!("Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {reason}"))
+        .with_code(IssueCode::MissingLean.as_str())
+        .with_annotation(Annotation::primary(span))
 }
 
 pub(crate) fn elan_failed(span: Span, message: &str) -> Issue {
@@ -252,20 +261,4 @@ pub(crate) fn elan_failed(span: Span, message: &str) -> Issue {
 
 fn unproven(law: &Law, message: String) -> Issue {
     Issue::error(message).with_code(IssueCode::UnprovenLaw.as_str()).with_annotation(Annotation::primary(law.span))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_platform_lean_has_no_build_for_is_named_and_given_no_install_command() {
-        let issue = no_lean_build(Span::zero(), "musl Linux");
-
-        assert_eq!(
-            issue.message,
-            "Lean has no build for musl Linux, so laws and structure rules can't be checked on this system."
-        );
-        assert_eq!(issue.code.as_deref(), Some("missing-lean"));
-    }
 }
