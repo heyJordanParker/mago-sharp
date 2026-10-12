@@ -350,8 +350,8 @@ where
                     .get_declaring_method(metadata.name.as_bytes(), constructor.name.value)
                     .is_some_and(|method| method.flags.is_named_constructor());
                 let issue = match (inherited, &classname.origin, argument_list) {
-                    // `new Self.of(…)` in a class that inherits `of`: semantics shows a class only in its own file.
-                    (true, ResolutionOrigin::Static { .. }, Some(arguments)) if context.dialect.is_sharp() => {
+                    // `new Self.of(…)` in a class that inherits `of`, whose declaring class semantics can't see.
+                    (true, ResolutionOrigin::Static { .. }, Some(arguments)) => {
                         let declaring = context.codebase.get_declaring_method_identifier(&constructor_id);
                         let fix = format!(
                             "new {}.{name}{}",

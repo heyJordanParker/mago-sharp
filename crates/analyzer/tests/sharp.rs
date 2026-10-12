@@ -4736,7 +4736,7 @@ fn initial_values_in_the_constructor_under_a_base_class_constructor_with_paramet
         ),
         (
             "src/Lib/Legacy.php",
-            "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    const MODE = 'm';\n\n    /**\n     * @param list<int> $ids\n     */\n    public function __construct($x, array $items = [], array $ids = [], ?\\DateTimeImmutable $at = null, string $mode = self::MODE)\n    {\n    }\n}\n",
+            "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    /**\n     * @param list<int> $ids\n     */\n    public function __construct($x, array $items = [], array $ids = [], ?\\DateTimeImmutable $at = null, string $sign = '$', int $after = 2)\n    {\n    }\n}\n",
         ),
         ("src/Billing/Money.php", "<?php\n\nnamespace Billing;\n\nclass Money\n{\n}\n"),
         (

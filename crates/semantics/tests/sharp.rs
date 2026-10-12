@@ -657,6 +657,7 @@ fn a_statement_at_file_level_is_an_error() {
     for statement in [
         "let total = 1;",
         "strlen(\"x\");",
+        "die;",
         "unset(here);",
         "isset(here);",
         "if (true) { }",
@@ -1513,7 +1514,34 @@ fn a_type_takes_any_capitalized_word_but_a_reserved_type_name() {
 
             assert_eq!(issues(code), expected, "{code}");
         }
+
+        if !RESERVED.contains(&name.as_str()) {
+            for header in [
+                format!("class Shop : {name}"),
+                format!("class Shop : Base, {name}"),
+                format!("interface Shop : {name}"),
+            ] {
+                let code = leak(format!("namespace App.Tenant;\n\n{header}\n{{\n}}\n"));
+
+                assert_eq!(issues(code), Vec::<String>::new(), "{code}");
+            }
+        }
     }
+
+    // PHP keeps its refusal of a reserved word as a type's name or base type.
+    assert_eq!(
+        issues_in(
+            "src/Report.php",
+            "<?php\n\nclass Report extends parent\n{\n}\n\nclass Total implements readonly\n{\n}\n\ntrait readonly\n{\n}\n\ninterface readonly\n{\n}\n\nenum readonly\n{\n}\n"
+        ),
+        [
+            "3:22 class `Report` cannot extend reserved keyword `parent`.",
+            "7:24 class `Total` cannot implement reserved keyword `readonly`.",
+            "11:7 Trait `readonly` name cannot be a reserved keyword.",
+            "15:11 Interface `readonly` name cannot be a reserved keyword.",
+            "19:6 Enum `readonly` name cannot be a reserved keyword."
+        ]
+    );
 
     let lowercase = "namespace App.Tenant;\n\nclass internal\n{\n}\n";
 
