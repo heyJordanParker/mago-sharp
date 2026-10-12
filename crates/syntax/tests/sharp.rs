@@ -2616,7 +2616,7 @@ fn lazy_is_a_modifier_and_stays_a_name_elsewhere() {
 /// after another, so semantics can name it, and stays a name elsewhere.
 #[test]
 fn internal_is_a_modifier_and_stays_a_name_elsewhere() {
-    const CODE: &str = "class Report\n{\n    internal const int MAX = 1;\n    internal static int count = 0;\n    public string name { get; internal set; } = \"\";\n    internal Report(internal int size { get; }) {}\n    public internal int run()\n    {\n        int internal = 5;\n        return internal;\n    }\n    public int internal() => 1;\n}\n";
+    const CODE: &str = "class Report\n{\n    internal const int MAX = 1;\n    internal static int count = 0;\n    public string name { get; internal set; } = \"\";\n    internal Report(internal int size { get; }) {}\n    public internal int run()\n    {\n        int internal = 5;\n        return internal;\n    }\n    public int internal() => 1;\n    [Pure]\n    internal int sum() => 1;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
@@ -2629,9 +2629,10 @@ fn internal_is_a_modifier_and_stays_a_name_elsewhere() {
         ClassLikeMember::Method(constructor),
         ClassLikeMember::Method(run),
         ClassLikeMember::Method(named),
+        ClassLikeMember::Method(sum),
     ] = class_members(program).as_slice()
     else {
-        panic!("expected six members, got {:#?}", class_members(program));
+        panic!("expected seven members, got {:#?}", class_members(program));
     };
     assert_eq!(modifiers(&constant.modifiers), ["Internal"]);
     assert_eq!(modifiers(count.modifiers()), ["Internal", "Static"]);
@@ -2646,6 +2647,8 @@ fn internal_is_a_modifier_and_stays_a_name_elsewhere() {
     assert_eq!(modifiers(&parameter.modifiers), ["Internal"]);
     assert_eq!(modifiers(&run.modifiers), ["Public", "Internal"]);
     assert_eq!(source(CODE, &named.name), "internal");
+    assert_eq!(modifiers(&sum.modifiers), ["Internal"]);
+    assert_eq!(sum.attribute_lists.len(), 1);
 
     for (code, kind) in [
         ("internal class Ledger\n{\n}\n", "class"),
