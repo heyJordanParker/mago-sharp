@@ -618,6 +618,16 @@ where
             }
         }
 
+        self.call_targets(span, receiver, arguments);
+    }
+
+    /// Records the functions and methods the analysis resolved the call at `span` to, with `receiver` and `arguments`.
+    fn call_targets(
+        &mut self,
+        span: Span,
+        receiver: Option<&'ast Expression<'arena>>,
+        arguments: &'ast ArgumentList<'arena>,
+    ) {
         let artifacts = self.artifacts;
         let Some(targets) = artifacts.call_targets.get(&(span.start.offset, span.end.offset)) else {
             return;
@@ -748,20 +758,7 @@ where
 
     /// Records `: super(…)`: the call of the base class's constructor the analysis resolved at its span.
     fn constructor_initializer(&mut self, initializer: &'ast ConstructorInitializer<'arena>) {
-        let span = initializer.span();
-        let artifacts = self.artifacts;
-        let Some(targets) = artifacts.call_targets.get(&(span.start.offset, span.end.offset)) else {
-            return;
-        };
-
-        for target in targets {
-            if let CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(declaring_class, method), class } =
-                *target
-            {
-                let class = class.unwrap_or(declaring_class);
-                self.method_call(declaring_class, method, class, span, None, &initializer.argument_list);
-            }
-        }
+        self.call_targets(initializer.span(), None, &initializer.argument_list);
     }
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the

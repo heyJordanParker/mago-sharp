@@ -310,12 +310,13 @@ pub(crate) fn analyze_constructor_initializer<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let Some(class) = block_context.scope.get_class_like() else {
+    let Some(class) = block_context
+        .scope
+        .get_class_like()
+        .filter(|class| initializer.is_super() && !class.has_incomplete_hierarchy())
+    else {
         return Ok(());
     };
-    if !initializer.is_super() || class.has_incomplete_hierarchy() {
-        return Ok(());
-    }
 
     if context.codebase.get_parent_constructor(class.name.as_bytes()).is_some() {
         let parent = Expression::Parent(initializer.keyword);

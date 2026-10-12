@@ -4590,10 +4590,11 @@ fn super_is_the_base_class_constructor_call_the_readonly_check_tracks() {
     assert_eq!(issues(("src/Demo/Entity.sharp", sharp), &[("src/Lib/Row.php", ROW)]), ["12:29 invalid-property-write"]);
 }
 
-/// A base class without a constructor takes `: super()`, which does nothing, and no arguments, as C#'s `object()`.
+/// A base class without a constructor takes `: super()`, which does nothing, and no arguments, as C#'s `object()`. A
+/// base class the checker cannot find gets only its own error.
 #[test]
 fn super_without_a_constructor_above_takes_no_arguments() {
-    let sharp = "namespace Demo;\n\nclass Entity\n{\n}\n\nclass Order : Entity\n{\n    public Order() : super() { }\n}\n\nclass Line : Entity\n{\n    public Line(int count) : super(count) { }\n}\n\nclass Root\n{\n    public Root(int count) : super(count) { }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Entity\n{\n}\n\nclass Order : Entity\n{\n    public Order() : super() { }\n}\n\nclass Line : Entity\n{\n    public Line(int count) : super(count) { }\n}\n\nclass Root\n{\n    public Root(int count) : super(count) { }\n}\n\nclass Lost : Missing\n{\n    public Lost(int count) : super(count) { }\n}\n";
 
     assert_messages(
         sharp,
@@ -4601,6 +4602,7 @@ fn super_without_a_constructor_above_takes_no_arguments() {
         &[
             "14:35 too-many-arguments: `Entity` has no constructor to call: remove the arguments.",
             "19:35 too-many-arguments: `Root` has no base class to call: remove the arguments.",
+            "22:14 non-existent-class-like: Class `Lost` cannot implement unknown type `Missing`",
         ],
     );
 }
