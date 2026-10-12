@@ -1768,24 +1768,52 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 ///         if ($size === 0) { return ${'this#1'}; }
 ///         ${'this#1'}->label = 'sized';
 ///         $describe = function () use (${'this#1'}) { return ${'this#1'}->label; };
+///         $twice = function () use ($size) { return $size * 2; };
 ///     }
 ///     return ${'this#1'};
 /// }
+///
+/// public function describer(): \Closure { return function () { return $this->label; }; }
 /// ```
 ///
 /// Spec section 9.1: a named constructor is the static method it runs as. `: this(…)` creates the object with the
 /// main constructor into the hidden local `this` runs as, `return;` returns that local, a lambda that reads `this`
-/// captures it, and the method returns it after its body.
+/// captures it, and the method returns it after its body. A lambda that does not read `this` captures no hidden local,
+/// and a method's lambda reads PHP's own `$this`.
 #[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
     let lowered = Lowered::new(
-        "namespace App;\n\nclass Report\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) { }\n\n    public Report.sized(int size) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = \"sized\";\n        let describe = () => { return this.label; };\n    }\n}\n",
+        "namespace App;\n\nclass Report\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) { }\n\n    public Report.sized(int size) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = \"sized\";\n        let describe = () => { return this.label; };\n        let twice = () => { return size * 2; };\n    }\n\n    public Function<string()> describer() => () => { return this.label; };\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.method_named("describer")),
+        indoc! {r#"
+            METHOD [1] "describer" @20-20
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  CLOSURE "" @20-20
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "label"
+                    null
+                    null
+              ZVAL "Closure"
+              null
+        "#}
     );
 
     assert_eq!(
         lowered.render(lowered.method_named("sized")),
         indoc! {r#"
-            METHOD [17] "sized" @9-17
+            METHOD [17] "sized" @9-18
               PARAM_LIST
                 PARAM
                   ZVAL [1] "int"
@@ -1834,6 +1862,21 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                             VAR
                               ZVAL "this#1"
                             ZVAL "label"
+                      null
+                      null
+                  ASSIGN
+                    VAR
+                      ZVAL "twice"
+                    CLOSURE "" @17-17
+                      PARAM_LIST
+                      CLOSURE_USES
+                        ZVAL "size"
+                      STMT_LIST
+                        RETURN
+                          BINARY_OP [3]
+                            VAR
+                              ZVAL "size"
+                            ZVAL 2
                       null
                       null
                 RETURN

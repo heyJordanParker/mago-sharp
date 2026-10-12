@@ -3970,6 +3970,31 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
     );
 }
 
+/// A construct outside the slice is refused with a note that lists what PHP# has where it is written, so the note of
+/// a refused class member names a class's members and the note of a refused expression names a body's expressions.
+#[test]
+fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
+    let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
+    let body = leak(method("        const copy = clone this;\n        return extra;\n"));
+
+    for (code, note) in [
+        (
+            class,
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`.",
+        ),
+        (
+            body,
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
+        ),
+    ] {
+        assert_eq!(
+            check("src/Report.sharp", code).into_iter().flat_map(|issue| issue.notes).collect::<Vec<_>>(),
+            [note],
+            "{code}"
+        );
+    }
+}
+
 /// A class-level error names the class by the name the file writes: `Order` in a `.sharp` file, and its full name
 /// `Demo\Order` in the PHP twin.
 #[test]
