@@ -86,6 +86,9 @@ pub enum ParseError {
     /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
     /// property has no incoming value to receive.
     ComputedParameterInSharp(Span),
+    /// Anything but `super(…)` or `this(…)` after a PHP# constructor's `:`, as in `: parent(row)`, `: super { }` or
+    /// `: ?Type`, from the `:` up to the body.
+    ConstructorInitializerInSharp(Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -121,7 +124,8 @@ impl HasFileId for ParseError {
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
             | ParseError::NonLawInSharpModule(span)
-            | ParseError::ComputedParameterInSharp(span) => span.file_id,
+            | ParseError::ComputedParameterInSharp(span)
+            | ParseError::ConstructorInitializerInSharp(span) => span.file_id,
         }
     }
 }
@@ -161,7 +165,8 @@ impl HasSpan for ParseError {
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
             | ParseError::NonLawInSharpModule(span)
-            | ParseError::ComputedParameterInSharp(span) => *span,
+            | ParseError::ComputedParameterInSharp(span)
+            | ParseError::ConstructorInitializerInSharp(span) => *span,
         }
     }
 }
@@ -276,6 +281,9 @@ impl std::fmt::Display for ParseError {
             ParseError::ComputedParameterInSharp(_) => {
                 "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
             }
+            ParseError::ConstructorInitializerInSharp(_) => {
+                "A constructor passes control to its base class with `: super(…)`.".to_string()
+            }
         };
 
         write!(f, "{message}")
@@ -327,7 +335,8 @@ impl From<&ParseError> for Issue {
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
             | ParseError::NonLawInSharpModule(..)
-            | ParseError::ComputedParameterInSharp(..) => Issue::error(error.to_string())
+            | ParseError::ComputedParameterInSharp(..)
+            | ParseError::ConstructorInitializerInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())

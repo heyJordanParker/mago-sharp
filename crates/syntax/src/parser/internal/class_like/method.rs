@@ -2,6 +2,7 @@ use crate::T;
 use crate::cst::cst::AttributeList;
 use crate::cst::cst::BinaryOperator;
 use crate::cst::cst::ClassLikeMember;
+use crate::cst::cst::ConstructorInitializer;
 use crate::cst::cst::FunctionLikeReturnTypeHint;
 use crate::cst::cst::Hint;
 use crate::cst::cst::Identifier;
@@ -35,6 +36,7 @@ where
             name: self.parse_local_identifier()?,
             parameter_list: self.parse_function_like_parameter_list()?,
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
+            initializer: None,
             body: self.parse_method_body()?,
         })
     }
@@ -100,6 +102,7 @@ where
                 name,
                 parameter_list: self.parse_function_like_parameter_list()?,
                 return_type_hint: None,
+                initializer: self.parse_optional_constructor_initializer()?,
                 body: self.parse_method_body()?,
             }));
         }
@@ -143,8 +146,44 @@ where
             ampersand: None,
             name: self.parse_local_identifier()?,
             parameter_list: self.parse_function_like_parameter_list()?,
+            initializer: None,
             body: self.parse_method_body()?,
         }))
+    }
+
+    /// Parses a PHP# constructor's `: super(…)` or `: this(…)`, spec section 9.1. Anything else after `:`, such as
+    /// `: base(row)`, `: super` without arguments or `: ?Type`, is one error up to the body, so the constructor and the
+    /// class parse on.
+    fn parse_optional_constructor_initializer(&mut self) -> Result<Option<ConstructorInitializer<'arena>>, ParseError> {
+        if !self.dialect.is_sharp() || !self.stream.is_at(T![":"])? {
+            return Ok(None);
+        }
+
+        let colon = self.stream.eat_span(T![":"])?;
+        if matches!(self.stream.peek_kind(0)?, None | Some(T!["{" | "=>" | ";"])) {
+            self.errors.push(ParseError::ConstructorInitializerInSharp(colon));
+
+            return Ok(None);
+        }
+
+        let keyword = self.expect_any_keyword()?;
+        if matches!(keyword.value, b"super" | b"this") && self.stream.is_at(T!["("])? {
+            return Ok(Some(ConstructorInitializer { colon, keyword, argument_list: self.parse_argument_list()? }));
+        }
+
+        let mut span = colon.join(keyword.span);
+        loop {
+            if let Some(argument_list) = self.parse_optional_argument_list()? {
+                span = span.join(argument_list.span());
+            }
+            if matches!(self.stream.peek_kind(0)?, None | Some(T!["{" | "=>" | ";"])) {
+                break;
+            }
+            span = span.join(self.expect_any_keyword()?.span);
+        }
+        self.errors.push(ParseError::ConstructorInitializerInSharp(span));
+
+        Ok(None)
     }
 
     /// Parses a method's body. A PHP# method may also have an expression body, `=> expr;`, as spec section 7 writes it.

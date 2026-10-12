@@ -14,6 +14,7 @@ use crate::cst::cst::type_hint::Hint;
 use crate::cst::sequence::Sequence;
 
 pub mod constant;
+pub mod constructor;
 pub mod enum_case;
 pub mod inheritance;
 pub mod law;
