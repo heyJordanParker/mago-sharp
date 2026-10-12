@@ -4761,15 +4761,55 @@ fn a_named_constructor_body_runs_on_this() {
 fn a_named_constructor_that_overwrites_a_get_only_property_the_main_constructor_set_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public string code { get; } = \"none\";\n    public int count { get; }\n    public string label { get; }\n\n    public Artifact(public int size { get; }, int count)\n    {\n        this.count = count;\n    }\n\n    public Artifact.rebuilt() : this(1, 2)\n    {\n        this.size = 3;\n        this.count = 4;\n        this.code = \"x\";\n        this.label = \"set\";\n        this.label = \"again\";\n    }\n}\n";
 
-    assert_messages(
-        sharp,
-        &[],
-        &[
-            "16:14 invalid-property-write: `size` is get-only, and the main constructor already set it.",
-            "17:14 invalid-property-write: `count` is get-only, and the main constructor already set it.",
-            "18:14 invalid-property-write: `code` is get-only, and the main constructor already set it.",
-            "20:14 invalid-property-write: `label` is get-only, and it is already set.",
-        ],
+    let help = "Declare it `{ get; init; }` to let a named constructor set it again.";
+    assert_eq!(
+        refusals(("src/Demo/Artifact.sharp", sharp), &[]),
+        [
+            format!(
+                "16:14 invalid-property-write `size` is get-only, and the main constructor already set it. | {help}"
+            ),
+            format!(
+                "17:14 invalid-property-write `count` is get-only, and the main constructor already set it. | {help}"
+            ),
+            format!(
+                "18:14 invalid-property-write `code` is get-only, and the main constructor already set it. | {help}"
+            ),
+            "20:14 invalid-property-write `label` is get-only, and it is already set. | ".to_owned(),
+        ]
+    );
+
+    // The help's fix: `{ get; init; }` lets the named constructor set each property again.
+    let fixed = "namespace Demo;\n\nclass Artifact\n{\n    public string code { get; init; } = \"none\";\n    public int count { get; init; }\n\n    public Artifact(public int size { get; init; }, int count)\n    {\n        this.count = count;\n    }\n\n    public Artifact.rebuilt() : this(1, 2)\n    {\n        this.size = 3;\n        this.count = 4;\n        this.code = \"x\";\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Artifact.sharp", fixed), &[]), Vec::<String>::new());
+}
+
+/// Spec section 6.1: an `init` property is set only while its object is created, where C# allows an `init` accessor:
+/// on `this`, in a constructor of its class or a subclass, or in a named constructor, and by its own accessor body
+/// through `field`. A lambda may run after the object is created, so it cannot set one, as C# refuses with CS8852. An
+/// accessor body writes only its own object's property, so not the same property on another object.
+#[test]
+fn an_init_property_is_set_only_on_this_while_the_object_is_created() {
+    let sharp = "namespace Demo;\n\nclass Label\n{\n    public string text { get; init; }\n    public string shown { get; init => field = trim(value); } = \"\";\n\n    public Label(string text)\n    {\n        this.text = text;\n        this.shown = text;\n        const later = () => { this.text = \"late\"; };\n        later();\n    }\n\n    public Label.shouting(string text) : this(text)\n    {\n        this.text = strtoupper(text);\n    }\n\n    public void rename(string text)\n    {\n        this.text = text;\n    }\n}\n\nclass Badge : Label\n{\n    public Badge(string text, Label source) : super(text)\n    {\n        this.text = \"badge\";\n        source.text = text;\n    }\n}\n\nclass Use\n{\n    public static void relabel(Label label)\n    {\n        label.text = \"x\";\n    }\n}\n\nclass Point\n{\n    public Point(public int x { get; init; }) { }\n\n    public void move()\n    {\n        this.x = 2;\n    }\n}\n\nclass Peer\n{\n    public Peer? link { get; init; }\n    public string name\n    {\n        get;\n        init\n        {\n            field = value;\n            if (this.link != null) {\n                this.link.name = value;\n            }\n        }\n    } = \"\";\n\n    public Peer(string name, Peer? link)\n    {\n        this.link = link;\n        this.name = name;\n    }\n}\n";
+    let help = "Set it on `this` in a constructor or a named constructor.";
+    let refused = format!("invalid-property-write `text` is set only while the object is created. | {help}");
+
+    assert_eq!(
+        refusals(("src/Demo/Label.sharp", sharp), &[]),
+        [
+            format!("12:36 {refused}"),
+            format!("23:14 {refused}"),
+            format!("32:16 {refused}"),
+            format!("40:15 {refused}"),
+            format!("50:14 invalid-property-write `x` is set only while the object is created. | {help}"),
+            format!("64:27 invalid-property-write `name` is set only while the object is created. | {help}"),
+        ]
+    );
+
+    // Plain PHP sees the `protected(set)` the property runs as, which lets a PHP subclass write it at any time.
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Relabel\n{\n    public static function run(Label $label): void\n    {\n        $label->text = 'x';\n    }\n}\n\nfinal class Fancy extends Label\n{\n    public function retitle(): void\n    {\n        $this->text = 'y';\n    }\n}\n";
+    assert_eq!(
+        issues(("src/Demo/Relabel.php", php), &[("src/Demo/Label.sharp", sharp)]),
+        ["9:17 invalid-property-write"]
     );
 }
 
@@ -10254,6 +10294,27 @@ fn a_getter_creating_an_object_whose_named_constructor_has_an_effect_is_refused(
         [
             "app/Shop/Stamp.sharp:16:27 impure-getter: Getter `current` reaches `Stamp.current`, which calls `now` with the effect `Clock`. Getters must be pure.",
             "app/Shop/Stamp.sharp:18:26 impure-getter: Getter `logged` reaches `Stamp.logged`, which calls `now` with the effect `Clock`. Getters must be pure.",
+        ]
+    );
+}
+
+/// A write runs the property's `set` or `init` body with the written value as `value`, so a body that changes `value`
+/// changes the object the caller wrote.
+#[test]
+fn a_getter_whose_new_object_changes_the_value_its_init_accessor_is_given_is_refused() {
+    let builder = (
+        "app/Shop/Builder.sharp",
+        "namespace App.Shop;\n\npublic class Builder\n{\n    private string text = \"\";\n\n    public void add(string part)\n    {\n        this.text = this.text + part;\n    }\n}\n",
+    );
+    let page = (
+        "app/Shop/Page.sharp",
+        "namespace App.Shop;\n\npublic class Box\n{\n    public Builder held { get; init { value.add(\"x\"); field = value; } }\n\n    public Box(Builder held)\n    {\n        this.held = held;\n    }\n}\n\npublic class Page\n{\n    private Builder builder = new Builder();\n\n    public bool boxed => new Box(this.builder) != null;\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[page, builder]),
+        [
+            "app/Shop/Page.sharp:17:26 impure-getter: Getter `boxed` reaches `Builder.add`, which changes `this.text`. Getters must be pure."
         ]
     );
 }
