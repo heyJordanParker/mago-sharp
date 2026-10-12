@@ -51,6 +51,7 @@ use mago_database::ReadDatabase;
 use mago_database::exclusion::Exclusion;
 use mago_database::file::File;
 use mago_database::loader::DatabaseLoader;
+use mago_sharp_bridge::unit::COMPILED_FOLDER;
 
 use crate::service::format::FileFormatStatus;
 use crate::service::format::FormatService;
@@ -169,7 +170,8 @@ impl<'cfg> Orchestrator<'cfg> {
     ///
     /// This method scans the workspace directory and builds a database of all PHP files
     /// according to the configured paths, includes, excludes, and extensions. The database
-    /// provides fast access to file contents and metadata for all tools.
+    /// provides fast access to file contents and metadata for all tools. The workspace's `.sharp`
+    /// folder, which `mago compile` writes, is never loaded: its Lean package links to source folders.
     ///
     /// # Arguments
     ///
@@ -238,6 +240,7 @@ impl<'cfg> Orchestrator<'cfg> {
         };
 
         let mut excludes = create_excludes_from_patterns(&self.config.excludes, workspace);
+        excludes.extend(create_excludes_from_patterns(&[COMPILED_FOLDER], workspace));
         if !include_externals {
             let include_strs: Vec<&str> = self.config.includes.iter().map(|s| s.as_ref()).collect();
             excludes.extend(create_excludes_from_patterns(&include_strs, workspace));

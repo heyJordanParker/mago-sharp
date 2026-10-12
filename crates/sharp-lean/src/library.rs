@@ -11,6 +11,9 @@ use mago_build_id::BUILD_ID;
 /// The library's Lean version, which `.sharp/.lean/lean-toolchain` pins too.
 pub(crate) const TOOLCHAIN: &str = include_str!("../lean/lean-toolchain");
 
+/// The Lean namespace that holds every module of the library.
+pub(crate) const NAMESPACE: &str = "Sharp";
+
 /// The library's Lake package, as `crates/sharp-lean/lean/` holds it.
 const PACKAGE: [(&str, &str); 7] = [
     ("lakefile.toml", include_str!("../lean/lakefile.toml")),
