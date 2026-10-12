@@ -32,18 +32,20 @@ mod internal;
 /// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
 /// [`ResolvedNames::is_written`] reports. The binder knows no types, so a call of a method of these names on an object
 /// writes its local too, which captures it by reference, as harmless.
-pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "delete", "remove", "clear"];
+pub const CHANGING_COLLECTION_METHODS: [&str; 6] = ["add", "set", "insert", "delete", "remove", "clear"];
 
 /// The methods of a PHP# `List`, `Map` or `Set` that run as PHP functions or operators on the array, not as
 /// `Sharp\Collection` methods, as `(collection, method)` pairs.
 ///
 /// The bridge lowers each of them from the checker's types, so the checker refuses one on a value that can also be an
 /// object, whose own method would not run.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 12] = [
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 14] = [
     ("List", "count"),
     ("List", "contains"),
     ("List", "indexOf"),
     ("List", "last"),
+    ("List", "remove"),
+    ("List", "clear"),
     ("Map", "count"),
     ("Set", "count"),
     ("Set", "add"),
