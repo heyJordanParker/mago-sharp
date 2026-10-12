@@ -13,7 +13,7 @@ use crate::dialect::Dialect;
 /// Each word starts or structures PHP# syntax, so no PHP# name can be one, as C# reserves its keywords. A `.sharp` file
 /// reads any other PHP keyword as a plain name, and so are the words that mean something only inside their own
 /// construct, such as `get`, `of` and `default`, as C#'s contextual keywords are.
-pub const SHARP_KEYWORDS: [&str; 49] = [
+pub const SHARP_KEYWORDS: [&str; 50] = [
     "let",
     "const",
     "emit",
@@ -50,6 +50,7 @@ pub const SHARP_KEYWORDS: [&str; 49] = [
     "public",
     "protected",
     "private",
+    "internal",
     "abstract",
     "final",
     "override",

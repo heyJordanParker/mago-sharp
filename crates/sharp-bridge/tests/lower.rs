@@ -256,8 +256,8 @@ fn a_construct_outside_the_slice_returns_its_not_supported_error() {
 #[test]
 fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() {
     let words = [
-        "isset", "empty", "unset", "array", "list", "echo", "print", "die", "foreach", "global", "get", "set", "init",
-        "field", "value", "of", "via", "uses", "and", "or", "not", "default",
+        "isset", "empty", "unset", "array", "list", "echo", "print", "die", "foreach", "global", "trait", "get", "set",
+        "init", "field", "value", "of", "via", "uses", "and", "or", "not", "default",
     ];
 
     for word in words {

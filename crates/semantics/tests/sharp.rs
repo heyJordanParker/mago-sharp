@@ -796,7 +796,7 @@ fn the_keyword_names_example_reserves_only_the_keywords_php_sharp_uses() {
 /// a `const` or `let` local or a parameter. `this` keeps its own message. The name the help suggests compiles.
 #[test]
 fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
-    const RESERVED: [&str; 49] = [
+    const RESERVED: [&str; 50] = [
         "let",
         "const",
         "emit",
@@ -833,6 +833,7 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
         "public",
         "protected",
         "private",
+        "internal",
         "abstract",
         "final",
         "override",
@@ -1384,6 +1385,23 @@ fn a_reserved_class_name_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Mixed\n{\n}\n";
 
     assert_eq!(issues(code), ["3:7 Cannot use `Mixed` as a class name: it is reserved."]);
+}
+
+/// Spec section 2: a keyword PHP# uses can't name a class. A PHP# keyword PHP doesn't reserve, such as `internal`, is
+/// lowercase, and spec section 24 capitalizes every type, so the capitalized name compiles, as C#'s keywords are
+/// lowercase and `Internal` names a class there.
+#[test]
+fn a_php_sharp_keyword_is_not_a_class_name() {
+    let code = "namespace App.Tenant;\n\nclass internal\n{\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Internal\n{\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:7 `internal` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
+        ]
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
 }
 
 #[test]
