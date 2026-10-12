@@ -1243,20 +1243,17 @@ pub(crate) fn localize_member_type<A>(
 ) where
     A: Arena,
 {
-    let TObject::Named(receiver) = receiver else {
-        return;
-    };
-    if declaring_class.template_types.is_empty() {
-        return;
+    if !declaring_class.template_types.is_empty()
+        && let TObject::Named(receiver) = receiver
+    {
+        *member_type = localize_property_type(
+            context,
+            member_type,
+            receiver.get_type_parameters().unwrap_or_default(),
+            context.codebase.get_class_like(receiver.name.as_bytes()).unwrap_or(declaring_class),
+            declaring_class,
+        );
     }
-
-    *member_type = localize_property_type(
-        context,
-        member_type,
-        receiver.get_type_parameters().unwrap_or_default(),
-        context.codebase.get_class_like(receiver.name.as_bytes()).unwrap_or(declaring_class),
-        declaring_class,
-    );
 }
 
 pub fn localize_property_type<A>(
@@ -1775,9 +1772,9 @@ where
     Some(fix_type_arguments(context, artifacts, value, &method_metadata.template_types, &method_name, read_span))
 }
 
-/// Spec section 14.3: a PHP# generic method's `value` takes its type arguments from the parameter types of the
-/// function type the read at `span` goes into, as C#'s method group conversion does, and the analysis records them at
-/// `span` for the lowering. Returns `value` with them. A type argument nothing fixes is refused, as C#'s CS0411, and
+/// Spec section 14.3: a PHP# generic method's `value`, one closure signature, takes its type arguments from the
+/// parameter types of the function type the read at `span` goes into, as C#'s method group conversion does, and the
+/// analysis records them at `span` for the lowering. Returns `value` with them. A type argument nothing fixes is refused, as C#'s CS0411, and
 /// one a parameter type fixes outside its bound is left to the bound's own issue.
 fn fix_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
@@ -1797,12 +1794,9 @@ where
     let mut violated_templates = WordSet::default();
     if let Some(function_type) =
         artifacts.get_expected_type(&span).map(|expected| closure_parameter_types(context, expected))
+        && let TAtomic::Callable(TCallable::Signature(signature)) = value.get_single()
     {
-        let signatures = value.types.iter().filter_map(|atomic| match atomic {
-            TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
-            _ => None,
-        });
-        for (index, parameter) in signatures.flat_map(|signature| signature.get_parameters().iter().enumerate()) {
+        for (index, parameter) in signature.get_parameters().iter().enumerate() {
             if let (Some(parameter_type), Some(function_parameter_type)) =
                 (parameter.get_type_signature(), function_type.get(&index))
             {

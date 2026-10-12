@@ -375,11 +375,7 @@ where
         // PHP#'s `new Self(…)` names no type arguments, spec section 11: `Self` is the class with its own type
         // parameters, as in a return type, so they stand for written ones.
         None if context.dialect.is_sharp() && classname.is_static() => {
-            let own_type_parameters = match get_this_type(context, metadata, None) {
-                TObject::Named(this) => this.type_parameters,
-                // An enum, which `new` refuses above.
-                _ => None,
-            };
+            let own_type_parameters = get_this_type(context, metadata, None).get_type_parameters().map(<[_]>::to_vec);
             for (own_type_parameter, (template_name, template)) in
                 own_type_parameters.iter().flatten().zip(&metadata.template_types)
             {

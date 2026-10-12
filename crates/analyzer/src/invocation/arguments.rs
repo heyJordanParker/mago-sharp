@@ -107,24 +107,6 @@ pub(super) fn is_array_multisort(invocation_target: &InvocationTarget<'_>) -> bo
     )
 }
 
-fn is_empty_container_construction(expression: &Expression) -> bool {
-    if let Expression::Instantiation(instantiation) = expression
-        && let Some(argument_list) = &instantiation.argument_list
-        && argument_list.arguments.len() == 1
-        && let Some(first_arg) = argument_list.arguments.iter().next()
-    {
-        let argument_value = first_arg.value();
-
-        match argument_value {
-            Expression::Array(array_expr) => array_expr.elements.is_empty(),
-            Expression::LegacyArray(array_expr) => array_expr.elements.is_empty(),
-            _ => false,
-        }
-    } else {
-        false
-    }
-}
-
 /// Analyzes an argument expression and stores its inferred type.
 pub fn analyze_and_store_argument_type<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -412,10 +394,6 @@ where
     }
 
     let is_coerced = union_comparison_result.type_coerced.unwrap_or(false);
-    if is_coerced && (input_type.is_empty_array() || is_empty_container_construction(input_expression)) {
-        return false;
-    }
-
     let (kind, mut issue) = if is_coerced {
         let (issue_kind, annotation_msg, note_msg) = if union_comparison_result
             .type_coerced_from_nested_mixed

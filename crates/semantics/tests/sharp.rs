@@ -994,6 +994,20 @@ fn an_interface_method_takes_union_types_and_a_variadic_parameter() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// A type an interface method can't take is refused with what an interface method has, its type parameters among them.
+#[test]
+fn a_type_an_interface_method_cannot_take_names_what_it_has() {
+    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    callable area();\n}\n";
+
+    assert_eq!(issues(code), ["5:5 This type is not supported yet in PHP#."]);
+    assert_eq!(
+        check("src/Report.sharp", code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
+        [[
+            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
+        ]]
+    );
+}
+
 #[test]
 fn a_modifier_on_an_interface_member_is_an_error() {
     let code =
@@ -3588,9 +3602,8 @@ fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error(
             })
             .collect::<Vec<_>>()
     );
-    assert!(check("src/Report.sharp", code).iter().all(
-        |issue| issue.notes == ["PHP# bounds a type parameter by classes and interfaces, several joined with `&`."]
-    ));
+    assert!(check("src/Report.sharp", code).iter().all(|issue| issue.notes
+        == ["A PHP# type parameter is a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<TItem : DatabaseEntity & Shareable>`."]));
 }
 
 /// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
@@ -4118,12 +4131,13 @@ fn a_union_of_two_collections_or_two_function_types_is_a_type_written_twice() {
 
 /// Spec section 11: type arguments reach the running program, so a union is refused only where the engine can't tell
 /// two members apart. Two generic classes, or one class with other type arguments, compile. `List`, `Map` and `Set`
-/// share PHP's one array kind, and a collection beside an `Iterable` of its element type adds nothing to it.
+/// share PHP's one array kind, and a collection beside an `Iterable` of its element type adds nothing to it, while a
+/// collection beside another generic class compiles.
 #[test]
 fn a_union_refuses_only_members_the_engine_cannot_tell_apart() {
     let code = leak(method("        return 1;\n").replace(
         "int extra",
-        "Box<Order>|Pair<Order> a, Box<int>|Box<string> b, Box<Order>|Box<Order> c, List<int>|Map<string, int> d, List<int>|Set<int> e, Iterable<int>|List<int> f, Iterable<int>|Map<string, int> g, Set<int>|Iterable<int> h, Iterable<string>|List<int> i, Iterable<string>|Map<string, int> j, Order|Entity k",
+        "Box<Order>|Pair<Order> a, Box<int>|Box<string> b, Box<Order>|Box<Order> c, List<int>|Map<string, int> d, List<int>|Set<int> e, Iterable<int>|List<int> f, Iterable<int>|Map<string, int> g, Set<int>|Iterable<int> h, Iterable<string>|List<int> i, Iterable<string>|Map<string, int> j, Order|Entity k, List<Order>|Box<Order> l",
     ));
 
     assert_eq!(

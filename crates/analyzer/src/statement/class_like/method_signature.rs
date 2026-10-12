@@ -461,9 +461,6 @@ pub fn validate_erased_signature_compatibility(
     {
         return;
     }
-    let Some(child_method_meta) = child_method.method_metadata.as_ref() else {
-        return;
-    };
     if child_method.name.as_bytes().eq_ignore_ascii_case(b"__construct")
         && !parent_method.method_metadata.as_ref().is_some_and(|parent| parent.is_abstract)
     {
@@ -474,7 +471,7 @@ pub fn validate_erased_signature_compatibility(
     let expansion_options = TypeExpansionOptions {
         self_class: Some(child_class_name),
         static_class_type: StaticClassType::Name(child_class_name),
-        function_is_final: child_method_meta.is_final,
+        function_is_final: child_method.method_metadata.as_ref().is_some_and(|method| method.is_final),
         ..Default::default()
     };
     let erased = |parameter: &FunctionLikeParameterMetadata| {
@@ -523,8 +520,10 @@ pub(super) fn bound_example(
     declared: Option<&TypeMetadata>,
     erased: &TUnion,
 ) -> Option<Word> {
-    let parameter = declared?.type_union.types.iter().find_map(|atomic| match atomic {
-        TAtomic::GenericParameter(parameter) => Some(parameter),
+    let (parameter, class) = declared?.type_union.types.iter().find_map(|atomic| match atomic {
+        TAtomic::GenericParameter(
+            parameter @ TGenericParameter { defining_entity: GenericParent::ClassLike(class), .. },
+        ) => Some((parameter, class)),
         _ => None,
     })?;
     let [bound] = erased.types.iter().filter(|atomic| !atomic.is_null()).collect::<Vec<_>>()[..] else {
@@ -536,9 +535,6 @@ pub(super) fn bound_example(
         _ => return None,
     };
     let bound = short_name(codebase.get_class_like(bound.as_bytes()).map_or(bound, |class| class.original_name));
-    let GenericParent::ClassLike(class) = parameter.defining_entity else {
-        return None;
-    };
     let class = codebase.get_class_like(class.as_bytes())?;
 
     Some(word(format!("{}<{} : {bound}>", short_name(class.original_name), parameter.parameter_name)))
@@ -575,11 +571,6 @@ pub(super) fn erase(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
             TAtomic::Object(TObject::Named(object)) => {
                 let mut object = object.clone();
                 object.type_parameters = None;
-                for member in object.intersection_types.iter_mut().flatten() {
-                    if let TAtomic::Object(TObject::Named(member)) = member {
-                        member.type_parameters = None;
-                    }
-                }
 
                 vec![TAtomic::Object(TObject::Named(object))]
             }
@@ -591,9 +582,10 @@ pub(super) fn erase(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
 }
 
 /// The type `erased`, which `erase` returns, in backticks, as a `dialect` file writes it. PHP writes it as in a
-/// declaration, `array`, `iterable`, `Closure`, `callable`, `mixed`, or a class by its full name. PHP# writes it as
+/// declaration, `array`, `Closure`, `callable`, `mixed`, or a class by its full name. PHP# writes it as
 /// `display_sharp_type` does, `Order`, `Any?` or `Iterable<Any?>`, but has no `array`, `Closure` or `callable`, so a
-/// PHP# file writes a type with any of them in it as PHP's, as in PHP's `Closure` or PHP's `array|null`.
+/// PHP# file writes a type with any of them in it as PHP's, as in PHP's `Closure` or PHP's `array|null`. No PHP#
+/// declaration erases to an `iterable`, and an `array` beside one joins it, so PHP's form never holds one.
 pub(super) fn display_erased<A>(erased: &TUnion, context: &Context<'_, '_, A>) -> String
 where
     A: Arena,
@@ -608,7 +600,6 @@ where
         .iter()
         .map(|atomic| match atomic {
             TAtomic::Array(_) => "array".to_owned(),
-            TAtomic::Iterable(_) => "iterable".to_owned(),
             TAtomic::Callable(callable) if callable.is_closure() => "Closure".to_owned(),
             TAtomic::Callable(_) => "callable".to_owned(),
             atomic => atomic.get_id().to_string(),

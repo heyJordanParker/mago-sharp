@@ -796,12 +796,14 @@ mod tests {
     use mago_codex::ttype::atomic::object::named::TNamedObject;
     use mago_codex::ttype::atomic::scalar::TScalar;
     use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+    use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
     use mago_codex::ttype::get_bool;
     use mago_codex::ttype::get_float;
     use mago_codex::ttype::get_int;
     use mago_codex::ttype::get_keyed_array;
     use mago_codex::ttype::get_list;
     use mago_codex::ttype::get_mixed;
+    use mago_codex::ttype::get_null;
     use mago_codex::ttype::get_object;
     use mago_codex::ttype::get_string;
     use mago_codex::ttype::get_void;
@@ -809,6 +811,8 @@ mod tests {
     use mago_codex::ttype::wrap_atomic;
     use mago_word::word;
 
+    use super::Parameter;
+    use super::receiver_intersections;
     use super::type_text;
 
     fn text(r#type: &TUnion) -> String {
@@ -923,5 +927,52 @@ mod tests {
 
         assert_eq!(text(&wrap_atomic(TAtomic::GenericParameter(parameter))), "Any?");
         assert_eq!(text(&wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_value)))), "Class<App.Order>");
+    }
+
+    /// A class value bounded by a class names it, one of a type parameter writes the type parameter, and one of any
+    /// class names `Object`. A type that is only `null` is `null`.
+    #[test]
+    fn a_class_value_names_its_bound_its_type_parameter_or_object() {
+        let order = TAtomic::Object(TObject::Named(TNamedObject::new(word("App\\Order"))));
+        let class_value = |class_value| text(&wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_value))));
+        let of_type = TClassLikeString::of_type(TClassLikeStringKind::Class, order.clone());
+        let generic = TClassLikeString::generic(
+            TClassLikeStringKind::Class,
+            word("TItem"),
+            GenericParent::ClassLike(word("App\\PaginatedList")),
+            order,
+        );
+
+        assert_eq!(class_value(of_type), "Class<App.Order>");
+        assert_eq!(class_value(generic), "Class<Any?>");
+        assert_eq!(class_value(TClassLikeString::class_string()), "Class<Object>");
+        assert_eq!(text(&get_null()), "null");
+    }
+
+    /// In a bound, a method's own type parameter is its bound, which a call from plain PHP gives it.
+    #[test]
+    fn a_bound_writes_a_method_type_parameter_as_its_bound() {
+        let parameter = TGenericParameter::new(
+            word("TOther"),
+            Arc::new(class("App\\Order", vec![])),
+            GenericParent::FunctionLike((word("App\\Report"), word("pick"))),
+        );
+        let bound = class("App\\Comparable", vec![wrap_atomic(TAtomic::GenericParameter(parameter))]);
+
+        assert_eq!(super::text(&bound, &CodebaseMetadata::default(), Parameter::Bound), "App.Comparable<App.Order>");
+    }
+
+    /// A receiver's intersection names its classes, and a part that is no class, as a PHP `@template` it is joined
+    /// with, names none.
+    #[test]
+    fn a_receiver_intersection_names_only_its_classes() {
+        let mut receiver = TAtomic::Object(TObject::Named(TNamedObject::new(word("App\\Order"))));
+        receiver.add_intersection_type(TAtomic::GenericParameter(TGenericParameter::new(
+            word("T"),
+            Arc::new(get_mixed()),
+            GenericParent::ClassLike(word("App\\Box")),
+        )));
+
+        assert_eq!(receiver_intersections(&wrap_atomic(receiver)), Some(vec![vec![b"App\\Order".as_slice()]]));
     }
 }

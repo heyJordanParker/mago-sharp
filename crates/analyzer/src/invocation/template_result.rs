@@ -35,7 +35,6 @@ use crate::invocation::template_inference::infer_templates_for_method_call;
 use crate::statement::function_like::check_template_arguments;
 use crate::statement::get_type_from_hint;
 use crate::utils::names::display_class_like_name;
-use crate::utils::names::display_function_like_identifier;
 use crate::utils::template::get_template_types_for_class_member;
 use mago_names::display_sharp_member;
 
@@ -139,67 +138,81 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
 
     // For `@mixin`-resolved methods, `class_type` is the receiver while the type
     // parameters of `class_like_metadata` live on the mixin object.
-    let instance_type = match (&method_context.declaring_object_type, &method_context.class_type) {
-        (Some(declaring_object), _) => Some(declaring_object),
-        (None, StaticClassType::Object(TObject::Named(instance_type))) => Some(instance_type),
-        _ => None,
-    };
-
-    if let Some(instance_type) = instance_type {
-        let is_declaring_instance = instance_type
-            .name
-            .as_bytes()
-            .eq_ignore_ascii_case(method_context.class_like_metadata.original_name.as_bytes());
-
-        if is_declaring_instance && let Some(type_parameters) = &instance_type.type_parameters {
-            for (template_index, template_type) in type_parameters.iter().enumerate() {
-                let Some(template_name) = method_context
-                    .class_like_metadata
-                    .template_types
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, (name, _))| if index == template_index { Some(*name) } else { None })
-                else {
-                    break;
-                };
-
-                template_result.add_lower_bound(
-                    template_name,
-                    GenericParent::ClassLike(method_context.class_like_metadata.name),
-                    template_type.clone(),
-                );
-
-                if let Some(variance) = instance_type.get_variance(template_index)
-                    && !variance.is_invariant()
-                {
-                    template_result.projections.insert(template_name, variance);
-                }
-            }
+    let instance_type = if let Some(declaring_object) = &method_context.declaring_object_type {
+        declaring_object
+    } else if let StaticClassType::Object(TObject::Named(instance_type)) = &method_context.class_type {
+        instance_type
+    } else {
+        // A receiver with no type of its own, as the object `new` makes, takes the type arguments `new` bound.
+        if let Some(identifier) = method_context.declaring_method_id
+            && let Some(declaring_class_metadata) =
+                context.codebase.get_class_like(identifier.get_class_name().as_bytes())
+            && let Some(type_arguments) =
+                get_bound_type_arguments(context, template_result, method_context.class_like_metadata)
+        {
+            seed_inherited_type_arguments(
+                context,
+                declaring_class_metadata,
+                method_context.class_like_metadata,
+                Some(&type_arguments),
+                template_result,
+            );
         }
 
-        if !is_declaring_instance
-            && let Some(calling_class_metadata) = context.codebase.get_class_like(instance_type.name.as_bytes())
-        {
-            for (template_name, _) in &method_context.class_like_metadata.template_types {
-                if template_result.lower_bounds.get(template_name).is_some_and(|m| !m.is_empty()) {
-                    continue;
-                }
+        return;
+    };
 
-                let template_type = get_specialized_template_type(
-                    context.codebase,
+    let is_declaring_instance =
+        instance_type.name.as_bytes().eq_ignore_ascii_case(method_context.class_like_metadata.original_name.as_bytes());
+
+    if is_declaring_instance && let Some(type_parameters) = &instance_type.type_parameters {
+        for (template_index, template_type) in type_parameters.iter().enumerate() {
+            let Some(template_name) = method_context
+                .class_like_metadata
+                .template_types
+                .iter()
+                .enumerate()
+                .find_map(|(index, (name, _))| if index == template_index { Some(*name) } else { None })
+            else {
+                break;
+            };
+
+            template_result.add_lower_bound(
+                template_name,
+                GenericParent::ClassLike(method_context.class_like_metadata.name),
+                template_type.clone(),
+            );
+
+            if let Some(variance) = instance_type.get_variance(template_index)
+                && !variance.is_invariant()
+            {
+                template_result.projections.insert(template_name, variance);
+            }
+        }
+    }
+
+    if !is_declaring_instance
+        && let Some(calling_class_metadata) = context.codebase.get_class_like(instance_type.name.as_bytes())
+    {
+        for (template_name, _) in &method_context.class_like_metadata.template_types {
+            if template_result.lower_bounds.get(template_name).is_some_and(|m| !m.is_empty()) {
+                continue;
+            }
+
+            let template_type = get_specialized_template_type(
+                context.codebase,
+                *template_name,
+                method_context.class_like_metadata.name,
+                calling_class_metadata,
+                instance_type.type_parameters.as_deref(),
+            );
+
+            if let Some(template_type) = template_type {
+                template_result.add_lower_bound(
                     *template_name,
-                    method_context.class_like_metadata.name,
-                    calling_class_metadata,
-                    instance_type.type_parameters.as_deref(),
+                    GenericParent::ClassLike(method_context.class_like_metadata.name),
+                    template_type,
                 );
-
-                if let Some(template_type) = template_type {
-                    template_result.add_lower_bound(
-                        *template_name,
-                        GenericParent::ClassLike(method_context.class_like_metadata.name),
-                        template_type,
-                    );
-                }
             }
         }
     }
@@ -208,43 +221,18 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
         return;
     };
 
-    let Some(declaring_class_metadata) = context.codebase.get_class_like(identifier.get_class_name().as_bytes()) else {
+    let Some(metadata) = context.codebase.get_class_like(identifier.get_class_name().as_bytes()) else {
         return;
     };
 
-    match instance_type {
-        Some(instance_type) => {
-            seed_inherited_type_arguments(
-                context,
-                declaring_class_metadata,
-                method_context.class_like_metadata,
-                instance_type.get_type_parameters(),
-                template_result,
-            );
-
-            infer_templates_for_method_call(
-                context,
-                instance_type,
-                method_context,
-                method_metadata,
-                declaring_class_metadata,
-                template_result,
-            );
-        }
-        None => {
-            if let Some(type_arguments) =
-                get_bound_type_arguments(context, template_result, method_context.class_like_metadata)
-            {
-                seed_inherited_type_arguments(
-                    context,
-                    declaring_class_metadata,
-                    method_context.class_like_metadata,
-                    Some(&type_arguments),
-                    template_result,
-                );
-            }
-        }
-    }
+    seed_inherited_type_arguments(
+        context,
+        metadata,
+        method_context.class_like_metadata,
+        instance_type.get_type_parameters(),
+        template_result,
+    );
+    infer_templates_for_method_call(context, instance_type, method_context, method_metadata, metadata, template_result);
 }
 
 /// The type arguments `template_result` bounds every template of `class` to, as `new` bounds them from the type
@@ -286,25 +274,24 @@ fn seed_inherited_type_arguments<A>(
         return;
     }
 
-    for (template_name, _) in &declaring_class.template_types {
-        if let Some(template_type) = get_specialized_template_type(
+    let inherited = declaring_class.template_types.keys().filter_map(|template_name| {
+        get_specialized_template_type(
             context.codebase,
             *template_name,
             declaring_class.name,
             called_class,
             type_arguments,
-        ) {
-            template_result.add_lower_bound(
-                *template_name,
-                GenericParent::ClassLike(declaring_class.name),
-                template_type,
-            );
-        }
+        )
+        .map(|template_type| (*template_name, template_type))
+    });
+    for (template_name, template_type) in inherited {
+        template_result.add_lower_bound(template_name, GenericParent::ClassLike(declaring_class.name), template_type);
     }
 }
 
 /// Seeds the type arguments PHP# writes on a method call, `x.m<A>(…)`, as the bounds of each target method's own
-/// templates, through [`seed_type_arguments`].
+/// templates, through [`seed_type_arguments`]. A function value a property holds declares no type parameter, so any
+/// type argument written on its call is one too many.
 pub fn seed_method_type_arguments<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     block_context: &BlockContext<'ctx>,
@@ -315,16 +302,19 @@ pub fn seed_method_type_arguments<'ctx, A>(
 ) where
     A: Arena,
 {
+    let no_templates = TemplateTypes::default();
     for target in targets {
-        let InvocationTarget::FunctionLike { identifier, metadata, .. } = target else {
-            continue;
-        };
-
-        let owner = match identifier {
-            FunctionLikeIdentifier::Method(class_name, _) => {
-                display_sharp_member(display_class_like_name(context, *class_name), metadata.original_name)
-            }
-            _ => display_function_like_identifier(context, identifier),
+        let (owner, owner_span, templates) = match target {
+            InvocationTarget::FunctionLike {
+                identifier: FunctionLikeIdentifier::Method(class_name, _),
+                metadata,
+                ..
+            } => (
+                display_sharp_member(display_class_like_name(context, *class_name), metadata.original_name),
+                metadata.name_span.unwrap_or(metadata.span),
+                &metadata.template_types,
+            ),
+            _ => (target.guess_name(context), type_arguments.span(), &no_templates),
         };
         seed_type_arguments(
             context,
@@ -332,8 +322,8 @@ pub fn seed_method_type_arguments<'ctx, A>(
             artifacts,
             type_arguments,
             owner,
-            metadata.name_span.unwrap_or(metadata.span),
-            &metadata.template_types,
+            owner_span,
+            templates,
             template_result,
         );
     }

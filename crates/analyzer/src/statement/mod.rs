@@ -64,6 +64,7 @@ use crate::error::AnalysisError;
 use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
 use crate::expression::is_refused_match;
+use crate::expression::match_arm_hints;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::statement::function_like::report_invalid_template_arguments;
@@ -246,9 +247,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::For(r#for) => r#for.analyze(context, block_context, artifacts),
                 Statement::ForOf(for_of) => analyze_for_of(for_of, context, block_context, artifacts),
                 Statement::PatternMatch(pattern_match) if is_refused_match(pattern_match, context) => Ok(()),
-                Statement::PatternMatch(_) => {
-                    analyze_php_shape(Node::Statement(self), context, block_context, artifacts)
-                }
+                Statement::PatternMatch(pattern_match) => analyze_php_shape(
+                    Node::Statement(self),
+                    match_arm_hints(pattern_match),
+                    context,
+                    block_context,
+                    artifacts,
+                ),
                 Statement::While(r#while) => r#while.analyze(context, block_context, artifacts),
                 Statement::DoWhile(do_while) => do_while.analyze(context, block_context, artifacts),
                 Statement::Continue(r#continue) => r#continue.analyze(context, block_context, artifacts),

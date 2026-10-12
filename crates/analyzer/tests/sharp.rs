@@ -5654,6 +5654,25 @@ fn a_method_one_collection_of_a_union_lacks_is_refused_once_naming_it() {
     );
 }
 
+/// A collection property read through a receiver that may also be a scalar is the collection its class declares, beside
+/// the refused read on the scalar: `basket.items.add(1)` on an `int|Basket` whose `items` is a `Set<string>` is refused
+/// for its element, and `basket.items.get(0)` names the `Set` that has no `get`.
+#[test]
+fn a_collection_property_read_through_a_union_with_a_scalar_is_the_declared_collection() {
+    let sharp = "namespace Demo;\n\npublic class Basket\n{\n    public Set<string> items { get; } = [];\n}\n\npublic class Report\n{\n    public static void add(int|Basket basket)\n    {\n        basket.items.add(1);\n        basket.items.get(0);\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "12:16 invalid-property-access Attempting to access a property on a non-object type (`int`). | Cannot access property here | This expression has type `int`",
+            "12:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
+            "12:26 invalid-argument Invalid argument type for argument #1 of `Set<string>.add`: expected `string`, but found `int`. | This has type `int` | Arguments to this method are incorrect | The provided type `int` is not compatible with the expected type `string`. | Change the argument value to match `string`, or update the parameter's type declaration.",
+            "13:22 non-existent-method Method `get` does not exist on `Set<string>`. | This method selection is invalid | This expression has type `Set<string>` | A `Set<string>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `map`, `remove`, `sortedby`, `sumof`, `tolist`.",
+            "13:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
+        ]
+    );
+}
+
 /// A method that changes a local that may be a `Set` or a `Map` leaves it either, as it was declared, so a `Map` local
 /// still refuses it.
 #[test]
@@ -7417,10 +7436,11 @@ fn a_map_literal_written_by_index_into_a_list_of_lists_is_refused_once_by_the_li
 }
 
 /// Plain PHP receives a `Set` as the array it runs as, keyed by each element or its backing value, so a `Set` passes
-/// where plain PHP takes an `array`, and to `count` and `in_array`.
+/// where plain PHP takes an `array`, and to `count` and `in_array`, and a key `array_key_exists` finds in it is of the
+/// backing type.
 #[test]
 fn a_set_passes_where_plain_php_takes_an_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Set<string> tags, Set<Status> statuses)\n    {\n        return count(tags) + Sink.plain(tags) + Sink.plain(statuses) + (in_array(\"vip\", tags, true) ? 1 : 0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Set<string> tags, Set<Status> statuses)\n    {\n        return count(tags) + Sink.plain(tags) + Sink.plain(statuses) + (in_array(\"vip\", tags, true) ? 1 : 0);\n    }\n\n    public string found(Set<Status> statuses, int|string key) => array_key_exists(key, statuses) ? key : \"\";\n}\n";
     let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $values): int\n    {\n        return count($values);\n    }\n}\n";
 
     assert_eq!(
@@ -7620,12 +7640,12 @@ fn a_bound_names_a_type_parameter_of_its_own_list() {
     );
 }
 
-/// A type argument outside its bound or beyond the type parameters is reported in PHP#'s words, with type arguments,
-/// short class names, a method written `Store.count` and a count that agrees with its noun, and its PHP twin keeps
-/// Mago's text about template arguments.
+/// A type argument outside its bound, beyond the type parameters or short of them is reported in PHP#'s words, with
+/// type arguments, short class names, a method written `Store.count` and a count that agrees with its noun, and its PHP
+/// twin keeps Mago's text about template arguments. A function value a property holds is never generic.
 #[test]
 fn a_type_argument_report_names_type_arguments_and_short_class_names() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any numbers(PaginatedList<int> page) => page;\n\n    public static Any pairs(PaginatedList<Order, Order> page) => page;\n\n    public static int counted(Store store) => store.count<int>();\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any numbers(PaginatedList<int> page) => page;\n\n    public static Any pairs(PaginatedList<Order, Order> page) => page;\n\n    public static int counted(Store store) => store.count<int>();\n\n    public static TFirst pair<TFirst, TSecond>(TFirst first, TSecond second) => first;\n\n    public static int paired() => Report.pair<int>(1, 2);\n}\n\npublic class Doubler\n{\n    public Doubler(public Function<int(int)> twice { get; })\n    {\n    }\n\n    public int run() => this.twice<int>(2);\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param PaginatedList<int> $page */\n    public static function numbers(PaginatedList $page): mixed\n    {\n        return $page;\n    }\n\n    /** @param PaginatedList<Order, Order> $page */\n    public static function pairs(PaginatedList $page): mixed\n    {\n        return $page;\n    }\n}\n";
     let others = [("src/Demo/Paging.sharp", PAGING), ("src/Demo/Store.sharp", GENERIC_STORE)];
 
@@ -7642,6 +7662,8 @@ fn a_type_argument_report_names_type_arguments_and_short_class_names() {
             "5:31 template-constraint-violation Type argument `int` does not satisfy `PaginatedList`'s `TItem`. | `int` is supplied for `TItem` here... | ...but `TItem` is bounded by `DatabaseEntity`. | Supply a type contained by `DatabaseEntity`.",
             "7:29 excess-template-parameter Too many type arguments for `PaginatedList`: expected 1, but found 2. | `PaginatedList` is applied here. | `PaginatedList` declares 1 type parameter.",
             "9:58 excess-template-parameter Too many type arguments for `Store.count`: expected 0, but found 1. | `Store.count` is applied here. | `Store.count` declares 0 type parameters.",
+            "13:46 missing-template-parameter Too few type arguments for `Report.pair`: expected at least 2, but found 1. | `Report.pair` is applied here. | `Report.pair` declares 2 type parameters.",
+            "22:35 excess-template-parameter Too many type arguments for `Closure`: expected 0, but found 1. | `Closure` is applied here. | `Closure` declares 0 type parameters.",
         ]
     );
 }
@@ -7794,6 +7816,22 @@ fn a_field_whose_type_erases_to_another_type_than_the_parent_field_is_an_error()
     );
 }
 
+/// The help of an erased parameter names a bound only where one bound makes both sides erase alike: an enum is a bound,
+/// as `Box<TItem : Status>`, and a union is not. `Class<TItem>` erases to `string` on both sides, so
+/// `kind(Class<Order> type)` links.
+#[test]
+fn an_erased_parameter_help_names_a_bound_only_where_one_fits() {
+    let sharp_box = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Line\n{\n}\n\npublic enum Status\n{\n    case Open;\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n\n    public virtual void kind(Class<TItem> type)\n    {\n    }\n}\n\npublic class StatusBox : Box<Status>\n{\n    public override void put(Status item)\n    {\n    }\n}\n\npublic class PairBox : Box<Order>\n{\n    public override void put(Order|Line item)\n    {\n    }\n\n    public override void kind(Class<Order> type)\n    {\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Box.sharp", sharp_box), &[]),
+        [
+            "29:37 incompatible-parameter-type Parameter `item` of `StatusBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Box<TItem : Status>`, so both sides erase to the bound.",
+            "36:41 incompatible-parameter-type Parameter `item` of `PairBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`.",
+        ]
+    );
+}
+
 /// A signature that stays sound once generics are erased has no issue: a bound makes the parent's parameter erase to
 /// the bound the implementation takes, a covariant return narrower than the erased `mixed` links, and PHP does not
 /// link a constructor against a parent's constructor that is not abstract, `required` or not.
@@ -7835,7 +7873,7 @@ fn a_php_class_overriding_an_erased_sharp_method_is_refused() {
     assert_eq!(
         explained(("src/Demo/OrderBox.php", order_box), &[("src/Demo/Box.sharp", sharp_box)]),
         [
-            "8:31 incompatible-parameter-type Parameter `item` of `Demo\\OrderBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound."
+            "8:31 incompatible-parameter-type Parameter `item` of `Demo\\OrderBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound.",
         ]
     );
     assert_eq!(
@@ -8235,6 +8273,26 @@ fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
     }
 }
 
+/// Spec section 11.1's wording names the one type argument of an invariant type parameter that differs: `Pair<Order,
+/// int>` given for a `Pair<DatabaseEntity, int>` is worded so. A value whose type arguments differ in more than one,
+/// whose count differs, or that differs in none, as the `Self` parameter the checker refuses, keeps the invalid
+/// issue's own message.
+#[test]
+fn only_one_differing_type_argument_is_worded_as_a_blocked_substitution() {
+    let sharp = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public TFirst? first() => null;\n\n    public TSecond? second() => null;\n}\n\npublic class Holder<TItem>\n{\n    public TItem? item() => null;\n\n    public bool same(Self other) => true;\n}\n\npublic class Report\n{\n    public static Any pair(Pair<DatabaseEntity, int> pair) => pair;\n\n    public static Any held(Holder<DatabaseEntity> holder) => holder;\n\n    public static Any one(Pair<Order, int> pair) => Report.pair(pair);\n\n    public static Any two(Pair<Order, string> pair) => Report.pair(pair);\n\n    public static Any counted(Holder<Order, int> holder) => Report.held(holder);\n\n    public static bool kept(Holder<Order> holder, Holder<Order> other) => holder.same(other);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        [
+            "Pair<Order, int> cannot be used as Pair<DatabaseEntity, int>.",
+            "Argument type mismatch for argument #1 of `Report.pair`: expected `Pair<DatabaseEntity, int>`, but provided type `Pair<Order, string>` is less specific.",
+            "Too many type arguments for `Holder`: expected 1, but found 2.",
+            "Argument type mismatch for argument #1 of `Report.held`: expected `Holder<DatabaseEntity>`, but provided type `Holder<Order, int>` is less specific.",
+            "Argument type mismatch for argument #1 of `Holder.same`: expected `Holder<Order>`, but provided type `Holder<Order>` is less specific.",
+        ]
+    );
+}
+
 /// A typed local's generic type is checked where it is written, as a parameter's is.
 #[test]
 fn a_typed_local_of_a_generic_type_outside_its_bound_is_reported() {
@@ -8564,18 +8622,21 @@ fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_
     );
 }
 
-/// A method call or a property read on a type parameter without a bound names the type parameter, not `mixed`. The
-/// PHP twin keeps Mago's text.
+/// A method call or a property read on a type parameter without a bound names the type parameter, not `mixed`. A
+/// method call on a receiver with no type, as an unknown function's result, names `Any?`. The PHP twin keeps Mago's
+/// text.
 #[test]
 fn a_member_access_on_a_type_parameter_names_it() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public void touch(TItem item)\n    {\n        item.save();\n    }\n\n    public Any? read(TItem item) => item.size;\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Box\n{\n    /** @param TItem $item */\n    public function touch(mixed $item): void\n    {\n        $item->save();\n    }\n\n    /** @param TItem $item */\n    public function read(mixed $item): mixed\n    {\n        return $item->size;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public void touch(TItem item)\n    {\n        item.save();\n    }\n\n    public Any? read(TItem item) => item.size;\n\n    public void lost()\n    {\n        unknown().save();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Box\n{\n    /** @param TItem $item */\n    public function touch(mixed $item): void\n    {\n        $item->save();\n    }\n\n    /** @param TItem $item */\n    public function read(mixed $item): mixed\n    {\n        return $item->size;\n    }\n\n    public function lost(): void\n    {\n        unknown()->save();\n    }\n}\n";
 
     assert_eq!(
         worded(("src/Demo/Box.php", php), &[]),
         [
             "11:16 mixed-method-access Attempting to access a method on a non-object type (`mixed`). | Cannot call method here | This expression has type `mixed`",
             "17:23 mixed-property-access Attempting to access a property on a non-object type (`mixed`). | Cannot access property here | This expression has type `mixed`",
+            "22:9 non-existent-function Could not find definition for function `Demo\\unknown` (also tried as `unknown` in a broader scope). | Attempted to use function `Demo\\unknown` which is undefined | Neither `Demo\\unknown` (e.g., in current namespace) nor `unknown` (e.g., global fallback) could be resolved. | This often means the function/method is misspelled, not imported correctly (e.g., missing `use` statement for namespaced functions), or not defined/autoloaded. | Check for typos in `Demo\\unknown`. Verify namespace imports if applicable, and ensure the function is defined and accessible.",
+            "22:20 mixed-method-access Attempting to access a method on a non-object type (`mixed`). | Cannot call method here | This expression has type `mixed`",
         ]
     );
     assert_eq!(
@@ -8583,6 +8644,8 @@ fn a_member_access_on_a_type_parameter_names_it() {
         [
             "7:14 mixed-method-access Attempting to access a method on a non-object type (`TItem`). | Cannot call method here | This expression has type `TItem`",
             "10:42 mixed-property-access Attempting to access a property on a non-object type (`TItem`). | Cannot access property here | This expression has type `TItem`",
+            "14:9 non-existent-function Function `unknown` could not be found. | Undefined function `unknown` called here | This often means the function is misspelled, or not defined or autoloaded. | Check the spelling of `unknown`, or declare `function unknown()` in a `.php` file outside any namespace.",
+            "14:19 mixed-method-access Attempting to access a method on a non-object type (`Any?`). | Cannot call method here | This expression has type `Any?`",
         ]
     );
 }
@@ -9378,6 +9441,26 @@ fn self_on_a_receiver_typed_by_a_type_parameter_is_that_type_parameter() {
     );
 }
 
+/// A PHP intersection a PHP# call receives keeps every part as the `Self` of a method it calls on it: `copy()`, which
+/// `Copyable` declares, on the `Order&Copyable` that `Lib::pair()` returns passes as an `Order` and as a `Copyable`.
+#[test]
+fn self_on_a_php_intersection_keeps_every_part() {
+    let lib = "<?php\n\nnamespace Demo;\n\ninterface Copyable\n{\n    public function copy(): static;\n}\n\nclass Order\n{\n}\n\nfinal class Lib\n{\n    public static function pair(): Order&Copyable\n    {\n        throw new \\Exception();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Order order() => Lib.pair().copy();\n\n    public static Copyable copyable() => Lib.pair().copy();\n}\n";
+
+    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[("src/Demo/Lib.php", lib)]), Vec::<String>::new());
+}
+
+/// The checker refuses a bound that names a type parameter, and the analysis reports nothing more on a call through it:
+/// `box.same()` on a `TOuter : TInner` is typed through `TInner`'s bound, and `holder.held()` on a
+/// `THolder : Order & TOther & Holder<int>` is the `int?` of its `Holder<int>` part, as its method value's call is.
+#[test]
+fn a_call_on_a_type_parameter_bounded_by_a_type_parameter_reports_only_the_refused_bound() {
+    let sharp = "namespace Demo;\n\npublic interface Holder<TValue>\n{\n    public TValue? held();\n}\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public required Box(public T value { get; }) { }\n\n    public Self same() => this;\n}\n\npublic class Report\n{\n    public TOuter chain<TInner : Box<int>, TOuter : TInner>(TOuter box) => box.same();\n\n    public int? hold<TOther, THolder : Order & TOther & Holder<int>>(THolder holder) => holder.held();\n\n    public Function<int?()> holdValue<TOther, THolder : Order & TOther & Holder<int>>(THolder holder) => holder.held;\n}\n";
+
+    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
 /// A PHP trait's `self` is the class that uses the trait, as PHP runs it: `order.me()` on an `Order` that uses `Fluent`,
 /// whose `me` returns `self`, is an `Order`, and the method value `order.me` is a `Function<Order()>`, so `label()`, which
 /// only `Order` declares, runs on what either gives. The PHP twin keeps Mago's issues.
@@ -9400,14 +9483,15 @@ fn self_in_a_php_trait_is_the_class_that_uses_it() {
 
 /// A method reached through a PHP `@mixin` runs on a receiver that does not inherit its class, so upstream Mago types
 /// it: `repository.first()` on a `Repository` whose `@mixin` is `Builder<Order>` is an `Order?`, and
-/// `repository.latest()`, declared to return `static`, is the `Repository`. A PHP caller of a `Repository` whose
+/// `repository.latest()`, declared to return `static`, is the `Repository`, also on a receiver typed by a type
+/// parameter bounded by `Repository`. A PHP caller of a `Repository` whose
 /// `@mixin` names the PHP# `Builder` gets the same types. The PHP twin keeps Mago's issues.
 #[test]
 fn a_mixin_method_called_from_sharp_has_the_type_upstream_gives_it() {
     let builder = "<?php\n\nnamespace Lib;\n\nclass Order\n{\n}\n\n/** @template TModel */\nclass Builder\n{\n    /** @return TModel|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n\n    /** @return static */\n    public function latest(): static\n    {\n        return $this;\n    }\n}\n\n/** @mixin Builder<Order> */\nclass Repository\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
     let sharp_builder = "namespace Lib;\n\npublic class Order\n{\n}\n\npublic class Builder<TModel>\n{\n    public TModel? first() => null;\n\n    public Self latest() => this;\n}\n";
     let repository = "<?php\n\nnamespace Lib;\n\n/** @mixin Builder<Order> */\nclass Repository\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Repository;\n\npublic class Report\n{\n    public static Order? first(Repository repository) => repository.first();\n\n    public static Repository latest(Repository repository) => repository.latest();\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Repository;\n\npublic class Report\n{\n    public static Order? first(Repository repository) => repository.first();\n\n    public static Repository latest(Repository repository) => repository.latest();\n\n    public static Repository latestOf<TRepository : Repository>(TRepository repository) => repository.latest();\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Order;\nuse Lib\\Repository;\n\nclass Report\n{\n    public static function first(Repository $repository): ?Order\n    {\n        return $repository->first();\n    }\n\n    public static function latest(Repository $repository): Repository\n    {\n        return $repository->latest();\n    }\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.php", php), &[("src/Lib/Builder.php", builder)]), Vec::<String>::new());
@@ -9471,13 +9555,15 @@ fn calling_a_stored_method_value_keeps_the_self_of_its_receiver() {
 
 /// Spec section 14.3: a method value of a generic method takes its type arguments from the function type it goes
 /// into, as C#'s method group conversion does. `Function<Box<Order>(Order)> make = this.box` fixes `box`'s `T` as
-/// `Order` through the parameter, and so does the element type of `pages` for `pages.map(this.take)`.
+/// `Order` through the parameter, and so does the element type of `pages` for `pages.map(this.take)`. A parameter the
+/// function type leaves out fixes nothing: `this.counted`, whose optional `count` it does not take, fixes `T` too.
 #[test]
 fn a_generic_method_value_takes_its_type_arguments_from_its_function_type() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Page<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public int take<T : Order>(Page<T> page) => 1;\n\n    public Box<Order> made(Order order)\n    {\n        Function<Box<Order>(Order)> make = this.box;\n        return make(order);\n    }\n\n    public List<int> taken(List<Page<Order>> pages) => pages.map(this.take);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Page<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public Box<T> counted<T>(T item, int count = 1) => new Box<T>();\n\n    public int take<T : Order>(Page<T> page) => 1;\n\n    public Box<Order> made(Order order)\n    {\n        Function<Box<Order>(Order)> make = this.box;\n        return make(order);\n    }\n\n    public Box<Order> madeOnce(Order order)\n    {\n        Function<Box<Order>(Order)> make = this.counted;\n        return make(order);\n    }\n\n    public List<int> taken(List<Page<Order>> pages) => pages.map(this.take);\n}\n";
     let library = "<?php namespace Lib; final class Library {}";
 
     assert_eq!(recorded_type_arguments(("src/Demo/Report.sharp", sharp), library, "this.box"), ["Demo\\Order"]);
+    assert_eq!(recorded_type_arguments(("src/Demo/Report.sharp", sharp), library, "this.counted"), ["Demo\\Order"]);
     assert_eq!(recorded_type_arguments(("src/Demo/Report.sharp", sharp), library, "this.take"), ["Demo\\Order"]);
 }
 

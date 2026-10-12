@@ -242,9 +242,23 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 Expression::Instantiation(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::MagicConstant(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::Pipe(expr) => expr.analyze(context, block_context, artifacts),
-                Expression::Is(_) | Expression::As(_) | Expression::PatternMatch(_) => {
-                    analyze_php_shape(Node::Expression(self), context, block_context, artifacts)
+                Expression::Is(is) => analyze_php_shape(
+                    Node::Expression(self),
+                    type_pattern_hints(is.pattern),
+                    context,
+                    block_context,
+                    artifacts,
+                ),
+                Expression::As(r#as) => {
+                    analyze_php_shape(Node::Expression(self), vec![r#as.hint], context, block_context, artifacts)
                 }
+                Expression::PatternMatch(pattern_match) => analyze_php_shape(
+                    Node::Expression(self),
+                    match_arm_hints(pattern_match),
+                    context,
+                    block_context,
+                    artifacts,
+                ),
                 Expression::TypeOf(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::List(list_expr) => {
                     context.collector.report_with_code(
@@ -342,10 +356,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
 }
 
 /// Analyzes a PHP# `is`, `as` or `match` as the PHP it runs as, which the engine's bridge lowers too, so the analyzer
-/// narrows on the code that runs. An expression's type is its PHP's. A form the slice refuses has no PHP, and its
-/// error is the semantic check's.
+/// narrows on the code that runs. `hints` are the types it tests, whose type arguments it checks. An expression's type
+/// is its PHP's. A form the slice refuses has no PHP, and its error is the semantic check's.
 pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
     node: Node<'_, 'arena>,
+    hints: Vec<&Hint<'_>>,
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
@@ -353,7 +368,7 @@ pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    for hint in type_test_hints(node) {
+    for hint in hints {
         report_hint_type_arguments(context, block_context, artifacts, hint);
     }
 
@@ -740,17 +755,6 @@ where
     !has_type_test(hint, &|span| resolved_names.is_type_parameter(&span))
 }
 
-/// The type of each type test of `node`: the types of an `is` pattern, of an `as`, or of a `match`'s arms.
-fn type_test_hints<'ast>(node: Node<'ast, '_>) -> Vec<&'ast Hint<'ast>> {
-    match node {
-        Node::Expression(Expression::Is(is)) => type_pattern_hints(is.pattern),
-        Node::Expression(Expression::As(r#as)) => vec![r#as.hint],
-        Node::Expression(Expression::PatternMatch(pattern_match))
-        | Node::Statement(Statement::PatternMatch(pattern_match)) => match_arm_hints(pattern_match),
-        _ => Vec::new(),
-    }
-}
-
 /// The type of each type pattern in `pattern`, itself or a pattern inside it.
 fn type_pattern_hints<'ast>(pattern: &'ast Pattern<'ast>) -> Vec<&'ast Hint<'ast>> {
     match pattern {
@@ -766,7 +770,7 @@ fn type_pattern_hints<'ast>(pattern: &'ast Pattern<'ast>) -> Vec<&'ast Hint<'ast
 }
 
 /// The type of each type pattern in the arms of `pattern_match`.
-fn match_arm_hints<'ast>(pattern_match: &'ast PatternMatch<'ast>) -> Vec<&'ast Hint<'ast>> {
+pub(crate) fn match_arm_hints<'ast>(pattern_match: &'ast PatternMatch<'ast>) -> Vec<&'ast Hint<'ast>> {
     pattern_match
         .arms
         .iter()

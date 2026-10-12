@@ -265,11 +265,8 @@ where
     else {
         return unchanged(issue);
     };
-    let (Some(given_arguments), Some(wanted_arguments)) =
-        (given_object.get_type_parameters(), wanted_object.get_type_parameters())
-    else {
-        return unchanged(issue);
-    };
+    let given_arguments = given_object.get_type_parameters().unwrap_or_default();
+    let wanted_arguments = wanted_object.get_type_parameters().unwrap_or_default();
     if given_arguments.len() != wanted_arguments.len() {
         return unchanged(issue);
     }

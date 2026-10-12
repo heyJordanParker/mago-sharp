@@ -935,10 +935,6 @@ fn infer_templates_from_input_and_container_types<A>(
                 constraint: class_string_constraint,
                 ..
             })) => {
-                if !is_inferable(context, template_result, *parameter_name, defining_entity) {
-                    continue;
-                }
-
                 let should_add_bound = !options.infer_only_if_new
                     || template_result
                         .lower_bounds

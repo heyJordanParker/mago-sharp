@@ -645,7 +645,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             context.report(
                 Issue::error(message)
                     .with_annotation(Annotation::primary(bound.hint.span()).with_message("Bound written here."))
-                    .with_note("PHP# bounds a type parameter by classes and interfaces, several joined with `&`."),
+                    .with_note(supported(Place::TypeParameter)),
             );
 
             None
