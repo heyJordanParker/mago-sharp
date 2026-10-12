@@ -2432,11 +2432,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     ) -> Option<u32> {
         let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
-        let (proof_collection, _) = self
-            .types
-            .collection_method(call)
-            .unwrap_or_else(|| unreachable!("proof: php_collection_method found this call's collection method"));
-        debug_assert_eq!(proof_collection, collection_name, "proof: one call has one collection");
         let element = || {
             arguments
                 .arguments
@@ -2540,7 +2535,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_METHOD_CALL, 0, line, &[set, filter, arguments])
             }
-            ("Map", b"filter") => unreachable!("proof: INLINED_COLLECTION_METHODS names no `filter` of a `Map`"),
+            ("Map", b"filter") => {
+                let kind = self.php_collection_method(call).unwrap_or_else(|| unreachable!("proof: no kind"));
+                unreachable!("proof: INLINED_COLLECTION_METHODS names no `filter` of a `Map`, {kind:?}")
+            }
             _ => unreachable!(
                 "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
                 String::from_utf8_lossy(&method)
