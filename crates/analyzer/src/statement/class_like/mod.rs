@@ -3344,6 +3344,27 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     .with_help(help),
             );
         }
+        SignatureCompatibilityIssue::ChangedTemplateCount { child_method, parent_method, parent_count } => {
+            let child_method = display_sharp_member(child_name, child_method);
+            let parent_method = display_sharp_member(parent_name, parent_method);
+            let declared = match parent_count {
+                0 => "no type parameter".to_owned(),
+                1 => "1 type parameter".to_owned(),
+                count => format!("{count} type parameters"),
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(format!("`{child_method}` must declare {declared}, as `{parent_method}` does."))
+                    .with_annotation(Annotation::primary(primary_span).with_message("Overrides it here"))
+                    .with_annotation(
+                        Annotation::secondary(parent_class_span)
+                            .with_message(format!("`{parent_method}` is declared here")),
+                    )
+                    .with_note("An override declares one type parameter for each of the method it overrides, as in C#.")
+                    .with_help(format!("Declare {declared}, as `{parent_method}` does.")),
+            );
+        }
         SignatureCompatibilityIssue::IncompatibleReturnType { child_type, parent_type } => {
             let child_type = display_type(context, &child_type);
             let parent_type = display_type(context, &parent_type);

@@ -8987,6 +8987,28 @@ fn an_override_keeps_a_bound_that_names_the_parents_type_parameter() {
     );
 }
 
+/// An override that declares type parameters declares one for each of the method it overrides, as C# requires, so one
+/// that declares more, or declares any over a method with none, is refused with the count to declare. One that declares
+/// none keeps its own types, as `PlainRepository.count` does.
+#[test]
+fn an_override_declares_the_type_parameters_of_the_method_it_overrides() {
+    let sharp = "namespace Demo;\n\npublic interface Query<TItem>\n{\n    List<TItem> rows();\n}\n\npublic abstract class Repository\n{\n    public abstract int count<TQuery : Query<int>>(TQuery query);\n\n    public abstract int total(Query<int> query);\n}\n\npublic class ExtraRepository : Repository\n{\n    public override int count<TQuery : Query<int>, TExtra>(TQuery query) => 0;\n\n    public override int total<TQuery : Query<int>>(TQuery query) => 0;\n}\n\npublic class PlainRepository : Repository\n{\n    public override int count(Query<int> query) => 0;\n\n    public override int total(Query<int> query) => 0;\n}\n";
+    let refused = |line: u32, method: &str, declared: &str, parent: &str| {
+        format!(
+            "{line}:25 incompatible-parameter-type `{method}` must declare {declared}, as `{parent}` does. | Overrides it here | `{parent}` is declared here | An override declares one type parameter for each of the method it overrides, as in C#. | Declare {declared}, as `{parent}` does."
+        )
+    };
+
+    assert_eq!(
+        worded(("src/Demo/Repository.sharp", sharp), &[]),
+        [
+            refused(19, "ExtraRepository.total<TQuery>", "no type parameter", "Repository.total"),
+            refused(17, "ExtraRepository.count<TQuery, TExtra>", "1 type parameter", "Repository.count<TQuery>"),
+            "17:25 unused-template-parameter Type parameter `TExtra` is never used in method `count`. | Type parameter `TExtra` is defined on this method but never referenced | Remove `TExtra` from `count<…>`.".to_owned(),
+        ]
+    );
+}
+
 /// A bound sees the bound of a type parameter it names, so `TItem : Holder<TKey>` holds a `TKey : DatabaseEntity`, and
 /// the `value` an item holds is a `DatabaseEntity?`. It sees it through another bound too, whichever order the list
 /// declares them in. The PHP twin keeps Mago's issues.

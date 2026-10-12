@@ -52,6 +52,7 @@ pub enum SignatureCompatibilityIssue {
     ParameterNameMismatch { parameter_index: usize, child_name: Word, parent_name: Word },
     ErasedParameterNarrowed { parameter_index: usize, child_type: TUnion, parent_type: TUnion, bound: Option<Word> },
     ChangedTemplateBound { template: Word, child_method: String, parent_method: String, bound: Option<TUnion> },
+    ChangedTemplateCount { child_method: String, parent_method: String, parent_count: usize },
 }
 
 /// Validates that a child method signature is compatible with a parent method signature.
@@ -375,16 +376,23 @@ pub fn validate_method_signature_compatibility(
 /// `child_method` with each of its own type parameters replaced by the type parameter `parent_method` declares at the
 /// same position, as C# matches a generic method's type parameters, so `T pick<T>(T item)` overriding
 /// `T pick<T>(T item)` returns the parent's `T`. C# lets no override write its own bound, so the type parameters
-/// match only when each pair has the same bound. Otherwise returns the issue of the first type parameter whose bound
-/// differs.
+/// match only when each pair has the same bound, and only when the override declares as many as the method it
+/// overrides, as C# requires. Otherwise returns the issue of a count that differs, or of the first type parameter whose
+/// bound differs. An override that declares none keeps its own types.
 fn with_parent_type_parameters<'method>(
     codebase: &CodebaseMetadata,
     child_method: &'method FunctionLikeMetadata,
     parent_method: &FunctionLikeMetadata,
 ) -> Result<Cow<'method, FunctionLikeMetadata>, SignatureCompatibilityIssue> {
-    if child_method.template_types.is_empty() || child_method.template_types.len() != parent_method.template_types.len()
-    {
+    if child_method.template_types.is_empty() {
         return Ok(Cow::Borrowed(child_method));
+    }
+    if child_method.template_types.len() != parent_method.template_types.len() {
+        return Err(SignatureCompatibilityIssue::ChangedTemplateCount {
+            child_method: generic_method_name(child_method),
+            parent_method: generic_method_name(parent_method),
+            parent_count: parent_method.template_types.len(),
+        });
     }
 
     let pairs = || child_method.template_types.iter().zip(&parent_method.template_types);
@@ -431,8 +439,12 @@ fn with_parent_type_parameters<'method>(
     Ok(Cow::Owned(super::apply_template_substitution_to_method(child_method, &template_result, codebase)))
 }
 
-/// `method` as a PHP# message names it with its type parameters, as in `pick<T>`.
+/// `method` as a PHP# message names it with its type parameters, as in `pick<T>`, or as `pick` without any.
 fn generic_method_name(method: &FunctionLikeMetadata) -> String {
+    if method.template_types.is_empty() {
+        return method.original_name.to_string();
+    }
+
     let templates: Vec<String> = method.template_types.keys().map(ToString::to_string).collect();
 
     format!("{}<{}>", method.original_name, templates.join(", "))
