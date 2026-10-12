@@ -3198,8 +3198,62 @@ fn grouping(code: &str, expression: &Expression) -> String {
             format!("({} is {pattern})", grouping(code, is.value))
         }
         Expression::As(r#as) => format!("({} as {})", grouping(code, r#as.value), source(code, r#as.hint)),
+        Expression::With(with) => {
+            format!("({} with {})", grouping(code, with.object), source(code, &with.initializer))
+        }
         _ => source(code, expression).to_owned(),
     }
+}
+
+/// Spec section 16: `with` copies the object before it with the values its initializer names, the shorthand `y` among
+/// them. It binds tighter than `+` and `!` and looser than unary `-`, at PHP's `instanceof` level, and follows a `new`
+/// with its own initializer.
+#[test]
+fn with_copies_the_object_before_it_with_the_values_it_names() {
+    const CODE: &str = "class Report\n{\n    Point run()\n    {\n        return p with { x: 1, y };\n        return a + b with { x: 1 };\n        return !p with { open: true };\n        return -p with { x: 1 };\n        return new Point { x: 1, y } with { x: 2 };\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let groupings: Vec<String> =
+        method_body(program).iter().map(|statement| grouping(CODE, expression(statement))).collect();
+    assert_eq!(
+        groupings,
+        [
+            "(p with { x: 1, y })",
+            "(a + (b with { x: 1 }))",
+            "!p with { open: true }",
+            "(-p with { x: 1 })",
+            "(new Point { x: 1, y } with { x: 2 })",
+        ]
+    );
+    let Expression::With(with) = expression(&method_body(program)[0]) else {
+        panic!("expected `with`, got {:#?}", method_body(program)[0]);
+    };
+    let values: Vec<(&str, bool)> =
+        with.initializer.values.iter().map(|value| (source(CODE, &value.name), value.is_shorthand())).collect();
+    assert_eq!(values, [("x", false), ("y", true)]);
+}
+
+/// Spec section 16: an object initializer follows `new` with or without arguments, and a named constructor, and may be
+/// empty. `{` after `new X` opens one only where a name and `:`, `,` or `}` follow, or `}` closes it at once.
+#[test]
+fn an_object_initializer_follows_new() {
+    const CODE: &str = "class Report\n{\n    Point run()\n    {\n        new Point { x: 1, y };\n        new Point(1) { x: 2 };\n        new Point.origin() { x: 1 };\n        new Point { };\n        new Point();\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let initializers: Vec<Option<&str>> = method_body(program)
+        .iter()
+        .map(|statement| match expression(statement) {
+            Expression::Instantiation(instantiation) => {
+                instantiation.initializer.as_ref().map(|initializer| source(CODE, initializer))
+            }
+            other => panic!("expected `new`, got {other:#?}"),
+        })
+        .collect();
+    assert_eq!(initializers, [Some("{ x: 1, y }"), Some("{ x: 2 }"), Some("{ x: 1 }"), Some("{ }"), None]);
 }
 
 #[test]

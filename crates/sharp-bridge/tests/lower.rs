@@ -14028,6 +14028,139 @@ fn a_struct_key_goes_in_as_its_key_text_and_a_loop_reads_it_back() {
     );
 }
 
+const SIZE: &str = "namespace App;\n\npublic struct Size\n{\n    public int width { get; init; }\n    public int depth { get; init; }\n}\n";
+
+/// ```php
+/// public function copies(\App\Size $size, int $depth): \App\Size
+/// {
+///     $made = (function ($value#1, $value#2) { $this->width = $value#1; $this->depth = $value#2; return $this; })
+///         ->call(new \App\Size(), 2, 1);
+///     return (function ($value#1) { return clone($this, ['depth' => $value#1]); })->call($size, $depth);
+/// }
+/// ```
+///
+/// Spec section 16: an object initializer and `with` run in a closure bound to the object, as a named constructor
+/// runs, so they write an `init` property at its accessor's access wherever the code is. The initializer writes each
+/// value after `new`, and `with` is PHP 8.5's `clone` with the values, which runs each `init` hook on the copy. Each
+/// value is evaluated in the caller, as an argument, and the shorthand `depth` is the local `depth`.
+#[test]
+fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
+    assert_eq!(
+        Lowered::with(
+            &method_in(
+                "Report",
+                "Size copies(Size size, int depth)",
+                "        Size made = new Size { width: 2, depth: 1 };\n        return size with { depth };\n"
+            )
+            .replace("import Lib.Calc;", "import App.Size;"),
+            &[("src/App/Size.sharp", SIZE)]
+        )
+        .declared("copies"),
+        indoc! {r#"
+            METHOD [1] "copies" @7-11
+              PARAM_LIST
+                PARAM
+                  ZVAL "App\\Size"
+                  ZVAL "size"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  ZVAL [1] "int"
+                  ZVAL "depth"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "made"
+                  METHOD_CALL
+                    CLOSURE "" @9-9
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "value#1"
+                          null
+                          null
+                          null
+                          null
+                        PARAM
+                          null
+                          ZVAL "value#2"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STMT_LIST
+                        ASSIGN
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "width"
+                          VAR
+                            ZVAL "value#1"
+                        ASSIGN
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "depth"
+                          VAR
+                            ZVAL "value#2"
+                        RETURN
+                          VAR
+                            ZVAL "this"
+                      null
+                      null
+                    ZVAL "call"
+                    ARG_LIST
+                      NEW
+                        ZVAL "App\\Size"
+                        ARG_LIST
+                      ZVAL 2
+                      ZVAL 1
+                RETURN
+                  METHOD_CALL
+                    CLOSURE "" @10-10
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "value#1"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STMT_LIST
+                        RETURN
+                          CALL
+                            ZVAL "clone"
+                            ARG_LIST
+                              VAR
+                                ZVAL "this"
+                              ARRAY [3]
+                                ARRAY_ELEM
+                                  VAR
+                                    ZVAL "value#1"
+                                  ZVAL "depth"
+                      null
+                      null
+                    ZVAL "call"
+                    ARG_LIST
+                      VAR
+                        ZVAL "size"
+                      VAR
+                        ZVAL "depth"
+              ZVAL "App\\Size"
+              null
+        "#}
+    );
+}
+
 const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(public int x { get; }, public float y { get; }, public Money? total { get; }) { }\n\n    public Point moved(int dx) => new Point(this.x + dx, this.y, this.total);\n}\n";
 
 /// ```php

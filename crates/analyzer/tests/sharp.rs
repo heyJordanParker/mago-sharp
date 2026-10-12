@@ -7156,6 +7156,106 @@ fn a_struct_keys_a_map_unless_it_holds_a_class_instance() {
     );
 }
 
+/// Every issue of `code`, as `line:column code message`.
+fn written(code: &str, issues: &[Issue]) -> Vec<String> {
+    issues.iter().map(|issue| format!("{} {}", located(code, issue), issue.message)).collect()
+}
+
+/// Spec section 10: a struct never changes, so a write to its property after it is created is refused, in its own
+/// method too. The help names the struct's first method that returns a changed copy, or `with` when it has none, and
+/// both fixes compile.
+#[test]
+fn a_struct_never_changes() {
+    let sharp = "namespace Demo;\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public int y { get; }) { }\n\n    public Spot moved(int dx) => new Spot(this.x + dx, this.y);\n\n    public void shift()\n    {\n        this.x = 1;\n    }\n}\n\nstruct Size\n{\n    public int width { get; init; }\n}\n\nclass Mover\n{\n    public Spot move(Spot spot)\n    {\n        spot.x = 5;\n        return spot.moved(1);\n    }\n\n    public Size widen(Size size)\n    {\n        size.width = 2;\n        return size with { width: 3 };\n    }\n}\n";
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Mover.sharp", sharp), &[])),
+        [
+            "11:14 invalid-property-write A struct never changes; return a changed copy from a method, such as `moved`.",
+            "24:14 invalid-property-write A struct never changes; return a changed copy from a method, such as `moved`.",
+            "30:14 invalid-property-write A struct never changes; return a changed copy built with `with`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct can't inherit or be inherited, and implements interfaces. A class in a struct's header
+/// and a class that extends a struct are each refused, and an interface in the header compiles.
+#[test]
+fn a_struct_inherits_nothing_and_implements_interfaces() {
+    let sharp = "namespace Demo;\n\ninterface Labeled\n{\n    string label();\n}\n\nclass Base\n{\n    public Base() { }\n}\n\nstruct Tag : Base\n{\n    public Tag() { }\n}\n\nstruct Name : Labeled\n{\n    public Name() { }\n\n    public string label() => \"name\";\n}\n\nclass Child : Name\n{\n    public Child() { }\n}\n";
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shapes.sharp", sharp), &[])),
+        [
+            "13:14 invalid-struct A struct can't inherit: `Base` is a class.",
+            "25:15 invalid-struct `Name` is a struct, which can't be inherited.",
+        ]
+    );
+}
+
+/// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct with a property `==` can't
+/// compare is refused at the `==`, naming the property, and `===` is refused with its fix. A struct compares with an
+/// `Any?`, and `!=` and the fix compile.
+#[test]
+fn a_struct_compares_by_value() {
+    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan() { }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public List<int> path { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public Plan plan { get; }) { }\n}\n\nclass Compare\n{\n    public bool same(Spot a, Spot b) => a === b;\n\n    public bool equal(Spot a, Spot b) => a == b;\n\n    public bool different(Spot a, Any? b) => a != b;\n\n    public bool orders(Order a, Order b) => a == b;\n}\n";
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Compare.sharp", sharp), &[])),
+        [
+            "20:41 invalid-operand `===` tests for the same object, and `Spot` is a struct: write `==`.",
+            "26:45 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+        ]
+    );
+}
+
+/// Spec section 16: `with` and an object initializer set only a property with `init` or `set`, each once, and the help
+/// of a get-only PHP# property, `{ get; init; }`, compiles. A plain PHP `readonly` property is get-only too, with no
+/// help, since its class isn't PHP#'s.
+#[test]
+fn with_and_an_object_initializer_set_init_and_set_properties() {
+    let sharp = "namespace Demo;\n\nimport Lib.Stamp;\n\nstruct Size\n{\n    public int width { get; init; }\n    public int depth { get; }\n\n    public Size() { this.depth = 1; }\n}\n\nclass Note\n{\n    public string text { get; set; } = \"\";\n}\n\nclass Copies\n{\n    public Size wider(Size size) => size with { width: 2, depth: 3 };\n\n    public Size twice() => new Size { width: 1, width: 2 };\n\n    public Note note(Note note) => note with { text: \"b\" };\n\n    public Stamp stamp(Stamp stamp) => stamp with { at: 2 };\n}\n";
+    let php = "<?php namespace Lib; final class Stamp { public function __construct(public readonly int $at) {} }";
+
+    let analyzed =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Copies.sharp", sharp), &[("src/Lib/Stamp.php", php)]);
+    assert_eq!(
+        analyzed
+            .iter()
+            .map(|issue| format!("{} | {}", issue.message, issue.help.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>(),
+        [
+            "`depth` is get-only, so `with` can't set it. | Declare it `{ get; init; }`.",
+            "`width` is named twice. | ",
+            "`at` is get-only, so `with` can't set it. | ",
+        ]
+    );
+}
+
+/// Spec section 10: every struct has a static `parse` and `tryParse`, and classes don't. `[Key]` renames the key a
+/// struct's main constructor parameter reads, so it is refused anywhere else, and two parameters may not read one key.
+/// A struct with a field no value can give, a pure enum or a function, also nested, compiles, and its `parse` and
+/// `tryParse` are refused where they are called.
+#[test]
+fn every_struct_parses_and_classes_do_not() {
+    let sharp = "namespace Demo;\n\nimport Sharp.Key;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public void note(Map<string, Any?> input)\n    {\n        Note.parse(input);\n    }\n}\n";
+    let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
+
+    assert_eq!(
+        written(
+            sharp,
+            &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reads.sharp", sharp), &[("src/Sharp/Key.sharp", key)])
+        ),
+        [
+            "22:75 invalid-struct `code` is read twice, by `plan` and `code`.",
+            "32:18 invalid-struct `Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
+            "41:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
+            "43:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
+            "47:14 non-existent-method Method `Note.parse` does not exist.",
+        ]
+    );
+}
+
 /// `\Sharp\Struct` is the engine interface the bridge gives each struct, spec section 10, and no PHP# type, so a
 /// `.sharp` class can't implement it: such a class could hold a class instance and key a `Map`.
 #[test]

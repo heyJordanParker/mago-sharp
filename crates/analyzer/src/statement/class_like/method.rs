@@ -403,6 +403,10 @@ pub(super) fn check_super_call<A>(
     else {
         return;
     };
+    // A struct can't be inherited, which `check_class_like_extends` reports, so its constructor isn't the class's to call.
+    if context.codebase.get_class_like(base.as_bytes()).is_some_and(|base| base.flags.is_struct()) {
+        return;
+    }
     let constructor = members.iter().find_map(|member| match member {
         ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => Some(method),
         _ => None,

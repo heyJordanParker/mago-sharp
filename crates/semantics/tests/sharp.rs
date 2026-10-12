@@ -1085,6 +1085,63 @@ fn a_required_property_has_init_or_set() {
     );
 }
 
+/// Spec section 10: every struct is already read-only, and a struct is a value with no subclasses, so `public` is its
+/// only modifier. Each refusal's fix, a plain `public struct`, compiles.
+#[test]
+fn a_struct_takes_only_public() {
+    let code = "namespace App.Tenant;\n\npublic readonly struct Size { }\n\nabstract struct Area { }\n\nfinal struct Shape { }\n\npublic struct Width { }\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:8 Every struct is already read-only: write `struct`.",
+            "5:1 A struct takes only `public`: remove `abstract`.",
+            "7:1 A struct takes only `public`: remove `final`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct never changes, so its property takes `init`, not `set`, as a declared property or a main
+/// constructor parameter. The fix, `{ get; init; }`, compiles.
+#[test]
+fn a_struct_property_takes_init_not_set() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    public int width { get; set; }\n    public int height { get; init; }\n\n    public Size(public int depth { get; set; }, public int weight { get; init; }) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:29 A struct never changes, so `width` takes `init`, not `set`.",
+            "8:41 A struct never changes, so `depth` takes `init`, not `set`.",
+        ]
+    );
+}
+
+/// Spec section 10: a struct can't be inherited, so a member modifier only a subclass reads is refused, on a property,
+/// a method, an operator and a main constructor parameter. The fix, `private`, compiles.
+#[test]
+fn a_struct_member_is_private_where_a_class_would_be_protected() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    protected int width { get; init; }\n    public virtual int area() => 1;\n    public override string toString() => \"\";\n    private int depth { get; init; }\n\n    public Size(protected int height { get; }) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:5 A struct has no subclasses, so write `private`.",
+            "6:12 A struct has no subclasses, so write `private`.",
+            "7:12 A struct has no subclasses, so write `private`.",
+            "10:17 A struct has no subclasses, so write `private`.",
+        ]
+    );
+}
+
+/// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct declares no `operator ==`.
+/// Another operator compiles.
+#[test]
+fn a_struct_declares_no_operator_equality() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    public Size(public int width { get; }) { }\n\n    public static bool operator ==(Size a, Size b) => a.width == b.width;\n\n    public static Size operator +(Size a, Size b) => new Size(a.width + b.width);\n}\n";
+
+    assert_eq!(issues(code), ["7:33 A struct compares by value: remove `operator ==`."]);
+}
+
 #[test]
 fn an_optional_parameter_before_a_required_one_is_an_error() {
     let code = leak(method("        return extra;\n").replace("int extra", "int first = 1, int extra, int last = 2"));
