@@ -534,6 +534,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             if class.modifiers.contains_static() {
                 check_static_class(class, context);
             }
+            for member in &class.members {
+                if let ClassLikeMember::NamedConstructor(constructor) = member {
+                    check_named_constructor(constructor, class.name.value, context);
+                }
+            }
 
             Some(Class)
         }
@@ -632,14 +637,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Class)
         }
         // A named constructor's parts are a method's, and `check_named_constructor` decides its class, name, modifiers
-        // and `: this(…)`.
-        (Node::NamedConstructor(constructor), Class) => {
-            if let Some(class) = enclosing_class(context.program, constructor.span()) {
-                check_named_constructor(constructor, class.name.value, context);
-            }
-
-            Some(Method)
-        }
+        // and `: this(…)` when the walk enters its class.
+        (Node::NamedConstructor(_), Class) => Some(Method),
         (Node::ClassLikeMember(ClassLikeMember::NamedConstructor(constructor)), Interface | Enum) => {
             let message = if place == Interface {
                 "An interface has no constructor: a named constructor creates an object of its own class."
