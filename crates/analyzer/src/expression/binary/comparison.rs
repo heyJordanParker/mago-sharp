@@ -1066,13 +1066,7 @@ pub(crate) fn check_element_equality<A>(
 
             return;
         }
-        Some(
-            refusal @ (Refusal::Instance | Refusal::Identity | Refusal::NullableOperand | Refusal::UnorderedOperand),
-        ) => {
-            debug_assert!(
-                matches!(refusal, Refusal::Instance),
-                "`==` with a side that is not `null` refuses an instance"
-            );
+        Some(Refusal::Instance) => {
             let class =
                 display_refused_side(context, element_type, value_type, |comparand| comparand == Comparand::Instance);
             let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
@@ -1114,6 +1108,9 @@ pub(crate) fn check_element_equality<A>(
                 .with_note("A search compares each element with the value by `==`.")
                 .with_help(format!("Make the `operator ==` of `{class}` take `{element_name}` and `{value_name}`.")),
             )
+        }
+        Some(Refusal::Identity | Refusal::NullableOperand | Refusal::UnorderedOperand) => {
+            unreachable!("`==` is refused only for a collection, an instance, or the operands of its operator")
         }
     };
 

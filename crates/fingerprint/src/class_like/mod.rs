@@ -17,6 +17,7 @@ use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Implements;
+use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::Method;
@@ -93,6 +94,23 @@ impl Fingerprintable for Implements<'_> {
         H: std::hash::Hasher,
     {
         "implements".hash(hasher);
+        for type_name in &self.types {
+            type_name.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for Inheritance<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "inheritance".hash(hasher);
         for type_name in &self.types {
             type_name.fingerprint_with_hasher(hasher, resolved_names, options);
         }
@@ -704,6 +722,7 @@ impl Fingerprintable for Class<'_> {
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.extends.fingerprint_with_hasher(hasher, resolved_names, options);
         self.implements.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);
         }
@@ -733,6 +752,7 @@ impl Fingerprintable for Interface<'_> {
         }
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.extends.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);
         }
@@ -790,6 +810,7 @@ impl Fingerprintable for Enum<'_> {
         }
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.backing_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         self.implements.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);
