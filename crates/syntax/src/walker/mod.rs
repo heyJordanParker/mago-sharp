@@ -68,6 +68,7 @@ use crate::cst::cst::EnumCaseBackedItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
 use crate::cst::cst::EvalConstruct;
+use crate::cst::cst::Event;
 use crate::cst::cst::ExitConstruct;
 use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
@@ -447,6 +448,7 @@ generate_ast_walker! {
             Statement::Interface(interface) => walker.walk_interface(interface, context),
             Statement::Trait(r#trait) => walker.walk_trait(r#trait, context),
             Statement::Enum(r#enum) => walker.walk_enum(r#enum, context),
+            Statement::Event(event) => walker.walk_event(event, context),
             Statement::Block(block) => walker.walk_block(block, context),
             Statement::Constant(constant) => walker.walk_constant(constant, context),
             Statement::Function(function) => walker.walk_function(function, context),
@@ -630,6 +632,10 @@ generate_ast_walker! {
 
     'arena Extern as r#extern => {
         walker.walk_keyword(&r#extern.r#extern, context);
+        if let Some(event) = &r#extern.event {
+            walker.walk_keyword(event, context);
+        }
+
         walker.walk_identifier(&r#extern.target, context);
 
         if let Some(uses) = &r#extern.uses {
@@ -862,6 +868,26 @@ generate_ast_walker! {
         for class_member in &r#enum.members {
             walker.walk_class_like_member(class_member, context);
         }
+    }
+
+    'arena Event as event => {
+        for attribute_list in &event.attribute_lists {
+            walker.walk_attribute_list(attribute_list, context);
+        }
+
+        for modifier in &event.modifiers {
+            walker.walk_modifier(modifier, context);
+        }
+
+        walker.walk_keyword(&event.event, context);
+        walker.walk_local_identifier(&event.name, context);
+        walker.walk_function_like_parameter_list(&event.parameter_list, context);
+
+        if let Some(inheritance) = &event.inheritance {
+            walker.walk_inheritance(inheritance, context);
+        }
+
+        walker.walk_terminator(&event.terminator, context);
     }
 
     'arena EnumBackingTypeHint as enum_backing_type_hint => {

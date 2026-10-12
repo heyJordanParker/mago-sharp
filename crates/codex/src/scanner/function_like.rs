@@ -15,6 +15,7 @@ use mago_span::Span;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Closure;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Function;
@@ -245,6 +246,39 @@ where
     if utils::expression_has_throws(law.body.expression) {
         metadata.flags |= MetadataFlags::HAS_THROW;
     }
+
+    metadata
+}
+
+/// Scans a PHP# event's constructor, spec section 15: it takes the event's parameters, and each sets the get-only
+/// property of its name.
+#[inline]
+pub(crate) fn scan_event_constructor<'arena, A>(
+    event: &'arena Event<'arena>,
+    class_like_metadata: &ClassLikeMetadata,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) -> FunctionLikeMetadata
+where
+    A: Arena,
+{
+    let name = word(b"__construct");
+    let mut metadata = FunctionLikeMetadata::new(
+        FunctionLikeKind::Method,
+        name,
+        name,
+        event.span(),
+        MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
+    );
+    metadata.name_span = Some(event.name.span);
+    metadata.parameters = event
+        .parameter_list
+        .parameters
+        .iter()
+        .filter_map(|p| scan_function_like_parameter(p, Some(class_like_metadata.original_name), context, scope))
+        .collect();
+    metadata.method_metadata =
+        Some(MethodMetadata { is_constructor: true, visibility: Visibility::Public, ..MethodMetadata::default() });
 
     metadata
 }

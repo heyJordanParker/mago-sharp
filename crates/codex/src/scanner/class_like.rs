@@ -16,6 +16,7 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Implements;
@@ -60,6 +61,7 @@ use crate::scanner::docblock::apply_common_metadata_flag;
 use crate::scanner::docblock::parse_docblock;
 use crate::scanner::docblock::parse_docblock_trivia;
 use crate::scanner::enum_case::scan_enum_case;
+use crate::scanner::function_like::scan_event_constructor;
 use crate::scanner::function_like::scan_law;
 use crate::scanner::property::scan_properties;
 use crate::scanner::ttype::get_type_metadata_from_type;
@@ -252,6 +254,66 @@ where
         context,
         scope,
     )?;
+
+    finish_registration(codebase, class_like_metadata)
+}
+
+/// Registers a PHP# event, spec section 15, as the final class it runs as: its constructor takes the event's
+/// parameters, and each parameter is a public get-only property.
+#[inline]
+pub fn register_event<'arena, A>(
+    codebase: &mut CodebaseMetadata,
+    event: &'arena Event<'arena>,
+    context: &Context<'_, 'arena, A>,
+    scope: &mut NamespaceScope,
+) -> ClassLikeRegistration
+where
+    A: Arena,
+{
+    const NO_MEMBERS: &Sequence<'static, ClassLikeMember<'static>> = &Sequence::empty();
+
+    let span = event.span();
+    let mut class_like_metadata = scan_class_like(
+        codebase,
+        word(context.resolved_names.get(&event.name)),
+        SymbolKind::Class,
+        Some(event.name.span),
+        span,
+        span.start.offset,
+        event.parameter_list.left_parenthesis.start.offset,
+        &event.attribute_lists,
+        Some(&event.modifiers),
+        NO_MEMBERS,
+        None,
+        None,
+        event.inheritance.as_ref(),
+        None,
+        context,
+        scope,
+    )?;
+    class_like_metadata.flags |= MetadataFlags::FINAL;
+
+    let constructor = scan_event_constructor(event, &class_like_metadata, context, scope);
+    for parameter in &constructor.parameters {
+        let mut flags = MetadataFlags::PROMOTED_PROPERTY | MetadataFlags::READONLY;
+        flags |= MetadataFlags::origin_flags(context.file.file_type);
+        if parameter.flags.has_default() {
+            flags |= MetadataFlags::HAS_DEFAULT;
+        }
+
+        let mut property = PropertyMetadata::new(*parameter.get_name(), flags);
+        property.set_name_span(Some(parameter.get_name_span()));
+        property.set_span(Some(parameter.get_span()));
+        property.set_visibility(Visibility::Public, Visibility::Protected);
+        property.set_type_declaration_metadata(parameter.get_type_declaration_metadata().cloned());
+        class_like_metadata.add_property_metadata(property);
+    }
+
+    let method_identifier = MethodIdentifier::new(class_like_metadata.name, constructor.name);
+    class_like_metadata.methods.insert(constructor.name);
+    class_like_metadata.add_declaring_method_id(constructor.name, method_identifier);
+    class_like_metadata.inheritable_method_ids.insert(constructor.name, method_identifier);
+    codebase.function_likes.insert((class_like_metadata.name, constructor.name), constructor);
 
     finish_registration(codebase, class_like_metadata)
 }

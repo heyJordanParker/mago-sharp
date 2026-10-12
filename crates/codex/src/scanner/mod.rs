@@ -19,6 +19,7 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::Function;
@@ -43,6 +44,7 @@ use mago_syntax::walker::MutWalker;
 use mago_syntax::walker::walk_anonymous_class_mut;
 use mago_syntax::walker::walk_class_mut;
 use mago_syntax::walker::walk_enum_mut;
+use mago_syntax::walker::walk_event_mut;
 use mago_syntax::walker::walk_interface_mut;
 use mago_syntax::walker::walk_module_mut;
 use mago_syntax::walker::walk_trait_mut;
@@ -64,6 +66,7 @@ use crate::scanner::class_alias::scan_class_like_alias;
 use crate::scanner::class_like::register_anonymous_class;
 use crate::scanner::class_like::register_class;
 use crate::scanner::class_like::register_enum;
+use crate::scanner::class_like::register_event;
 use crate::scanner::class_like::register_interface;
 use crate::scanner::class_like::register_module;
 use crate::scanner::class_like::register_trait;
@@ -783,6 +786,24 @@ where
 
             walk_interface_mut(self, interface, context);
         }
+    }
+
+    /// A PHP# event registers as the final class it runs as, with its constructor, spec section 15.
+    #[inline]
+    fn walk_event(&mut self, event: &'arena Event<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some((id, templates, _, _)) = register_event(&mut self.codebase, event, context, &mut self.scope) {
+            self.apply_polyfill_flag_to_class_like(id);
+            self.stack.push(id);
+            self.template_constraints.push(templates);
+            self.has_constructor = true;
+
+            walk_event_mut(self, event, context);
+        }
+    }
+
+    #[inline]
+    fn walk_out_event(&mut self, _event: &'arena Event<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        finalize_class_like(self, context);
     }
 
     /// A PHP# module registers as its namespace's class-like `Module`, which encloses the lambdas of its laws as a

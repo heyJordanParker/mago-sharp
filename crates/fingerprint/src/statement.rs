@@ -27,6 +27,7 @@ impl Fingerprintable for Statement<'_> {
             Statement::Interface(interface) => interface.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Trait(r#trait) => r#trait.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Enum(r#enum) => r#enum.fingerprint_with_hasher(hasher, resolved_names, options),
+            Statement::Event(event) => event.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Block(block) => block.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Constant(constant) => constant.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Function(function) => function.fingerprint_with_hasher(hasher, resolved_names, options),

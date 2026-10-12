@@ -465,6 +465,56 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     }
 }
 
+/// Every type, events and interfaces included, is declared at file level in its own file, spec section 15, so a type
+/// declared inside a class, an interface, an enum, a trait or a module is one error over the whole type that names
+/// its owner, and the owner parses on without it.
+#[test]
+fn a_type_declared_inside_another_is_one_error_and_its_owner_parses_on() {
+    for (owner, named, member, name) in [
+        ("class", "A class", "public event Paid(int orderId) : OrderEvent;", "Paid"),
+        ("class", "A class", "public interface OrderEvent { public int orderId { get; } }", "OrderEvent"),
+        ("class", "A class", "public class Line { }", "Line"),
+        ("class", "A class", "enum Kind { case One; }", "Kind"),
+        ("class", "A class", "trait Logs { }", "Logs"),
+        ("interface", "An interface", "public class Line { public int size() { return 1; } }", "Line"),
+        ("enum", "An enum", "public event Paid(int orderId);", "Paid"),
+        ("trait", "A trait", "public event Paid(int orderId);", "Paid"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("{owner} Order\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}` in a {owner}, got {:#?}", program.errors);
+        };
+        let message = format!("{named} can't declare a type inside it: declare `{name}` in its own file.");
+        assert_eq!(error.to_string(), message);
+        assert_eq!(source(code, error), member, "{message}");
+        let members = match program.statements.first() {
+            Some(Statement::Class(class)) => &class.members,
+            Some(Statement::Interface(interface)) => &interface.members,
+            Some(Statement::Enum(r#enum)) => &r#enum.members,
+            Some(Statement::Trait(r#trait)) => &r#trait.members,
+            _ => panic!("expected a {owner}, got {:#?}", program.statements),
+        };
+        let [ClassLikeMember::Method(run)] = members.as_slice() else {
+            panic!("expected only the method `run` after `{member}`, got {members:#?}");
+        };
+        assert_eq!(run.name.value, b"run", "{message}");
+    }
+
+    const MODULE: &str = "module\n{\n    public event Paid(int orderId);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Module.sharp", MODULE);
+    let [error] = program.errors else {
+        panic!("expected one error in a module, got {:#?}", program.errors);
+    };
+    assert_eq!(error.to_string(), "A module can't declare a type inside it: declare `Paid` in its own file.");
+    assert_eq!(source(MODULE, error), "public event Paid(int orderId);");
+}
+
 /// A case that carries data, spec section 20, is one error from its name to its closing parenthesis. The case stays
 /// in the enum, and the members after it still parse. PHP keeps its own parse error at the parenthesis.
 #[test]
@@ -2647,10 +2697,11 @@ fn extern_in_a_php_file_is_a_name() {
 }
 
 /// A file-level `extern` declares the effects of a plain PHP class, method or function, spec section 29. Its target is
-/// a bare name or `Class.member`, and `uses` lists its effects.
+/// a bare name or `Class.member`, and `uses` lists its effects. `extern event` marks a plain PHP class as an event, spec
+/// section 15, and a class named `event` stays a target.
 #[test]
 fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
-    const CODE: &str = "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Carbon.Carbon;\n\nextern StripeClient uses Http;\nextern Carbon.now uses Clock;\nextern now uses Clock;\nextern BigDecimal;\nextern trim;\nextern Mailer uses Http, Mail;\n";
+    const CODE: &str = "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Carbon.Carbon;\n\nextern StripeClient uses Http;\nextern Carbon.now uses Clock;\nextern now uses Clock;\nextern BigDecimal;\nextern trim;\nextern Mailer uses Http, Mail;\nextern event JobFailed;\nextern event JobFailed uses Database;\nextern event;\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "app/Stubs/Stripe.sharp", CODE);
 
@@ -2658,7 +2709,7 @@ fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
     let Some(Statement::Namespace(namespace)) = program.statements.first() else {
         panic!("expected a namespace, got {:#?}", program.statements);
     };
-    let externs: Vec<(&str, bool, Vec<&str>, &str)> = namespace
+    let externs: Vec<(bool, &str, bool, Vec<&str>, &str)> = namespace
         .statements()
         .iter()
         .filter_map(|statement| match statement {
@@ -2667,6 +2718,7 @@ fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
         })
         .map(|declaration| {
             (
+                declaration.event.is_some(),
                 source(CODE, &declaration.target),
                 declaration.target.is_dotted(),
                 declaration.uses.iter().flat_map(|uses| uses.names.iter()).map(|name| source(CODE, name)).collect(),
@@ -2677,12 +2729,15 @@ fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
     assert_eq!(
         externs,
         [
-            ("StripeClient", false, vec!["Http"], "extern StripeClient uses Http;"),
-            ("Carbon.now", true, vec!["Clock"], "extern Carbon.now uses Clock;"),
-            ("now", false, vec!["Clock"], "extern now uses Clock;"),
-            ("BigDecimal", false, vec![], "extern BigDecimal;"),
-            ("trim", false, vec![], "extern trim;"),
-            ("Mailer", false, vec!["Http", "Mail"], "extern Mailer uses Http, Mail;"),
+            (false, "StripeClient", false, vec!["Http"], "extern StripeClient uses Http;"),
+            (false, "Carbon.now", true, vec!["Clock"], "extern Carbon.now uses Clock;"),
+            (false, "now", false, vec!["Clock"], "extern now uses Clock;"),
+            (false, "BigDecimal", false, vec![], "extern BigDecimal;"),
+            (false, "trim", false, vec![], "extern trim;"),
+            (false, "Mailer", false, vec!["Http", "Mail"], "extern Mailer uses Http, Mail;"),
+            (true, "JobFailed", false, vec![], "extern event JobFailed;"),
+            (true, "JobFailed", false, vec!["Database"], "extern event JobFailed uses Database;"),
+            (false, "event", false, vec![], "extern event;"),
         ]
     );
     let Some(Statement::Extern(stripe)) =
@@ -3763,4 +3818,108 @@ fn php_keeps_reading_operator_as_a_name() {
     assert_eq!(method.name.value, b"operator");
     assert!(matches!(property.hint(), Some(Hint::Identifier(name)) if name.value() == b"operator"), "{property:#?}");
     assert_eq!(constant.first_item().name.value, b"operator");
+}
+
+/// Spec section 15 declares an event at file level as its name and its parameters, with an optional header of the
+/// interfaces it implements. A name PHP reserves, such as `Empty`, still declares an event, which the checks refuse.
+#[test]
+fn an_event_declares_its_parameters_and_its_interfaces() {
+    const CODE: &str = "namespace App;\n\npublic event Shipped(int shipmentId);\n\npublic event Exit(int code);\n\npublic event OrderPaid(int orderId, Money amount) : OrderEvent;\n\nevent Refunded(int orderId) : OrderEvent, Audited;\n\npublic event Cleared();\n\npublic event Empty();\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Events.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let events: Vec<(&str, Vec<&str>, Vec<&str>, &str)> = namespace
+        .statements()
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Event(event) => Some(event),
+            _ => None,
+        })
+        .map(|event| {
+            assert_eq!(event.event.value, b"event");
+
+            (
+                source(CODE, &event.name),
+                event.parameter_list.parameters.iter().map(|parameter| source(CODE, parameter)).collect(),
+                event
+                    .inheritance
+                    .iter()
+                    .flat_map(|inheritance| inheritance.types.iter())
+                    .map(|name| source(CODE, name))
+                    .collect(),
+                source(CODE, event),
+            )
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            ("Shipped", vec!["int shipmentId"], vec![], "public event Shipped(int shipmentId);"),
+            ("Exit", vec!["int code"], vec![], "public event Exit(int code);"),
+            (
+                "OrderPaid",
+                vec!["int orderId", "Money amount"],
+                vec!["OrderEvent"],
+                "public event OrderPaid(int orderId, Money amount) : OrderEvent;"
+            ),
+            (
+                "Refunded",
+                vec!["int orderId"],
+                vec!["OrderEvent", "Audited"],
+                "event Refunded(int orderId) : OrderEvent, Audited;"
+            ),
+            ("Cleared", vec![], vec![], "public event Cleared();"),
+            ("Empty", vec![], vec![], "public event Empty();"),
+        ]
+    );
+}
+
+/// An event's parameters are its whole declaration, so a body after them is one error, and the file parses on.
+#[test]
+fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
+    const CODE: &str =
+        "public event OrderPaid(int orderId) { }\n\npublic class Order\n{\n    public int run() { return 1; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/OrderPaid.sharp", CODE);
+
+    let [error] = program.errors else {
+        panic!("expected one error, got {:#?}", program.errors);
+    };
+    assert_eq!(
+        error.to_string(),
+        "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`."
+    );
+    assert_eq!(source(CODE, error), "{ }");
+    let [.., Statement::Class(order)] = program.statements.as_slice() else {
+        panic!("expected the class `Order` last, got {:#?}", program.statements);
+    };
+    assert_eq!(order.name.value, b"Order");
+}
+
+/// `event` declares an event only before a name and `(`, so a parameter, a field, a local, a call such as Laravel's
+/// `event(…)` and an operand of a word operator keep it as a name.
+#[test]
+fn event_stays_a_name_where_no_declaration_follows() {
+    const CODE: &str = "class Order\n{\n    public void run(int event)\n    {\n        event(new Paid(event));\n        const total = event + 1;\n        event and (event);\n    }\n\n    private int event = 0;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [call, Statement::LocalDeclaration(total), both] = method_body(program) else {
+        panic!("expected a call, a local and an expression, got {:#?}", method_body(program));
+    };
+    let Expression::Call(Call::Function(call)) = expression(call) else {
+        panic!("expected a call, got {call:#?}");
+    };
+    assert_eq!(source(CODE, call.function), "event");
+    assert_eq!(source(CODE, total.value), "event + 1");
+    assert!(matches!(expression(both), Expression::Binary(_)), "{both:#?}");
+    let [ClassLikeMember::Method(_), ClassLikeMember::Property(field)] = class_members(program).as_slice() else {
+        panic!("expected a method and a field, got {:#?}", class_members(program));
+    };
+    assert_eq!(field.first_variable().name, b"event");
 }
