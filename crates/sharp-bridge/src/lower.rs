@@ -2535,7 +2535,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_METHOD_CALL, 0, line, &[set, filter, arguments])
             }
-            ("Map", b"filter") => self.read_collection(&mut collection, line, false),
             _ => unreachable!(
                 "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
                 String::from_utf8_lossy(&method)
