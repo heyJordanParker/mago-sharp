@@ -409,11 +409,7 @@ where
     A: Arena,
 {
     let mut hint_type = get_written_type_from_hint(context, block_context, artifacts, hint);
-    expander::expand_union(
-        context.codebase,
-        &mut hint_type,
-        &TypeExpansionOptions { self_class: block_context.scope.get_class_like_name(), ..Default::default() },
-    );
+    expander::expand_union(context.codebase, &mut hint_type, &TypeExpansionOptions::default());
 
     hint_type
 }

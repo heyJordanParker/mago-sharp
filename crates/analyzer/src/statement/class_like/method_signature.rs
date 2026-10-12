@@ -467,20 +467,19 @@ pub fn validate_erased_signature_compatibility(
         return;
     }
 
-    let child_class_name = child_class.name;
-    let expansion_options = TypeExpansionOptions {
-        self_class: Some(child_class_name),
-        static_class_type: StaticClassType::Name(child_class_name),
-        function_is_final: child_method.method_metadata.as_ref().is_some_and(|method| method.is_final),
-        ..Default::default()
-    };
-    let erased = |parameter: &FunctionLikeParameterMetadata| {
+    // A plain PHP parameter's `parent` is the parent of the class that declares it. No parameter is `static`, since
+    // PHP refuses one and the checker refuses a PHP# `Self` parameter.
+    let erased = |parameter: &FunctionLikeParameterMetadata, class: &ClassLikeMetadata| {
         let mut erased = parameter
             .type_declaration_metadata
             .as_ref()
             .map_or_else(get_mixed, |declared| erase(&declared.type_union, codebase));
         if erased.is_expandable() {
-            expand_union(codebase, &mut erased, &expansion_options);
+            expand_union(
+                codebase,
+                &mut erased,
+                &TypeExpansionOptions { self_class: Some(class.name), ..Default::default() },
+            );
         }
 
         erased
@@ -488,8 +487,8 @@ pub fn validate_erased_signature_compatibility(
 
     issues.extend(parent_method.parameters.iter().zip(&child_method.parameters).enumerate().find_map(
         |(parameter_index, (parent_parameter, child_parameter))| {
-            let parent_type = erased(parent_parameter);
-            let child_type = erased(child_parameter);
+            let parent_type = erased(parent_parameter, parent_class);
+            let child_type = erased(child_parameter, child_class);
             if union_comparator::is_contained_by(
                 codebase,
                 &parent_type,

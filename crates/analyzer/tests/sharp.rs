@@ -7784,10 +7784,37 @@ fn a_class_type_takes_typeof_of_its_class_or_a_subclass() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
-/// `TItem.make()`, which `check_slice` refuses, reads no constant named `TItem`, and its refused value adds no issue.
+/// A plain PHP parent's parameter typed `parent` takes the parent of the class that declares it, as PHP links it, so a
+/// PHP# override that narrows it to that class is refused, and one that keeps the parent's parent compiles.
+#[test]
+fn a_plain_php_parameter_typed_parent_is_the_parent_of_its_class() {
+    let php = "<?php\n\nnamespace Lib;\n\nclass Base\n{\n}\n\nclass Node extends Base\n{\n    public function take(parent $item): void\n    {\n    }\n\n    public function keep(parent $item): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Base;\nimport Lib.Node;\n\npublic class Leaf : Node\n{\n    public override void take(Node item) { }\n\n    public override void keep(Base item) { }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Leaf.sharp", sharp), &[("src/Lib/Node.php", php)]),
+        [
+            "8:36 incompatible-parameter-type Parameter `item` of `Leaf.take` must take at least `Base`, the type `Node.take` erases it to. | Erases to `Node`. | `Node.take` takes `Base` once its type parameters are erased. | PHP# erases type parameters when it compiles, and PHP refuses a parameter narrower than the one it overrides when it links the class. | Write `item` with a type that erases to `Base`."
+        ]
+    );
+}
+
+/// A plain PHP docblock's `parent` is the parent of the class that writes it: in the type PHP# reads from a member of
+/// it, and in the type a PHP property hook's return is checked against.
+#[test]
+fn a_plain_php_docblock_parent_is_the_parent_of_its_class() {
+    let php = "<?php\n\nnamespace Lib;\n\nclass Base\n{\n}\n\nclass Node extends Base\n{\n    /** @return parent */\n    public function base(): object\n    {\n        return $this;\n    }\n\n    /** @var parent */\n    public object $hooked {\n        get {\n            return $this;\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Base;\nimport Lib.Node;\n\npublic class Walker\n{\n    public Base base(Node node) => node.base();\n}\n";
+
+    assert_eq!(worded(("src/Lib/Node.php", php), &[]), Vec::<String>::new());
+    assert_eq!(worded(("src/Demo/Walker.sharp", sharp), &[("src/Lib/Node.php", php)]), Vec::<String>::new());
+}
+
+/// `TItem.make()`, `TItem.size`, `TItem.size.length` and `typeof(TItem).make()`, which `check_slice` refuses, read no
+/// constant named `TItem`, and their refused values add no issue.
 #[test]
 fn a_type_parameter_before_a_dot_is_not_read_as_a_constant() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n\npublic abstract class Builder<TItem : Maker>\n{\n    public int build() => TItem.make();\n\n    public abstract TItem made();\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n\n    public static int size = 1;\n}\n\npublic abstract class Builder<TItem : Maker>\n{\n    public int build() => TItem.make();\n\n    public int size() => TItem.size;\n\n    public int length() => TItem.size.length;\n\n    public int typed() => typeof(TItem).make();\n\n    public abstract TItem made();\n}\n";
 
     assert_eq!(issues(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -7801,10 +7828,11 @@ fn typeof_and_new_of_a_type_parameter_add_no_issue() {
 }
 
 /// `value is TItem`, `value as TItem` and a `match` arm of the type `TItem`, which `check_slice` refuses, add no
-/// analyzer issue on the refused line, in an expression or in a statement.
+/// analyzer issue on the refused line, in an expression or in a statement. The other arms' types of a refused `match`
+/// statement add none either, as `Box<int>` outside its bound.
 #[test]
 fn a_pattern_or_as_of_a_type_parameter_adds_no_issue() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n}\n\npublic abstract class Builder<TItem : Maker>\n{\n    public bool holds(Any? value) => value is TItem;\n\n    public bool lacks(Any? value) => value is not TItem;\n\n    public Any? kept(Any? value) => value as TItem;\n\n    public int ranked(Any? value) => match (value) { TItem item => 1, default => 0 };\n\n    public void sort(Any? value)\n    {\n        match (value) {\n            TItem item => this.made(),\n            default => this.made(),\n        }\n    }\n\n    public abstract TItem made();\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n}\n\npublic class Box<T : Maker>\n{\n    public T? item() => null;\n}\n\npublic abstract class Builder<TItem : Maker>\n{\n    public bool holds(Any? value) => value is TItem;\n\n    public bool lacks(Any? value) => value is not TItem;\n\n    public Any? kept(Any? value) => value as TItem;\n\n    public int ranked(Any? value) => match (value) { TItem item => 1, default => 0 };\n\n    public void sort(Any? value)\n    {\n        match (value) {\n            TItem item => this.made(),\n            Box<int> box => this.made(),\n            default => this.made(),\n        }\n    }\n\n    public abstract TItem made();\n}\n";
 
     assert_eq!(issues(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
 }
