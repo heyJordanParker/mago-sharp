@@ -578,7 +578,13 @@ pub fn handle_return_value<'ctx, A>(
             issue = issue.with_note(type_diff);
         }
 
-        let issue = explain_blocked_substitution(context, &inferred_return_type, &expected_return_type, issue);
+        let (code, issue) = explain_blocked_substitution(
+            context,
+            &inferred_return_type,
+            &expected_return_type,
+            IssueCode::InvalidReturnStatement,
+            (code, issue),
+        );
         context.collector.report_with_code(code, issue);
     } else if require_return_value
         && !function_like_metadata.flags.has_yield()

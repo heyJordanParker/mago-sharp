@@ -823,10 +823,14 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
                 )
                 .with_help(format!("Assign a `{local_type_str}` value, or change the type `{name}` is declared with."));
 
-            context.collector.report_with_code(
+            let (code, issue) = explain_blocked_substitution(
+                context,
+                &assigned_type,
+                &local_type,
                 IssueCode::InvalidLocalAssignmentValue,
-                explain_blocked_substitution(context, &assigned_type, &local_type, issue),
+                (IssueCode::InvalidLocalAssignmentValue, issue),
             );
+            context.collector.report_with_code(code, issue);
         }
 
         // The local keeps its written type, as the engine never checks it.

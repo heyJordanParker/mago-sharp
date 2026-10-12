@@ -249,6 +249,7 @@ where
         method.name_span,
         "method",
         concat_word!(&class_like_metadata.original_name, "::", &method_name),
+        body,
     );
 
     // Check for missing type hints

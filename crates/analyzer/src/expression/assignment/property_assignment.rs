@@ -226,10 +226,14 @@ where
                     "Consider adding a type assertion to narrow the type of the value before the assignment.",
                 );
 
-                context.collector.report_with_code(
-                    issue_kind,
-                    explain_blocked_substitution(context, assigned_value_type, &resolved_property.property_type, issue),
+                let (issue_kind, issue) = explain_blocked_substitution(
+                    context,
+                    assigned_value_type,
+                    &resolved_property.property_type,
+                    IssueCode::InvalidPropertyAssignmentValue,
+                    (issue_kind, issue),
                 );
+                context.collector.report_with_code(issue_kind, issue);
             } else {
                 if let Some(value_span) = assigned_value_span {
                     issue = Issue::error(format!(
@@ -263,10 +267,14 @@ where
                     .with_note(format!("The type `{assigned_type_str}` is not compatible with and cannot be assigned to `{property_type_str}`."))
                     .with_help("Change the assigned value to match the property's type, or update the property's type declaration.");
 
-                context.collector.report_with_code(
+                let (code, issue) = explain_blocked_substitution(
+                    context,
+                    assigned_value_type,
+                    &resolved_property.property_type,
                     IssueCode::InvalidPropertyAssignmentValue,
-                    explain_blocked_substitution(context, assigned_value_type, &resolved_property.property_type, issue),
+                    (IssueCode::InvalidPropertyAssignmentValue, issue),
                 );
+                context.collector.report_with_code(code, issue);
             }
         }
 

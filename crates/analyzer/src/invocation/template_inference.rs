@@ -1290,10 +1290,16 @@ where
         violated_templates.insert(template_name);
         let inferred_bound = display_type(context, &violation.inferred_bound);
         let constraint = display_type(context, &violation.constraint);
+        // PHP# reports the argument once, here, so the message names the bound, as C#'s CS0311 does.
+        let message = if context.dialect.is_sharp() {
+            format!("`{inferred_bound}` does not satisfy the bound `{constraint}` of type parameter `{template_name}`.")
+        } else {
+            format!("Argument type mismatch for {kind} `{template_name}`.")
+        };
 
         context.collector.report_with_code(
             IssueCode::TemplateConstraintViolation,
-            Issue::error(format!("Argument type mismatch for {kind} `{template_name}`."))
+            Issue::error(message)
                 .with_annotation(Annotation::primary(argument_span).with_message(format!(
                     "This argument has type `{inferred_bound}`, which is not compatible with the required {constraint_kind} `{constraint}`."
                 )))

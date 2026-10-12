@@ -669,6 +669,15 @@ where
                 calling_instance_type,
                 method_class_type,
             );
+            // A PHP# argument outside a type parameter's bound is reported once, by the issue that names the bound.
+            let is_reported_by_its_bound = context.dialect.is_sharp()
+                && base_parameter_type.get_all_child_nodes().into_iter().any(|node| {
+                    matches!(
+                        node,
+                        TypeRef::Atomic(TAtomic::GenericParameter(parameter))
+                            if violated_templates.contains(&parameter.parameter_name)
+                    )
+                });
 
             let final_parameter_type = resolve_parameter_type_for_invocation(
                 context,
@@ -683,7 +692,7 @@ where
                 matches!(invocation.arguments_source, InvocationArgumentsSource::PartialArgumentList(_))
                     && contains_parameter_variable(&final_parameter_type);
 
-            if !check_is_deferred_to_partial_invocation {
+            if !check_is_deferred_to_partial_invocation && !is_reported_by_its_bound {
                 // Only a type PHP# wrote is judged by PHP# literal rules: the parameter of a PHP# method or lambda,
                 // whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
                 // `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. A

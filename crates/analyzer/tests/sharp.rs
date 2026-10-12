@@ -36,6 +36,7 @@ use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::resolver::NameResolver;
 use mago_prelude::Prelude;
+use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
 use mago_reporting::Level;
 use mago_span::HasSpan;
@@ -7776,7 +7777,7 @@ fn generic_declarations_infer_what_their_php_template_twins_infer() {
             "Invalid argument type for argument #1 of `Report.keepInt`: expected `int`, but found `Order`.",
             "Invalid argument type for argument #1 of `Report.keepInt`: expected `int`, but found `Order`.",
             "Possible argument type mismatch for argument #1 of `Report.lined`: expected `Validator<Line>`, but possibly received `OrderValidator`.",
-            "Argument type mismatch for type parameter `TItem`.",
+            "`Line` does not satisfy the bound `DatabaseEntity` of type parameter `TItem`.",
         ]
     );
     assert_eq!(
@@ -7964,7 +7965,6 @@ fn a_value_of_another_type_never_passes_where_a_type_parameter_is_required() {
         [
             "16:55 invalid-argument",
             "20:26 invalid-argument",
-            "18:17 unused-template-parameter",
             "25:19 invalid-local-assignment-value",
             "31:16 invalid-return-statement",
             "50:45 invalid-argument",
@@ -8116,8 +8116,9 @@ fn a_type_new_and_a_type_test_name_the_type_arguments_of_a_generic_class() {
 const CHECKS: &str = "namespace Checks;\n\npublic interface Validator<TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Slot<TItem>\n{\n    TItem get();\n\n    void put(TItem item);\n}\n";
 
 /// A generic class without a marker takes only its own type arguments, as the engine checks them, so a `Feed<Order>`
-/// is refused where a `Feed<Entity>` is expected, worded as spec section 11.1 words it, with the issue's code: as an
-/// argument, a returned value, a typed local and a property. Its help names no marker, which is not supported yet.
+/// is refused where a `Feed<Entity>` is expected, worded as spec section 11.1 words it: as an argument, a returned
+/// value, a typed local and a property. It is a value of another type, not a wider one, so each issue is its place's
+/// invalid one, with spec section 11.1's note and no help, which would name a marker, not supported yet.
 #[test]
 fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
     let sharp = "namespace App;\n\nimport Checks.Slot;\nimport Checks.Validator;\nimport Demo.DatabaseEntity;\nimport Demo.Order;\nimport Demo.PaginatedList;\n\npublic class Report\n{\n    public PaginatedList<DatabaseEntity>? shelf { get; set; }\n\n    public static Any wide(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any narrow(Validator<Order> validator) => validator;\n\n    public static Any slot(Slot<DatabaseEntity> slot) => slot;\n\n    public static Any passed(PaginatedList<Order> page) => Report.wide(page);\n\n    public static Any checked(Validator<DatabaseEntity> validator) => Report.narrow(validator);\n\n    public static Any slotted(Slot<Order> slot) => Report.slot(slot);\n\n    public static PaginatedList<DatabaseEntity> returned(PaginatedList<Order> page) => page;\n\n    public static PaginatedList<DatabaseEntity> assigned(PaginatedList<Order> page)\n    {\n        PaginatedList<DatabaseEntity> wide = page;\n        return wide;\n    }\n\n    public void kept(PaginatedList<Order> page)\n    {\n        this.shelf = page;\n    }\n}\n";
@@ -8127,12 +8128,12 @@ fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
     assert_eq!(
         issues(("src/App/Report.sharp", sharp), &others),
         [
-            "19:72 less-specific-argument",
-            "21:85 less-specific-argument",
-            "23:64 less-specific-argument",
-            "25:88 less-specific-return-statement",
+            "19:72 invalid-argument",
+            "21:85 invalid-argument",
+            "23:64 invalid-argument",
+            "25:88 invalid-return-statement",
             "29:46 invalid-local-assignment-value",
-            "35:22 property-type-coercion",
+            "35:22 invalid-property-assignment-value",
         ]
     );
     assert_eq!(
@@ -8146,10 +8147,19 @@ fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
             wide,
         ]
     );
-    assert!(
-        explained(("src/App/Report.sharp", sharp), &others).iter().all(|issue| !issue.contains("declare it")),
-        "no help names a marker"
-    );
+    for issue in analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Report.sharp", sharp), &others) {
+        assert_eq!(
+            issue.notes,
+            ["A type parameter without `out` or `in` is invariant, so neither substitution is allowed."]
+        );
+        assert_eq!(issue.help, None);
+        let given = issue.message.split(" cannot be used as ").next().unwrap();
+        let primary = issue.annotations.iter().find(|annotation| matches!(annotation.kind, AnnotationKind::Primary));
+        assert_eq!(
+            primary.and_then(|annotation| annotation.message.clone()),
+            Some(format!("This has type `{given}`."))
+        );
+    }
 }
 
 /// A typed local's generic type is checked where it is written, as a parameter's is.
@@ -8426,7 +8436,8 @@ fn a_default_of_another_type_is_refused_where_a_type_parameter_is_required() {
 }
 
 /// A type argument outside its bound, inferred for a call or written in a class header, is named as PHP# writes it,
-/// and the header's report speaks of a type argument. The PHP twin keeps Mago's text.
+/// and the header's report speaks of a type argument. A call's argument is one issue that names the bound, as C#'s
+/// CS0311 is. The PHP twin keeps Mago's text and its two issues.
 #[test]
 fn a_type_argument_outside_its_bound_is_named_as_sharp_writes_it() {
     let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Line\n{\n}\n\npublic class Page<TItem : DatabaseEntity>\n{\n}\n\npublic class LinePage : Page<Line>\n{\n}\n\npublic class Report\n{\n    public static T keep<T : DatabaseEntity>(T item) => item;\n\n    public static Any? kept(Line line) => Report.keep(line);\n}\n";
@@ -8446,8 +8457,7 @@ fn a_type_argument_outside_its_bound_is_named_as_sharp_writes_it() {
         [
             "11:14 unused-template-parameter Type parameter `TItem` is never used in class `Page`. | Type parameter `TItem` is defined on this class but never referenced | Remove `TItem` from `Page<…>`.",
             "15:14 invalid-template-parameter Type argument for `Page` is not compatible with its bound. | In the definition of `LinePage` | The type `Line` provided for type parameter `TItem`... | ...does not satisfy the bound `DatabaseEntity` from `Page`. | Supply a type contained by `DatabaseEntity`.",
-            "23:55 template-constraint-violation Argument type mismatch for type parameter `T`. | This argument has type `Line`, which is not compatible with the required bound `DatabaseEntity`. | Type parameter `T` is bounded by `DatabaseEntity`. | Ensure the argument's type satisfies the bound.",
-            "23:55 invalid-argument Invalid argument type for argument #1 of `Report.keep`: expected `T`, but found `Line`. | This has type `Line` | Arguments to this method are incorrect | The provided type `Line` is not compatible with the expected type `T`. | Change the argument value to match `T`, or update the parameter's type declaration.",
+            "23:55 template-constraint-violation `Line` does not satisfy the bound `DatabaseEntity` of type parameter `T`. | This argument has type `Line`, which is not compatible with the required bound `DatabaseEntity`. | Type parameter `T` is bounded by `DatabaseEntity`. | Ensure the argument's type satisfies the bound.",
         ]
     );
 }
@@ -9435,7 +9445,7 @@ fn a_generic_method_value_fixed_outside_its_bound_names_only_the_bound() {
     assert_eq!(
         explained(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "22:42 template-constraint-violation Argument type mismatch for type parameter `T`. Ensure the argument's type satisfies the bound.",
+            "22:42 template-constraint-violation `Line` does not satisfy the bound `DatabaseEntity` of type parameter `T`. Ensure the argument's type satisfies the bound.",
             "22:42 invalid-local-assignment-value Invalid assignment to `make`: it is declared as `Function<Box<Line>(Line)>`. Assign a `Function<Box<Line>(Line)>` value, or change the type `make` is declared with.",
         ]
     );
@@ -9463,6 +9473,21 @@ fn a_generic_call_nothing_fixes_is_refused() {
             format!("33:16 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.size`. | `Report.size` is called here | {note} | Write the type argument on the call."),
         ]
     );
+}
+
+/// A method's type parameter its body names is used, as `catch (TError error)` and a typed local name it, since a call
+/// writes its type argument. One that nothing names is reported. Semantics refuses the generic `catch` until R3b, so
+/// only the unused type parameters are read here.
+#[test]
+fn a_type_parameter_the_body_names_is_used() {
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\npublic class Report\n{\n    public int caught<TError : RuntimeException>()\n    {\n        try {\n            return 1;\n        } catch (TError error) {\n            return 0;\n        }\n    }\n\n    public int counted<TItem>()\n    {\n        List<TItem> items = [];\n        return items.count();\n    }\n\n    public int unused<TValue>(int count) => count;\n}\n";
+
+    let unused: Vec<String> = issues(("src/Demo/Report.sharp", sharp), &[])
+        .into_iter()
+        .filter(|issue| issue.ends_with("unused-template-parameter"))
+        .collect();
+
+    assert_eq!(unused, ["22:16 unused-template-parameter"]);
 }
 
 /// The type argument a call writes fixes it, on an instance and a static method alike. The PHP twin, which cannot

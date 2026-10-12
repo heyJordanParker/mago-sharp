@@ -623,8 +623,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 return Some(Place::TypeParameter);
             }
 
+            let message = if matches!(bound.hint, Hint::Union(_)) {
+                "A bound can't be a union: join several bounds with `&`."
+            } else {
+                "A bound is a class or an interface, as in `<TItem : DatabaseEntity>`."
+            };
             context.report(
-                Issue::error("A bound is a class or an interface, as in `<TItem : DatabaseEntity>`.")
+                Issue::error(message)
                     .with_annotation(Annotation::primary(bound.hint.span()).with_message("Bound written here."))
                     .with_note("PHP# bounds a type parameter by classes and interfaces, several joined with `&`."),
             );

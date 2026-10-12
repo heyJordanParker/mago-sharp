@@ -3536,7 +3536,8 @@ fn in_or_out_is_not_supported_yet_and_an_error_on_a_method_type_parameter() {
     );
 }
 
-/// A bound is a class or an interface, a generic class type, or several of them joined with `&`, spec section 11.
+/// A bound is a class or an interface, a generic class type, or several of them joined with `&`, spec section 11. A
+/// union of classes names `&`, which joins several bounds.
 #[test]
 fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error() {
     let code = "namespace App.Tenant;\n\npublic class Box<TA : DatabaseEntity, TB : Comparable<TB>, TC : DatabaseEntity & Shareable>\n{\n    public void a<TD : int>() { }\n    public void b<TE : Any>() { }\n    public void c<TF : Order?>() { }\n    public void d<TG : Order|Line>() { }\n    public void e<TH : List<int>>() { }\n    public void f<TI : Map<string, int>>() { }\n    public void g<TJ : Class<Order>>() { }\n    public void h<TK : TA>() { }\n    public void i<TL : Order & TA>() { }\n}\n";
@@ -3544,7 +3545,10 @@ fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error(
     assert_eq!(
         issues(code),
         (5..=13)
-            .map(|line| format!("{line}:24 A bound is a class or an interface, as in `<TItem : DatabaseEntity>`."))
+            .map(|line| match line {
+                8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
+                line => format!("{line}:24 A bound is a class or an interface, as in `<TItem : DatabaseEntity>`."),
+            })
             .collect::<Vec<_>>()
     );
     assert!(check("src/Report.sharp", code).iter().all(

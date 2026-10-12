@@ -529,7 +529,9 @@ where
         issue = issue.with_note(type_diff);
     }
 
-    context.collector.report_with_code(kind, explain_blocked_substitution(context, input_type, parameter_type, issue));
+    let (kind, issue) =
+        explain_blocked_substitution(context, input_type, parameter_type, IssueCode::InvalidArgument, (kind, issue));
+    context.collector.report_with_code(kind, issue);
 
     false
 }

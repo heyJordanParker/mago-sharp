@@ -20,10 +20,12 @@ use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
 use mago_word::Word;
 use mago_word::WordMap;
 
+use crate::code::IssueCode;
 use crate::context::Context;
 use crate::utils::names::display_sharp_type;
 
@@ -225,27 +227,29 @@ pub fn get_generic_parameter_for_offset(
     get_mixed()
 }
 
-/// Rewrites `issue`, which reports `input` where `expected` is required, when only a missing `out` or `in` blocks the
-/// substitution in a PHP# file: `C<A>` given where `C<B>` is expected, `C` a PHP# class, and the one type argument that
-/// differs belongs to an invariant type parameter whose `out` (`A` within `B`) or `in` (`B` within `A`) would accept
-/// it. The message is spec section 11.1's. The issue keeps its help, which names no marker until the engine checks
-/// variance, and its code.
+/// Rewrites `issue`, reported with `code` for `input` where `expected` is required, when only a missing `out` or `in`
+/// blocks the substitution in a PHP# file: `C<A>` given where `C<B>` is expected, `C` a PHP# class, and the one type
+/// argument that differs belongs to an invariant type parameter whose `out` (`A` within `B`) or `in` (`B` within `A`)
+/// would accept it. The value is then of another type, not a wider one, so the issue becomes `invalid`, with spec
+/// section 11.1's message and note and no help, since the help names a marker only once R4 checks variance.
 pub(crate) fn explain_blocked_substitution<A>(
     context: &Context<'_, '_, A>,
     input: &TUnion,
     expected: &TUnion,
-    mut issue: Issue,
-) -> Issue
+    invalid: IssueCode,
+    (code, mut issue): (IssueCode, Issue),
+) -> (IssueCode, Issue)
 where
     A: Arena,
 {
+    let unchanged = |issue| (code, issue);
     if !context.dialect.is_sharp() {
-        return issue;
+        return unchanged(issue);
     }
 
     let codebase = context.codebase;
     let [TAtomic::Object(TObject::Named(given_object))] = input.types.as_ref() else {
-        return issue;
+        return unchanged(issue);
     };
     let Some((wanted, wanted_object)) = expected.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object))
@@ -255,19 +259,19 @@ where
         }
         _ => None,
     }) else {
-        return issue;
+        return unchanged(issue);
     };
     let Some(class) = codebase.get_class_like(given_object.name.as_bytes()).filter(|class| class.flags.is_sharp())
     else {
-        return issue;
+        return unchanged(issue);
     };
     let (Some(given_arguments), Some(wanted_arguments)) =
         (given_object.get_type_parameters(), wanted_object.get_type_parameters())
     else {
-        return issue;
+        return unchanged(issue);
     };
     if given_arguments.len() != wanted_arguments.len() {
-        return issue;
+        return unchanged(issue);
     }
 
     let contains = |input: &TUnion, container: &TUnion| {
@@ -292,21 +296,26 @@ where
 
         let is_invariant = class.template_variance.get(index).is_none_or(Variance::is_invariant);
         if blocked || !is_invariant || !(widens || narrows) {
-            return issue;
+            return unchanged(issue);
         }
 
         blocked = true;
     }
 
     if !blocked {
-        return issue;
+        return unchanged(issue);
     }
 
-    issue.message = format!(
-        "{} cannot be used as {}.",
-        display_sharp_type(context, input),
-        display_sharp_type(context, &wrap_atomic(wanted.clone()))
-    );
+    let given = display_sharp_type(context, input);
+    issue.message = format!("{given} cannot be used as {}.", display_sharp_type(context, &wrap_atomic(wanted.clone())));
+    for annotation in &mut issue.annotations {
+        if matches!(annotation.kind, AnnotationKind::Primary) {
+            annotation.message = Some(format!("This has type `{given}`."));
+        }
+    }
+    issue.notes =
+        vec!["A type parameter without `out` or `in` is invariant, so neither substitution is allowed.".to_owned()];
+    issue.help = None;
 
-    issue
+    (invalid, issue)
 }
