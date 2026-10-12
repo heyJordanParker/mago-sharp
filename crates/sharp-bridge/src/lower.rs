@@ -2432,6 +2432,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     ) -> Option<u32> {
         let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
+        let (proof_collection, _) = self
+            .types
+            .collection_method(call)
+            .unwrap_or_else(|| unreachable!("proof: php_collection_method found this call's collection method"));
+        debug_assert_eq!(proof_collection, collection_name, "proof: one call has one collection");
         let element = || {
             arguments
                 .arguments
