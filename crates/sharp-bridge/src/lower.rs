@@ -2529,9 +2529,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
         let element = || {
-            let element = arguments.arguments.first().map(Argument::value);
-
-            element.unwrap_or_else(|| unreachable!("the checker refuses a collection method without its element"))
+            arguments
+                .arguments
+                .first()
+                .map(Argument::value)
+                .unwrap_or_else(|| unreachable!("the checker refuses a collection method call without its element"))
         };
 
         let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
