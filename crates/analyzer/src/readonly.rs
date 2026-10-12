@@ -679,7 +679,8 @@ where
             "`{}` is get-only, and the main constructor already set it.",
             sharp_property_name(pending)
         ))
-        .with_annotation(Annotation::primary(pending.member_span).with_message("Set again here.")),
+        .with_annotation(Annotation::primary(pending.member_span).with_message("Set again here."))
+        .with_help("Declare it `{ get; init; }` to let a named constructor set it again."),
     );
 }
 

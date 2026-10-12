@@ -69,6 +69,10 @@ where
         flags |= MetadataFlags::READONLY;
     }
 
+    if is_sharp && parameter.hooks.as_ref().is_some_and(is_sharp_init) {
+        flags |= MetadataFlags::INIT;
+    }
+
     if parameter.modifiers.contains_abstract() {
         flags |= MetadataFlags::ABSTRACT;
     }
@@ -320,6 +324,10 @@ where
                 flags |= MetadataFlags::READONLY;
             }
 
+            if is_sharp && is_sharp_init(&hooked_property.hook_list) {
+                flags |= MetadataFlags::INIT;
+            }
+
             if hooked_property.modifiers.contains_static() {
                 flags |= MetadataFlags::STATIC;
             }
@@ -428,17 +436,22 @@ where
     }
 }
 
-/// The write visibility of a PHP# property: its `set` accessor's access modifier, or the property's own for a `set`
-/// without one. A get-only property runs as `readonly`, or as `protected(set)` when its `get` has a body, so it is
-/// written at `protected` at most.
+/// The write visibility of a PHP# property: its `set` or `init` accessor's access modifier, or the property's own for
+/// a `set` without one. A get-only property runs as `readonly`, or as `protected(set)` when its `get` has a body, and
+/// an `init` accessor without one as `protected(set)`, so both are written at `protected` at most.
 fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibility) -> Visibility {
-    match accessors.hooks.iter().find(|accessor| accessor.name.value == b"set") {
-        Some(set) => {
-            set.modifiers.first().and_then(|modifier| Visibility::try_from(modifier).ok()).unwrap_or(read_visibility)
-        }
+    let setter = accessors.setter();
+    match setter.and_then(|setter| setter.modifiers.first()).and_then(|modifier| Visibility::try_from(modifier).ok()) {
+        Some(visibility) => visibility,
+        None if setter.is_some_and(|setter| setter.name.value == b"set") => read_visibility,
         None if read_visibility == Visibility::Public => Visibility::Protected,
         None => read_visibility,
     }
+}
+
+/// Whether a PHP# property is written by an `init` accessor, which sets it only while the object is created.
+fn is_sharp_init(accessors: &PropertyHookList) -> bool {
+    accessors.setter().is_some_and(|setter| setter.name.value == b"init")
 }
 
 /// Scans a property's hooks and whether it is virtual. A PHP# accessor without a body is storage, as an
@@ -508,9 +521,11 @@ fn scan_property_hook<'arena, A>(
 where
     A: Arena,
 {
-    let name = word(hook.name.value);
     let is_get = hook.name.value == b"get";
-    let is_set = hook.name.value == b"set";
+    // A PHP# `init` accessor's body runs as the `set` hook it lowers to, and the property's `INIT` flag keeps that it
+    // writes only while the object is created.
+    let is_set = if context.program.dialect.is_sharp() { hook.is_setter() } else { hook.name.value == b"set" };
+    let name = if is_set { word(b"set") } else { word(hook.name.value) };
     let is_abstract = matches!(hook.body, PropertyHookBody::Abstract(_));
     let has_explicit_parameter = hook.parameter_list.is_some();
 

@@ -2591,15 +2591,15 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
 }
 
 #[test]
-fn an_auto_property_has_get_an_optional_narrower_set_and_an_optional_constant_initial_value() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; } = \"none\";\n    public float rate { get; protected set; }\n    protected int total { get; private set; }\n    public int id { get; }\n    private int hidden { get; set; }\n}\n";
+fn an_auto_property_has_get_an_optional_narrower_set_or_init_and_an_optional_constant_initial_value() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; } = \"none\";\n    public float rate { get; protected set; }\n    protected int total { get; private set; }\n    public int id { get; }\n    private int hidden { get; set; }\n    public string title { get; init; } = \"\";\n    public string label { get; private init; } = \"\";\n    public string slug { get; init => field = strtolower(value); } = \"\";\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
 fn an_auto_property_breaking_the_accessor_rules_is_an_error() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; public set; }\n    private int b { get; private set; }\n    protected int c { get; public set; }\n    public int d { set; }\n    public int e { get; get; }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; public set; }\n    private int b { get; private set; }\n    protected int c { get; public set; }\n    public int d { set; }\n    public int e { get; get; }\n    protected int f { get; public init; }\n    public int g { get; set; init; }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2609,6 +2609,8 @@ fn an_auto_property_breaking_the_accessor_rules_is_an_error() {
             "7:28 The `set` accessor of a PHP# property must be narrower than the property.",
             "8:16 A PHP# property needs a `get` accessor.",
             "9:25 A PHP# property declares each accessor once.",
+            "10:28 The `init` accessor of a PHP# property must be narrower than the property.",
+            "11:30 A PHP# property is written by `set` or by `init`, not both.",
         ]
     );
 }
@@ -2655,7 +2657,7 @@ fn a_static_computed_property_or_one_without_an_access_modifier_is_not_supported
 
 #[test]
 fn properties_outside_the_slice_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int a { get; set; }\n    public static int b { get; }\n    public int c { private get; set; }\n    public abstract int d { get; }\n    public override int e { get => 1; }\n    public int f { get; init; }\n    public int g = 0 { get; }\n    public int h { get; set(int value); }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int a { get; set; }\n    public static int b { get; }\n    public int c { private get; set; }\n    public abstract int d { get; }\n    public override int e { get => 1; }\n    public int g = 0 { get; }\n    public int h { get; set(int value); }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2666,9 +2668,8 @@ fn properties_outside_the_slice_are_not_supported_yet() {
             "7:20 This accessor is not supported yet in PHP#.",
             "8:12 This modifier is not supported yet in PHP#.",
             "9:25 Overriding a property is not supported yet in PHP#.",
-            "10:25 This accessor is not supported yet in PHP#.",
-            "11:16 An initial value before the accessors is not supported yet in PHP#.",
-            "12:25 This accessor is not supported yet in PHP#.",
+            "10:16 An initial value before the accessors is not supported yet in PHP#.",
+            "11:25 This accessor is not supported yet in PHP#.",
         ]
     );
 
@@ -2728,14 +2729,18 @@ fn the_property_read_through_this_inside_its_own_accessor_is_an_error_that_names
 }
 
 /// PHP gives a `get` hook the property's type and a `set` hook `void`, so `get` returns a value and `set` returns
-/// none. A lambda in an accessor returns for itself.
+/// none, as does `init`, which runs as the `set` hook. A lambda in an accessor returns for itself.
 #[test]
 fn a_get_returns_a_value_and_a_set_returns_none_as_php_hooks_do() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { return; } }\n    public int b { get => field; set { return value; } }\n    public int c { get => field; set { const run = () => { return 1; }; return; } }\n    public int d { get { const run = () => { return; }; return 1; } }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { return; } }\n    public int b { get => field; set { return value; } }\n    public int c { get => field; set { const run = () => { return 1; }; return; } }\n    public int d { get { const run = () => { return; }; return 1; } }\n    public int e { get => field; init { return value; } }\n}\n";
 
     assert_eq!(
         issues(code),
-        ["5:26 A `get` accessor must return a value.", "6:47 A `set` accessor must not return a value.",]
+        [
+            "5:26 A `get` accessor must return a value.",
+            "6:47 A `set` accessor must not return a value.",
+            "9:48 An `init` accessor must not return a value.",
+        ]
     );
 }
 
@@ -2777,15 +2782,17 @@ fn an_initial_value_or_a_constructor_parameter_needs_storage() {
     );
 }
 
-/// A constant initial value is the property's default, but any other would run the `set` body in the constructor.
+/// A constant initial value is the property's default, but any other would run the `set` or `init` body in the
+/// constructor.
 #[test]
 fn an_initial_value_that_is_not_constant_on_a_property_whose_set_has_a_body_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n    public int d { get; init => field = value; } = strlen(\"x\");\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#."
+            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#.",
+            "8:52 An initial value that is not constant, on a property whose `init` has a body, is not supported yet in PHP#.",
         ]
     );
 }
@@ -2796,6 +2803,20 @@ fn a_static_property_with_an_accessor_body_is_not_supported_yet() {
         "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n}\n";
 
     assert_eq!(issues(code), ["5:12 A static property with an accessor body is not supported yet in PHP#."]);
+}
+
+/// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.
+/// The help's `set;` and `private set;` compile.
+#[test]
+fn a_static_property_has_no_init() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int count { get; init; } = 0;\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Report\n{\n    public static int count { get; set; } = 0;\n    public static int total { get; private set; } = 0;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["5:36 A static property has no `init`: `init` sets a property while its object is created."]
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
 }
 
 #[test]
