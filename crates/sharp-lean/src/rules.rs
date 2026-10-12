@@ -169,7 +169,8 @@ pub(crate) fn judges(file: &LeanFile, translation: &Translation) -> bool {
 
 /// Builds every one of `files` in `package`, refuses every file under the namespace of a `Module.lean` or an unreached
 /// Lean file Lean rejects, and runs every rule of the other `Module.lean` files over the facts of every file of
-/// `translations`. `root` is the workspace's, and `roots` its PSR-4 folders.
+/// `translations`. A rule the runner does not run refuses every file its `Module.lean` judges. `root` is the
+/// workspace's, and `roots` its PSR-4 folders.
 pub(crate) fn check(
     root: &Path,
     roots: &[Root],
@@ -229,10 +230,23 @@ pub(crate) fn check(
     let facts: Vec<(&str, &Facts)> =
         names.iter().zip(translations).map(|(name, translation)| (name.as_str(), &translation.facts)).collect();
     for broken in runner::rules(library, package, &modules, &facts)? {
+        let rules = built[broken.module];
+        if let Some(refused) = &broken.refused {
+            for translation in translations.iter().filter(|translation| judges(rules, translation)) {
+                let issue = issues::refused_rule(
+                    translation.facts.anchor,
+                    &rules.path,
+                    &rules.namespace,
+                    &broken.rule,
+                    refused,
+                );
+                issues.entry(translation.file).or_default().push(issue);
+            }
+        }
         for (file, fact) in broken.facts {
             let translation = &translations[file];
             let fact = &translation.facts.list[fact];
-            let issue = issues::broken_rule(fact.span, &fact.describe(), &broken.rule, &built[broken.module].path);
+            let issue = issues::broken_rule(fact.span, &fact.describe(), &broken.rule, &rules.path);
             issues.entry(translation.file).or_default().push(issue);
         }
     }

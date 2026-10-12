@@ -1260,6 +1260,117 @@ fn a_structure_rule_names_a_namespace_by_its_full_name_and_a_misspelled_one_is_a
     }
 }
 
+/// A structure rule runs only on what Lean's kernel checks, and names a namespace only through the constants `Code`
+/// declares: any other way to make a `Namespace` would let a misspelled name compile and never fire. So the runner
+/// does not run a rule that reaches `sorry`, an axiom beyond Lean's standard ones, an unsafe constant, a constant whose
+/// compiled code is not its definition, `Sharp.Rule.breaks` or the constructor of `Namespace`, nor one Lean cannot
+/// evaluate. It refuses each file of the rule's namespace, naming the rule, its place and what it reached, and the
+/// compile still checks every other file. Each row is the `app/Tenant/Store/Module.lean` of `structured`.
+#[test]
+fn a_structure_rule_that_reaches_more_than_lean_checks_does_not_run() {
+    let ledgr = "\"App.Shared.Ledgr\"";
+    let elaborator = "open Lean Elab Term in\nelab \"ns!\" s:str : term => do\n  let some (mk, _) := (← getEnv).constants.toList.find? fun (n, _) => (privateToUserName? n) == some `Sharp.Namespace.mk\n    | throwError \"no constructor\"\n  return mkApp (mkConst mk) (mkStrLit s.getString)\n";
+    let reserved = |name: &str| {
+        format!(
+            "it reaches {name}, which makes a namespace from a string. Name the namespace by its full name, as App.Shared.Schema"
+        )
+    };
+    for (module_lean, rule, place, reason) in [
+        (
+            rules(
+                "App.Tenant.Store",
+                &format!(
+                    "@[rule] def viaBreaks : Rule := .imports fun _ i => Rule.breaks (.imports fun ns j => under j.name ns) {ledgr} {{}} (.import {{ i with namespace_ := {ledgr} }})"
+                ),
+            ),
+            "viaBreaks",
+            "line 4, column 13",
+            reserved("Sharp.Rule.breaks"),
+        ),
+        (
+            format!(
+                "import Lean\n{}",
+                rules(
+                    "App.Tenant.Store",
+                    &format!("{elaborator}@[rule] def withElab : Rule := .neverImports (ns! {ledgr})")
+                )
+            ),
+            "withElab",
+            "line 10, column 13",
+            reserved("Sharp.Namespace.mk"),
+        ),
+        (
+            rules(
+                "App.Tenant.Store",
+                &format!("@[rule] unsafe def withUnsafeCast : Rule := .neverImports (unsafeCast {ledgr})"),
+            ),
+            "withUnsafeCast",
+            "line 4, column 20",
+            "it reaches unsafeCast, which is unsafe, so Lean's kernel does not check it".to_owned(),
+        ),
+        (
+            rules(
+                "App.Tenant.Store",
+                &format!(
+                    "axiom same : String = Namespace\n@[rule] def withAxiomCast : Rule := .neverImports (cast same {ledgr})"
+                ),
+            ),
+            "withAxiomCast",
+            "line 5, column 13",
+            "it uses the axiom same, which Lean's kernel does not check".to_owned(),
+        ),
+        (
+            rules("App.Tenant.Store", "@[rule] def withSorry : Rule := .neverImports sorry"),
+            "withSorry",
+            "line 4, column 13",
+            "it uses sorry. Write the rule out".to_owned(),
+        ),
+        (
+            rules(
+                "App.Tenant.Store",
+                "def legacy : Namespace := App.Shared.Schema\n@[implemented_by legacy] def schema : Namespace := App.Shared.Schema\n@[rule] def implemented : Rule := .neverImports schema",
+            ),
+            "implemented",
+            "line 6, column 13",
+            "it reaches schema, whose compiled code is not the definition Lean checked".to_owned(),
+        ),
+        (
+            rules(
+                "App.Tenant.Store",
+                "@[extern \"sharp_schema\"] def schema (u : Unit) : Namespace := App.Shared.Schema\n@[rule] def externed : Rule := .neverImports (schema ())",
+            ),
+            "externed",
+            "line 5, column 13",
+            "it reaches schema, whose compiled code is not the definition Lean checked".to_owned(),
+        ),
+        (
+            rules(
+                "App.Tenant.Store",
+                "@[rule] noncomputable def uncomputed : Rule := .neverImports (Classical.choice ⟨App.Shared.Schema⟩)",
+            ),
+            "uncomputed",
+            "line 4, column 27",
+            "Lean cannot evaluate it: (interpreter) unknown declaration 'uncomputed'".to_owned(),
+        ),
+    ] {
+        let directory = structured(&[("app/Tenant/Store/Module.lean", module_lean.as_str())]);
+        let refused = |file: &str| {
+            format!(
+                "app/Tenant/Store/{file}.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and its rule {rule} at {place} does not run: {reason}."
+            )
+        };
+
+        let output = compile_lines(directory.path());
+
+        assert_eq!(
+            issue_lines(&output),
+            [LEDGER_BREAKS.to_owned(), refused("Receipts"), refused("StoreService")],
+            "{rule}: {}",
+            printed(&output)
+        );
+    }
+}
+
 /// The namespaces a rule may name are those of the project's `.sharp` files when `mago compile` runs, so a rule that
 /// names a namespace an edit deletes is Lean's unknown identifier on the next compile, though no `.sharpc` file the rule
 /// judges lists the deleted file as an input. Each row is an edit to a project that compiled.

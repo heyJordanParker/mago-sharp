@@ -8,7 +8,8 @@ file's module: the proof module when Lake built it, or else the generated module
 type is exactly the law's statement, with the axioms its proof uses, and, when the request asks for one, the first
 automatic proof step that proves the law. A `Rules` request names every `Module.lean` that Lake built, with the facts of
 every `.sharp` file. The runner imports them all, runs each `@[rule]` over the facts under its namespace, and answers
-with every fact that breaks one.
+with every fact that breaks one. A rule that trusts more than Lean's kernel checks, or that builds a namespace from a
+string, does not run, and the answer says what it reached.
 
 One runner answers one request because Lean cannot free an imported environment while the tasks that elaborated a
 proposal may still hold parts of it. Lean's own server likewise restarts a file's worker to import anew.
@@ -237,8 +238,83 @@ def rules : Decode Rules := do
   let modules ← many do return { module := (← string).toName, namespace_ := ← string }
   return { modules, files := ← many file }
 
-/-- Each rule of each rules module, in request order: the module's index, the rule's name, and every fact under its
-namespace that breaks it, as the file's index and the fact's index in that file. -/
+/-- Why the runner does not run a rule: it trusts more than Lean's kernel checks, or it builds a namespace from a string
+instead of naming one `Code` declares, so a misspelled name would never fire. -/
+inductive Refusal where
+  | gap
+  | axiom_ (name : Name)
+  | unsafe_ (name : Name)
+  /-- A workspace constant whose compiled code is not its definition: `implemented_by` or `extern`. -/
+  | implementedBy (name : Name)
+  /-- `Sharp.Namespace.mk` or `Sharp.Rule.breaks`, which only the runtime library and the runner use. -/
+  | reserved (name : Name)
+  | unevaluable (message : String)
+
+def Refusal.code : Refusal → UInt8
+  | .gap => 1
+  | .axiom_ _ => 2
+  | .unsafe_ _ => 3
+  | .implementedBy _ => 4
+  | .reserved _ => 5
+  | .unevaluable _ => 6
+
+def Refusal.detail : Refusal → String
+  | .gap => ""
+  | .axiom_ name | .unsafe_ name | .implementedBy name | .reserved name => name.toString
+  | .unevaluable message => message
+
+/-- The constants only the runtime library and the runner use to make a `Namespace`. -/
+def reserved : Array Name := #[`Sharp.Namespace.mk, ``Rule.breaks]
+
+/-- Whether `name` belongs to Lean, to the runtime library, or to the modules `mago compile` generates, which the walk
+trusts and does not enter. -/
+def trusted (env : Environment) (name : Name) : Bool :=
+  match env.getModuleIdxFor? name with
+  | some index =>
+    let module := env.header.moduleNames[index.toNat]!
+    [`Init, `Lean, `Std, `Code].contains module.getRoot || (`Sharp.Lean).isPrefixOf module
+  | none => false
+
+/-- The first constant `rule` reaches that a rule may not: a reserved constant, an `unsafe` one, or a workspace
+constant whose compiled code is not its definition. The walk goes through the workspace's constants, as `collectAxioms`
+goes through every constant, and stops at those it trusts. A safe constant cannot name an unsafe one, so an unsafe
+constant of Lean is reached only through an unsafe rule, which is refused for the unsafe constant it names. -/
+def reached (env : Environment) (rule : Name) : Option Refusal := Id.run do
+  let mut seen : NameSet := {}
+  let mut pending := #[rule]
+  repeat
+    let some name := pending.back? | break
+    pending := pending.pop
+    if seen.contains name then continue
+    seen := seen.insert name
+    if reserved.contains (privateToUserName name) then return some (.reserved (privateToUserName name))
+    let some info := env.find? name | continue
+    if info.isUnsafe && name != rule then return some (.unsafe_ name)
+    if trusted env name then continue
+    if (Compiler.getImplementedBy? env name).isSome || isExtern env name then return some (.implementedBy name)
+    for used in info.getUsedConstantsAsSet do
+      pending := pending.push used
+  if (env.find? rule).any (·.isUnsafe) then return some (.unsafe_ rule)
+  return none
+
+/-- Why `rule` may not run, or `none`: it reaches a constant `reached` refuses, or it uses `sorry` or an axiom beyond
+Lean's standard ones, as a law's proof may not. The walk comes first, so an unsafe rule is refused for the unsafe
+constant it names rather than for the axiom Lean's compiler gives that constant. -/
+def refusalOf (env : Environment) (rule : Name) : IO (Option Refusal) := do
+  if let some refusal := reached env rule then return some refusal
+  let axioms ← runCore env (collectAxioms rule)
+  if axioms.contains ``sorryAx then return some .gap
+  return axioms.find? (!standardAxioms.contains ·) |>.map .axiom_
+
+/-- The line, counted from 1, and the column, counted from 0, of the name `rule` declares, or `0, 0` when Lean recorded
+none. -/
+def placeOf (env : Environment) (rule : Name) : IO (Nat × Nat) := do
+  let ranges ← runCore env (findDeclarationRanges? rule)
+  return ranges.map (fun ranges => (ranges.selectionRange.pos.line, ranges.selectionRange.pos.column)) |>.getD (0, 0)
+
+/-- Each rule of each rules module, in request order: the module's index, the rule's name, then either `0` and every
+fact under its namespace that breaks it, as the file's index and the fact's index in that file, or the code of its
+refusal, its detail, and the line and column of its name. -/
 unsafe def judge (env : Environment) (request : Rules) : IO ByteArray := do
   let edges := request.files.foldl (init := #[]) fun edges facts =>
     facts.foldl (init := edges) fun edges fact =>
@@ -252,23 +328,34 @@ unsafe def judge (env : Environment) (request : Rules) : IO ByteArray := do
     let some moduleIndex := env.getModuleIdx? rulesModule.module
       | throw <| IO.userError s!"module {rulesModule.module} was not imported"
     for name in ruleAttribute.ext.getModuleEntries env moduleIndex do
-      let rule ← IO.ofExcept (env.evalConst Rule {} name)
-      let mut broken := #[]
-      let mut fileIndex : UInt32 := 0
-      for facts in request.files do
-        let mut factIndex : UInt32 := 0
-        for fact in facts do
-          if rule.breaks rulesModule.namespace_ graph fact then
-            broken := broken.push (fileIndex, factIndex)
-          factIndex := factIndex + 1
-        fileIndex := fileIndex + 1
-      found := found.push (index, name, broken)
+      let evaluated : Except Refusal Rule ← match ← refusalOf env name with
+        | some refusal => pure (.error refusal)
+        | none => pure <| (env.evalConst Rule {} name).mapError Refusal.unevaluable
+      let judged : Except (Refusal × Nat × Nat) (Array (UInt32 × UInt32)) ← match evaluated with
+        | .error refusal => pure (.error (refusal, ← placeOf env name))
+        | .ok rule => do
+          let mut broken := #[]
+          let mut fileIndex : UInt32 := 0
+          for facts in request.files do
+            let mut factIndex : UInt32 := 0
+            for fact in facts do
+              if rule.breaks rulesModule.namespace_ graph fact then
+                broken := broken.push (fileIndex, factIndex)
+              factIndex := factIndex + 1
+            fileIndex := fileIndex + 1
+          pure (.ok broken)
+      found := found.push (index, name, judged)
     index := index + 1
   let mut b := putU32 (header brokenResponse) found.size.toUInt32
-  for (moduleIndex, name, broken) in found do
-    b := putU32 (putString (putU32 b moduleIndex) name.toString) broken.size.toUInt32
-    for (fileIndex, factIndex) in broken do
-      b := putU32 (putU32 b fileIndex) factIndex
+  for (moduleIndex, name, judged) in found do
+    b := putString (putU32 b moduleIndex) name.toString
+    match judged with
+    | .ok broken =>
+      b := putU32 (putU8 b 0) broken.size.toUInt32
+      for (fileIndex, factIndex) in broken do
+        b := putU32 (putU32 b fileIndex) factIndex
+    | .error (refusal, line, column) =>
+      b := putU32 (putU32 (putString (putU8 b refusal.code) refusal.detail) line.toUInt32) column.toUInt32
   return b
 
 partial def readAll (stream : IO.FS.Stream) (bytes : ByteArray := .empty) : IO ByteArray := do

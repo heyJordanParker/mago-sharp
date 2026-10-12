@@ -6,6 +6,8 @@ use mago_reporting::Issue;
 use mago_span::Span;
 
 use crate::package::Message;
+use crate::runner::Refusal;
+use crate::runner::Refused;
 use crate::translate::Law;
 use crate::translate::Unmodeled;
 
@@ -175,6 +177,31 @@ pub(crate) fn broken_rule(span: Span, fact: &str, rule: &str, rules: &str) -> Is
         .with_annotation(Annotation::primary(span))
 }
 
+/// A rule of the `Module.lean` `rules` that the runner did not run, on each file of the namespace it constrains, since
+/// the rule cannot check them.
+pub(crate) fn refused_rule(span: Span, rules: &str, namespace: &str, rule: &str, refused: &Refused) -> Issue {
+    let reason = match &refused.refusal {
+        Refusal::Gap => "it uses sorry. Write the rule out".to_owned(),
+        Refusal::Axiom(axiom) => format!("it uses the axiom {axiom}, which Lean's kernel does not check"),
+        Refusal::Unsafe(name) => format!("it reaches {name}, which is unsafe, so Lean's kernel does not check it"),
+        Refusal::ImplementedBy(name) => {
+            format!("it reaches {name}, whose compiled code is not the definition Lean checked")
+        }
+        Refusal::Reserved(name) => format!(
+            "it reaches {name}, which makes a namespace from a string. Name the namespace by its full name, as App.Shared.Schema"
+        ),
+        Refusal::Unevaluable(message) => format!("Lean cannot evaluate it: {}", one_line(message)),
+    };
+
+    Issue::error(format!(
+        "This file is in {namespace}, whose structure rules {rules} holds, and its rule {rule} at line {}, column {} does not run: {reason}.",
+        refused.line,
+        refused.column + 1
+    ))
+    .with_code(IssueCode::BrokenRule.as_str())
+    .with_annotation(Annotation::primary(span))
+}
+
 /// An error of a `Module.lean` Lean rejected, on each file of the namespace its rules constrain, since no rule of it can
 /// check them.
 pub(crate) fn rejected_rules(span: Span, rules: &str, namespace: &str, error: &Message) -> Issue {
@@ -212,13 +239,22 @@ pub(crate) fn rejected_lean(span: Span, file: &str, namespace: &str, error: &Mes
 /// `rejection` followed by where Lean reported `error`, with its column counted from 1, and its whole message, each
 /// line joined to the next by one space.
 fn rejected_lean_error(span: Span, rejection: String, error: &Message) -> Issue {
-    let lines: Vec<&str> = error.data.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
-    let message = lines.join(" ");
-    let message = message.strip_suffix('.').unwrap_or(&message);
+    Issue::error(format!(
+        "{rejection} line {}, column {}: {}.",
+        error.pos.line,
+        error.pos.column + 1,
+        one_line(&error.data)
+    ))
+    .with_code(IssueCode::BrokenRule.as_str())
+    .with_annotation(Annotation::primary(span))
+}
 
-    Issue::error(format!("{rejection} line {}, column {}: {message}.", error.pos.line, error.pos.column + 1))
-        .with_code(IssueCode::BrokenRule.as_str())
-        .with_annotation(Annotation::primary(span))
+/// Lean's `message` on one line: each line trimmed and joined to the next by one space, without its final period.
+fn one_line(message: &str) -> String {
+    let lines: Vec<&str> = message.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let message = lines.join(" ");
+
+    message.strip_suffix('.').unwrap_or(&message).to_owned()
 }
 
 /// A `Module.lean` in no PSR-4 folder, on each file under its folder, since none of its rules can run.
