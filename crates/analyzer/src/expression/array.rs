@@ -240,10 +240,13 @@ where
                                 item_key_type.clone()
                             } else {
                                 let item_key_type_id = display_value_type(context, item_key_type, &get_arraykey());
-                                context.collector.report_with_code(
-                                    IssueCode::InvalidArrayElementKey,
-                                    map_key_error(&item_key_type_id, key_value_array_element.key.span()),
+                                let error = map_key_error(
+                                    context,
+                                    item_key_type,
+                                    &item_key_type_id,
+                                    key_value_array_element.key.span(),
                                 );
+                                context.collector.report_with_code(IssueCode::InvalidArrayElementKey, error);
 
                                 get_never()
                             }

@@ -165,28 +165,39 @@ where
     // A PHP# local, parameter, `field` or property is the collections it is declared as, so an element written into it
     // must fit the elements of each of them, and the place keeps its type. An `int` written where the elements are
     // `float` is reported at the value, when every refusal is for that `int`, as `are_parts_contained_by` decides for
-    // a union's parts. A property's other mismatches are `property_assignment`'s to report, and its key is the index
-    // checks'.
+    // a union's parts. A property's other mismatches are `property_assignment`'s to report. A key that does not fit is
+    // the index checks' to report, and the place keeps its type there too.
     if context.dialect.is_sharp()
         && let Some(declared) = get_declared_collection(context, block_context, artifacts, root_array_expression)
     {
-        let declared_elements: Vec<TUnion> = declared
+        let declared_parameters: Vec<(TUnion, TUnion)> = declared
             .types
             .iter()
             .filter_map(|atomic| match atomic {
-                TAtomic::Array(collection) => Some(get_array_parameters(collection, context.codebase).1),
+                TAtomic::Array(collection) => Some(get_array_parameters(collection, context.codebase)),
                 _ => None,
             })
             .collect();
         let mut fits = true;
         let mut refused_otherwise = false;
+        let mut keeps_type = false;
         for atomic in root_array_type.types.iter() {
             let TAtomic::Array(written) = atomic else {
                 continue;
             };
-            let written_element = get_array_parameters(written, context.codebase).1;
+            let (written_key, written_element) = get_array_parameters(written, context.codebase);
 
-            for declared_element in &declared_elements {
+            for (declared_key, declared_element) in &declared_parameters {
+                keeps_type |= !union_comparator::is_contained_by(
+                    context.codebase,
+                    &written_key,
+                    declared_key,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::with_sharp_rules(true),
+                );
+
                 let mut element_result = ComparisonResult::with_sharp_rules(true);
                 if !union_comparator::is_contained_by(
                     context.codebase,
@@ -219,7 +230,7 @@ where
                     };
                     report_int_for_float(context, code, value, &declared);
 
-                    root_array_type = declared;
+                    keeps_type = true;
                 }
                 (None, Some(access)) => {
                     let name = String::from_utf8_lossy(access.name.value());
@@ -237,10 +248,13 @@ where
                             )),
                     );
 
-                    root_array_type = declared;
+                    keeps_type = true;
                 }
                 (None, None) => {}
             }
+        }
+        if keeps_type {
+            root_array_type = declared;
         }
     }
 

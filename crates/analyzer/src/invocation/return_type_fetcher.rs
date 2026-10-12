@@ -25,6 +25,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
+use crate::invocation::InvocationTarget;
 use crate::invocation::resolver::resolve_invocation_type;
 use crate::statement::function_like::map_key_error;
 use crate::utils::names::display_sharp_type;
@@ -46,7 +47,7 @@ where
         return Ok(return_type);
     }
 
-    if context.dialect.is_sharp() && is_method(invocation, b"Sharp\\SetMethods", b"filter") {
+    if context.dialect.is_sharp() && is_method(&invocation.target, b"Sharp\\SetMethods", b"filter") {
         return Ok(fetch_set_filter_return_type(context, invocation, template_result, parameters));
     }
 
@@ -58,15 +59,14 @@ where
             .get(&(invocation.span.start.offset, invocation.span.end.offset))
             .map(Vec::as_slice)
     {
-        if is_collection_method(invocation, b"sortedBy") {
+        if is_collection_method(&invocation.target, b"sortedBy") {
             check_sorted_by_key(context, selector, key_type);
-        } else if (is_collection_method(invocation, b"groupBy") || is_collection_method(invocation, b"associateBy"))
+        } else if keys_a_map_by_its_function(&invocation.target)
             && !get_backing_key_type(key_type, context.codebase).is_always_array_key(true)
         {
             let key_name = display_sharp_type(context, key_type);
-            context
-                .collector
-                .report_with_code(IssueCode::TemplateConstraintViolation, map_key_error(&key_name, selector.span()));
+            let error = map_key_error(context, key_type, &key_name, selector.span());
+            context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
 
             // The refused key is an error, so the code that reads the `Map` adds no second issue.
             let declared = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
@@ -100,7 +100,7 @@ fn fetch_list_wrap_return_type<A>(
 where
     A: Arena,
 {
-    if !is_method(invocation, b"Sharp\\List", b"wrap") {
+    if !is_method(&invocation.target, b"Sharp\\List", b"wrap") {
         return None;
     }
 
@@ -182,17 +182,24 @@ where
     TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
 }
 
-/// Whether `invocation` calls the method `method` on a PHP# `List`, `Map` or `Set`.
-fn is_collection_method(invocation: &Invocation<'_, '_, '_>, method: &[u8]) -> bool {
-    [b"Sharp\\ListMethods".as_slice(), b"Sharp\\MapMethods", b"Sharp\\SetMethods"]
-        .into_iter()
-        .any(|class| is_method(invocation, class, method))
+/// Whether `target` is a PHP# `List`'s or `Map`'s `groupBy` or `associateBy`, which key a `Map` by what their function
+/// returns. A `.sharp` call checks that key by spec section 12's rule, where a backed enum keys a `Map` as its backing
+/// value, so it infers their `G` without the `array-key` bound a `.php` call checks it by.
+pub(crate) fn keys_a_map_by_its_function(target: &InvocationTarget<'_>) -> bool {
+    is_collection_method(target, b"groupBy") || is_collection_method(target, b"associateBy")
 }
 
-/// Whether `invocation` calls the method `method` of the class `class`.
-fn is_method(invocation: &Invocation<'_, '_, '_>, class: &[u8], method: &[u8]) -> bool {
+/// Whether `target` is the method `method` of a PHP# `List`, `Map` or `Set`.
+fn is_collection_method(target: &InvocationTarget<'_>, method: &[u8]) -> bool {
+    [b"Sharp\\ListMethods".as_slice(), b"Sharp\\MapMethods", b"Sharp\\SetMethods"]
+        .into_iter()
+        .any(|class| is_method(target, class, method))
+}
+
+/// Whether `target` is the method `method` of the class `class`.
+fn is_method(target: &InvocationTarget<'_>, class: &[u8], method: &[u8]) -> bool {
     matches!(
-        invocation.target.get_function_like_identifier(),
+        target.get_function_like_identifier(),
         Some(FunctionLikeIdentifier::Method(called_class, called_method))
             if called_class.as_bytes().eq_ignore_ascii_case(class) && called_method.as_bytes().eq_ignore_ascii_case(method)
     )

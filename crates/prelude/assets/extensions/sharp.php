@@ -210,9 +210,7 @@ final class ListMethods
     public function any(\Closure $predicate): bool {}
 
     /**
-     * The analyzer refuses a `G` that keys no `Map`, which a docblock bound cannot say, since a backed enum keys one.
-     *
-     * @template G
+     * @template G of array-key
      *
      * @param \Closure(T): G $key
      *
@@ -223,9 +221,7 @@ final class ListMethods
     public function groupBy(\Closure $key): array {}
 
     /**
-     * The analyzer refuses a `G` that keys no `Map`, as for `groupBy`.
-     *
-     * @template G
+     * @template G of array-key
      *
      * @param \Closure(T): G $key
      *
@@ -350,9 +346,7 @@ final class MapMethods
     public function any(\Closure $predicate): bool {}
 
     /**
-     * The analyzer refuses a `G` that keys no `Map`, as for a `List`'s `groupBy`.
-     *
-     * @template G
+     * @template G of array-key
      *
      * @param \Closure(V): G $key
      *
@@ -363,9 +357,7 @@ final class MapMethods
     public function groupBy(\Closure $key): array {}
 
     /**
-     * The analyzer refuses a `G` that keys no `Map`, as for a `List`'s `groupBy`.
-     *
-     * @template G
+     * @template G of array-key
      *
      * @param \Closure(V): G $key
      *

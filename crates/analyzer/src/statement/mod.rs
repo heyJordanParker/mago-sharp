@@ -6,6 +6,7 @@ use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::scanner::get_union_from_hint;
+use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
@@ -34,7 +35,6 @@ use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ExpressionStatement;
 use mago_syntax::cst::ForOf;
-use mago_syntax::cst::ForOfKeyValueTarget;
 use mago_syntax::cst::ForOfTarget;
 use mago_syntax::cst::ForOfVariable;
 use mago_syntax::cst::Foreach;
@@ -65,6 +65,7 @@ use crate::expression::assignment::analyze_assignment;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::statement::function_like::report_map_keys_without_backing_value;
+use crate::statement::function_like::report_undefined_types;
 use crate::statement::function_like::report_unsupported_set_elements;
 use crate::utils::docblock::populate_docblock_variables;
 use crate::utils::docblock::populate_docblock_variables_excluding;
@@ -73,6 +74,7 @@ use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_function_like_id_from_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
+use crate::utils::quoted_source;
 
 pub mod attributes;
 pub mod class_like;
@@ -383,6 +385,7 @@ where
     );
 
     let local_type = (Rc::new(local_type), hint.span());
+    report_undefined_types(context, &local_type.0, local_type.1);
     report_map_keys_without_backing_value(context, &local_type.0, local_type.1);
     report_unsupported_set_elements(context, &local_type.0, local_type.1);
     block_context.local_types.insert(variable_id, local_type.clone());
@@ -428,58 +431,64 @@ where
 
     foreach.analyze(context, block_context, artifacts)?;
 
-    if let ForOfTarget::KeyValue(pair) = &for_of.target {
-        report_key_mixing_a_backed_enum(context, artifacts, for_of, pair);
+    if let ForOfTarget::KeyValue(pair) = &for_of.target
+        && artifacts
+            .get_expression_type(for_of.expression)
+            .is_some_and(|map_type| keys_mix_a_backed_enum(context, map_type))
+    {
+        report_keys_read_back(context, IssueCode::InvalidForeachKey, for_of.expression, "the loop", pair.key.span());
     }
 
     Ok(())
 }
 
-/// Reports a loop over a `Map` whose key type mixes a backed enum with other types. The engine holds each key as its
-/// backing value, and the lowering reads it back as a case only through one enum's `from`.
-fn report_key_mixing_a_backed_enum<A>(
+/// Whether the keys of the `Map`s that `map_type` may be, taken together, mix a backed enum with other types, as
+/// `Status|int` or `Status|Rank` do. The engine holds each key of a `Map` as its backing value, and reads it back as a
+/// case only through one enum.
+pub(crate) fn keys_mix_a_backed_enum<A>(context: &Context<'_, '_, A>, map_type: &TUnion) -> bool
+where
+    A: Arena,
+{
+    let key_type = map_type.types.iter().fold(None, |key_type, atomic| match atomic {
+        TAtomic::Array(TArray::Keyed(keyed_array)) => keyed_array
+            .get_generic_parameters()
+            .map(|(key, _)| add_optional_union_type(key.clone(), key_type.as_ref(), context.codebase))
+            .or(key_type),
+        _ => key_type,
+    });
+    let Some(key_type) = key_type else {
+        return false;
+    };
+    let mut keys = key_type.types.iter().filter(|atomic| !atomic.is_null());
+    let is_one_enum = match keys.next() {
+        Some(TAtomic::Object(TObject::Enum(first))) => {
+            keys.all(|atomic| matches!(atomic, TAtomic::Object(TObject::Enum(other)) if other.name == first.name))
+        }
+        _ => false,
+    };
+
+    matches!(get_backing_key_type(&key_type, context.codebase), Cow::Owned(_)) && !is_one_enum
+}
+
+/// Reports the `Map` `collection`, whose keys mix a backed enum with other types, where `reader`, the loop or `keys()`,
+/// reads them back at `span`.
+pub(crate) fn report_keys_read_back<A>(
     context: &mut Context<'_, '_, A>,
-    artifacts: &AnalysisArtifacts,
-    for_of: &ForOf<'_>,
-    pair: &ForOfKeyValueTarget<'_>,
+    code: IssueCode,
+    collection: &Expression<'_>,
+    reader: &str,
+    span: Span,
 ) where
     A: Arena,
 {
-    let Some(collection_type) = artifacts.get_expression_type(for_of.expression) else {
-        return;
-    };
-    let is_one_enum = |key_type: &TUnion| match key_type.types.first() {
-        Some(TAtomic::Object(TObject::Enum(first))) => key_type
-            .types
-            .iter()
-            .all(|atomic| matches!(atomic, TAtomic::Object(TObject::Enum(other)) if other.name == first.name)),
-        _ => false,
-    };
-    let mixes_a_backed_enum = collection_type.types.iter().any(|atomic| match atomic {
-        TAtomic::Array(TArray::Keyed(keyed_array)) => {
-            keyed_array.get_generic_parameters().is_some_and(|(key_type, _)| {
-                matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_enum(key_type)
-            })
-        }
-        _ => false,
-    });
-    if !mixes_a_backed_enum {
-        return;
-    }
-
-    let collection = context
-        .source_file
-        .contents
-        .get(for_of.expression.span().start.offset as usize..for_of.expression.span().end.offset as usize)
-        .map(|text| String::from_utf8_lossy(text).into_owned())
-        .unwrap_or_default();
+    let collection = quoted_source(context, collection.span());
 
     context.collector.report_with_code(
-        IssueCode::InvalidForeachKey,
+        code,
         Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so the loop cannot read them back."
+            "The keys of `{collection}` mix a backed enum with other types, so {reader} cannot read them back."
         ))
-        .with_annotation(Annotation::primary(pair.key.span()).with_message("Its key is read here."))
+        .with_annotation(Annotation::primary(span).with_message("Its key is read here."))
         .with_note(
             "The engine holds each key as its backing value, and reads it back as a case through one enum's `from`.",
         )

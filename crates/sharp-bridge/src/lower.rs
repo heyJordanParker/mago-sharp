@@ -2262,14 +2262,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         Some(self.node(SHARP_AST_CAST, IS_STRING, line, &[stored_key]))
     }
 
-    /// `keys`, the list of the keys a `Map` of `map_type` stores, each read back as [`Self::key_read_back`] reads a
+    /// `keys`, the list of the keys of `key_type` a `Map` stores, each read back as [`Self::key_read_back`] reads a
     /// loop's key, as in `\array_map(fn ($key#N) => (string) $key#N, $keys)` for a `Map<string, V>`. `keys` alone
     /// where each stored key is the key the `Map` was given.
-    fn keys_read_back(&mut self, span: Span, map_type: &TUnion, keys: u32) -> u32 {
+    fn keys_read_back(&mut self, span: Span, key_type: &TUnion, keys: u32) -> u32 {
         self.temporaries += 1;
         let key = format!("key#{}", self.temporaries).into_bytes();
-        let read_back =
-            self.types.map_key_type(map_type).and_then(|key_type| self.key_read_back(span, &key, &key_type));
+        let read_back = self.key_read_back(span, &key, key_type);
         self.temporaries -= 1;
         let Some(read_back) = read_back else {
             return keys;
@@ -2556,7 +2555,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[array]);
                 let called = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
                 if method == b"keys" {
-                    self.keys_read_back(call.span(), self.types.expression_type(receiver), called)
+                    let key_type = self.types.element_type(self.types.expression_type(call));
+                    self.keys_read_back(call.span(), &key_type, called)
                 } else {
                     called
                 }

@@ -75,11 +75,14 @@ use crate::resolver::method::report_non_existent_method;
 use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::resolver::static_property::StaticProperty;
+use crate::statement::keys_mix_a_backed_enum;
+use crate::statement::report_keys_read_back;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
 use crate::utils::names::display_type;
 use crate::utils::names::sharp_collection_name;
+use crate::utils::quoted_source;
 use crate::visibility::check_method_visibility;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodCall<'arena> {
@@ -356,6 +359,16 @@ where
                     .iter()
                     .any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
         });
+    let takes_map_key = context.dialect.is_sharp()
+        && !refused_on_object
+        && method_resolution.resolved_methods.iter().any(|method| {
+            let name = method.method_identifier.get_method_name();
+
+            sharp_collection_name(&TObject::new_named(method.classname)) == Some("Map")
+                && ["get", "has", "remove", "keys"]
+                    .iter()
+                    .any(|keyed| keyed.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        });
 
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
@@ -509,6 +522,21 @@ where
         check_element_equality(context, &method, object, value, &element_type, value_type, is_null_safe);
     }
 
+    // The engine holds a `Map`'s key as its backing value, and reads it back as a case only through one enum. A `Map`
+    // whose keys mix a backed enum with other types cannot read them back in `keys()`, and its `get`, `has` and
+    // `remove` cannot tell a case from the key of its backing value.
+    if takes_map_key
+        && let ClassLikeMemberSelector::Identifier(method) = selector
+        && let Some(map_type) = artifacts.get_expression_type(object)
+        && keys_mix_a_backed_enum(context, map_type)
+    {
+        if method.value.eq_ignore_ascii_case(b"keys") {
+            report_keys_read_back(context, IssueCode::InvalidArrayAccess, object, "`keys()`", selector.span());
+        } else if let Some(key) = argument_list.arguments.first().map(Argument::value) {
+            report_key_mixing_a_backed_enum(context, object, key, method.value);
+        }
+    }
+
     if !method_resolution.undocumented_methods.is_empty() {
         analyze_undocumented_method_return_type(
             context,
@@ -537,6 +565,32 @@ where
 /// The bridge lowers such a call to PHP on the array from the checker's one collection method, so an object the value
 /// holds never reaches its own method of that name, and a value that may be another collection runs as a
 /// `Sharp\Collection` method that is not that collection's. Returns whether it reported the call.
+/// Reports the key `key` that `method`, the `get`, `has` or `remove` of the `Map` `collection`, is given, where the keys
+/// of `collection` mix a backed enum with other types.
+fn report_key_mixing_a_backed_enum<A>(
+    context: &mut Context<'_, '_, A>,
+    collection: &Expression<'_>,
+    key: &Expression<'_>,
+    method: &[u8],
+) where
+    A: Arena,
+{
+    let collection = quoted_source(context, collection.span());
+    let method = String::from_utf8_lossy(method);
+
+    context.collector.report_with_code(
+        IssueCode::InvalidArgument,
+        Issue::error(format!(
+            "The keys of `{collection}` mix a backed enum with other types, so `{method}` cannot tell them apart."
+        ))
+        .with_annotation(Annotation::primary(key.span()).with_message("Its key is looked up here."))
+        .with_note(
+            "The engine holds each key as its backing value, so a case and the `int` or `string` key of its backing value share one entry.",
+        )
+        .with_help("Key the `Map` by one backed enum alone."),
+    );
+}
+
 fn report_collection_method_on_object<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,

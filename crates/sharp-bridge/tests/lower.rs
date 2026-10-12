@@ -2820,18 +2820,20 @@ fn set_methods_read_and_change_each_element_under_its_key() {
 /// $tags = \Sharp\Set::from($tags);
 /// $count = \count($tags);
 /// $kept = $tags->filterValues($keep);
+/// $priced = $prices->filterValues($positive);
 /// $tags->any($keep);
 /// return \array_values($tags);
 /// ```
 ///
-/// `count` and `toList` are PHP's functions on the array. `filter` keeps each element under its key, as
-/// `Sharp\Collection`'s `filterValues` does, and any other `Set` method is the `Sharp\Collection` method of its name.
+/// `count` and `toList` are PHP's functions on the array. A `Set`'s and a `Map`'s `filter` keep each element under its
+/// key, as `Sharp\Collection`'s `filterValues` does, and any other `Set` method is the `Sharp\Collection` method of its
+/// name.
 #[test]
 fn set_count_to_list_and_filter_are_the_php_that_reads_the_array() {
     assert_eq!(
         body_in(
-            "List<string> run(Set<string> tags, Function<bool(string)> keep)",
-            "        const count = tags.count();\n        const kept = tags.filter(keep);\n        tags.any(keep);\n        return tags.toList();\n",
+            "List<string> run(Set<string> tags, Function<bool(string)> keep, Map<string, int> prices, Function<bool(int)> positive)",
+            "        const count = tags.count();\n        const kept = tags.filter(keep);\n        const priced = prices.filter(positive);\n        tags.any(keep);\n        return tags.toList();\n",
             &[]
         ),
         indoc! {r#"
@@ -2863,6 +2865,16 @@ fn set_count_to_list_and_filter_are_the_php_that_reads_the_array() {
                   ARG_LIST
                     VAR
                       ZVAL "keep"
+              ASSIGN
+                VAR
+                  ZVAL "priced"
+                METHOD_CALL
+                  VAR
+                    ZVAL "prices"
+                  ZVAL "filterValues"
+                  ARG_LIST
+                    VAR
+                      ZVAL "positive"
               METHOD_CALL
                 VAR
                   ZVAL "tags"
@@ -4744,7 +4756,7 @@ fn let_and_const_locals_assign_their_variables() {
 #[test]
 fn typed_locals_assign_their_variables_and_drop_the_type() {
     assert_eq!(
-        body("        Calc? found = null;\n        const int base = 2;\n        return base;\n"),
+        body("        string? found = null;\n        const int base = 2;\n        return base;\n"),
         indoc! {r#"
             STMT_LIST
               ASSIGN
@@ -8962,21 +8974,23 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 /// $names = \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($skus));
 /// $ids = \array_keys($keys);
 /// $maybe = ($optional === null) ? null : \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($optional));
+/// $stock['5'] = 1;
+/// $stocked = \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($stock));
 /// foreach (\Lib\Calc::rows() as $row => $n) {
 /// }
 /// ```
 ///
 /// A `Map` keyed by a backed enum holds each key as its backing value, so a loop and `keys()` read each key back as
 /// its case, through `from` on the enum. PHP stores an all-digit `string` key as an `int`, so a loop over a
-/// `Map<string, V>` and its `keys()` read each key back through `(string)`, a null-safe `keys()` too. Both follow the
-/// `Map`'s key type, written on the key or not. An `int` key type changes nothing, and a loop over a PHP iterable that
+/// `Map<string, V>` and its `keys()` read each key back through `(string)`, a null-safe `keys()` too, and a `keys()`
+/// after a write of the key `"5"`. Both follow the `Map`'s key type, written on the key or not. An `int` key type changes nothing, and a loop over a PHP iterable that
 /// is no array, such as a `Generator`, takes each key as it comes.
 #[test]
 fn a_map_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
     assert_eq!(
         body_in(
-            "int run(int extra, Map<Calc, int> statuses, Map<string, int> skus, Map<int, int> keys, Map<string, int>? optional)",
-            "        for (const [status, int n] of statuses) {\n            extra += n;\n        }\n        for (const [string sku, n] of skus) {\n        }\n        for (const [key, n] of keys) {\n        }\n        const cases = statuses.keys();\n        const names = skus.keys();\n        const ids = keys.keys();\n        const maybe = optional?.keys();\n        for (const [row, n] of Calc.rows()) {\n        }\n        return 1;\n",
+            "int run(int extra, Map<Calc, int> statuses, Map<string, int> skus, Map<int, int> keys, Map<string, int>? optional, Map<string, int> stock)",
+            "        for (const [status, int n] of statuses) {\n            extra += n;\n        }\n        for (const [string sku, n] of skus) {\n        }\n        for (const [key, n] of keys) {\n        }\n        const cases = statuses.keys();\n        const names = skus.keys();\n        const ids = keys.keys();\n        const maybe = optional?.keys();\n        stock[\"5\"] = 1;\n        const stocked = stock.keys();\n        for (const [row, n] of Calc.rows()) {\n        }\n        return 1;\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; /** @return \\Generator<string, int> */ public static function rows(): \\Generator { yield 'a' => 1; } }"
@@ -9125,6 +9139,38 @@ fn a_map_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
                         ARG_LIST
                           VAR
                             ZVAL "optional"
+              ASSIGN
+                DIM
+                  VAR
+                    ZVAL "stock"
+                  ZVAL "5"
+                ZVAL 1
+              ASSIGN
+                VAR
+                  ZVAL "stocked"
+                CALL
+                  ZVAL "array_map"
+                  ARG_LIST
+                    ARROW_FUNC "" @21-21
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "key#1"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      CAST [6]
+                        VAR
+                          ZVAL "key#1"
+                      null
+                      null
+                    CALL
+                      ZVAL "array_keys"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
               FOREACH
                 STATIC_CALL
                   ZVAL "Lib\\Calc"

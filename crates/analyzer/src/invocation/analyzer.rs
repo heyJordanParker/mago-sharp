@@ -8,6 +8,7 @@ use mago_bytes::BytesDisplay;
 use mago_bytes::trim_start_byte;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_union_type;
@@ -60,6 +61,7 @@ use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
 use crate::invocation::resolver::resolve_invocation_type;
+use crate::invocation::return_type_fetcher::keys_a_map_by_its_function;
 use crate::invocation::template_inference::infer_parameter_templates_from_argument;
 use crate::invocation::template_inference::infer_parameter_templates_from_default;
 use crate::invocation::template_result::get_class_template_parameters_from_result;
@@ -185,6 +187,13 @@ where
     }
 
     populate_template_result_from_invocation(context, invocation, template_result);
+    if context.dialect.is_sharp() && keys_a_map_by_its_function(&invocation.target) {
+        for template in template_result.template_types.values_mut().flatten() {
+            if matches!(template.defining_entity, GenericParent::FunctionLike(_)) {
+                template.constraint = get_mixed();
+            }
+        }
+    }
 
     let arg_count = invocation.arguments_source.argument_count();
     let mut analyzed_argument_types = HashMap::default();
@@ -1477,6 +1486,11 @@ where
         _ => invocation_target_parameter.get_type(),
     };
     let parameter_type = parameter_type.cloned().unwrap_or_else(get_mixed);
+    let parameter_type = if context.dialect.is_sharp() && keys_a_map_by_its_function(invocation_target) {
+        without_method_template_bounds(&parameter_type)
+    } else {
+        parameter_type
+    };
 
     resolve_type_in_class_context(
         context,
@@ -1486,6 +1500,27 @@ where
         calling_instance_type,
         method_class_type,
     )
+}
+
+/// `union` with each template its method defines unbounded, there and in the return type of a function type it holds,
+/// as the `G` of `\Closure(T): G`.
+fn without_method_template_bounds(union: &TUnion) -> TUnion {
+    let types = union.types.iter().map(|atomic| match atomic {
+        TAtomic::GenericParameter(parameter) if matches!(parameter.defining_entity, GenericParent::FunctionLike(_)) => {
+            TAtomic::GenericParameter(parameter.with_constraint(get_mixed()))
+        }
+        TAtomic::Callable(TCallable::Signature(signature)) => {
+            let mut signature = signature.clone();
+            if let Some(return_type) = signature.get_return_type_mut() {
+                *return_type = without_method_template_bounds(return_type);
+            }
+
+            TAtomic::Callable(TCallable::Signature(signature))
+        }
+        atomic => atomic.clone(),
+    });
+
+    union.clone_with_types(types.collect())
 }
 
 /// Expands `self`/`static`/`parent` and class-level context in a type declared on a function-like,

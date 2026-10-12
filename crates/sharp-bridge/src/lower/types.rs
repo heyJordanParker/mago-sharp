@@ -223,11 +223,10 @@ impl<'analysis> Types<'analysis> {
         }
     }
 
-    /// The type of the keys a value of `r#type` holds, leaving out `null`, or none when another part of it is no `Map`
-    /// or `List`.
+    /// The type of the keys a value of `r#type` holds, or none when part of it is no `Map` or `List`.
     pub(crate) fn map_key_type(&self, r#type: &TUnion) -> Option<TUnion> {
         let mut key_type = None;
-        for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
+        for atomic in r#type.types.iter() {
             let TAtomic::Array(array) = atomic else {
                 return None;
             };
