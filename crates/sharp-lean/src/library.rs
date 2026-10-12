@@ -7,6 +7,8 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Output;
+use std::time::Duration;
 
 use mago_build_id::BUILD_ID;
 use sha2::Digest;
@@ -248,15 +250,32 @@ fn install_elan(url: &str, archive: &Archive, home: &Path) -> io::Result<()> {
     for folder in [home, &staging] {
         remove_folder(folder)?;
     }
-    let output = Command::new(unpacked.path().join("elan-init"))
-        .args(["-y", "--no-modify-path", "--default-toolchain", "none"])
-        .env("ELAN_HOME", &staging)
-        .output()?;
+    let output = run_unpacked(
+        Command::new(unpacked.path().join("elan-init"))
+            .args(["-y", "--no-modify-path", "--default-toolchain", "none"])
+            .env("ELAN_HOME", &staging),
+    )?;
     if !output.status.success() {
         return Err(io::Error::other(format!("elan-init failed: {}", String::from_utf8_lossy(&output.stderr).trim())));
     }
 
     fs::rename(&staging, home)
+}
+
+/// Runs `command`, whose program was just written, and runs it again while Linux refuses it as "Text file busy", for up
+/// to a second. A process another thread forks while the program is still open for writing holds that handle until it
+/// starts its own program, and Linux refuses to start a file open for writing.
+fn run_unpacked(command: &mut Command) -> io::Result<Output> {
+    for _ in 0..50 {
+        match command.output() {
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            output => return output,
+        }
+    }
+
+    command.output()
 }
 
 /// Whether the elan in `home` has the library's Lean version installed.
