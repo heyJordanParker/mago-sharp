@@ -20,7 +20,8 @@ The constructor of `Namespace` is private, so `⟨"App.Shared.Ledgr"⟩` is refu
 
 namespace Sharp
 
-/-- One namespace of the codebase, by its full name. Only `namespace_decl` makes one. -/
+/-- One namespace of the codebase, by its full name. A rule gets one only from `namespace_decl`: the runner refuses a
+rule that reaches the constructor or `Rule.breaks`. -/
 structure Namespace where
   private mk ::
   /-- Dot separated: "App.Shared.Schema". -/
@@ -214,8 +215,8 @@ def Rule.noImportCycles : Rule :=
   .importsIn fun _ => Graph.onCycle
 
 /-- Whether `fact` breaks `rule`, which the Module.lean of the namespace `ns` holds: the fact sits under `ns` and the
-rule breaks it there. The runner names `ns` as its request does, so this is the one place a rule gets a namespace no
-`namespace_decl` made. -/
+rule breaks it there. The runner names `ns` as its request does, so this is the one place a namespace comes from a
+string, and the runner refuses a rule that reaches it. -/
 def Rule.breaks (rule : Rule) (ns : String) (graph : Graph) (fact : Fact) : Bool :=
   let ns : Namespace := ⟨ns⟩
   under fact.namespace_ ns && match rule with
