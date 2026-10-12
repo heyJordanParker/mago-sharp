@@ -4070,16 +4070,18 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 /// (${'receiver#1'} = $this->me())->sizes['c'] ?? ${'receiver#1'}->sizes->put('c', 3);
 /// ```
 ///
-/// A write into a `Map` a property holds reaches the property, and its hooks, only through the engine's collection of
-/// the property, as a change through a `List` index reaches the element. So it is a `put` on the property, and a `??=`
-/// puts only for a missing key, holding an object that runs something in a hidden variable.
+/// PHP gives no reference to a hooked property, so a write into the `Map` one holds reaches it, and its `set` hook,
+/// only through the engine's collection of the property, as a change through a `List` index reaches the element. It
+/// is a `put` on the property, and a `??=` puts only for a missing key, holding an object that runs something in a
+/// hidden variable. A property without hooks keeps PHP's write, as `literals_are_short_arrays_and_an_index_is_a_dim`
+/// shows.
 #[test]
-fn a_write_into_a_map_a_property_holds_puts_it_through_the_property() {
+fn a_write_into_a_map_a_hooked_property_holds_puts_it_through_the_property() {
     assert_eq!(
         child_body(
             "void run(int extra)",
             "        this.sizes[\"a\"] = extra;\n        this.sizes[\"b\"] ??= 2;\n        this.me().sizes[\"c\"] ??= 3;\n    }\n\n    private Report me()\n    {\n        return this;\n",
-            "<?php namespace App\\Tenant; class Base { /** @var array<string, int> */ public array $sizes = ['a' => 0]; }"
+            "<?php namespace App\\Tenant; class Base { /** @var array<string, int> */ public array $sizes = ['a' => 0] { set { $this->sizes = $value; } } }"
         ),
         indoc! {r#"
             STMT_LIST
@@ -5035,7 +5037,8 @@ fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
 /// $numbers = [1, $extra];
 /// $named = ['a' => 1, 2 => $numbers[0]];
 /// $empty = [];
-/// $named['b'] = ($this->sizes['a'] ?? 0) + $numbers[0];
+/// $named['b'] = $numbers[0];
+/// $this->sizes['a'] = ($this->sizes['a'] ?? 0) + 1;
 /// return $numbers[1];
 /// ```
 ///
@@ -5046,7 +5049,7 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
     assert_eq!(
         child_body(
             RUN,
-            "        List<int> numbers = [1, extra];\n        const named = [\"a\": 1, 2: numbers[0]];\n        const Map<string, int> empty = [:];\n        named[\"b\"] = (this.sizes[\"a\"] ?? 0) + numbers[0];\n        return numbers[1];\n",
+            "        List<int> numbers = [1, extra];\n        const named = [\"a\": 1, 2: numbers[0]];\n        const Map<string, int> empty = [:];\n        named[\"b\"] = numbers[0];\n        this.sizes[\"a\"] = (this.sizes[\"a\"] ?? 0) + 1;\n        return numbers[1];\n",
             "<?php namespace App\\Tenant; class Base { /** @var array<string, int> */ public array $sizes = ['a' => 0]; }"
         ),
         indoc! {r#"
@@ -5084,6 +5087,17 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
                   VAR
                     ZVAL "named"
                   ZVAL "b"
+                DIM
+                  VAR
+                    ZVAL "numbers"
+                  ZVAL 0
+              ASSIGN
+                DIM
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "sizes"
+                  ZVAL "a"
                 BINARY_OP [1]
                   COALESCE
                     DIM
@@ -5093,10 +5107,7 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
                         ZVAL "sizes"
                       ZVAL "a"
                     ZVAL 0
-                  DIM
-                    VAR
-                      ZVAL "numbers"
-                    ZVAL 0
+                  ZVAL 1
               RETURN
                 DIM
                   VAR

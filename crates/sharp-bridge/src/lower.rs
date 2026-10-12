@@ -1641,10 +1641,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 if let Expression::ArrayAccess(access) = assignment.lhs
                     && match access.array.unparenthesized() {
                         Expression::ArrayAccess(element) => self.is_list(element.array),
-                        Expression::Access(Access::Property(property)) => {
-                            self.names.static_property_class(property).is_none()
-                                && !self.is_class_value(property.object)
-                        }
+                        Expression::Access(Access::Property(PropertyAccess {
+                            object,
+                            property: ClassLikeMemberSelector::Identifier(name),
+                            ..
+                        })) => self.types.property_has_hooks(self.types.expression_type(object), name.value),
                         _ => false,
                     }
                 {
@@ -2075,12 +2076,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
-    /// A write into the element of a `List`, a place by spec section 12, or into a `Map` a property holds, which only
-    /// the engine's collection of the element or the property reaches where it is stored, through the property's
-    /// hooks: `list[i][key] = value` is `$list[$i]->put($key, $value)`, which gives the value, and
-    /// `list[i][key] ??= value` is `$list[$i][$key] ?? $list[$i]->put($key, $value)`, which holds the index and the
-    /// key that run something in hidden variables. `this.map[key] = value` is `$this->map->put($key, $value)`. The
-    /// checker refuses every other operator there, since it reads the element of the `Map` bare.
+    /// A write into the element of a `List`, a place by spec section 12, or into a `Map` a hooked property holds, which
+    /// PHP gives no reference to. Only the engine's collection of the element or the property reaches where it is
+    /// stored, through the property's hooks: `list[i][key] = value` is `$list[$i]->put($key, $value)`, which gives the
+    /// value, and `list[i][key] ??= value` is `$list[$i][$key] ?? $list[$i]->put($key, $value)`, which holds the index
+    /// and the key that run something in hidden variables. `this.hooked[key] = value` is
+    /// `$this->hooked->put($key, $value)`. The checker refuses every other operator there, since it reads the element
+    /// of the `Map` bare.
     fn element_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
         let coalesce = match assignment.operator {
             AssignmentOperator::Assign(_) => false,
