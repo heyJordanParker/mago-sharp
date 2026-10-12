@@ -11,6 +11,8 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
@@ -355,7 +357,9 @@ where
             let name = method.method_identifier.get_method_name();
 
             sharp_collection_name(&TObject::new_named(method.classname)) == Some("List")
-                && ["contains", "indexOf"].iter().any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+                && ["contains", "indexOf", "remove"]
+                    .iter()
+                    .any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
         });
 
     let undocumented_template_result =
@@ -409,30 +413,6 @@ where
 
     if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target && !refused_on_object {
         check_changed_collection(context, block_context, artifacts, object)?;
-    }
-
-    if searches_list
-        && let ClassLikeMemberSelector::Identifier(method) = selector
-        && let Some(value) = argument_list.arguments.first().map(Argument::value)
-        && let Some(element_type) = artifacts.get_expression_type(object).and_then(|list_type| {
-            list_type.types.iter().fold(None, |element_type, atomic| match atomic {
-                TAtomic::Array(list) => Some(add_optional_union_type(
-                    get_array_parameters(list, context.codebase).1,
-                    element_type.as_ref(),
-                    context.codebase,
-                )),
-                _ => element_type,
-            })
-        })
-    {
-        check_element_equality(
-            context,
-            &String::from_utf8_lossy(method.value),
-            object,
-            value,
-            &element_type,
-            is_null_safe,
-        );
     }
 
     if !method_resolution.unresolved_methods.is_empty() {
@@ -513,6 +493,36 @@ where
             is_null_safe && method_resolution.encountered_null,
             artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null()),
         )?;
+    }
+
+    // A search compares each element with the value as `==` does, so it runs once the value's type is known. A value
+    // that is no element is refused by its argument check.
+    if searches_list
+        && let ClassLikeMemberSelector::Identifier(method) = selector
+        && let Some(value) = argument_list.arguments.first().map(Argument::value)
+        && let Some(value_type) = artifacts.get_expression_type(value)
+        && let Some(element_type) = artifacts.get_expression_type(object).and_then(|list_type| {
+            list_type.types.iter().fold(None, |element_type, atomic| match atomic {
+                TAtomic::Array(list) => Some(add_optional_union_type(
+                    get_array_parameters(list, context.codebase).1,
+                    element_type.as_ref(),
+                    context.codebase,
+                )),
+                _ => element_type,
+            })
+        })
+        && union_comparator::is_contained_by(
+            context.codebase,
+            value_type,
+            &element_type,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        )
+    {
+        let method = String::from_utf8_lossy(method.value);
+        check_element_equality(context, &method, object, value, &element_type, value_type, is_null_safe);
     }
 
     if !method_resolution.undocumented_methods.is_empty() {

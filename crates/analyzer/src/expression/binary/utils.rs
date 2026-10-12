@@ -9,6 +9,8 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::float::TFloat;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
@@ -25,6 +27,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::word;
 
@@ -67,6 +70,31 @@ pub(crate) fn can_take_operands(
             let parameter_type = expand_in_class(codebase, &method, &parameter_type.type_union);
 
             can_expression_types_be_identical(codebase, operand_type, &parameter_type, false, false)
+        })
+    })
+}
+
+/// Whether each of `operand_types` is always a value the matching parameter of the static method `method` takes, as
+/// `verify_argument_type` decides it for the call the operator runs as. `Money::op_Equality` takes no `Line` of a
+/// `Money|Line`.
+pub(crate) fn takes_operands(
+    codebase: &CodebaseMetadata,
+    (method, metadata): (MethodIdentifier, &FunctionLikeMetadata),
+    operand_types: &[&TUnion],
+) -> bool {
+    operand_types.iter().zip(&metadata.parameters).all(|(operand_type, parameter)| {
+        parameter.get_type_metadata().is_none_or(|parameter_type| {
+            let parameter_type = expand_in_class(codebase, &method, &parameter_type.type_union);
+
+            union_comparator::is_contained_by(
+                codebase,
+                operand_type,
+                &parameter_type,
+                true,
+                true,
+                false,
+                &mut ComparisonResult::for_dialect(Dialect::Sharp),
+            )
         })
     })
 }

@@ -334,6 +334,15 @@ enum CollectionReceiver<'receiver, 'ast> {
     Value(Reread<'receiver, 'ast>),
 }
 
+/// What a `List`'s search by `==` gives: whether an element equals the value, the index of the first one that does, or
+/// whether `remove` removed it.
+#[derive(Clone, Copy)]
+enum Search {
+    Contains,
+    IndexOf,
+    Remove,
+}
+
 /// One side of an `==` the lowering writes: an expression of the source, or the hidden variable `name` holding a value
 /// of `r#type`, read on the line of `span`, as the element and the value a collection search compares.
 enum Side<'side, 'ast> {
@@ -2695,9 +2704,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
         let element = || {
-            let element = arguments.arguments.first().map(Argument::value);
-
-            element.unwrap_or_else(|| unreachable!("the checker refuses a collection method without its element"))
+            arguments
+                .arguments
+                .first()
+                .map(Argument::value)
+                .unwrap_or_else(|| unreachable!("the checker refuses a collection method call without its element"))
         };
 
         let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
@@ -2707,10 +2718,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.is_null(line, receiver)
         });
         let lowered = match (collection_name, method.as_slice()) {
-            ("List", b"contains" | b"indexof") => {
+            ("List", b"contains" | b"indexof" | b"remove") => {
                 let element_type = self.types.element_type(self.types.expression_type(receiver));
+                let search = match method.as_slice() {
+                    b"contains" => Search::Contains,
+                    b"indexof" => Search::IndexOf,
+                    _ => Search::Remove,
+                };
 
-                self.element_search(call.span(), &mut collection, &element_type, element(), method == b"indexof")
+                self.element_search(call.span(), &mut collection, &element_type, element(), search)
             }
             ("List", b"last") => {
                 let list = self.read_collection(&mut collection, line, false);
@@ -2769,7 +2785,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_AND, 0, line, &[held, deleted])
             }
-            ("Set", b"clear") => {
+            ("List" | "Set", b"clear") => {
                 let place = self.read_collection(&mut collection, line, false);
                 if matches!(collection, CollectionReceiver::Value(Reread { hidden: None, .. })) {
                     // The receiver lives nowhere, so clearing it changes nothing anyone reads.
@@ -2812,25 +2828,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// A `List`'s `contains(value)`, or its `indexOf(value)` when `index` holds: whether an element of `element_type`
-    /// equals `value` by spec section 19's `==`, or the index of the first one that does, or null. Where `==` on them is
-    /// `===` and the value runs nothing, so it may run before the receiver, it is PHP's strict search,
-    /// `\in_array($value, $list, true)`, or `\array_search` with its false read as null through a hidden `$index#N`,
-    /// since index 0 is falsy. Otherwise it runs [`Self::equality`] on each element:
+    /// A `List`'s `contains(value)`, `indexOf(value)` or `remove(value)`, as `search` names it: whether an element of
+    /// `element_type` equals `value` by spec section 19's `==`, the index of the first one that does or null, or whether
+    /// `remove` removed it. Where `==` on them is `===` and neither the receiver nor the value runs code, so the value
+    /// may be read first, the search is PHP's strict `\in_array($value, $list, true)` or
+    /// `\array_search($value, $list, true)`. Otherwise it runs [`Self::equality`] on each element:
     /// `\array_find_key($list, (fn ($value#N) => fn ($element#M) => $element#M == $value#N)($value))`, which reads
-    /// the receiver before the value, as the call does, and the value once.
+    /// the receiver before the value, as the call does, and the value once. An index the search found goes into a
+    /// hidden `$index#N`, since index 0 is falsy: `indexOf` reads `\array_search`'s false as null, and `remove` gives
+    /// `($index#N = …) !== false && $list->removeAt($index#N) === null`, so `Sharp\Collection::removeAt` removes the
+    /// element, renumbers the list and writes it back where it lives.
     fn element_search(
         &mut self,
         call: Span,
         collection: &mut CollectionReceiver,
         element_type: &TUnion,
         value: &Expression,
-        index: bool,
+        search: Search,
     ) -> u32 {
         let line = self.line(call);
         let value_type = self.types.expression_type(value);
-        let identical =
-            self.declared_equality(element_type, value_type).is_none() && !mixes_numbers(element_type, value_type);
         // `\in_array` and `\array_search` read the value before the list, so they run only where neither side runs code.
         let receiver_runs_nothing = match collection {
             CollectionReceiver::Place(_) => true,
@@ -2838,57 +2855,78 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.is_pure(object.expression)
             }
         };
-        if identical && self.is_pure(value) && receiver_runs_nothing {
-            let hidden = index.then(|| {
-                self.temporaries += 1;
+        let strict = self.declared_equality(element_type, value_type).is_none()
+            && !mixes_numbers(element_type, value_type)
+            && self.is_pure(value)
+            && receiver_runs_nothing;
+        let hidden = (matches!(search, Search::Remove) || (strict && matches!(search, Search::IndexOf))).then(|| {
+            self.temporaries += 1;
 
-                format!("index#{}", self.temporaries).into_bytes()
-            });
+            format!("index#{}", self.temporaries).into_bytes()
+        });
+        let found = if strict {
             let value = self.expression(value);
             let list = self.read_collection(collection, line, false);
             let strict = self.zval(line, sharp_value::SHARP_TRUE, |_| {});
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value, list, strict]);
-            let Some(hidden) = hidden else {
-                let function = self.string(ZEND_NAME_FQ, line, b"in_array");
+            let function = if matches!(search, Search::Contains) { b"in_array".as_slice() } else { b"array_search" };
+            let function = self.string(ZEND_NAME_FQ, line, function);
 
-                return self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
-            };
-            let function = self.string(ZEND_NAME_FQ, line, b"array_search");
-            let found = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
-            let variable = self.variable(call, &hidden);
-            let found = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, found]);
-            let missed = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
+            self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+        } else {
+            self.temporaries += 2;
+            let value_name = format!("value#{}", self.temporaries - 1).into_bytes();
+            let element_name = format!("element#{}", self.temporaries).into_bytes();
+            let list = self.read_collection(collection, line, false);
+            let element = Side::Hidden { span: call, name: element_name.clone(), r#type: element_type };
+            let held = Side::Hidden { span: call, name: value_name.clone(), r#type: value_type };
+            let equality = self.equality(line, element, held, false);
+            let compare = self.hidden_arrow_function(call, &element_name, equality);
+            let compare_with = self.hidden_arrow_function(call, &value_name, compare);
+            let value = self.expression(value);
+            let value = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+            let predicate = self.node(SHARP_AST_CALL, 0, line, &[compare_with, value]);
+            self.temporaries -= 2;
+
+            let function = self.string(ZEND_NAME_FQ, line, b"array_find_key");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[list, predicate]);
+
+            self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+        };
+        let Some(hidden) = hidden else {
+            if strict || matches!(search, Search::IndexOf) {
+                return found;
+            }
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+            return self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, null]);
+        };
+
+        let variable = self.variable(call, &hidden);
+        let found = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, found]);
+        let missed = if strict { sharp_value::SHARP_FALSE } else { sharp_value::SHARP_NULL };
+        let missed = self.zval(line, missed, |_| {});
+        let lowered = if matches!(search, Search::Remove) {
+            let found = self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, missed]);
+            let list = self.read_collection(collection, line, false);
+            let remove_at = self.string(0, line, b"removeAt");
+            let index = self.variable(call, &hidden);
+            let index = self.node(SHARP_AST_ARG_LIST, 0, line, &[index]);
+            let removed = self.node(SHARP_AST_METHOD_CALL, 0, line, &[list, remove_at, index]);
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+            let removed = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[removed, null]);
+
+            self.node(SHARP_AST_AND, 0, line, &[found, removed])
+        } else {
             let missed = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[found, missed]);
             let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
             let index = self.variable(call, &hidden);
-            self.temporaries -= 1;
 
-            return self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[missed, null, index]);
-        }
+            self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[missed, null, index])
+        };
+        self.temporaries -= 1;
 
-        self.temporaries += 2;
-        let value_name = format!("value#{}", self.temporaries - 1).into_bytes();
-        let element_name = format!("element#{}", self.temporaries).into_bytes();
-        let list = self.read_collection(collection, line, false);
-        let element = Side::Hidden { span: call, name: element_name.clone(), r#type: element_type };
-        let held = Side::Hidden { span: call, name: value_name.clone(), r#type: value_type };
-        let equality = self.equality(line, element, held, false);
-        let compare = self.hidden_arrow_function(call, &element_name, equality);
-        let compare_with = self.hidden_arrow_function(call, &value_name, compare);
-        let value = self.expression(value);
-        let value = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
-        let predicate = self.node(SHARP_AST_CALL, 0, line, &[compare_with, value]);
-        self.temporaries -= 2;
-
-        let function = self.string(ZEND_NAME_FQ, line, b"array_find_key");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[list, predicate]);
-        let found = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
-        if index {
-            return found;
-        }
-        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-
-        self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, null])
+        lowered
     }
 
     /// `fn ($parameter) => body`, an arrow function of one untyped hidden parameter, on the line of `span`.
@@ -2911,7 +2949,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }) {
             return None;
         }
-        let reads_twice = matches!((collection, method.as_slice()), ("Set", b"add" | b"remove") | ("List", b"last"));
+        let reads_twice =
+            matches!((collection, method.as_slice()), ("Set", b"add" | b"remove") | ("List", b"last" | b"remove"));
 
         Some((collection, method, reads_twice))
     }

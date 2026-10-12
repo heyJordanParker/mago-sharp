@@ -406,6 +406,39 @@ fn a_second_compile_leaves_the_proof_byte_identical_and_starts_no_lean_process()
 }
 
 #[test]
+fn a_second_compile_of_the_whole_workspace_reads_no_source_through_the_sharp_folder() {
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\".\"]\n");
+    compile_succeeds(root);
+
+    let output = compile_lines(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+}
+
+#[test]
+fn compile_proves_a_law_in_a_project_that_installs_the_standard_library() {
+    let directory = lawful_project(&[
+        ("app/Shared/Money.sharp", LAWFUL_MONEY),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/composer.json",
+            "{\n    \"name\": \"heyjordanparker/php-sharp-composer\",\n    \"autoload\": {\n        \"psr-4\": {\n            \"Sharp\\\\\": \"library/Sharp/\"\n        }\n    }\n}\n",
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp",
+            "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert_eq!(read(root, "app/Shared/Money.lean"), MONEY_PROOF);
+}
+
+#[test]
 fn compile_refuses_a_law_a_changed_method_breaks_on_the_law_line_and_writes_no_compiled_file() {
     let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
     let root = directory.path();
