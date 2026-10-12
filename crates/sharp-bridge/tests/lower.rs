@@ -2782,18 +2782,21 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
 /// ```php
 /// $held = \in_array($tag, $tags, true);
 /// $at = ((${'index#1'} = \array_search('vip', $tags, true)) === false) ? null : ${'index#1'};
-/// return \in_array($ratio, $ratios, true);
+/// $next = ((${'index#1'} = \array_search($tag, $tags, true)) === false) ? null : ${'index#1'};
+/// $found = (($maybe === null) ? null : \in_array($tag, $maybe, true)) ?? false;
+/// return $held && $at !== $next && $found && \in_array($ratio, $ratios, true);
 /// ```
 ///
 /// Spec section 12's `contains` and `indexOf` compare by section 19's `==`, which is `===` on a string and on two floats,
-/// so they are PHP's strict `in_array` and `array_search`. `indexOf` gives null where `array_search` gives false, and
-/// its hidden `$index#N` holds the index, since index 0 is falsy.
+/// so where neither the receiver nor the value runs code they are PHP's strict `in_array` and `array_search`. `indexOf`
+/// gives null where `array_search` gives false, and its hidden `$index#N` holds the index, since index 0 is falsy. The
+/// next search takes the same hidden variable. A null-safe search tests its receiver first.
 #[test]
 fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
     assert_eq!(
         body_in(
-            "bool run(List<string> tags, string tag, List<float> ratios, float ratio)",
-            "        const held = tags.contains(tag);\n        const at = tags.indexOf(\"vip\");\n        return held && at != null && ratios.contains(ratio);\n",
+            "bool run(List<string> tags, string tag, List<float> ratios, float ratio, List<string>? maybe)",
+            "        const held = tags.contains(tag);\n        const at = tags.indexOf(\"vip\");\n        const next = tags.indexOf(tag);\n        const found = maybe?.contains(tag) ?? false;\n        return held && at != next && found && ratios.contains(ratio);\n",
             &[]
         ),
         indoc! {r#"
@@ -2828,15 +2831,58 @@ fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
                   ZVAL null
                   VAR
                     ZVAL "index#1"
+              ASSIGN
+                VAR
+                  ZVAL "next"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    ASSIGN
+                      VAR
+                        ZVAL "index#1"
+                      CALL
+                        ZVAL "array_search"
+                        ARG_LIST
+                          VAR
+                            ZVAL "tag"
+                          VAR
+                            ZVAL "tags"
+                          ZVAL true
+                    ZVAL false
+                  ZVAL null
+                  VAR
+                    ZVAL "index#1"
+              ASSIGN
+                VAR
+                  ZVAL "found"
+                COALESCE
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "maybe"
+                      ZVAL null
+                    ZVAL null
+                    CALL
+                      ZVAL "in_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tag"
+                        VAR
+                          ZVAL "maybe"
+                        ZVAL true
+                  ZVAL false
               RETURN
                 AND
                   AND
-                    VAR
-                      ZVAL "held"
-                    BINARY_OP [17]
+                    AND
                       VAR
-                        ZVAL "at"
-                      ZVAL null
+                        ZVAL "held"
+                      BINARY_OP [17]
+                        VAR
+                          ZVAL "at"
+                        VAR
+                          ZVAL "next"
+                    VAR
+                      ZVAL "found"
                   CALL
                     ZVAL "in_array"
                     ARG_LIST
@@ -2982,67 +3028,124 @@ fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
 }
 
 /// ```php
-/// return \array_find_key($this->make(), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($this->next())) !== null;
+/// $x = 1;
+/// return \array_find_key($this->bump($xs), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($this->n)) !== null
+///     && \array_find_key(\App\Tenant\Report::pick($xs, $x = 2), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($x)) === 0;
 /// ```
 ///
-/// PHP's `in_array` reads its value before its array, so a search whose receiver and value both run code takes the
-/// form that runs the receiver first, as the call `this.make().contains(this.next())` runs it.
+/// PHP's `in_array` and `array_search` read their value before their array, so a search whose receiver or value runs
+/// code takes the form that runs the receiver first, as the call runs it: `this.bump(xs)` changes `this.n` before
+/// `contains` reads it, and `Report.pick(xs, x = 2)` assigns `x` before `indexOf` reads it.
 #[test]
 fn a_list_search_runs_its_receiver_before_its_value() {
     assert_eq!(
         Lowered::new(
-            "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> make() => [1];\n\n    public int next() => 1;\n\n    public bool run()\n    {\n        return this.make().contains(this.next());\n    }\n}\n"
+            "namespace App.Tenant;\n\nclass Report\n{\n    private int n = 1;\n\n    public List<int> bump(List<int> xs)\n    {\n        this.n = this.n + 1;\n        return xs;\n    }\n\n    public static List<int> pick(List<int> xs, int ignored) => xs;\n\n    public bool run(List<int> xs)\n    {\n        let x = 1;\n        return this.bump(xs).contains(this.n) && Report.pick(xs, x = 2).indexOf(x) == 0;\n    }\n}\n"
         )
         .body(),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "x"
+                ZVAL 1
               RETURN
-                BINARY_OP [17]
-                  CALL
-                    ZVAL "array_find_key"
-                    ARG_LIST
-                      METHOD_CALL
-                        VAR
-                          ZVAL "this"
-                        ZVAL "make"
-                        ARG_LIST
-                      CALL
-                        ARROW_FUNC "" @11-11
-                          PARAM_LIST
-                            PARAM
-                              null
-                              ZVAL "value#1"
-                              null
-                              null
-                              null
-                              null
-                          null
-                          ARROW_FUNC "" @11-11
+                AND
+                  BINARY_OP [17]
+                    CALL
+                      ZVAL "array_find_key"
+                      ARG_LIST
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "bump"
+                          ARG_LIST
+                            VAR
+                              ZVAL "xs"
+                        CALL
+                          ARROW_FUNC "" @18-18
                             PARAM_LIST
                               PARAM
                                 null
-                                ZVAL "element#2"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            BINARY_OP [16]
-                              VAR
-                                ZVAL "element#2"
-                              VAR
                                 ZVAL "value#1"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            ARROW_FUNC "" @18-18
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "element#2"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "element#2"
+                                VAR
+                                  ZVAL "value#1"
+                              null
+                              null
                             null
                             null
-                          null
-                          null
-                        ARG_LIST
-                          METHOD_CALL
+                          ARG_LIST
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "n"
+                    ZVAL null
+                  BINARY_OP [16]
+                    CALL
+                      ZVAL "array_find_key"
+                      ARG_LIST
+                        STATIC_CALL
+                          ZVAL "App\\Tenant\\Report"
+                          ZVAL "pick"
+                          ARG_LIST
                             VAR
-                              ZVAL "this"
-                            ZVAL "next"
-                            ARG_LIST
-                  ZVAL null
+                              ZVAL "xs"
+                            ASSIGN
+                              VAR
+                                ZVAL "x"
+                              ZVAL 2
+                        CALL
+                          ARROW_FUNC "" @18-18
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "value#1"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            ARROW_FUNC "" @18-18
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "element#2"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "element#2"
+                                VAR
+                                  ZVAL "value#1"
+                              null
+                              null
+                            null
+                            null
+                          ARG_LIST
+                            VAR
+                              ZVAL "x"
+                    ZVAL 0
         "#}
     );
 }

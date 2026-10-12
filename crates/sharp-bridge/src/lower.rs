@@ -2411,11 +2411,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
         let element = || {
-            arguments
-                .arguments
-                .first()
-                .map(Argument::value)
-                .unwrap_or_else(|| unreachable!("the checker refuses a collection method call without its element"))
+            let element = arguments.arguments.first().map(Argument::value);
+
+            element.unwrap_or_else(|| unreachable!("the checker refuses a collection method without its element"))
         };
 
         let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
@@ -2549,7 +2547,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let value_type = self.types.expression_type(value);
         let identical =
             self.declared_equality(element_type, value_type).is_none() && !mixes_numbers(element_type, value_type);
-        if identical && (self.is_pure(value) || value.is_constant(&PHPVersion::PHP85, false)) {
+        // `\in_array` and `\array_search` read the value before the list, so they run only where neither side runs code.
+        let receiver_runs_nothing = match collection {
+            CollectionReceiver::Place(_) => true,
+            CollectionReceiver::Property(object, _) | CollectionReceiver::Value(object) => {
+                self.is_pure(object.expression)
+            }
+        };
+        if identical && self.is_pure(value) && receiver_runs_nothing {
             let hidden = index.then(|| {
                 self.temporaries += 1;
 

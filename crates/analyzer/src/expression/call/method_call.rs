@@ -420,7 +420,14 @@ where
             })
         })
     {
-        check_element_equality(context, &String::from_utf8_lossy(method.value), object, value, &element_type);
+        check_element_equality(
+            context,
+            &String::from_utf8_lossy(method.value),
+            object,
+            value,
+            &element_type,
+            is_null_safe,
+        );
     }
 
     if !method_resolution.unresolved_methods.is_empty() {

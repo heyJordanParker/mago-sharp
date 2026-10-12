@@ -233,12 +233,11 @@ impl<'analysis> Types<'analysis> {
     /// only about a value the checker typed as a collection.
     pub(crate) fn element_type(&self, r#type: &TUnion) -> TUnion {
         let mut element_type = None;
-        for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
-            let TAtomic::Array(array) = atomic else {
-                unreachable!("the checker runs a collection method only on a collection, not on {atomic:?}");
-            };
-            let (_, value) = get_array_parameters(array, self.codebase);
-            element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
+        for atomic in r#type.types.iter() {
+            if let TAtomic::Array(array) = atomic {
+                let (_, value) = get_array_parameters(array, self.codebase);
+                element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
+            }
         }
 
         element_type.unwrap_or_else(|| unreachable!("a collection method's receiver is a collection"))
