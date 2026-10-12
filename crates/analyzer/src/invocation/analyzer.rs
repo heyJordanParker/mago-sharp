@@ -29,6 +29,7 @@ use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::intersect_union_types;
+use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::inferred_type_replacer;
@@ -992,14 +993,21 @@ where
                     .map(|bounds| get_most_specific_type_from_bounds(bounds, context.codebase))
             })
             .collect();
-        if context.dialect.is_sharp()
-            && let Some(metadata) = invocation.target.get_function_like_metadata()
-            && metadata.flags.is_sharp()
-        {
+        let sharp_metadata = invocation
+            .target
+            .get_function_like_metadata()
+            .filter(|metadata| context.dialect.is_sharp() && metadata.flags.is_sharp());
+        if let Some(metadata) = sharp_metadata {
             report_unfixed_type_arguments(context, invocation, metadata, &type_arguments, &violated_templates);
         }
 
         artifacts.record_type_arguments(invocation.span, type_arguments.into_iter(), context.codebase);
+        if let Some(metadata) = sharp_metadata
+            && let Some(recorded) =
+                artifacts.inferred_type_arguments.get(&(invocation.span.start.offset, invocation.span.end.offset))
+        {
+            report_unwritable_type_arguments(context, invocation, metadata, recorded);
+        }
     }
 
     let max_params = invocation.target.parameter_count();
@@ -1420,6 +1428,38 @@ fn report_unfixed_type_arguments<A>(
             )
             .with_help(help),
     );
+}
+
+/// The engine carries a PHP# call's type arguments as their PHP# text, so one a plain PHP value fixes as a type only a
+/// PHP docblock writes, such as `array-key` or an `array{…}` shape, is refused at the call. Writing the type argument
+/// fixes it as a type PHP# writes.
+fn report_unwritable_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    metadata: &FunctionLikeMetadata,
+    type_arguments: &[TUnion],
+) where
+    A: Arena,
+{
+    for ((name, _), type_argument) in metadata.template_types.iter().zip(type_arguments) {
+        if is_written_in_sharp(type_argument) {
+            continue;
+        }
+
+        let method_name = invocation.target.guess_name(context);
+        context.collector.report_with_code(
+            IssueCode::MissingTemplateParameter,
+            Issue::error(format!(
+                "The type argument `{name}` of the call to `{method_name}` would be `{}`, which PHP# can't write.",
+                type_argument.get_id()
+            ))
+            .with_annotation(
+                Annotation::primary(invocation.span).with_message(format!("`{method_name}` is called here")),
+            )
+            .with_note("A PHP docblock type has no PHP# spelling, and the engine carries a type argument as one.")
+            .with_help("Write the type argument on the call."),
+        );
+    }
 }
 
 /// Installs a provider-supplied signature for an explicit callable identity.

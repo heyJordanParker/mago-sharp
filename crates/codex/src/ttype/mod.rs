@@ -13,6 +13,8 @@ use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::array::keyed::TKeyedArray;
 use crate::ttype::atomic::array::list::TList;
+use crate::ttype::atomic::callable::TCallable;
+use crate::ttype::atomic::callable::TCallableSignature;
 use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
@@ -1488,6 +1490,83 @@ pub fn get_sole_backed_enum<'codebase>(
     backed_enums
         .all(|backed_enum| backed_enum.is_some_and(|backed_enum| backed_enum.name == first.name))
         .then_some(first)
+}
+
+/// A type PHP# can write, by the form its spelling takes. A PHP docblock refinement of one, such as `positive-int`,
+/// `non-empty-string` or `list<int>`, is that type.
+#[derive(Debug, Clone, Copy)]
+pub enum SharpType<'atomic> {
+    Int,
+    Float,
+    Bool,
+    String,
+    Void,
+    /// `Object`, any object.
+    Object,
+    Enum(Word),
+    /// A class with its type arguments, none for a class that takes none.
+    Class(Word, &'atomic [TUnion]),
+    List(&'atomic TUnion),
+    Set(&'atomic TUnion),
+    Map(&'atomic TUnion, &'atomic TUnion),
+    Iterable(&'atomic TUnion),
+    Parameter(&'atomic TGenericParameter),
+    ClassValue(&'atomic TClassLikeString),
+    Function(&'atomic TCallableSignature),
+}
+
+/// `atomic` as PHP# writes it, or `None` for a type only a PHP docblock writes, such as `array-key`, `scalar`,
+/// `numeric`, `resource` or an `array{…}` shape.
+#[must_use]
+pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
+    Some(match atomic {
+        TAtomic::Scalar(TScalar::Integer(_)) => SharpType::Int,
+        TAtomic::Scalar(TScalar::Float(_)) => SharpType::Float,
+        TAtomic::Scalar(TScalar::Bool(_)) => SharpType::Bool,
+        TAtomic::Scalar(TScalar::String(_)) => SharpType::String,
+        TAtomic::Scalar(TScalar::ClassLikeString(class_value)) => SharpType::ClassValue(class_value),
+        TAtomic::Void => SharpType::Void,
+        TAtomic::Object(TObject::Any) => SharpType::Object,
+        TAtomic::Object(TObject::Enum(object)) => SharpType::Enum(object.name),
+        TAtomic::Object(TObject::Named(object)) => {
+            SharpType::Class(object.name, object.get_type_parameters().unwrap_or_default())
+        }
+        TAtomic::Array(TArray::List(list)) => SharpType::List(&list.element_type),
+        TAtomic::Array(TArray::Set(element_type)) => SharpType::Set(element_type),
+        TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, value)), .. })) => SharpType::Map(key, value),
+        TAtomic::Iterable(iterable) => SharpType::Iterable(iterable.get_value_type()),
+        TAtomic::GenericParameter(parameter) => SharpType::Parameter(parameter),
+        TAtomic::Callable(TCallable::Signature(signature)) => SharpType::Function(signature),
+        _ => return None,
+    })
+}
+
+/// Whether PHP# can write `union`, each member, each type it intersects and each type inside them, as
+/// [`get_sharp_type`] reads them. `mixed` is `Any?`.
+#[must_use]
+pub fn is_written_in_sharp(union: &TUnion) -> bool {
+    union.types.iter().all(|atomic| {
+        atomic.is_null()
+            || atomic.is_mixed()
+            || std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).all(|member| {
+                match get_sharp_type(member) {
+                    None => false,
+                    Some(SharpType::Class(_, inner)) => inner.iter().all(is_written_in_sharp),
+                    Some(SharpType::List(inner) | SharpType::Set(inner) | SharpType::Iterable(inner)) => {
+                        is_written_in_sharp(inner)
+                    }
+                    Some(SharpType::Map(key, value)) => is_written_in_sharp(key) && is_written_in_sharp(value),
+                    Some(SharpType::Function(signature)) => {
+                        signature.get_return_type().is_none_or(is_written_in_sharp)
+                            && signature
+                                .get_parameters()
+                                .iter()
+                                .all(|parameter| parameter.get_type_signature().is_none_or(is_written_in_sharp))
+                    }
+                    Some(_) => true,
+                }
+            })
+    })
 }
 
 #[must_use]

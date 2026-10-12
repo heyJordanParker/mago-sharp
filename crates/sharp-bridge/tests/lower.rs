@@ -6001,6 +6001,45 @@ fn a_value_from_plain_php_is_checked_where_a_typed_local_or_property_takes_it() 
     }
 }
 
+/// A type argument a plain PHP value fixes as a refinement PHP# writes as a wider type carries that type's text:
+/// `list<int>` is `List<int>`, `non-empty-string` is `string`, `positive-int` is `int` and `class-string` is
+/// `Class<Object>`. A written type argument carries its own text.
+#[test]
+fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
+    let lowered = Lowered::with(
+        indoc! {"
+        namespace App;
+
+        import Lib.Pager;
+
+        public class Registry
+        {
+            public static T keep<T>(T value) => value;
+
+            public void run()
+            {
+                Registry.keep(Pager.list());
+                Registry.keep(Pager.text());
+                Registry.keep(Pager.count());
+                Registry.keep(Pager.class());
+                Registry.keep<Map<string, int>>(Pager.shape());
+                Registry.keep<int|string>(Pager.key());
+            }
+        }
+        "},
+        &[(
+            "src/Lib/Pager.php",
+            "<?php\n\nnamespace Lib;\n\nfinal class Pager\n{\n    /** @return list<int> */\n    public static function list(): array\n    {\n        return [1];\n    }\n\n    /** @return non-empty-string */\n    public static function text(): string\n    {\n        return 'a';\n    }\n\n    /** @return positive-int */\n    public static function count(): int\n    {\n        return 1;\n    }\n\n    /** @return class-string */\n    public static function class(): string\n    {\n        return self::class;\n    }\n\n    /** @return array{a: int} */\n    public static function shape(): array\n    {\n        return ['a' => 1];\n    }\n\n    /** @return array-key */\n    public static function key(): int|string\n    {\n        return 1;\n    }\n}\n",
+        )],
+    );
+
+    let body = lowered.body();
+    assert_eq!(body.matches("SHARP_TYPE_ARGS").count(), 6, "{body}");
+    for text in ["List<int>", "string", "int", "Class<Object>", "Map<string, int>", "int|string"] {
+        assert!(body.contains(&format!("ZVAL \"{text}\"\n")), "{text}: {body}");
+    }
+}
+
 /// A value of a type parameter is a value of its bound, so a generic method called on it carries its type arguments as
 /// a call on the bound does.
 #[test]

@@ -9686,6 +9686,33 @@ fn a_generic_call_nothing_fixes_is_refused() {
     );
 }
 
+/// A type argument a plain PHP value fixes is refused when PHP# can't write it, since the engine carries a type
+/// argument as its PHP# text: an `array{…}` shape, `array-key`, `scalar`, `numeric` and `resource`, on a static call
+/// and an instance call alike. A refinement PHP# writes as a wider type is that type: `list<int>` is `List<int>`,
+/// `non-empty-string` is `string`, `positive-int` is `int` and `class-string` is `Class<Object>`. A written type
+/// argument the value fits compiles.
+#[test]
+fn a_type_argument_php_sharp_cant_write_is_refused() {
+    let php = "<?php\n\nnamespace Lib;\n\nfinal class Pager\n{\n    /** @return array{a: int} */\n    public static function shape(): array\n    {\n        return ['a' => 1];\n    }\n\n    /** @return array-key */\n    public static function key(): int|string\n    {\n        return 1;\n    }\n\n    /** @return scalar */\n    public static function scalar(): int|float|string|bool\n    {\n        return 1;\n    }\n\n    /** @return numeric */\n    public static function numeric(): int|float|string\n    {\n        return 1;\n    }\n\n    /** @return resource */\n    public static function resource(): mixed\n    {\n        return STDIN;\n    }\n\n    /** @return list<int> */\n    public static function list(): array\n    {\n        return [1];\n    }\n\n    /** @return non-empty-string */\n    public static function text(): string\n    {\n        return 'a';\n    }\n\n    /** @return positive-int */\n    public static function count(): int\n    {\n        return 1;\n    }\n\n    /** @return class-string */\n    public static function class(): string\n    {\n        return self::class;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pager;\n\npublic class Registry\n{\n    public static T keep<T>(T value) => value;\n\n    public T hold<T>(T value) => value;\n\n    public void run()\n    {\n        Registry.keep(Pager.shape());\n        Registry.keep(Pager.key());\n        Registry.keep(Pager.scalar());\n        Registry.keep(Pager.numeric());\n        this.hold(Pager.resource());\n        Registry.keep(Pager.list());\n        Registry.keep(Pager.text());\n        Registry.keep(Pager.count());\n        this.hold(Pager.class());\n        Registry.keep<Map<string, int>>(Pager.shape());\n        Registry.keep<int|string>(Pager.key());\n    }\n}\n";
+    let refused = |line: u32, column: u32, method: &str, written: &str| {
+        format!(
+            "{line}:{column} missing-template-parameter The type argument `T` of the call to `{method}` would be `{written}`, which PHP# can't write. | `{method}` is called here | A PHP docblock type has no PHP# spelling, and the engine carries a type argument as one. | Write the type argument on the call."
+        )
+    };
+
+    assert_eq!(
+        worded(("src/Demo/Registry.sharp", sharp), &[("src/Lib/Pager.php", php)]),
+        [
+            refused(13, 9, "Registry.keep", "array{'a': int}"),
+            refused(14, 9, "Registry.keep", "array-key"),
+            refused(15, 9, "Registry.keep", "scalar"),
+            refused(16, 9, "Registry.keep", "numeric"),
+            refused(17, 9, "Registry.hold", "resource"),
+        ]
+    );
+}
+
 /// A method's type parameter its body names is used, as `catch (TError error)` and a typed local name it, since a call
 /// writes its type argument. One that nothing names is reported. Semantics refuses the generic `catch` until R3b, so
 /// only the unused type parameters are read here.

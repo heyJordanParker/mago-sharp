@@ -7,15 +7,15 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::misc::GenericParent;
+use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
-use mago_codex::ttype::atomic::array::TArray;
-use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_sole_backed_enum;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
@@ -757,34 +757,27 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
             (Parameter::Bound, GenericParent::FunctionLike(_)) => bound(),
         };
 
-    match atomic {
-        TAtomic::Scalar(TScalar::Integer(_)) => "int".to_owned(),
-        TAtomic::Scalar(TScalar::Float(_)) => "float".to_owned(),
-        TAtomic::Scalar(TScalar::Bool(_)) => "bool".to_owned(),
-        TAtomic::Scalar(TScalar::String(_)) => "string".to_owned(),
-        TAtomic::Void => "void".to_owned(),
-        TAtomic::Object(TObject::Any) => "Object".to_owned(),
-        TAtomic::Object(TObject::Enum(object)) => class_text(object.name, codebase),
-        TAtomic::Object(TObject::Named(object)) => match object.get_type_parameters() {
-            Some(arguments) if !arguments.is_empty() => {
-                format!("{}<{}>", class_text(object.name, codebase), list(&mut arguments.iter()))
-            }
-            _ => class_text(object.name, codebase),
-        },
-        TAtomic::Array(TArray::List(array)) => format!("List<{}>", type_text(&array.element_type)),
-        TAtomic::Array(TArray::Set(element_type)) => format!("Set<{}>", type_text(element_type)),
-        TAtomic::Array(TArray::Keyed(array)) => {
-            let (key, value) = array.parameters.as_ref().unwrap_or_else(|| {
-                unreachable!("PHP# writes a Map with its key and value types, not `{}`", atomic.get_id())
-            });
+    let Some(sharp_type) = get_sharp_type(atomic) else {
+        unreachable!("the analyzer refuses a type PHP# can't write, not `{}`", atomic.get_id())
+    };
 
-            format!("Map<{}>", list(&mut [key.as_ref(), value.as_ref()].into_iter()))
-        }
-        TAtomic::Iterable(iterable) => format!("Iterable<{}>", type_text(iterable.get_value_type())),
-        TAtomic::GenericParameter(generic) => {
+    match sharp_type {
+        SharpType::Int => "int".to_owned(),
+        SharpType::Float => "float".to_owned(),
+        SharpType::Bool => "bool".to_owned(),
+        SharpType::String => "string".to_owned(),
+        SharpType::Void => "void".to_owned(),
+        SharpType::Object => "Object".to_owned(),
+        SharpType::Enum(name) | SharpType::Class(name, []) => class_text(name, codebase),
+        SharpType::Class(name, arguments) => format!("{}<{}>", class_text(name, codebase), list(&mut arguments.iter())),
+        SharpType::List(element_type) => format!("List<{}>", type_text(element_type)),
+        SharpType::Set(element_type) => format!("Set<{}>", type_text(element_type)),
+        SharpType::Map(key, value) => format!("Map<{}>", list(&mut [key, value].into_iter())),
+        SharpType::Iterable(value) => format!("Iterable<{}>", type_text(value)),
+        SharpType::Parameter(generic) => {
             parameter_text(generic.parameter_name, generic.defining_entity, &|| type_text(&generic.constraint))
         }
-        TAtomic::Scalar(TScalar::ClassLikeString(class_value)) => {
+        SharpType::ClassValue(class_value) => {
             let class = match class_value {
                 TClassLikeString::Literal { value } => class_text(*value, codebase),
                 TClassLikeString::OfType { constraint, .. } => atomic_text(constraint, codebase, parameter),
@@ -796,14 +789,13 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
 
             format!("Class<{class}>")
         }
-        TAtomic::Callable(TCallable::Signature(signature)) => {
+        SharpType::Function(signature) => {
             let written = |r#type: Option<&TUnion>| r#type.map_or_else(|| "Any?".to_owned(), type_text);
             let parameters: Vec<String> =
                 signature.get_parameters().iter().map(|parameter| written(parameter.get_type_signature())).collect();
 
             format!("Function<{}({})>", written(signature.get_return_type()), parameters.join(", "))
         }
-        _ => unreachable!("the checker refuses a type PHP# can't write, not `{}`", atomic.get_id()),
     }
 }
 
