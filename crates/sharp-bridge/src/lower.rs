@@ -603,11 +603,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
         for member in &interface.members {
-            members.push(match member {
-                ClassLikeMember::Method(method) => self.method(method, ZEND_ACC_PUBLIC, &[]),
-                ClassLikeMember::Property(Property::Hooked(property)) => self.interface_property(property),
-                _ => unreachable!("check_slice refuses the interface member `{member}`"),
-            });
+            if let ClassLikeMember::Property(Property::Hooked(property)) = member {
+                members.push(self.interface_property(property));
+                continue;
+            }
+            let ClassLikeMember::Method(method) = member else {
+                unreachable!("check_slice refuses the interface member `{member}`");
+            };
+
+            members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
         }
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);

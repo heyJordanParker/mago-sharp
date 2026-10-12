@@ -664,13 +664,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Event<'arena> {
         // The scanner registers every event, with its constructor.
         let name = context.resolved_names.get(&self.name);
         let codebase = context.codebase;
-        if let Some(class_like_metadata) = codebase.get_class_like(name)
-            && let Some(constructor) = codebase.get_method(name, b"__construct")
-        {
-            analyze_event(self, class_like_metadata, constructor, context, artifacts)?;
-        }
 
-        Ok(())
+        codebase.get_class_like(name).zip(codebase.get_method(name, b"__construct")).map_or(
+            Ok(()),
+            |(class_like_metadata, constructor)| {
+                analyze_event(self, class_like_metadata, constructor, context, artifacts)
+            },
+        )
     }
 }
 
