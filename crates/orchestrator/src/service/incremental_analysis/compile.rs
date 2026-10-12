@@ -83,8 +83,8 @@ impl IncrementalAnalysisService {
     ///
     /// A file that states a law also lists its proof file and every source its laws reach. A file outside `vendor/`
     /// lists the workspace-relative Lean files `rules` gives for its name, whose structure rules may judge it. `check`
-    /// gets the Lean translation of every accepted file and the namespace of every PHP# class-like, refused or not,
-    /// and returns the issues of each file whose law is not proved or that breaks a structure rule, which refuse that
+    /// gets the Lean translation of every accepted file and the namespace of every class-like PHP or PHP# code
+    /// declares, in the project or `vendor/`, refused or not, and returns the issues of each file whose law is not proved or that breaks a structure rule, which refuse that
     /// file whatever pragma, ignore entry or baseline the analysis honors. It runs before any input is stamped, so a
     /// proof file it creates is stamped present.
     ///
@@ -153,7 +153,7 @@ impl IncrementalAnalysisService {
             .codebase
             .class_likes
             .values()
-            .filter(|class_like| class_like.flags.is_sharp())
+            .filter(|class_like| !class_like.flags.is_built_in())
             .filter_map(|class_like| {
                 let name = class_like.original_name.as_str_lossy();
                 let (namespace, _) = name.rsplit_once('\\')?;
@@ -1540,16 +1540,20 @@ mod tests {
         assert_eq!(error.to_string(), "The Lean step failed: lake crashed.");
     }
 
-    /// A structure rule names a namespace that holds PHP# code, so the Lean step gets the namespace of every PHP#
-    /// class-like, a refused file's too: a type error in the only file of `App.Shared.Schema` keeps the namespace a
-    /// rule names. A plain PHP class names none.
+    /// A structure rule judges every import of PHP# code, of plain PHP too, so the Lean step gets the namespace of
+    /// every class-like the project and `vendor/` declare, a refused file's too: a type error in the only file of
+    /// `App.Shared.Schema` keeps the namespace a rule names. A built-in class-like names none.
     #[test]
-    fn the_lean_step_gets_the_namespace_of_every_php_sharp_class_like_a_refused_one_too() {
+    fn the_lean_step_gets_the_namespace_of_every_class_like_the_codebase_declares_a_refused_one_too() {
         let refused = ORDER.replace("namespace App;", "namespace App.Shared.Schema;").replace("extra + 1", "\"one\"");
         let database = project(&[
             ("app/Order.sharp", ORDER),
             ("app/Shared/Schema/Order.sharp", &refused),
             ("app/Legacy/Rate.php", "<?php\n\nnamespace App\\Legacy;\n\nfinal class Rate {}\n"),
+            (
+                "vendor/illuminate/support/Facades/DB.php",
+                "<?php\n\nnamespace Illuminate\\Support\\Facades;\n\nclass DB {}\n",
+            ),
         ]);
         let mut service = analyzed(&database);
         let mut given = Vec::new();
@@ -1562,7 +1566,7 @@ mod tests {
             })
             .expect("the compile runs");
 
-        assert_eq!(given, ["App", "App.Shared.Schema"]);
+        assert_eq!(given, ["App", "App.Legacy", "App.Shared.Schema", "Illuminate.Support.Facades"]);
     }
 
     /// A project whose `Report` reads what the headers of `Invoice`, `Taxable` and `Status` say they inherit, and whose

@@ -205,7 +205,8 @@ def answer (env : Environment) (request : Check) : IO ByteArray := do
 /-- A `Module.lean` that Lake built, and the namespace its rules constrain. -/
 structure RulesModule where
   module : Name
-  namespace_ : Namespace
+  /-- Dot separated: "App.Shared". -/
+  namespace_ : String
 
 /-- A request: the rules modules, then the facts of every `.sharp` file. -/
 structure Rules where
@@ -233,14 +234,8 @@ def file : Decode (Array Fact) := do
   many (fact path)
 
 def rules : Decode Rules := do
-  let modules ← many do return { module := (← string).toName, namespace_ := ⟨← string⟩ }
+  let modules ← many do return { module := (← string).toName, namespace_ := ← string }
   return { modules, files := ← many file }
-
-/-- The namespace whose code holds the fact. -/
-def namespaceOfFact : Fact → String
-  | .declaration d => namespaceOf d.name
-  | .import i => i.namespace_
-  | .reference r => r.namespace_
 
 /-- Each rule of each rules module, in request order: the module's index, the rule's name, and every fact under its
 namespace that breaks it, as the file's index and the fact's index in that file. -/
@@ -257,15 +252,13 @@ unsafe def judge (env : Environment) (request : Rules) : IO ByteArray := do
     let some moduleIndex := env.getModuleIdx? rulesModule.module
       | throw <| IO.userError s!"module {rulesModule.module} was not imported"
     for name in ruleAttribute.ext.getModuleEntries env moduleIndex do
-      let breaks := match ← IO.ofExcept (env.evalConst Rule {} name) with
-        | .each breaks => breaks rulesModule.namespace_
-        | .eachIn breaks => breaks rulesModule.namespace_ graph
+      let rule ← IO.ofExcept (env.evalConst Rule {} name)
       let mut broken := #[]
       let mut fileIndex : UInt32 := 0
       for facts in request.files do
         let mut factIndex : UInt32 := 0
         for fact in facts do
-          if under (namespaceOfFact fact) rulesModule.namespace_ && breaks fact then
+          if rule.breaks rulesModule.namespace_ graph fact then
             broken := broken.push (fileIndex, factIndex)
           factIndex := factIndex + 1
         fileIndex := fileIndex + 1

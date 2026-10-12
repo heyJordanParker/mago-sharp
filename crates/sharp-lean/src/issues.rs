@@ -209,14 +209,16 @@ pub(crate) fn rejected_lean(span: Span, file: &str, namespace: &str, error: &Mes
     rejected_lean_error(span, format!("This file is in {namespace}, and Lean rejected {file}"), error)
 }
 
-/// `rejection` followed by where Lean reported `error`, with its column counted from 1, and its first line.
+/// `rejection` followed by where Lean reported `error`, with its column counted from 1, and its whole message, each
+/// line joined to the next by one space.
 fn rejected_lean_error(span: Span, rejection: String, error: &Message) -> Issue {
-    let first = error.data.lines().next().unwrap_or(&error.data);
+    let lines: Vec<&str> = error.data.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let message = lines.join(" ");
+    let message = message.strip_suffix('.').unwrap_or(&message);
 
-    Issue::error(format!("{rejection} line {}, column {}: {first}.", error.pos.line, error.pos.column + 1))
+    Issue::error(format!("{rejection} line {}, column {}: {message}.", error.pos.line, error.pos.column + 1))
         .with_code(IssueCode::BrokenRule.as_str())
         .with_annotation(Annotation::primary(span))
-        .with_note(error.data.clone())
 }
 
 /// A `Module.lean` in no PSR-4 folder, on each file under its folder, since none of its rules can run.

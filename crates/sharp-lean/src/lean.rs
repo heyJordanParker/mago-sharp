@@ -65,15 +65,17 @@ impl Lean {
 
     /// Proves the laws of `translations`, which hold every accepted `.sharp` file, checks the structure rules of every
     /// `Module.lean` over their facts, and returns the issues that refuse each file whose law is not proved or that
-    /// breaks a rule. `namespaces` holds the namespace of every `.sharp` file, accepted or not, which a rule names.
+    /// breaks a rule. `namespaces` holds the namespace of every class-like the codebase declares, accepted or not,
+    /// which a rule names.
     ///
     /// A file whose `.sharpc` is current is proved: the `.sharpc` lists its proof file and every source its laws reach
     /// as inputs, and the build ID it records covers the runtime library. Every rule runs over every file's facts
-    /// whenever one `.sharpc` is not current or the namespaces changed, so a compile checks every rule exactly, and
-    /// every Lean file of a PSR-4 folder that no Lean file imports is built then too, so a `@[rule]` outside a
-    /// `Module.lean` is an error. A `Module.lean` in no PSR-4 folder refuses each file under its folder. No Lean process
-    /// starts when no file states a law or has a proof file and no workspace Lean file is left to build, nor when each
-    /// `.sharpc` is current and the namespaces did not change. When none of those remains, `.sharp/.lean/` is deleted.
+    /// whenever one `.sharpc` is not current, the namespaces changed, or a workspace Lean file the check builds changed,
+    /// joined or left, so a compile checks every rule exactly. Every Lean file of a PSR-4 folder that no Lean file
+    /// imports is built then too, so a `@[rule]` outside a `Module.lean` is an error, though no `.sharpc` lists that
+    /// file. A `Module.lean` in no PSR-4 folder refuses each file under its folder. No Lean process starts when no file
+    /// states a law or has a proof file and no workspace Lean file is left to build, nor when each `.sharpc` is current
+    /// and neither the namespaces nor those Lean files changed. When none of those remains, `.sharp/.lean/` is deleted.
     ///
     /// # Errors
     ///
@@ -131,8 +133,12 @@ impl Lean {
             }
         }
         let declared = package::namespaces(namespaces);
-        let check_rules =
-            !files.is_empty() && (!stale.is_empty() || !package.holds(&declared) || self.any_stale(&translations)?);
+        let sources = rules::sources(&self.root, &files)?;
+        let check_rules = !files.is_empty()
+            && (!stale.is_empty()
+                || !package.holds(&declared)
+                || !package.checked(&sources)
+                || self.any_stale(&translations)?);
         if stale.is_empty() && !check_rules {
             return Ok(issues);
         }
@@ -207,6 +213,7 @@ impl Lean {
         }
         if check_rules {
             rules::check(&self.root, &roots, &library, &package, &files, &translations, &mut issues)?;
+            package.record_checked(&sources)?;
         }
 
         Ok(issues)

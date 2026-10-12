@@ -2974,6 +2974,17 @@ fn a_class_that_shares_its_full_name_with_a_namespace_is_an_error() {
             )],
             None,
         ),
+        // `App.Tenant.Store2.Alpha` sorts before `App.Tenant.Store.Order`, and it is not in the namespace.
+        (
+            store,
+            vec![
+                order,
+                ("src/App/Tenant/Store2/Alpha.sharp", "namespace App.Tenant.Store2;\n\npublic class Alpha\n{\n}\n"),
+            ],
+            Some(
+                "3:14 name-already-in-use `App.Tenant.Store` is both a class and a namespace: rename the class or the folder. | `App.Tenant.Store.Order` is in the namespace `App.Tenant.Store`.",
+            ),
+        ),
     ];
 
     for (analyzed, others, expected) in rows {

@@ -1,4 +1,5 @@
 import Lean.Attributes
+import Lean.Elab.Command
 import Lean.Elab.Term
 import Lean.IdentifierSuggestion
 import Std.Data.HashMap
@@ -13,17 +14,32 @@ structure rule is a `@[rule]` definition of type `Rule` in a `Module.lean`. It c
 breaks it on the code that holds the fact.
 
 A rule names a namespace by its full name, `App.Shared.Schema`, which Lean resolves like any name: `mago compile`
-declares one `Namespace` constant per namespace of the project and of the standard library, so a misspelled namespace is
-Lean's unknown identifier.
+declares one `Namespace` constant per namespace of the codebase, so a misspelled namespace is Lean's unknown identifier.
+The constructor of `Namespace` is private, so `⟨"App.Shared.Ledgr"⟩` is refused too.
 -/
 
 namespace Sharp
 
-/-- One namespace of PHP# code, by its full name. -/
+/-- One namespace of the codebase, by its full name. Only `namespace_decl` makes one. -/
 structure Namespace where
+  private mk ::
   /-- Dot separated: "App.Shared.Schema". -/
   name : String
-  deriving Repr, DecidableEq, Inhabited
+  deriving Repr, DecidableEq
+
+open Lean Elab Command in
+/-- `namespace_decl App.Shared` declares the namespace constant `App.Shared`, unless Lean already holds a constant of that
+name, such as `List`. It works only in the module `Code` that `mago compile` generates, so a rule names only a namespace
+that a class-like of the codebase sits in. -/
+elab "namespace_decl " id:ident : command => do
+  unless (← getMainModule) == `Code do
+    throwError "`namespace_decl` belongs in the module mago compile generates: a rule names only a namespace of the codebase"
+  let name := id.getId
+  unless (← getEnv).contains name do
+    liftCoreM <| addAndCompile <| .defnDecl {
+      name, levelParams := [], type := mkConst ``Namespace,
+      value := mkApp (mkConst ``Namespace.mk) (mkStrLit (name.toString (escape := false))),
+      hints := .abbrev, safety := .safe }
 
 open Lean Elab Term in
 /-- A name below a namespace that names nothing, such as `App.Shared.Ledgr` below `App.Shared`, is an unknown identifier,
@@ -94,6 +110,12 @@ def under (name : String) (ns : Namespace) : Bool :=
 /-- The namespace that holds `name`: "A.B.C" ↦ "A.B", "C" ↦ "" (the global namespace). -/
 def namespaceOf (name : String) : String :=
   ".".intercalate (name.splitOn ".").dropLast
+
+/-- The namespace whose code holds the fact. -/
+def Fact.namespace_ : Fact → String
+  | .declaration d => namespaceOf d.name
+  | .import i => i.namespace_
+  | .reference r => r.namespace_
 
 /-- The import's edge in the namespace import graph: from the importing namespace to the namespace of the imported
 name. An import from the namespace's own code has no edge. -/
@@ -185,6 +207,15 @@ def Rule.importsOnly (allowed : List Namespace) : Rule :=
 /-- Breaks every import whose edge lies on a cycle of the namespace import graph. -/
 def Rule.noImportCycles : Rule :=
   .importsIn fun _ => Graph.onCycle
+
+/-- Whether `fact` breaks `rule`, which the Module.lean of the namespace `ns` holds: the fact sits under `ns` and the
+rule breaks it there. The runner names `ns` as its request does, so this is the one place a rule gets a namespace no
+`namespace_decl` made. -/
+def Rule.breaks (rule : Rule) (ns : String) (graph : Graph) (fact : Fact) : Bool :=
+  let ns : Namespace := ⟨ns⟩
+  under fact.namespace_ ns && match rule with
+    | .each breaks => breaks ns fact
+    | .eachIn breaks => breaks ns graph fact
 
 /-- Marks a definition of type `Sharp.Rule` in a `Module.lean` as a structure rule the runner checks. -/
 initialize ruleAttribute : Lean.TagAttribute ←

@@ -1141,12 +1141,25 @@ fn store_rejected(file: &str, place: &str, message: &str) -> String {
 /// Spec section 28.1: a structure rule names a namespace by its full name, which Lean resolves as any name, so a
 /// misspelled namespace is Lean's unknown identifier at its line and column of the `Module.lean`, in the standard
 /// library's rules and in a rule the project writes alike, and refuses every file the rules judge. Each row is the
-/// rules of `app/Tenant/Store/Module.lean`, whose fourth line is the first rule: real namespaces of the project and of
-/// the standard library judge imports, and each misspelled one is reported at its own place.
+/// rules of `app/Tenant/Store/Module.lean`, whose fourth line is the first rule: real namespaces of the project, of
+/// plain PHP in the project and in `vendor/`, and of the standard library judge imports, and each misspelled one is
+/// reported at its own place. A name is a namespace only through a class-like of the codebase: a `Namespace` built from
+/// a string, or declared in a `Module.lean`, is refused with Lean's whole reason.
 #[test]
 fn a_structure_rule_names_a_namespace_by_its_full_name_and_a_misspelled_one_is_an_unknown_identifier() {
     let ledgr = "Unknown identifier `App.Shared.Ledgr`";
     let json = "namespace App.Tenant.Store;\n\nimport Sharp.Json.Json;\n\npublic class StoreService { }\n";
+    let plain_php = "namespace App.Tenant.Store;\n\nimport App.Legacy.Rate;\nimport Illuminate.Support.Facades.DB;\nimport App.Legacy.fun.Clock;\n\npublic class StoreService { }\n";
+    let plain_php_breaks = |line: u32, imported: &str, rule: &str| {
+        format!(
+            "app/Tenant/Store/StoreService.sharp:{line}:8:error - broken-rule: This import of {imported} breaks the structure rule {rule} in app/Tenant/Store/Module.lean."
+        )
+    };
+    let anonymous = "Invalid `⟨...⟩` notation: Constructor for `Sharp.Namespace` is marked as private";
+    let instance = "invalid {...} notation, constructor for `Namespace` is marked as private";
+    let declared =
+        "`namespace_decl` belongs in the module mago compile generates: a rule names only a namespace of the codebase";
+    let quoted = "Application type mismatch: The argument \"App.Shared.Ledgr\" has type String but is expected to have type Namespace in the application Rule.neverImports \"App.Shared.Ledgr\"";
     for (rules_of_store, service, refused) in [
         (
             IMPORTS_ONLY.to_owned(),
@@ -1186,11 +1199,49 @@ fn a_structure_rule_names_a_namespace_by_its_full_name_and_a_misspelled_one_is_a
                 "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of Sharp.Json.Json breaks the structure rule neverJson in app/Tenant/Store/Module.lean.".to_owned(),
             ],
         ),
+        (
+            "@[rule] def legacy : Rule := .neverImports App.Legacy\n@[rule] def facades : Rule := .neverImports Illuminate.Support.Facades\n@[rule] def keyword : Rule := .neverImports App.Legacy.«fun»".to_owned(),
+            plain_php,
+            vec![
+                LEDGER_BREAKS.to_owned(),
+                plain_php_breaks(5, "App.Legacy.fun.Clock", "keyword"),
+                plain_php_breaks(4, "Illuminate.Support.Facades.DB", "facades"),
+                plain_php_breaks(3, "App.Legacy.Rate", "legacy"),
+                plain_php_breaks(5, "App.Legacy.fun.Clock", "legacy"),
+            ],
+        ),
+        (
+            "@[rule] def anonymous : Rule := .neverImports ⟨\"App.Shared.Ledgr\"⟩\n@[rule] def structureInstance : Rule := .neverImports { name := \"App.Shared.Ledgr\" }\nnamespace_decl App.Shared.Ledgr".to_owned(),
+            STORE_SERVICE,
+            vec![
+                LEDGER_BREAKS.to_owned(),
+                store_rejected("Receipts", "line 4, column 47", anonymous),
+                store_rejected("Receipts", "line 5, column 55", instance),
+                store_rejected("Receipts", "line 6, column 1", declared),
+                store_rejected("StoreService", "line 4, column 47", anonymous),
+                store_rejected("StoreService", "line 5, column 55", instance),
+                store_rejected("StoreService", "line 6, column 1", declared),
+            ],
+        ),
+        (
+            "@[rule] def quoted : Rule := .neverImports \"App.Shared.Ledgr\"".to_owned(),
+            STORE_SERVICE,
+            vec![
+                LEDGER_BREAKS.to_owned(),
+                store_rejected("Receipts", "line 4, column 44", quoted),
+                store_rejected("StoreService", "line 4, column 44", quoted),
+            ],
+        ),
     ] {
         let store = rules("App.Tenant.Store", &rules_of_store);
         let directory = structured(&[
             ("app/Tenant/Store/Module.lean", store.as_str()),
             ("app/Tenant/Store/StoreService.sharp", service),
+            ("app/Legacy/Rate.php", "<?php\n\nnamespace App\\Legacy;\n\nfinal class Rate {}\n"),
+            ("app/Legacy/fun/Clock.php", "<?php\n\nnamespace App\\Legacy\\fun;\n\nfinal class Clock {}\n"),
+            ("vendor/illuminate/support/Facades/DB.php", "<?php\n\nnamespace Illuminate\\Support\\Facades;\n\nclass DB {}\n"),
+            // A namespace Lean already names, as `List`, is declared by none, so the rest of `Code` still builds.
+            ("vendor/acme/list/Item.php", "<?php\n\nnamespace List;\n\nclass Item {}\n"),
             (
                 "vendor/heyjordanparker/php-sharp-composer/composer.json",
                 "{\"name\": \"heyjordanparker/php-sharp-composer\", \"autoload\": {\"psr-4\": {\"Sharp\\\\\": \"library/Sharp/\"}}}\n",
@@ -1345,7 +1396,8 @@ fn a_module_lean_outside_every_psr_4_folder_refuses_each_file_under_its_folder()
 }
 
 /// The design note's ruling: a `Module.lean` that Lean rejects refuses every `.sharp` file of its namespace, with one
-/// issue for each of Lean's errors that names the `Module.lean` and the error's line and column. A `Module.lean` that
+/// issue for each of Lean's errors that names the `Module.lean`, the error's line and column, and Lean's whole message,
+/// its lines joined by spaces. A `Module.lean` that
 /// imports a rejected one names it and its errors instead, and a `Module.sharp` beside a rejected `Module.lean` gets
 /// Lean's error as the proof file of its laws.
 #[test]
@@ -1381,11 +1433,11 @@ fn a_module_lean_that_lean_rejects_refuses_every_file_of_its_namespace() {
                 ("app/Tenant/Store/Module.lean", open.as_str()),
             ],
             vec![
-                "app/Shared/Ledger.sharp:1:11:error - broken-rule: This file is in App.Shared, whose structure rules app/Shared/Module.lean holds, and app/Shared/Module.lean imports app/Tenant/Module.lean, which Lean rejected at line 4, column 30: failed to synthesize instance of type class.",
-                "app/Shared/Schema/Entity.sharp:1:11:error - broken-rule: This file is in App.Shared, whose structure rules app/Shared/Module.lean holds, and app/Shared/Module.lean imports app/Tenant/Module.lean, which Lean rejected at line 4, column 30: failed to synthesize instance of type class.",
-                "app/Tenant/Community/Forum.sharp:1:11:error - broken-rule: This file is in App.Tenant, whose structure rules app/Tenant/Module.lean holds, and Lean rejected app/Tenant/Module.lean line 4, column 30: failed to synthesize instance of type class.",
-                "app/Tenant/Store/Receipts.sharp:1:11:error - broken-rule: This file is in App.Tenant, whose structure rules app/Tenant/Module.lean holds, and Lean rejected app/Tenant/Module.lean line 4, column 30: failed to synthesize instance of type class.",
-                "app/Tenant/Store/StoreService.sharp:1:11:error - broken-rule: This file is in App.Tenant, whose structure rules app/Tenant/Module.lean holds, and Lean rejected app/Tenant/Module.lean line 4, column 30: failed to synthesize instance of type class.",
+                "app/Shared/Ledger.sharp:1:11:error - broken-rule: This file is in App.Shared, whose structure rules app/Shared/Module.lean holds, and app/Shared/Module.lean imports app/Tenant/Module.lean, which Lean rejected at line 4, column 30: failed to synthesize instance of type class OfNat (List String) 1 numerals are polymorphic in Lean, but the numeral `1` cannot be used in a context where the expected type is List String due to the absence of the instance above Hint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.",
+                "app/Shared/Schema/Entity.sharp:1:11:error - broken-rule: This file is in App.Shared, whose structure rules app/Shared/Module.lean holds, and app/Shared/Module.lean imports app/Tenant/Module.lean, which Lean rejected at line 4, column 30: failed to synthesize instance of type class OfNat (List String) 1 numerals are polymorphic in Lean, but the numeral `1` cannot be used in a context where the expected type is List String due to the absence of the instance above Hint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.",
+                "app/Tenant/Community/Forum.sharp:1:11:error - broken-rule: This file is in App.Tenant, whose structure rules app/Tenant/Module.lean holds, and Lean rejected app/Tenant/Module.lean line 4, column 30: failed to synthesize instance of type class OfNat (List String) 1 numerals are polymorphic in Lean, but the numeral `1` cannot be used in a context where the expected type is List String due to the absence of the instance above Hint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.",
+                "app/Tenant/Store/Receipts.sharp:1:11:error - broken-rule: This file is in App.Tenant, whose structure rules app/Tenant/Module.lean holds, and Lean rejected app/Tenant/Module.lean line 4, column 30: failed to synthesize instance of type class OfNat (List String) 1 numerals are polymorphic in Lean, but the numeral `1` cannot be used in a context where the expected type is List String due to the absence of the instance above Hint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.",
+                "app/Tenant/Store/StoreService.sharp:1:11:error - broken-rule: This file is in App.Tenant, whose structure rules app/Tenant/Module.lean holds, and Lean rejected app/Tenant/Module.lean line 4, column 30: failed to synthesize instance of type class OfNat (List String) 1 numerals are polymorphic in Lean, but the numeral `1` cannot be used in a context where the expected type is List String due to the absence of the instance above Hint: Type class instance resolution failures can be inspected with the `set_option trace.Meta.synthInstance true` command.",
             ],
         ),
     ] {
@@ -1463,8 +1515,10 @@ fn a_structure_rule_outside_a_module_lean_is_refused_at_its_attribute() {
 
 /// Spec section 27: "At deploy, `mago compile` checks every rule exactly." Each `.sharpc` lists the `Module.lean` of
 /// its folder and of each folder above it and every workspace Lean file they import, so any edit that changes a rule
-/// makes the files it judges stale, and the compile checks every rule again over the facts of every file. Each row is
-/// an edit to a project that compiled, and the next compile refuses exactly the files a compile from nothing refuses.
+/// makes the files it judges stale, and the compile checks every rule again over the facts of every file. A Lean file
+/// that no Lean file imports is listed by no `.sharpc`, and the compile checks again when one joins or changes, so a
+/// `@[rule]` written there is refused at once. Each row is an edit to a project that compiled, and the next compile
+/// refuses exactly the files a compile from nothing refuses.
 #[test]
 fn compile_checks_every_rule_exactly_after_any_edit() {
     let fine = rules("App.Shared", "");
@@ -1499,6 +1553,19 @@ fn compile_checks_every_rule_exactly_after_any_edit() {
     );
     let closing = class("App.C", "Z", "import App.A.X;\n\n");
     let forbidding = "app/Shared/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule neverReachesForbidden in app/Shared/Module.lean.";
+    let unreached = |declaration: &str| format!("import Code.App.Shared.Rules\nopen Sharp\n\n{declaration}\n");
+    let (helper, straying) = (
+        unreached("def helper : Nat := 1"),
+        unreached("@[rule] def neverReachesTenant : Rule := .neverImports App.Tenant"),
+    );
+    let refused_at_attribute = |file: &str| {
+        format!(
+            "{file}:1:11:error - broken-rule: This file is in App.Shared, and Lean rejected app/Shared/Rules.lean line 4, column 3: `@[rule]` belongs in a Module.lean: a structure rule constrains the namespace of the Module.lean that holds it."
+        )
+    };
+    let attributes =
+        [refused_at_attribute("app/Shared/Ledger.sharp"), refused_at_attribute("app/Shared/Schema/Entity.sharp")];
+    let attributes: Vec<&str> = attributes.iter().map(String::as_str).collect();
     for (files, edits, refused) in [
         (
             vec![("app/Shared/Module.lean", fine.as_str())],
@@ -1558,6 +1625,16 @@ fn compile_checks_every_rule_exactly_after_any_edit() {
             vec![
                 "app/Tenant/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule neverReachesStore in app/Tenant/Module.lean.",
             ],
+        ),
+        (
+            vec![("app/Shared/Module.lean", fine.as_str())],
+            vec![("app/Shared/Rules.lean", Some(straying.as_str()))],
+            attributes.clone(),
+        ),
+        (
+            vec![("app/Shared/Module.lean", fine.as_str()), ("app/Shared/Rules.lean", helper.as_str())],
+            vec![("app/Shared/Rules.lean", Some(straying.as_str()))],
+            attributes,
         ),
     ] {
         let mut all = vec![("app/Tenant/Store/Module.lean", open.as_str())];

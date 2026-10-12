@@ -2,6 +2,7 @@
 //! every `.sharp` file under that namespace.
 
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -11,6 +12,7 @@ use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_database::file::FileId;
 use mago_reporting::IssueCollection;
+use mago_sharp_bridge::unit;
 
 use crate::facts::Facts;
 use crate::issues;
@@ -143,6 +145,20 @@ pub(crate) fn find(
     found.sort_by(|a, b| a.path.cmp(&b.path));
 
     Ok((found, unnamed))
+}
+
+/// Each of `files` with the hash of its source, one per line. The structure rules check reads them, and an unreached
+/// Lean file is the input of no `.sharpc`, so the check runs again whenever they differ from what the last check read.
+pub(crate) fn sources(root: &Path, files: &[LeanFile]) -> io::Result<String> {
+    let mut sources = String::new();
+    for file in files {
+        for byte in unit::source_hash(&fs::read(root.join(&file.path))?) {
+            let _ = write!(sources, "{byte:02x}");
+        }
+        let _ = writeln!(sources, " {}", file.path);
+    }
+
+    Ok(sources)
 }
 
 /// Whether `file` judges `translation`: `file` is a `Module.lean` or an unreached Lean file, and `translation`'s
