@@ -7,6 +7,7 @@ use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
+use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -260,6 +261,55 @@ impl<'analysis> Types<'analysis> {
     /// The fields the struct `class`'s `parse` reads, as the codex gives them.
     pub(crate) fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'analysis>> {
         self.codebase.struct_parse_fields(class)
+    }
+
+    /// `r#type` as the type text generics R3c's walk reads, php-sharp's decision 72: a class by its full dotted name as
+    /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `Object`, `List<T>`, `Set<T>`, `Map<K, V>`, and `T?`,
+    /// `A|B` and `(A|B)?` with union members sorted by their text. These are the types a struct's `parse` reads.
+    pub(crate) fn type_text(&self, r#type: &TUnion) -> String {
+        if let Some(TAtomic::Mixed(mixed)) = r#type.types.iter().find(|atomic| atomic.is_mixed()) {
+            return if mixed.is_non_null() { "Any" } else { "Any?" }.to_owned();
+        }
+
+        let mut members: Vec<String> =
+            r#type.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| self.atomic_text(atomic)).collect();
+        members.sort_unstable();
+        members.dedup();
+
+        match (r#type.has_null(), members.as_slice()) {
+            (false, _) => members.join("|"),
+            (true, [member]) => format!("{member}?"),
+            (true, _) => format!("({})?", members.join("|")),
+        }
+    }
+
+    /// One member of a union as [`Types::type_text`] writes it.
+    fn atomic_text(&self, atomic: &TAtomic) -> String {
+        match atomic {
+            TAtomic::Scalar(TScalar::Integer(_)) => "int".to_owned(),
+            TAtomic::Scalar(TScalar::Float(_)) => "float".to_owned(),
+            TAtomic::Scalar(TScalar::String(_)) => "string".to_owned(),
+            TAtomic::Scalar(TScalar::Bool(_)) => "bool".to_owned(),
+            TAtomic::Object(TObject::Any) => "Object".to_owned(),
+            TAtomic::Object(TObject::Enum(r#enum)) => self.class_text(r#enum.name),
+            TAtomic::Object(TObject::Named(object)) => self.class_text(object.name),
+            TAtomic::Array(array) => {
+                let (key, element) = self.array_parameters(array);
+                match array {
+                    TArray::List(_) => format!("List<{}>", self.type_text(&element)),
+                    TArray::Set(_) => format!("Set<{}>", self.type_text(&element)),
+                    TArray::Keyed(_) => format!("Map<{}, {}>", self.type_text(&key), self.type_text(&element)),
+                }
+            }
+            atomic => unreachable!("the checker refuses `parse` of a struct holding `{}`", atomic.get_id()),
+        }
+    }
+
+    /// The full dotted name of the class `name`, as it is declared.
+    fn class_text(&self, name: Word) -> String {
+        let declared = self.codebase.get_class_like(name.as_bytes()).map_or(name, |class| class.original_name);
+
+        declared.as_str_lossy().trim_start_matches('\\').replace('\\', ".")
     }
 
     /// The key type and the element type of a collection.

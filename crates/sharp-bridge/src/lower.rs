@@ -1,11 +1,9 @@
 use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
-use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::union::TUnion;
 use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::ResolvedNames;
@@ -645,9 +643,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A struct's `parse`, spec section 10, as `public static function parse(array|object $value): \App\Point`,
     /// spanning the struct's name. It reads each field `struct_parse_fields` gives from the input, a `Map` or an
-    /// object's public properties, records each bad field's problem under its path in `$fields#2`, and throws one
-    /// `\Sharp\InvalidFields` when any is bad. Otherwise it creates the struct through its main constructor, with the
-    /// arguments spread by name, so a missing key takes its parameter's default, then writes each property read:
+    /// object's public properties, records each bad value's problem under its path in `$fields#2` through generics
+    /// R3c's walk, and throws one `\Sharp\InvalidFields` when any is bad. Otherwise it creates the struct through its main
+    /// constructor, with the arguments spread by name, so a missing key takes its parameter's default, then writes each
+    /// property read:
     ///
     /// ```php
     /// $input#1 = \is_object($value) ? \get_object_vars($value) : $value;
@@ -682,8 +681,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let collected = if field.is_parameter { &arguments } else { &properties };
             let target = Place::element(collected, Index::Text(field.name.to_vec()));
             let source = Place::element(&input, Index::Text(field.key.to_vec()));
-            let path = [PathPart::Text(field.key.to_vec())];
-            let read = self.parse_value(span, field.r#type, &source, &path, &target, &fields);
+            let read = self.parse_field(span, field.r#type, &source, field.key, &target, &fields);
             let key = self.string(0, line, field.key);
             let input_read = self.variable(span, &input);
             let present = self.global_call(line, b"array_key_exists", &[key, input_read]);
@@ -795,15 +793,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter])
     }
 
-    /// The statement that reads the value at `source` as `r#type` into `target`, or records why it can't under `path`
-    /// in the problems `fields` holds, as `parse` checks each field. A nullable type takes null, and `Any?` anything.
-    /// A union takes the value as the first member that reads it with no problem, each tried against `$tried#N`.
-    fn parse_value(
+    /// The read of a field present in the input, from `source` into `target`. Each nested struct is built from its
+    /// value through its own `parse`, and each backed enum case from its backing value, then generics R3c's walk checks
+    /// the whole value against `r#type`, adding each bad value's problem to `fields` under its path, which starts at
+    /// `key`. The walk takes only a struct object where a struct is expected, so where a nested `parse` already moved
+    /// its problems under a path, the walk's own problem at that path is dropped. Once the walk accepts the value, each
+    /// `Set` in it holds its elements under their keys. `Any?` takes the value as it is.
+    ///
+    /// ```php
+    /// $read#N = $input#1['addresses'];
+    /// $failed#N = [];
+    /// …each nested struct and enum case built in $read#N…
+    /// if (\Sharp\Internal\accepts('List<App.Address>', $read#N, 'addresses', $fields#2)) { …each Set built… }
+    /// foreach ($failed#N as $path#N) { unset($fields#2[$path#N]); }
+    /// $arguments#3['addresses'] = $read#N;
+    /// ```
+    fn parse_field(
         &mut self,
         span: Span,
         r#type: &TUnion,
         source: &Place,
-        path: &[PathPart],
+        key: &[u8],
         target: &Place,
         fields: &[u8],
     ) -> u32 {
@@ -813,170 +823,194 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             return self.assign(span, target, value);
         }
-        let shown = self.type_name(r#type);
-        let members: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
-        let read = if let [member] = members.as_slice() {
-            self.parse_atomic(span, member, &shown, source, path, target, fields)
-        } else {
-            let tried = self.hidden("tried");
-            let mut otherwise = self.parse_error(span, &shown, source, path, fields);
-            for member in members.iter().rev() {
-                let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
-                let reset = self.assign(span, &Place::variable(&tried), empty);
-                let member_shown = self.atomic_name(member);
-                let read = self.parse_atomic(span, member, &member_shown, source, path, target, &tried);
-                let failed = self.not_empty(span, &tried);
-                let retry = self.if_chain(span, &[(failed, otherwise)]);
-                otherwise = self.node(SHARP_AST_STMT_LIST, 0, line, &[reset, read, retry]);
-            }
 
-            otherwise
-        };
-        if !r#type.is_nullable() {
-            return read;
-        }
-
+        let [read, failed] = ["read", "failed"].map(|base| self.hidden(base));
         let value = self.place(span, source);
-        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-        let is_null = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[value, null]);
-        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-        let takes_null = self.assign(span, target, null);
-
-        self.if_chain(span, &[(is_null, takes_null), (NULL, read)])
-    }
-
-    /// The read of one type `parse_value` tries, as `if (\is_int($value)) { $target = $value; } else { …problem… }`.
-    /// An `int` passes where a `float` is expected, as a `float`. An enum case is read from its backing value, a struct
-    /// through its own `parse`, its problems moved under `path`, and a `List`, `Map` or `Set` element by element.
-    #[allow(clippy::too_many_arguments)]
-    fn parse_atomic(
-        &mut self,
-        span: Span,
-        atomic: &TAtomic,
-        shown: &str,
-        source: &Place,
-        path: &[PathPart],
-        target: &Place,
-        fields: &[u8],
-    ) -> u32 {
-        let line = self.line(span);
-        let condition = match atomic {
-            TAtomic::Scalar(TScalar::Integer(_)) => self.global_call_of(span, b"is_int", source),
-            TAtomic::Scalar(TScalar::String(_)) => self.global_call_of(span, b"is_string", source),
-            TAtomic::Scalar(TScalar::Bool(_)) => self.global_call_of(span, b"is_bool", source),
-            TAtomic::Scalar(TScalar::Float(_)) => {
-                let either =
-                    [self.global_call_of(span, b"is_float", source), self.global_call_of(span, b"is_int", source)];
-
-                self.node(SHARP_AST_OR, 0, line, &either)
-            }
-            TAtomic::Object(TObject::Any) => self.global_call_of(span, b"is_object", source),
-            TAtomic::Mixed(_) => {
-                let value = self.place(span, source);
-                let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-
-                self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[value, null])
-            }
-            TAtomic::Object(TObject::Enum(r#enum)) => {
-                return self.parse_enum(span, r#enum.name.as_bytes(), shown, source, path, target, fields);
-            }
-            TAtomic::Object(TObject::Named(object)) if self.types.is_struct(object.name.as_bytes()) => {
-                return self.parse_struct(span, object.name.as_bytes(), shown, source, path, target, fields);
-            }
-            TAtomic::Object(TObject::Named(object)) => self.instance_of(span, source, object.name.as_bytes()),
-            TAtomic::Array(array) => return self.parse_collection(span, array, shown, source, path, target, fields),
-            atomic => unreachable!("the checker refuses `parse` of a struct holding `{}`", atomic.get_id()),
-        };
-        let mut value = self.place(span, source);
-        if let TAtomic::Scalar(TScalar::Float(_)) = atomic {
-            value = self.node(SHARP_AST_CAST, IS_DOUBLE, line, &[value]);
+        let mut statements = vec![self.assign(span, &Place::variable(&read), value)];
+        let mut moves = false;
+        let built = self.parse_build(span, r#type, &read, &[PathPart::Text(key.to_vec())], fields, &failed, &mut moves);
+        if moves {
+            let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
+            statements.push(self.assign(span, &Place::variable(&failed), empty));
         }
-        let read = self.assign(span, target, value);
-        let problem = self.parse_error(span, shown, source, path, fields);
+        statements.extend(built);
 
-        self.if_chain(span, &[(condition, read), (NULL, problem)])
+        let text = self.types.type_text(r#type);
+        let arguments = [
+            self.string(0, line, text.as_bytes()),
+            self.variable(span, &read),
+            self.string(0, line, key),
+            self.variable(span, fields),
+        ];
+        let accepts = self.global_call(line, b"Sharp\\Internal\\accepts", &arguments);
+        statements.push(match self.parse_sets(span, r#type, &read) {
+            Some(sets) => self.if_chain(span, &[(accepts, sets)]),
+            None => accepts,
+        });
+        if moves {
+            let path = self.hidden("path");
+            let slot = self.place(span, &Place::element(fields, Index::Variable(path.clone())));
+            let unset = self.node(SHARP_AST_UNSET, 0, line, &[slot]);
+            let unset = self.node(SHARP_AST_STMT_LIST, 0, line, &[unset]);
+            let each = [self.variable(span, &failed), self.variable(span, &path)];
+            statements.push(self.node(SHARP_AST_FOREACH, 0, line, &[each[0], each[1], NULL, unset]));
+        }
+        let read_value = self.variable(span, &read);
+        statements.push(self.assign(span, target, read_value));
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &statements)
     }
 
-    /// The read of a backed enum's case: the case itself, or the case its backing value names, through `tryFrom`.
+    /// The statements that build, in the value of `variable`, each struct and backed enum case `r#type` holds from the
+    /// value plain PHP gives, at `path`: a struct through its own `parse` from a `Map` or an object, and a case through
+    /// `tryFrom` from its backing value, inside a `List`, `Set` or `Map` element by element. A value that builds
+    /// nothing stays as it is, for the walk to report. Where the value can only be the one struct, that struct's
+    /// problems move under `path`, which `failed` records, and `moves` becomes true. Where it may be one of several, the
+    /// first that builds is taken.
     ///
     /// ```php
-    /// if ($value instanceof \App\Status) { $target = $value; }
-    /// elseif (\is_string($value) && ($case#N = \App\Status::tryFrom($value)) !== null) { $target = $case#N; }
-    /// else { $fields['status'] = \Sharp\InvalidFields::expected('Status', $value); }
-    /// ```
-    #[allow(clippy::too_many_arguments)]
-    fn parse_enum(
-        &mut self,
-        span: Span,
-        class: &[u8],
-        shown: &str,
-        source: &Place,
-        path: &[PathPart],
-        target: &Place,
-        fields: &[u8],
-    ) -> u32 {
-        let line = self.line(span);
-        let case = self.hidden("case");
-        let is_case = self.instance_of(span, source, class);
-        let value = self.place(span, source);
-        let itself = self.assign(span, target, value);
-
-        let backing: &[u8] =
-            if self.types.backing_type(class).is_some_and(TAtomic::is_int) { b"is_int" } else { b"is_string" };
-        let backs = self.global_call_of(span, backing, source);
-        let found = self.try_from(span, class, source);
-        let case_read = self.variable(span, &case);
-        let found = self.node(SHARP_AST_ASSIGN, 0, line, &[case_read, found]);
-        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-        let found = self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, null]);
-        let named = self.node(SHARP_AST_AND, 0, line, &[backs, found]);
-        let case_read = self.variable(span, &case);
-        let from_value = self.assign(span, target, case_read);
-        let problem = self.parse_error(span, shown, source, path, fields);
-
-        self.if_chain(span, &[(is_case, itself), (named, from_value), (NULL, problem)])
-    }
-
-    /// The read of a struct: the struct itself, or a `Map` or an object read through the struct's own `parse`, each of
-    /// its problems moved under `path`, as `addresses[1].city`.
-    ///
-    /// ```php
-    /// if ($value instanceof \App\Address) { $target = $value; }
-    /// elseif (\is_array($value) || \is_object($value)) {
-    ///     try { $target = \App\Address::parse($value); }
+    /// if (!$read#N instanceof \App\Address && (\is_array($read#N) || \is_object($read#N))) {
+    ///     try { $read#N = \App\Address::parse($read#N); }
     ///     catch (\Sharp\InvalidFields $inner#N) {
-    ///         foreach ($inner#N->fields as $key#N => $problem#N) { $fields[path . '.' . $key#N] = $problem#N; }
+    ///         foreach ($inner#N->fields as $key#N => $problem#N) { $fields#2[path . '.' . $key#N] = $problem#N; }
+    ///         $failed#N[] = path;
     ///     }
     /// }
-    /// else { $fields[path] = \Sharp\InvalidFields::expected('Address', $value); }
+    /// if (\is_string($read#N) && ($case#N = \App\Status::tryFrom($read#N)) !== null) { $read#N = $case#N; }
+    /// if (\is_array($read#N)) { foreach ($read#N as $key#N => $element#N) { …$element#N built… $read#N[$key#N] = $element#N; } }
     /// ```
     #[allow(clippy::too_many_arguments)]
-    fn parse_struct(
+    fn parse_build(
+        &mut self,
+        span: Span,
+        r#type: &TUnion,
+        variable: &[u8],
+        path: &[PathPart],
+        fields: &[u8],
+        failed: &[u8],
+        moves: &mut bool,
+    ) -> Vec<u32> {
+        let line = self.line(span);
+        let value = Place::variable(variable);
+        let members: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
+        let mut statements = Vec::new();
+
+        let structs: Vec<&[u8]> = members
+            .iter()
+            .filter_map(|atomic| match atomic {
+                TAtomic::Object(TObject::Named(object)) if self.types.is_struct(object.name.as_bytes()) => {
+                    Some(object.name.as_bytes())
+                }
+                _ => None,
+            })
+            .collect();
+        if !structs.is_empty() {
+            let readable =
+                [self.global_call_of(span, b"is_array", &value), self.global_call_of(span, b"is_object", &value)];
+            let mut condition = self.node(SHARP_AST_OR, 0, line, &readable);
+            for class in &structs {
+                let is_struct = self.instance_of(span, &value, class);
+                let is_not = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[is_struct]);
+                condition = self.node(SHARP_AST_AND, 0, line, &[is_not, condition]);
+            }
+            let built = if let ([class], [_]) = (structs.as_slice(), members.as_slice()) {
+                *moves = true;
+                self.parse_nested(span, class, variable, path, fields, failed)
+            } else {
+                let mut otherwise = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+                for class in structs.iter().rev() {
+                    let parsed = self.nested_parse(span, class, variable);
+                    let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\InvalidFields");
+                    let exception = self.node(SHARP_AST_NAME_LIST, 0, line, &[exception]);
+                    let catch = self.node(SHARP_AST_CATCH, 0, line, &[exception, NULL, otherwise]);
+                    let catches = self.node(SHARP_AST_CATCH_LIST, 0, line, &[catch]);
+                    let r#try = self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL]);
+                    otherwise = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#try]);
+                }
+
+                otherwise
+            };
+            statements.push(self.if_chain(span, &[(condition, built)]));
+        }
+
+        for atomic in &members {
+            let TAtomic::Object(TObject::Enum(r#enum)) = atomic else {
+                continue;
+            };
+            let class = r#enum.name.as_bytes();
+            let Some(backing) = self.types.backing_type(class) else {
+                continue;
+            };
+            let case = self.hidden("case");
+            let backs: &[u8] = if backing.is_int() { b"is_int" } else { b"is_string" };
+            let backs = self.global_call_of(span, backs, &value);
+            let found = self.try_from(span, class, &value);
+            let case_read = self.variable(span, &case);
+            let found = self.node(SHARP_AST_ASSIGN, 0, line, &[case_read, found]);
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+            let found = self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, null]);
+            let named = self.node(SHARP_AST_AND, 0, line, &[backs, found]);
+            let case_read = self.variable(span, &case);
+            let from_value = self.assign(span, &value, case_read);
+            statements.push(self.if_chain(span, &[(named, from_value)]));
+        }
+
+        for atomic in &members {
+            let TAtomic::Array(array) = atomic else {
+                continue;
+            };
+            let (_, element_type) = self.types.array_parameters(array);
+            if !self.builds(&element_type) {
+                continue;
+            }
+            let [key, element] = ["key", "element"].map(|base| self.hidden(base));
+            let (open, close): (&[u8], &[u8]) =
+                if matches!(array, TArray::Keyed(_)) { (b"[\"", b"\"]") } else { (b"[", b"]") };
+            let element_path = [
+                path,
+                &[PathPart::Text(open.to_vec()), PathPart::Variable(key.clone()), PathPart::Text(close.to_vec())],
+            ]
+            .concat();
+            let mut each = self.parse_build(span, &element_type, &element, &element_path, fields, failed, moves);
+            let element_read = self.variable(span, &element);
+            each.push(self.assign(span, &Place::element(variable, Index::Variable(key.clone())), element_read));
+            let each = self.node(SHARP_AST_STMT_LIST, 0, line, &each);
+            let parts = [self.place(span, &value), self.variable(span, &element), self.variable(span, &key)];
+            let each = self.node(SHARP_AST_FOREACH, 0, line, &[parts[0], parts[1], parts[2], each]);
+            let is_array = self.global_call_of(span, b"is_array", &value);
+            statements.push(self.if_chain(span, &[(is_array, each)]));
+        }
+
+        statements
+    }
+
+    /// `try { $read#N = \App\Address::parse($read#N); }`, the struct `class` built from the value of `variable`.
+    fn nested_parse(&mut self, span: Span, class: &[u8], variable: &[u8]) -> u32 {
+        let line = self.line(span);
+        let name = self.string(ZEND_NAME_FQ, line, class);
+        let method = self.string(0, line, b"parse");
+        let value = self.variable(span, variable);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+        let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments]);
+        let parsed = self.assign(span, &Place::variable(variable), parsed);
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed])
+    }
+
+    /// The struct `class` built from the value of `variable` through its own `parse`, each of its problems moved
+    /// under `path`, as `addresses[1].city`, and `path` recorded in `failed`.
+    fn parse_nested(
         &mut self,
         span: Span,
         class: &[u8],
-        shown: &str,
-        source: &Place,
+        variable: &[u8],
         path: &[PathPart],
-        target: &Place,
         fields: &[u8],
+        failed: &[u8],
     ) -> u32 {
         let line = self.line(span);
         let [inner, key, problem] = ["inner", "key", "problem"].map(|base| self.hidden(base));
-        let is_struct = self.instance_of(span, source, class);
-        let value = self.place(span, source);
-        let itself = self.assign(span, target, value);
-
-        let readable =
-            [self.global_call_of(span, b"is_array", source), self.global_call_of(span, b"is_object", source)];
-        let readable = self.node(SHARP_AST_OR, 0, line, &readable);
-        let name = self.string(ZEND_NAME_FQ, line, class);
-        let method = self.string(0, line, b"parse");
-        let value = self.place(span, source);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
-        let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments]);
-        let parsed = self.assign(span, target, parsed);
-        let parsed = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
+        let parsed = self.nested_parse(span, class, variable);
         let inner_path = [path, &[PathPart::Text(b".".to_vec()), PathPart::Variable(key.clone())]].concat();
         let moved = self.parse_problem(span, &inner_path, fields, Place::variable(&problem));
         let moved = self.node(SHARP_AST_STMT_LIST, 0, line, &[moved]);
@@ -985,128 +1019,77 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let problems = self.node(SHARP_AST_PROP, 0, line, &[inner_read, property]);
         let each = [self.variable(span, &problem), self.variable(span, &key)];
         let each = self.node(SHARP_AST_FOREACH, 0, line, &[problems, each[0], each[1], moved]);
-        let each = self.node(SHARP_AST_STMT_LIST, 0, line, &[each]);
+        let path = self.path(span, path);
+        let recorded = self.assign(span, &Place::element(failed, Index::Append), path);
+        let caught = self.node(SHARP_AST_STMT_LIST, 0, line, &[each, recorded]);
         let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\InvalidFields");
         let exception = self.node(SHARP_AST_NAME_LIST, 0, line, &[exception]);
-        let caught = self.string(0, line, &inner);
-        let catch = self.node(SHARP_AST_CATCH, 0, line, &[exception, caught, each]);
+        let inner = self.string(0, line, &inner);
+        let catch = self.node(SHARP_AST_CATCH, 0, line, &[exception, inner, caught]);
         let catches = self.node(SHARP_AST_CATCH_LIST, 0, line, &[catch]);
-        let r#try = self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL]);
-        let problem = self.parse_error(span, shown, source, path, fields);
 
-        self.if_chain(span, &[(is_struct, itself), (readable, r#try), (NULL, problem)])
+        self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL])
     }
 
-    /// The read of a `List`, a `Map` or a `Set`, each element read under its path, as `addresses[2]` or
-    /// `prices["vip"]`, into a hidden collection the target takes. A `List` and a `Set` take a PHP list, and a `Set`
-    /// holds each element under its key. A `Map` takes an array, and a key of an `int` or a backed enum is checked.
+    /// Whether `r#type` holds a struct or a backed enum, at any depth, which `parse_build` builds from a value.
+    fn builds(&self, r#type: &TUnion) -> bool {
+        r#type.types.iter().any(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(object)) => self.types.is_struct(object.name.as_bytes()),
+            TAtomic::Object(TObject::Enum(r#enum)) => self.types.backing_type(r#enum.name.as_bytes()).is_some(),
+            TAtomic::Array(array) => self.builds(&self.types.array_parameters(array).1),
+            _ => false,
+        })
+    }
+
+    /// Whether `r#type` holds a `Set`, at any depth, which `parse_sets` builds once the walk accepts the value.
+    fn holds_set(&self, r#type: &TUnion) -> bool {
+        r#type.types.iter().any(|atomic| match atomic {
+            TAtomic::Array(TArray::Set(_)) => true,
+            TAtomic::Array(array) => self.holds_set(&self.types.array_parameters(array).1),
+            _ => false,
+        })
+    }
+
+    /// The statement that holds each `Set` `r#type` holds in the value of `variable` as a `Set`, each element under its
+    /// key, through `\Sharp\Set::from`, once the walk has accepted the value, and none when it holds no `Set`. A `List`
+    /// or a `Map` holds its `Set`s element by element. Where the value may be one of several collections, the array
+    /// alone doesn't say which, and none is built.
     ///
     /// ```php
-    /// if (\is_array($value) && \array_is_list($value)) {
-    ///     $collected#N = [];
-    ///     foreach ($value as $key#N => $element#N) { …the read of $element#N into $collected#N[]… }
-    ///     $target = $collected#N;
-    /// } else { $fields[path] = \Sharp\InvalidFields::expected('List<Address>', $value); }
+    /// if (\is_array($read#N)) { $read#N = \Sharp\Set::from($read#N); }
     /// ```
-    #[allow(clippy::too_many_arguments)]
-    fn parse_collection(
-        &mut self,
-        span: Span,
-        array: &TArray,
-        shown: &str,
-        source: &Place,
-        path: &[PathPart],
-        target: &Place,
-        fields: &[u8],
-    ) -> u32 {
+    fn parse_sets(&mut self, span: Span, r#type: &TUnion, variable: &[u8]) -> Option<u32> {
         let line = self.line(span);
-        let [collected, key, element] = ["collected", "key", "element"].map(|base| self.hidden(base));
-        let is_map = matches!(array, TArray::Keyed(_));
-        let mut condition = self.global_call_of(span, b"is_array", source);
-        if !is_map {
-            let is_list = self.global_call_of(span, b"array_is_list", source);
-            condition = self.node(SHARP_AST_AND, 0, line, &[condition, is_list]);
-        }
-
-        let (key_type, element_type) = self.types.array_parameters(array);
-        let (open, close): (&[u8], &[u8]) = if is_map { (b"[\"", b"\"]") } else { (b"[", b"]") };
-        let element_path =
-            [path, &[PathPart::Text(open.to_vec()), PathPart::Variable(key.clone()), PathPart::Text(close.to_vec())]]
-                .concat();
-        let index = if is_map { Index::Variable(key.clone()) } else { Index::Append };
-        let element_target = Place::element(&collected, index);
-        let mut each = Vec::new();
-        if is_map && let Some(check) = self.parse_key(span, &key_type, &key, &element_path, fields) {
-            each.push(check);
-        }
-        each.push(self.parse_value(
-            span,
-            &element_type,
-            &Place::variable(&element),
-            &element_path,
-            &element_target,
-            fields,
-        ));
-        let each = self.node(SHARP_AST_STMT_LIST, 0, line, &each);
-        let loop_parts = [self.place(span, source), self.variable(span, &element), self.variable(span, &key)];
-        let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
-        let mut read = vec![self.assign(span, &Place::variable(&collected), empty)];
-        read.push(self.node(SHARP_AST_FOREACH, 0, line, &[loop_parts[0], loop_parts[1], loop_parts[2], each]));
-        let mut result = collected;
-        if let TArray::Set(_) = array {
-            // A `Set` holds each element under its key, which is a backed enum case's value.
-            let [set, item] = ["set", "item"].map(|base| self.hidden(base));
-            let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
-            read.push(self.assign(span, &Place::variable(&set), empty));
-            let mut stored = self.variable(span, &item);
-            if self.backed_enum(&element_type).is_some() {
-                let value = self.string(0, line, b"value");
-                stored = self.node(SHARP_AST_PROP, 0, line, &[stored, value]);
-            }
-            let set_read = self.variable(span, &set);
-            let slot = self.node(SHARP_AST_DIM, 0, line, &[set_read, stored]);
-            let item_read = self.variable(span, &item);
-            let hold = self.node(SHARP_AST_ASSIGN, 0, line, &[slot, item_read]);
-            let hold = self.node(SHARP_AST_STMT_LIST, 0, line, &[hold]);
-            let loop_parts = [self.variable(span, &result), self.variable(span, &item)];
-            read.push(self.node(SHARP_AST_FOREACH, 0, line, &[loop_parts[0], loop_parts[1], NULL, hold]));
-            result = set;
-        }
-        let result_read = self.variable(span, &result);
-        read.push(self.assign(span, target, result_read));
-        let read = self.node(SHARP_AST_STMT_LIST, 0, line, &read);
-        let problem = self.parse_error(span, shown, source, path, fields);
-
-        self.if_chain(span, &[(condition, read), (NULL, problem)])
-    }
-
-    /// The check of a `Map`'s key `key` against `key_type`, at `path`: an `int` key, or the backing value of a backed
-    /// enum's case. A `string` key needs none, and a backed struct's key is checked by its constructor.
-    fn parse_key(
-        &mut self,
-        span: Span,
-        key_type: &TUnion,
-        key: &[u8],
-        path: &[PathPart],
-        fields: &[u8],
-    ) -> Option<u32> {
-        let line = self.line(span);
-        let key_place = Place::variable(key);
-        let valid = match key_type.types.as_ref() {
-            [TAtomic::Scalar(TScalar::Integer(_))] => self.global_call_of(span, b"is_int", &key_place),
-            [TAtomic::Object(TObject::Enum(r#enum))] => {
-                let found = self.try_from(span, r#enum.name.as_bytes(), &key_place);
-                let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-
-                self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, null])
-            }
-            _ => return None,
+        let mut arrays = r#type.types.iter().filter_map(|atomic| match atomic {
+            TAtomic::Array(array) => Some(array),
+            _ => None,
+        });
+        let (Some(array), None) = (arrays.next(), arrays.next()) else {
+            return None;
         };
-        let invalid = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[valid]);
-        let shown = self.type_name(key_type);
-        let problem = self.parse_error(span, &shown, &key_place, path, fields);
+        let value = Place::variable(variable);
+        let held = if let TArray::Set(_) = array {
+            let read = self.place(span, &value);
+            let set = self.set_from(line, read);
 
-        Some(self.if_chain(span, &[(invalid, problem)]))
+            self.assign(span, &value, set)
+        } else {
+            let (_, element_type) = self.types.array_parameters(array);
+            if !self.holds_set(&element_type) {
+                return None;
+            }
+            let [key, element] = ["key", "element"].map(|base| self.hidden(base));
+            let inner = self.parse_sets(span, &element_type, &element)?;
+            let element_read = self.variable(span, &element);
+            let write = self.assign(span, &Place::element(variable, Index::Variable(key.clone())), element_read);
+            let each = self.node(SHARP_AST_STMT_LIST, 0, line, &[inner, write]);
+            let parts = [self.place(span, &value), self.variable(span, &element), self.variable(span, &key)];
+
+            self.node(SHARP_AST_FOREACH, 0, line, &[parts[0], parts[1], parts[2], each])
+        };
+        let is_array = self.global_call_of(span, b"is_array", &value);
+
+        Some(self.if_chain(span, &[(is_array, held)]))
     }
 
     /// `\App\Status::tryFrom($value)`, its value cast to a `string` for a `string`-backed enum, as PHP holds an
@@ -1122,23 +1105,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
 
         self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments])
-    }
-
-    /// `$fields[path] = \Sharp\InvalidFields::expected('shown', $value);`, the problem of a value `parse` can't read as
-    /// the type `shown` names.
-    fn parse_error(&mut self, span: Span, shown: &str, source: &Place, path: &[PathPart], fields: &[u8]) -> u32 {
-        let line = self.line(span);
-        let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\InvalidFields");
-        let method = self.string(0, line, b"expected");
-        let shown = self.string(0, line, shown.as_bytes());
-        let value = self.place(span, source);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[shown, value]);
-        let problem = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
-        let path = self.path(span, path);
-        let fields = self.variable(span, fields);
-        let slot = self.node(SHARP_AST_DIM, 0, line, &[fields, path]);
-
-        self.node(SHARP_AST_ASSIGN, 0, line, &[slot, problem])
     }
 
     /// `$fields[path] = $problem;`, a problem a nested struct's `parse` reported, recorded under `path`.
@@ -1233,46 +1199,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.temporaries += 1;
 
         format!("{base}#{}", self.temporaries).into_bytes()
-    }
-
-    /// `r#type` as PHP# writes it, as `string?`, `List<Address>` or `Plan`, which a problem `parse` reports names.
-    fn type_name(&self, r#type: &TUnion) -> String {
-        let members: Vec<String> =
-            r#type.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| self.atomic_name(atomic)).collect();
-        let joined = members.join("|");
-        if !r#type.is_nullable() {
-            joined
-        } else if members.len() == 1 {
-            format!("{joined}?")
-        } else {
-            format!("({joined})?")
-        }
-    }
-
-    /// One type of a union as PHP# writes it, a class by its name without its namespace.
-    fn atomic_name(&self, atomic: &TAtomic) -> String {
-        let short = |name: &[u8]| {
-            String::from_utf8_lossy(name.rsplit(|&byte| byte == b'\\').next().unwrap_or(name)).into_owned()
-        };
-        match atomic {
-            TAtomic::Scalar(TScalar::Integer(_)) => "int".to_owned(),
-            TAtomic::Scalar(TScalar::Float(_)) => "float".to_owned(),
-            TAtomic::Scalar(TScalar::String(_)) => "string".to_owned(),
-            TAtomic::Scalar(TScalar::Bool(_)) => "bool".to_owned(),
-            TAtomic::Mixed(_) => "Any".to_owned(),
-            TAtomic::Object(TObject::Any) => "Object".to_owned(),
-            TAtomic::Object(TObject::Enum(r#enum)) => short(r#enum.name.as_bytes()),
-            TAtomic::Object(TObject::Named(object)) => short(object.name.as_bytes()),
-            TAtomic::Array(array) => {
-                let (key, element) = self.types.array_parameters(array);
-                match array {
-                    TArray::List(_) => format!("List<{}>", self.type_name(&element)),
-                    TArray::Set(_) => format!("Set<{}>", self.type_name(&element)),
-                    TArray::Keyed(_) => format!("Map<{}, {}>", self.type_name(&key), self.type_name(&element)),
-                }
-            }
-            atomic => unreachable!("the checker refuses `parse` of a struct holding `{}`", atomic.get_id()),
-        }
     }
 
     /// The members of a class or a struct, each lowered, with the constructor the class needs when it declares none
