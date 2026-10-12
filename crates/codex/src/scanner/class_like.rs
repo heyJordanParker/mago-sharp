@@ -1693,6 +1693,7 @@ fn create_enum_method(
             visibility: Visibility::Public,
             where_constraints: WordMap::default(),
         }),
+        listens: vec![],
         type_resolution_context: None,
         thrown_types,
         issues: Vec::default(),

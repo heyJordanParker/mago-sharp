@@ -260,7 +260,11 @@ fn any_other_word_after_a_constructor_colon_is_one_error() {
         let [error] = program.errors else {
             panic!("expected one error for `{member}`, got {:#?}", program.errors);
         };
-        assert_eq!(error.to_string(), "A constructor passes control to its base class with `: super(…)`.", "{member}");
+        assert_eq!(
+            error.to_string(),
+            "A constructor passes control to its base class with `: super(…)`, and a named constructor to the main one with `: this(…)`.",
+            "{member}"
+        );
         assert_eq!(source(code, error), start, "{member}");
         let [ClassLikeMember::Method(constructor), ClassLikeMember::Method(run)] = class_members(program).as_slice()
         else {
@@ -269,6 +273,79 @@ fn any_other_word_after_a_constructor_colon_is_one_error() {
         assert_eq!(source(code, &constructor.body), "{}", "{member}");
         assert_eq!(source(code, &run.name), "run", "{member}");
     }
+}
+
+/// Spec section 9.1: a named constructor is its modifiers, its class's name, a `.`, its own name, parameters, an
+/// optional `: this(…)` and a body. Semantics requires `: this(…)`.
+#[test]
+fn a_named_constructor_is_its_class_a_dot_its_name_parameters_this_and_a_body() {
+    for (member, name, initializer, body) in [
+        ("public Report.fromJson(string json) : this(json.length) {}", "fromJson", Some(": this(json.length)"), "{}"),
+        ("[Shown] private Report.empty() : this(0) => this.reset();", "empty", Some(": this(0)"), "=> this.reset();"),
+        ("protected Report.raw(int id) { }", "raw", None, "{ }"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{member}: {:#?}", program.errors);
+        let [ClassLikeMember::NamedConstructor(constructor), ClassLikeMember::Method(run)] =
+            class_members(program).as_slice()
+        else {
+            panic!("expected a named constructor and a method for `{member}`, got {:#?}", class_members(program));
+        };
+        assert_eq!(source(code, constructor), member);
+        assert_eq!(source(code, &constructor.class), "Report", "{member}");
+        assert_eq!(source(code, &constructor.name), name, "{member}");
+        assert_eq!(
+            constructor.initializer.as_ref().map(|initializer| source(code, initializer)),
+            initializer,
+            "{member}"
+        );
+        assert_eq!(source(code, &constructor.body), body, "{member}");
+        assert_eq!(source(code, &run.name), "run", "{member}");
+    }
+}
+
+/// Spec section 9.1: `new Report.fromJson(…)` creates an object with the named constructor `fromJson`. PHP reads
+/// `new Report . fromJson(…)` as the new object joined to a function's result.
+#[test]
+fn new_with_a_dot_names_a_named_constructor_and_php_keeps_its_concatenation() {
+    const SHARP: &str = "class Use\n{\n    public Report make() => new Report.fromJson(\"{}\");\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Use.sharp", SHARP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(ClassLikeMember::Method(method)) = class_members(program).first() else {
+        panic!("expected a method, got {:#?}", class_members(program));
+    };
+    let MethodBody::Expression(body) = &method.body else {
+        panic!("expected an expression body, got {:#?}", method.body);
+    };
+    let Expression::Instantiation(instantiation) = body.expression else {
+        panic!("expected `new`, got {:#?}", body.expression);
+    };
+    assert_eq!(source(SHARP, instantiation), "new Report.fromJson(\"{}\")");
+    assert_eq!(source(SHARP, instantiation.class), "Report");
+    assert_eq!(instantiation.constructor.as_ref().map(|constructor| source(SHARP, constructor)), Some(".fromJson"));
+
+    const PHP: &str = "<?php $made = new Report.fromJson('{}');";
+    let program = parse(&arena, "src/use.php", PHP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Expression(statement)) = program.statements.get(1) else {
+        panic!("expected an expression statement, got {:#?}", program.statements);
+    };
+    let Expression::Assignment(assignment) = statement.expression else {
+        panic!("expected an assignment, got {:#?}", statement.expression);
+    };
+    let Expression::Binary(concatenation) = assignment.rhs else {
+        panic!("expected a concatenation, got {:#?}", assignment.rhs);
+    };
+    assert_eq!(source(PHP, concatenation.lhs), "new Report");
+    assert_eq!(source(PHP, concatenation.rhs), "fromJson('{}')");
 }
 
 #[test]
@@ -351,8 +428,8 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required`, `via` and a named constructor are spec syntax outside the slice. Each one is a
-/// single error where it starts, and the class around it still parses.
+/// `required` and `via` are spec syntax outside the slice. Each one is a single error where it starts, and the class
+/// around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
@@ -362,16 +439,6 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
             "public Report(public int id { get; } via Tracked, int other) {}",
             "`via` is not supported yet in PHP#.",
             "via",
-        ),
-        (
-            "public Report.fromJson(string json) : this(json.length) {}",
-            "A named constructor is not supported yet in PHP#.",
-            "Report.fromJson",
-        ),
-        (
-            "public Report make() { return new Report.fromJson(\"{}\"); }",
-            "A named constructor is not supported yet in PHP#.",
-            "Report.fromJson",
         ),
     ] {
         let arena = LocalArena::new();
@@ -3831,6 +3898,62 @@ fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
         panic!("expected the class `Order` last, got {:#?}", program.statements);
     };
     assert_eq!(order.name.value, b"Order");
+}
+
+/// Spec section 15: a trailing `on` clause after a method's parameters lists the events the method listens to, before
+/// its block, its `=>` body or its `;`.
+#[test]
+fn an_on_clause_lists_events_after_the_parameters() {
+    const CODE: &str = "class Notices\n{\n    public void refresh() on OrderPaid { }\n\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded => this.log(e);\n\n    abstract void heard(OrderEvent e) on OrderEvent;\n\n    public void run() { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Notices.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let methods: Vec<(&str, Option<(&str, Vec<&str>)>)> = class_members(program)
+        .iter()
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            let on = method.on.as_ref().map(|on| {
+                assert_eq!(on.on.value, b"on");
+
+                (source(CODE, on), on.events.iter().map(|event| source(CODE, event)).collect())
+            });
+
+            (source(CODE, &method.name), on)
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("refresh", Some(("on OrderPaid", vec!["OrderPaid"]))),
+            ("send", Some(("on OrderPaid, OrderRefunded", vec!["OrderPaid", "OrderRefunded"]))),
+            ("heard", Some(("on OrderEvent", vec!["OrderEvent"]))),
+            ("run", None),
+        ]
+    );
+}
+
+/// `on` starts a clause only after a method's parameters, so a method, a parameter and a local named `on` keep it as a
+/// name.
+#[test]
+fn on_stays_a_name_outside_the_clause() {
+    const CODE: &str =
+        "class Switch\n{\n    public bool on(bool on)\n    {\n        const was = on;\n        return was;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Switch.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(method)] = class_members(program).as_slice() else {
+        panic!("expected one method, got {:#?}", class_members(program));
+    };
+    assert_eq!(source(CODE, &method.name), "on");
+    assert!(method.on.is_none(), "{:#?}", method.on);
+    let [Statement::LocalDeclaration(was), _] = method_body(program) else {
+        panic!("expected a local and a return, got {:#?}", method_body(program));
+    };
+    assert_eq!(source(CODE, was.value), "on");
 }
 
 /// `event` declares an event only before a name and `(`, so a parameter, a field, a local, a call such as Laravel's

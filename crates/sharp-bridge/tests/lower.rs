@@ -700,15 +700,19 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
 /// public readonly int $id;
 /// protected protected(set) int $total;   // written `public int total { get; protected set; }`
 /// private readonly int $hidden;
+/// public protected(set) string $title;   // written `public string title { get; init; }`
+/// public private(set) string $tag;       // written `public string tag { get; private init; }`
 /// ```
 ///
 /// An auto-property is a property with asymmetric visibility. `[4097]` is `ZEND_ACC_PUBLIC | ZEND_ACC_PRIVATE_SET`,
 /// and `[2049]` is `ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED_SET`. A get-only property is `readonly`, so `[129]` is
-/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY` and `[132]` is `ZEND_ACC_PRIVATE | ZEND_ACC_READONLY`.
+/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY` and `[132]` is `ZEND_ACC_PRIVATE | ZEND_ACC_READONLY`. An `init` property is
+/// `protected(set)` without `readonly`, so a named constructor sets it again, and the analyzer refuses each write after
+/// the object is created. PHP has no set visibility for that, so a plain PHP subclass can still write it.
 #[test]
 fn an_auto_property_is_a_property_with_its_set_visibility() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n}\n",
+        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n}\n",
     );
     let groups: Vec<(u32, String)> = lowered
         .nodes()
@@ -726,6 +730,8 @@ fn an_auto_property_is_a_property_with_its_set_visibility() {
             (129, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"id\"\n    null\n    null\n    null\n".to_owned()),
             (2049, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"total\"\n    null\n    null\n    null\n".to_owned()),
             (132, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"hidden\"\n    null\n    null\n    null\n".to_owned()),
+            (2049, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"title\"\n    null\n    null\n    null\n".to_owned()),
+            (4097, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"tag\"\n    null\n    null\n    null\n".to_owned()),
         ]
     );
 }
@@ -891,10 +897,12 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 /// public int $size { get => $this->size; set { $this->resize($value); } }
 /// public protected(set) int $kept = 3 { get => $this->kept * 2; }
 /// protected int $guarded { get => $this->guarded; }
+/// public protected(set) int $slug { set { $this->slug = $value * 2; } }
 /// ```
 ///
 /// Each accessor body is a hook: `get => expr;` keeps PHP's short body, and a block or `set => expr;` is a statement
-/// list, because PHP stores the result of a short `set` body. `field` is `$this->name` and `value` is `$value`. An auto
+/// list, because PHP stores the result of a short `set` body. An `init` body is the `set` hook, under
+/// `protected(set)`. `field` is `$this->name` and `value` is `$value`. An auto
 /// accessor beside a body that uses `field` is PHP's backing store, so it lowers to nothing, and otherwise it is the
 /// hook over the storage, so the property stays backed. A public get-only property whose body uses `field` takes
 /// `protected(set)`, the set visibility of `readonly`, which PHP refuses on a hooked property. A protected one takes
@@ -904,7 +912,7 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 #[test]
 fn accessor_bodies_are_property_hooks() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n\n    public void resize(int to)\n    {\n    }\n}\n",
+        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public void resize(int to)\n    {\n    }\n}\n",
     );
 
     assert_eq!(
@@ -1066,6 +1074,32 @@ fn accessor_bodies_are_property_hooks() {
                               VAR
                                 ZVAL "this"
                               ZVAL "guarded"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [2049]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "slug"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @9-9
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "slug"
+                              BINARY_OP [3]
+                                VAR
+                                  ZVAL "value"
+                                ZVAL 2
                           null
                           null
                   null
@@ -1762,6 +1796,166 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 
         assert_eq!(lowered.render(lowered.child(lowered.method_named("__construct"), 2)), "STMT_LIST\n", "{code}");
     }
+}
+
+/// ```php
+/// public static function sized(int $size, string ...$notes): \App\Report
+/// {
+///     ${'this#1'} = new \App\Report($size);
+///     (function ($size, ...$notes) {
+///         if ($size === 0) { return; }
+///         $this->label = parent::describe();
+///         $read = function () { return $this->label; };
+///         $skip = function () { return; };
+///     })->call(${'this#1'}, $size, ...$notes);
+///     return ${'this#1'};
+/// }
+/// ```
+///
+/// Spec section 9.1: a named constructor is the static method it runs as. `: this(…)` creates the object with the
+/// main constructor, and the body is a closure bound to it, so it runs as a method body on a real `$this`: `super.m()`
+/// is `parent::m()`, `return;` and a lambda's `return;` return nothing, and a lambda reads `$this` as in a method. The
+/// closure takes each parameter, a variadic one spread back out. The method returns the object after its body.
+#[test]
+fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.method_named("sized")),
+        indoc! {r#"
+            METHOD [17] "sized" @15-24
+              PARAM_LIST
+                PARAM
+                  ZVAL [1] "int"
+                  ZVAL "size"
+                  null
+                  null
+                  null
+                  null
+                PARAM [16]
+                  ZVAL [1] "string"
+                  ZVAL "notes"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "this#1"
+                  NEW
+                    ZVAL "App\\Report"
+                    ARG_LIST
+                      VAR
+                        ZVAL "size"
+                METHOD_CALL
+                  CLOSURE "" @16-24
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "size"
+                        null
+                        null
+                        null
+                        null
+                      PARAM [16]
+                        null
+                        ZVAL "notes"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "size"
+                            ZVAL 0
+                          STMT_LIST
+                            RETURN
+                              null
+                      ASSIGN
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "label"
+                        STATIC_CALL
+                          ZVAL [1] "parent"
+                          ZVAL "describe"
+                          ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "read"
+                        CLOSURE "" @22-22
+                          PARAM_LIST
+                          null
+                          STMT_LIST
+                            RETURN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "label"
+                          null
+                          null
+                      ASSIGN
+                        VAR
+                          ZVAL "skip"
+                        CLOSURE "" @23-23
+                          PARAM_LIST
+                          null
+                          STMT_LIST
+                            RETURN
+                              null
+                          null
+                          null
+                    null
+                    null
+                  ZVAL "call"
+                  ARG_LIST
+                    VAR
+                      ZVAL "this#1"
+                    VAR
+                      ZVAL "size"
+                    UNPACK
+                      VAR
+                        ZVAL "notes"
+                RETURN
+                  VAR
+                    ZVAL "this#1"
+              ZVAL "App\\Report"
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// public static function make(): \App\Report { return \App\Report::sized(3); }
+/// ```
+///
+/// Spec section 9.1: `new Report.sized(…)` calls the static method the named constructor runs as.
+#[test]
+fn new_with_a_named_constructor_is_a_static_call_of_it() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Report\n{\n    public Report(public int size { get; }) { }\n\n    public Report.sized(int size) : this(size) { }\n\n    public static Report make() => new Report.sized(3);\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("make"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Report"
+                  ZVAL "sized"
+                  ARG_LIST
+                    ZVAL 3
+        "#}
+    );
 }
 
 /// ```php
@@ -5299,6 +5493,18 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
                 null
                 null
         "#}
+    );
+}
+
+/// Spec section 15: an `on` clause adds nothing to its class, because `mago compile` lists each listener in
+/// `.sharp/listeners.php`, so a listener lowers to its method alone.
+#[test]
+fn a_listener_lowers_to_its_method_alone() {
+    let code = "namespace App;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n\npublic event OrderPaid(int orderId) : OrderEvent;\n\npublic class Notices\n{\n    public void send(OrderEvent e) on OrderPaid { }\n\n    public void refresh() on OrderPaid, OrderEvent => this.send(new OrderPaid(1));\n}\n";
+
+    assert_eq!(
+        Lowered::new(code).tree(),
+        Lowered::new(&code.replace(" on OrderPaid, OrderEvent", "").replace(" on OrderPaid", "")).tree()
     );
 }
 

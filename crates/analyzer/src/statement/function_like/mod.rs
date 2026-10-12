@@ -448,7 +448,7 @@ where
 
     if let Some(function_metadata) = block_context.scope.get_function_like()
         && !block_context.flags.has_returned()
-        && let Some(return_type) = &function_metadata.return_type_metadata
+        && let Some(return_type) = body_return_type(function_metadata)
         && !return_type.type_union.is_void()
         && !function_like_metadata.flags.has_yield()
     {
@@ -752,6 +752,12 @@ where
     }
 
     Ok(())
+}
+
+/// The type a function-like's body returns. A PHP# named constructor runs as a static method that returns the object
+/// its `: this(…)` creates, spec section 9.1, but its body returns nothing, as the main constructor's does.
+pub(crate) fn body_return_type(function_like: &FunctionLikeMetadata) -> Option<&TypeMetadata> {
+    function_like.return_type_metadata.as_ref().filter(|_| !function_like.flags.is_named_constructor())
 }
 
 /// Reports a body that can end without returning a value, though the `kind` named `name`, declared at `declaration`,
@@ -1136,7 +1142,7 @@ fn check_return_type_width<'ctx, A>(
         return;
     }
 
-    let Some(return_type_metadata) = function_like_metadata.return_type_metadata.as_ref() else {
+    let Some(return_type_metadata) = body_return_type(function_like_metadata) else {
         return;
     };
 
@@ -1751,27 +1757,33 @@ where
             continue;
         };
 
-        let issue = if context.dialect.is_sharp() {
-            let name = display_class_like_name(context, *name);
-            Issue::error(format!("Cannot find type `{name}`."))
-                .with_annotation(
-                    Annotation::primary(type_metadata.span)
-                        .with_message(format!("`{name}` is not defined in the current codebase")),
-                )
-                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
-        } else {
-            Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
-                .with_annotation(
-                    Annotation::primary(type_metadata.span)
-                        .with_message(format!("`{name}` is not defined in the current codebase")),
-                )
-                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-                .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
-                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.")
-        };
-        context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
+        report_undefined_type(context, *name, type_metadata.span);
     }
+}
+
+/// Reports the type `name`, written at `span`, as not found in the codebase.
+pub(crate) fn report_undefined_type<A>(context: &mut Context<'_, '_, A>, name: Word, span: Span)
+where
+    A: Arena,
+{
+    let issue = if context.dialect.is_sharp() {
+        let name = display_class_like_name(context, name);
+        Issue::error(format!("Cannot find type `{name}`."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+            )
+            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
+    } else {
+        Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+            )
+            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+            .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
+            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.")
+    };
+    context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
 }
 
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an

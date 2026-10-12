@@ -89,6 +89,7 @@ use crate::utils::names::display_type;
 pub mod constant;
 pub mod enum_case;
 pub mod initialization;
+pub mod listener;
 pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
@@ -506,6 +507,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
         }
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         let should_check_unused = 'check_unused: {
             if !context.settings.find_unused_definitions {
@@ -628,6 +630,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
         }
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         // Call plugin on_leave_interface hooks
         if context.plugin_registry.has_interface_hooks() {
@@ -911,6 +914,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
         check_duplicate_enum_case_values(context, artifacts, name, self);
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         if context.settings.find_unused_definitions
             && !class_like_metadata.flags.is_unchecked()
@@ -1381,6 +1385,9 @@ where
             }
             ClassLikeMember::Law(law) => {
                 law.analyze(context, &mut block_context, artifacts)?;
+            }
+            ClassLikeMember::NamedConstructor(named_constructor) => {
+                named_constructor.analyze(context, &mut block_context, artifacts)?;
             }
             _ => {}
         }
@@ -2550,6 +2557,23 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             }
 
+            let error_span = if appearing_class.kind.is_trait() {
+                class_like_metadata.name_span.unwrap_or(class_like_metadata.span)
+            } else {
+                appearing_method.name_span.unwrap_or(appearing_method.span)
+            };
+
+            if report_named_constructor_clash(
+                context,
+                class_like_metadata,
+                appearing_method,
+                overridden_class,
+                overridden_method,
+                error_span,
+            ) {
+                continue;
+            }
+
             let substituted_overridden_method =
                 get_substituted_method(overridden_method, class_like_metadata, declaring_class_name, context.codebase);
 
@@ -2563,16 +2587,6 @@ fn check_abstract_method_signatures<'ctx, A>(
                 &substituted_overridden_method,
                 context.dialect,
             );
-
-            if issues.is_empty() {
-                continue;
-            }
-
-            let error_span = if appearing_class.kind.is_trait() {
-                class_like_metadata.name_span.unwrap_or(class_like_metadata.span)
-            } else {
-                appearing_method.name_span.unwrap_or(appearing_method.span)
-            };
 
             for incompatibility in issues {
                 report_signature_compatibility_issue(
@@ -3136,6 +3150,19 @@ fn check_interface_method_signatures<'ctx, A>(
             continue;
         }
 
+        let declaring_class = context.codebase.get_class_like(interface_fqcn_str).unwrap_or(interface_metadata);
+        let method_span = class_method.name_span.unwrap_or(class_method.span);
+        if report_named_constructor_clash(
+            context,
+            class_like_metadata,
+            class_method,
+            declaring_class,
+            interface_method,
+            method_span,
+        ) {
+            continue;
+        }
+
         let substituted_interface_method = get_substituted_method(
             interface_method,
             class_like_metadata,
@@ -3159,12 +3186,6 @@ fn check_interface_method_signatures<'ctx, A>(
         );
 
         for incompatibility in issues {
-            // Use the method span as primary location (where the issue actually is)
-            let method_span = class_method.name_span.unwrap_or(class_method.span);
-
-            // Get the actual declaring class for error reporting
-            let declaring_class = context.codebase.get_class_like(interface_fqcn_str).unwrap_or(interface_metadata);
-
             report_signature_compatibility_issue(
                 context,
                 class_like_metadata,
@@ -3176,6 +3197,48 @@ fn check_interface_method_signatures<'ctx, A>(
             );
         }
     }
+}
+
+/// Reports a method that shares its name with a PHP# named constructor of a parent class or interface, or the reverse,
+/// spec section 9.1, and returns whether it did. PHP refuses the pair, a static and an instance method of one name, so
+/// the class is refused once, in the words the user wrote, and the signature checks that would follow are skipped. Two
+/// named constructors of one name are a subclass's own, checked as any static method pair is.
+fn report_named_constructor_clash<A>(
+    context: &mut Context<'_, '_, A>,
+    child_class: &ClassLikeMetadata,
+    child_method: &FunctionLikeMetadata,
+    parent_class: &ClassLikeMetadata,
+    parent_method: &FunctionLikeMetadata,
+    primary_span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    let child_is_constructor = child_method.flags.is_named_constructor();
+    if child_is_constructor == parent_method.flags.is_named_constructor() {
+        return false;
+    }
+
+    let child =
+        display_sharp_member(display_class_like_name(context, child_class.original_name), child_method.original_name);
+    let parent_name = display_class_like_name(context, parent_class.original_name);
+    let message = if child_is_constructor {
+        let parent = display_sharp_member(parent_name, parent_method.original_name);
+
+        format!("The named constructor `{child}` cannot share its name with the method `{parent}`.")
+    } else {
+        format!(
+            "`{child}` cannot share its name with `{parent_name}`'s named constructor `{}`.",
+            parent_method.original_name
+        )
+    };
+
+    context.collector.report_with_code(
+        IssueCode::IncompatibleStaticModifier,
+        Issue::error(message).with_annotation(Annotation::primary(primary_span).with_message("Declared here.")),
+    );
+
+    true
 }
 
 fn report_signature_compatibility_issue<'ctx, A>(

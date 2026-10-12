@@ -57,7 +57,9 @@ use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -1081,6 +1083,32 @@ where
         property_type.set_possibly_undefined(true, None);
     }
 
+    // A PHP# `init` property is set only while its object is created, spec section 6.1: on `this`, in a constructor of
+    // its class or a subclass, or in a named constructor, where C# allows an `init` accessor. A lambda may run after
+    // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
+    // its storage through `field`, on `this` only.
+    if for_assignment && context.dialect.is_sharp() && property_metadata.flags.is_init() {
+        let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
+        let creates_this = is_this(object_expr, context.resolved_names)
+            && block_context.scope.get_function_like().is_some_and(|function_like| {
+                function_like.flags.is_named_constructor()
+                    || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
+            });
+
+        if !writes_its_storage && !creates_this {
+            let property = display_property_name(context, prop_name);
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(format!("`{property}` is set only while the object is created."))
+                    .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                    .with_help("Set it on `this` in a constructor or a named constructor."),
+            );
+            result.has_error_path = true;
+
+            return None;
+        }
+    }
+
     let is_visible = if for_assignment {
         check_resolved_property_write_visibility(
             context,
@@ -1545,6 +1573,19 @@ where
         None,
     ) {
         return Some(get_never());
+    }
+
+    // Spec section 9.1: a named constructor creates an object, so it is called with `new` and is no function value.
+    // The read keeps the closure's type, so the one error is this one.
+    if context.codebase.get_method_by_id(&method).is_some_and(|metadata| metadata.flags.is_named_constructor()) {
+        let constructor = quoted_source(context, access_span);
+        context.collector.report_with_code(
+            IssueCode::NamedConstructorWithoutNew,
+            Issue::error(format!(
+                "`{constructor}` is a constructor, so it is no function value: create the object with `new {constructor}(…)`."
+            ))
+            .with_annotation(Annotation::primary(access_span).with_message("Read as a value here.")),
+        );
     }
 
     artifacts.symbol_references.add_reference_to_class_member(

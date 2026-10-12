@@ -35,6 +35,7 @@ use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCase;
@@ -67,6 +68,7 @@ use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::NamedArgument;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafePropertyAccess;
@@ -509,6 +511,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 ClassLikeMember::Method(method) => self.method(method, modifier_flags(&method.modifiers), &[]),
                 ClassLikeMember::Operator(operator) => self.operator(operator),
+                ClassLikeMember::NamedConstructor(
+                    constructor @ NamedConstructor { initializer: Some(initializer), .. },
+                ) => self.named_constructor(constructor, initializer),
                 ClassLikeMember::Property(property) => self.property(property, parent_name),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
                 _ => unreachable!("check_slice refuses the class member `{member}`"),
@@ -847,6 +852,81 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
+    /// A named constructor is the static method it runs as, spec section 9.1, as php-src's grammar builds
+    /// `public static function fromJson(string $json): \Demo\Artifact { ${'this#1'} = new \Demo\Artifact(…);
+    /// (function ($json) { … })->call(${'this#1'}, $json); return ${'this#1'}; }`: its `: this(…)` creates the object
+    /// with the main constructor, and its body is a closure bound to that object, so it runs as a method body on a real
+    /// `$this`, where `super.m()` and `return;` run as they do in a method.
+    fn named_constructor(&mut self, constructor: &NamedConstructor, initializer: &ConstructorInitializer) -> u32 {
+        self.enter(constructor.name.value);
+        let mut parameters = Vec::new();
+        for parameter in &constructor.parameter_list.parameters {
+            parameters.push(self.parameter(parameter));
+        }
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&constructor.parameter_list), &parameters);
+        let mut statements = self.set_parameters(&constructor.parameter_list);
+        let line = self.line(initializer);
+        let object = self.variable(initializer.keyword.span, b"this#1");
+        let class = self.string(ZEND_NAME_FQ, line, self.class);
+        let arguments = self.arguments(&initializer.argument_list, &[]);
+        let new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+        statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[object, new]));
+
+        // The closure takes the method's parameters untyped, as the method already checked and converted each one.
+        let line = self.line(&constructor.body);
+        let mut closure_parameters = Vec::new();
+        let mut arguments = vec![self.variable(constructor.body.span(), b"this#1")];
+        for parameter in &constructor.parameter_list.parameters {
+            let parameter_line = self.line(parameter);
+            let name = self.string(0, parameter_line, parameter.variable.name);
+            let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
+            closure_parameters.push(self.node(
+                SHARP_AST_PARAM,
+                variadic_flag,
+                parameter_line,
+                &[NULL, name, NULL, NULL, NULL, NULL],
+            ));
+
+            let argument = self.variable(parameter.variable.span, parameter.variable.name);
+            arguments.push(if parameter.is_variadic() {
+                self.node(SHARP_AST_UNPACK, 0, parameter_line, &[argument])
+            } else {
+                argument
+            });
+        }
+
+        let closure_parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &closure_parameters);
+        let body = self.method_body(&constructor.body, false, Vec::new());
+        let closure = self.declaration(
+            SHARP_AST_CLOSURE,
+            0,
+            &constructor.body,
+            &constructor.body,
+            b"",
+            &[closure_parameters, NULL, body, NULL, NULL],
+        );
+        let call = self.string(0, line, b"call");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+        statements.push(self.node(SHARP_AST_METHOD_CALL, 0, line, &[closure, call, arguments]));
+
+        let end = self.lines.line(constructor.body.span().end.offset);
+        let object = self.variable(constructor.body.span(), b"this#1");
+        statements.push(self.node(SHARP_AST_RETURN, 0, end, &[object]));
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let return_type = self.string(ZEND_NAME_FQ, self.line(constructor.class), self.class);
+        let attributes = self.attributes(&constructor.attribute_lists, None);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            modifier_flags(&constructor.modifiers) | ZEND_ACC_STATIC,
+            constructor.class,
+            constructor.body.span(),
+            constructor.name.value,
+            &[parameters, NULL, body, return_type, attributes],
+        )
+    }
+
     /// A type that also holds null: `?T`, as php-src's grammar builds `?\App\Money`, a union with `null` last, or the
     /// type itself when it holds null already, as `T?` and `Any` do.
     fn nullable_hint(&mut self, hint: &Hint) -> u32 {
@@ -1055,7 +1135,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     PropertyHookBody::Abstract(_) if uses_field => continue,
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
-                hooks.push(lowering.hook(accessor.name.value, accessor.name, accessor, body));
+                // An `init` body is the `set` hook, and the property's set visibility keeps it to object creation.
+                let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
+                hooks.push(lowering.hook(name, accessor.name, accessor, body));
             }
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
@@ -1617,8 +1699,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
+            // `new Artifact.fromJson(…)` calls the static method the named constructor runs as, spec section 9.1.
             Expression::Instantiation(Instantiation {
                 class: Expression::Identifier(class),
+                constructor: Some(constructor),
+                argument_list: Some(arguments),
+                ..
+            }) => {
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+                let method = self.string(0, self.line(constructor), constructor.name.value);
+                let arguments = self.arguments(arguments, &[]);
+
+                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+            }
+            Expression::Instantiation(Instantiation {
+                class: Expression::Identifier(class),
+                constructor: None,
                 argument_list: Some(arguments),
                 ..
             }) => {
@@ -2205,7 +2301,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let parameters = self.lambda_parameters(&arrow_function.parameter_list);
-        let uses = self.closure_uses(lambda);
+        let uses = self.closure_uses(Node::ArrowFunction(arrow_function));
         let body = self.lambda_body(|lowering| {
             let line = lowering.line(arrow_function.expression);
             let mut statements = lowering.set_parameters(&arrow_function.parameter_list);
@@ -2223,7 +2319,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn closure(&mut self, closure: &Closure) -> u32 {
         let lambda = closure.span();
         let parameters = self.lambda_parameters(&closure.parameter_list);
-        let uses = self.closure_uses(lambda);
+        let uses = self.closure_uses(Node::Closure(closure));
         let body = self.lambda_body(|lowering| {
             let mut statements = lowering.set_parameters(&closure.parameter_list);
             for statement in &closure.body.statements {
@@ -2249,10 +2345,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The `use` list of a `CLOSURE`: each local the lambda captures, in first-use order, by reference with
     /// `ZEND_BIND_REF` when code writes it and by value otherwise, or null when it captures none.
-    fn closure_uses(&mut self, lambda: Span) -> u32 {
-        let line = self.line(lambda);
+    fn closure_uses(&mut self, lambda: Node) -> u32 {
+        let line = self.line(lambda.span());
         let mut uses = Vec::new();
-        for &(name, local) in self.names.captures(&lambda) {
+        for &(name, local) in self.names.captures(&lambda.span()) {
             let attr = if self.names.is_written(&local) { ZEND_BIND_REF } else { 0 };
             uses.push(self.string(attr, line, name));
         }
@@ -2980,7 +3076,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(name);
 
         match self.names.binding(&name.name) {
-            Some(Binding::Local(_) | Binding::This) => self.variable(name.span(), name.name.value()),
+            Some(Binding::Local(_)) => self.variable(name.span(), name.name.value()),
+            Some(Binding::This) => self.variable(name.span(), b"this"),
             Some(Binding::Field) => self.storage(line),
             Some(Binding::Constant) => {
                 let constant = self.string(ZEND_NAME_NOT_FQ, line, name.name.value());
@@ -3323,20 +3420,24 @@ fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
 }
 
 /// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the
-/// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` accessor's
-/// access modifier. A get-only property whose body uses `field` takes `protected(set)`, the set visibility of
-/// `readonly`, and one without storage takes none, because PHP refuses a set visibility on a read-only virtual
-/// property. PHP drops a set visibility equal to the property's own, so a private property, or a protected one with
-/// `protected(set)`, takes none, and the flags carry only what the engine keeps.
+/// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` or `init`
+/// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property whose body uses
+/// `field` takes `protected(set)`, the set visibility of `readonly`, and one without storage takes none, because PHP
+/// refuses a set visibility on a read-only virtual property. PHP drops a set visibility equal to the property's own,
+/// so a private property, or a protected one with `protected(set)`, takes none, and the flags carry only what the
+/// engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
     if accessors.is_readonly() {
         return ZEND_ACC_READONLY;
     }
 
-    let flags = match accessors.hooks.iter().find(|accessor| accessor.name.value == b"set") {
+    let flags = match accessors.setter() {
         None if names.uses_field(accessors) => ZEND_ACC_PROTECTED_SET,
         None => 0,
-        Some(set) => match set.modifiers.first() {
+        Some(setter) => match setter.modifiers.first() {
+            // `init` sets the property while the object is created, in the constructors of its class and its
+            // subclasses, so it runs as `protected(set)`, and the analyzer refuses every write after that.
+            None if setter.name.value == b"init" => ZEND_ACC_PROTECTED_SET,
             None => 0,
             Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED_SET,
             Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE_SET,

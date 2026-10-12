@@ -245,6 +245,48 @@ fn compile_replaces_a_compiled_file_by_rename_so_no_reader_sees_a_partial_file()
     assert_eq!(files_under(&root.join(".sharp/app")), [Path::new("Order.sharpc")], "no temporary file is left");
 }
 
+/// `app/OrderNotices.sharp`, whose two listeners run in their place in the class, not in name order.
+const NOTICES: &str = "namespace App;\n\npublic class OrderNotices\n{\n    public void send(OrderPaid e) on OrderPaid { }\n\n    public void refresh() on OrderPaid, OrderEvent { }\n}\n";
+
+/// Spec section 15: `mago compile` lists every listener of an accepted file in `.sharp/listeners.php`, the table the
+/// engine runs them from, by its class's full name, then by its place in its class. A refused file's listeners leave
+/// the table, and so does the table once no listener is left.
+#[test]
+fn compile_writes_every_listener_of_an_accepted_file_in_order() {
+    let directory = lawful_project(&[
+        (
+            "app/OrderEvent.sharp",
+            "namespace App;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n",
+        ),
+        ("app/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId) : OrderEvent;\n"),
+        (
+            "app/Receipts.sharp",
+            "namespace App;\n\npublic class Receipts\n{\n    private void deliver(OrderPaid e) on OrderPaid { }\n}\n",
+        ),
+        ("app/OrderNotices.sharp", NOTICES),
+    ]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    assert_eq!(
+        read(root, ".sharp/listeners.php"),
+        "<?php\n\nreturn [\n    ['App\\OrderNotices', 'send', ['App\\OrderPaid'], true],\n    ['App\\OrderNotices', 'refresh', ['App\\OrderPaid', 'App\\OrderEvent'], false],\n    ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n];\n"
+    );
+
+    write(root, "app/OrderNotices.sharp", &NOTICES.replace("public void send", "public static void send"));
+    let output = compile(root);
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert_eq!(
+        read(root, ".sharp/listeners.php"),
+        "<?php\n\nreturn [\n    ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n];\n"
+    );
+
+    std::fs::remove_file(root.join("app/OrderNotices.sharp")).unwrap();
+    std::fs::remove_file(root.join("app/Receipts.sharp")).unwrap();
+    compile_succeeds(root);
+    assert!(!root.join(".sharp/listeners.php").exists());
+}
+
 /// Spec section 28.1's `app/Shared/Money.sharp`, whose law holds over its pure `add`.
 const LAWFUL_MONEY: &str = "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n}\n";
 
@@ -1633,5 +1675,13 @@ fn a_law_reaching_an_inherited_class_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Base\n{\n}\n\npublic class Shape : Base\n{\n    law any(Shape s) => true;\n}\n",
         "Law any reaches the class Shape, which extends Base in Shape. Mago does not translate inheritance to Lean.",
+    );
+}
+
+#[test]
+fn a_law_reaching_a_named_constructor_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n    public Shape.triangle() : this(3) { }\n\n    law threeSides(int unused) => new Shape.triangle().sides == 3;\n}\n",
+        "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. Mago does not translate constructor bodies to Lean.",
     );
 }
