@@ -2549,10 +2549,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_METHOD_CALL, 0, line, &[set, filter, arguments])
             }
-            ("Map", b"filter") => {
-                let kind = self.php_collection_method(call).unwrap_or_else(|| unreachable!("proof: no kind"));
-                unreachable!("proof: INLINED_COLLECTION_METHODS names no `filter` of a `Map`, {kind:?}")
-            }
             _ => unreachable!(
                 "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
                 String::from_utf8_lossy(&method)
