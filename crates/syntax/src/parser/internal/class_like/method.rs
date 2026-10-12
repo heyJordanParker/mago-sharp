@@ -62,6 +62,7 @@ where
             ));
         }
         if self.is_at_event()?
+            || self.is_at_struct()?
             || matches!(self.stream.peek_kind(0)?, Some(T!["interface" | "class" | "enum" | "trait"]))
         {
             return Err(self.parse_nested_type(attributes, modifiers)?);
@@ -158,7 +159,7 @@ where
 
     /// Parses a type declared inside a PHP# class-like whole, so the class-like parses on, and returns its refusal:
     /// every type, events and interfaces included, is declared in its own file. The caller has seen `event Name(`,
-    /// `interface`, `class`, `enum` or `trait`.
+    /// `struct Name`, `interface`, `class`, `enum` or `trait`.
     fn parse_nested_type(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -182,6 +183,10 @@ where
             Some(T!["trait"]) => {
                 let r#trait = self.parse_trait_with_attributes_and_modifiers(attributes, modifiers)?;
                 (r#trait.name, r#trait.span())
+            }
+            _ if self.is_at_struct()? => {
+                let r#struct = self.parse_struct_with_attributes_and_modifiers(attributes, modifiers)?;
+                (r#struct.name, r#struct.span())
             }
             _ => {
                 let event = self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?;

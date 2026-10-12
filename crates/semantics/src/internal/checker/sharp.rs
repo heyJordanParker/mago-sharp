@@ -90,6 +90,7 @@ use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Terminator;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TypePattern;
@@ -399,6 +400,8 @@ pub enum Place {
     Enum,
     /// An event, spec section 15: its modifiers, parameters and header.
     Event,
+    /// A struct, spec section 10: its modifiers, backing type and header. Its members are a class's.
+    Struct,
     /// A module and its members.
     Module,
     /// A field or a property, both of which the CST calls a property: its modifiers, type and name.
@@ -519,7 +522,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Statement::Class(_)
                 | Statement::Interface(_)
                 | Statement::Enum(_)
-                | Statement::Event(_),
+                | Statement::Event(_)
+                | Statement::Struct(_),
             )
             | Node::Namespace(_)
             | Node::NamespaceBody(_)
@@ -543,12 +547,29 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             }
             for member in &class.members {
                 if let ClassLikeMember::NamedConstructor(constructor) = member {
-                    check_named_constructor(constructor, class, context);
+                    check_named_constructor(constructor, &class.name, class.modifiers.contains_abstract(), context);
                 }
             }
 
             Some(Class)
         }
+        (Node::Struct(r#struct), File) => {
+            report_methods_named_as_properties(ClassLike::of_struct(r#struct), context);
+            check_struct_declaration(r#struct, context);
+            for member in &r#struct.members {
+                if let ClassLikeMember::NamedConstructor(constructor) = member {
+                    check_named_constructor(constructor, &r#struct.name, false, context);
+                }
+            }
+
+            Some(Place::Struct)
+        }
+        // `check_struct_declaration` reports every modifier but `public`, and `check_struct` a backing type other than
+        // `int` or `string`. A struct's members are a class's.
+        (Node::Modifier(modifier), Place::Struct) => matches!(modifier, Modifier::Public(_)).then_some(Place::Struct),
+        (Node::EnumBackingTypeHint(_), Place::Struct) => None,
+        (Node::AttributeList(_), Place::Struct) => Some(Attribute),
+        (Node::ClassLikeMember(_), Place::Struct) => enter(node, Class, context),
         // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
@@ -603,7 +624,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Class,
         ) => Some(Class),
-        (Node::Inheritance(inheritance), Class | Interface | Enum | Place::Event) => {
+        (Node::Inheritance(inheritance), Class | Interface | Enum | Place::Event | Place::Struct) => {
             check_header(inheritance, place, context);
 
             Some(place)
@@ -1414,7 +1435,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Instantiation,
         ) => Some(Instantiation),
-        (Node::ArgumentList(_), Instantiation) => Some(Body),
+        (Node::ArgumentList(_) | Node::ObjectInitializer(_), Instantiation) => Some(Body),
+        // Spec section 16: `with` copies an object, and an object initializer names the values it sets.
+        (
+            Node::Expression(Expression::With(_)) | Node::With(_) | Node::ObjectInitializer(_) | Node::NamedValue(_),
+            Body,
+        ) => Some(Body),
         (Node::AssignmentOperator(operator), Body) if is_slice_assignment_operator(operator) => Some(Body),
         (Node::PositionalArgument(_), Body) => Some(Body),
         // A constructor runs once, when `new` creates the object, so no code calls one as a method, as in C#.
@@ -1715,6 +1741,91 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
                 report(non_static(variable.name), variable.span, "Declared without `static` here.");
             }
             _ => {}
+        }
+    }
+}
+
+/// Reports what spec section 10 refuses in a struct: a modifier but `public`, `readonly` above all because every
+/// struct is read-only, a `set` accessor, a member modifier only a subclass would need, and `operator ==`, because a
+/// struct compares by value.
+fn check_struct_declaration(r#struct: &Struct, context: &mut Context<'_, '_, '_>) {
+    let mut report = |issue: Issue| context.report(issue);
+
+    for modifier in &r#struct.modifiers {
+        let issue = match modifier {
+            Modifier::Public(_) => continue,
+            Modifier::Readonly(_) => Issue::error("Every struct is already read-only: write `struct`.")
+                .with_annotation(Annotation::primary(modifier.span()).with_message("Remove `readonly`.")),
+            _ => Issue::error(format!(
+                "A struct takes only `public`: remove `{}`.",
+                BytesDisplay(modifier.get_keyword().value)
+            ))
+            .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
+            .with_note("A struct is a value: it has objects, and no subclasses."),
+        };
+        report(issue);
+    }
+
+    let parameters = r#struct.members.iter().flat_map(|member| match member {
+        ClassLikeMember::Method(method) => method.parameter_list.parameters.as_slice(),
+        _ => &[],
+    });
+    let accessor_lists = r#struct
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            ClassLikeMember::Property(Property::Hooked(property)) => {
+                Some((&property.hook_list, property.item.variable().name))
+            }
+            _ => None,
+        })
+        .chain(parameters.clone().filter_map(|parameter| Some((parameter.hooks.as_ref()?, parameter.variable.name))));
+    for (accessors, name) in accessor_lists {
+        for setter in accessors.hooks.iter().filter(|accessor| accessor.name.value == b"set") {
+            report(
+                Issue::error(format!(
+                    "A struct never changes, so `{}` takes `init`, not `set`.",
+                    BytesDisplay(name.strip_prefix(b"$").unwrap_or(name))
+                ))
+                .with_annotation(Annotation::primary(setter.name.span).with_message("Written here."))
+                .with_note("A struct's property is set only while the struct is created."),
+            );
+        }
+    }
+
+    let member_modifiers = r#struct
+        .members
+        .iter()
+        .flat_map(|member| match member {
+            ClassLikeMember::Method(method) => method.modifiers.as_slice(),
+            ClassLikeMember::Property(property) => property.modifiers().as_slice(),
+            ClassLikeMember::Constant(constant) => constant.modifiers.as_slice(),
+            ClassLikeMember::Operator(operator) => operator.modifiers.as_slice(),
+            ClassLikeMember::NamedConstructor(constructor) => constructor.modifiers.as_slice(),
+            _ => &[],
+        })
+        .chain(parameters.flat_map(|parameter| parameter.modifiers.as_slice()));
+    for modifier in member_modifiers {
+        if matches!(
+            modifier,
+            Modifier::Protected(_) | Modifier::Virtual(_) | Modifier::Abstract(_) | Modifier::Override(_)
+        ) {
+            report(
+                Issue::error("A struct has no subclasses, so write `private`.")
+                    .with_annotation(Annotation::primary(modifier.span()).with_message("Written here.")),
+            );
+        }
+    }
+
+    for member in &r#struct.members {
+        if let ClassLikeMember::Operator(operator) = member
+            && matches!(operator.symbol, BinaryOperator::Equal(_))
+        {
+            report(
+                Issue::error("A struct compares by value: remove `operator ==`.")
+                    .with_annotation(Annotation::primary(operator.symbol.span()).with_message("Declared here."))
+                    .with_note("`==` on a struct compares each property with its own `==`."),
+            );
         }
     }
 }
@@ -2865,11 +2976,11 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
         _ => {}
     }
 
-    if instantiation.argument_list.is_none() {
+    if instantiation.argument_list.is_none() && instantiation.initializer.is_none() {
         report_not_supported(
             instantiation.span(),
             "`new` without arguments",
-            "PHP# creates an object with `new Class(arguments)`, parentheses included.",
+            "PHP# creates an object with `new Class(arguments)`, parentheses included, or with an object initializer, as in `new Class { name: value }`.",
             context,
         );
 
@@ -2918,14 +3029,19 @@ fn has_required_constructor(class: &ClassLike) -> bool {
 /// one PHP reserves, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
 /// another member of the class has, as PHP's duplicate-method check, since the named constructor runs as the static
 /// method of its name.
-fn check_named_constructor(constructor: &NamedConstructor, class: &Class, context: &mut Context<'_, '_, '_>) {
-    let class_name = BytesDisplay(class.name.value);
+fn check_named_constructor(
+    constructor: &NamedConstructor,
+    class: &LocalIdentifier,
+    is_abstract: bool,
+    context: &mut Context<'_, '_, '_>,
+) {
+    let class_name = BytesDisplay(class.value);
     let name = BytesDisplay(constructor.name.value);
     let mut report = |message: String, span: Span, written: &str| {
         context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
     };
 
-    if class.modifiers.contains_abstract() {
+    if is_abstract {
         report(
             "An abstract class has no objects of its own, so it declares no named constructor.".to_owned(),
             constructor.name.span,
@@ -2933,7 +3049,7 @@ fn check_named_constructor(constructor: &NamedConstructor, class: &Class, contex
         );
     }
 
-    if constructor.class.value != class.name.value {
+    if constructor.class.value != class.value {
         report(
             format!("A named constructor is declared on its own class, as in `{class_name}.{name}`."),
             constructor.class.span,
@@ -2941,7 +3057,7 @@ fn check_named_constructor(constructor: &NamedConstructor, class: &Class, contex
         );
     }
 
-    if constructor.name.value.eq_ignore_ascii_case(class.name.value) {
+    if constructor.name.value.eq_ignore_ascii_case(class.value) {
         report(
             format!(
                 "A named constructor cannot have its class's name: `new {class_name}(…)` calls the main constructor."
@@ -3330,7 +3446,9 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// What the slice has at a place, as the note of a refusal there.
 const fn supported(place: Place) -> &'static str {
     match place {
-        Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
+        Place::File => {
+            "At file level, PHP# supports `namespace`, `import`, `class`, `struct`, `interface`, `enum` and `event`."
+        }
         Place::Class => {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`."
         }
@@ -3345,6 +3463,9 @@ const fn supported(place: Place) -> &'static str {
         }
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
+        }
+        Place::Struct => {
+            "A PHP# struct has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, and a class's members."
         }
         Place::Module => "A PHP# module states laws.",
         Place::FieldOrProperty => {
@@ -3861,7 +3982,7 @@ fn check_member_access(object: &Expression, member: &ClassLikeMemberSelector, co
     }
 }
 
-/// A class or an enum a PHP# file declares. The slice's class rules treat both alike.
+/// A class, a struct or an enum a PHP# file declares. The slice's class rules treat them alike.
 #[derive(Clone, Copy)]
 struct ClassLike<'ast, 'arena> {
     name: &'ast LocalIdentifier<'arena>,
@@ -3878,6 +3999,10 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
             members: &class.members,
             is_static: class.modifiers.contains_static(),
         }
+    }
+
+    fn of_struct(r#struct: &'ast Struct<'arena>) -> Self {
+        Self { name: &r#struct.name, span: r#struct.span(), members: &r#struct.members, is_static: false }
     }
 }
 
@@ -3906,6 +4031,7 @@ fn collect_declarations<'ast, 'arena>(
 ) {
     match statement {
         Statement::Class(class) => classes.push(ClassLike::of_class(class)),
+        Statement::Struct(r#struct) => classes.push(ClassLike::of_struct(r#struct)),
         Statement::Enum(r#enum) => {
             classes.push(ClassLike {
                 name: &r#enum.name,
@@ -4162,10 +4288,12 @@ fn enclosing_class<'ast, 'arena>(program: &'ast Program<'arena>, span: Span) -> 
     classes.into_iter().find(|class| class.span.contains(&span.start))
 }
 
-/// The name of the class, interface or enum of a PHP# file whose body holds `span`, in any of the file's namespaces.
+/// The name of the class, struct, interface or enum of a PHP# file whose body holds `span`, in any of the file's
+/// namespaces.
 fn enclosing_class_like_name<'arena>(program: &Program<'arena>, span: Span) -> Option<&'arena [u8]> {
     file_statements(program).find_map(|statement| match statement {
         Statement::Class(class) if class.span().contains(&span.start) => Some(class.name.value),
+        Statement::Struct(r#struct) if r#struct.span().contains(&span.start) => Some(r#struct.name.value),
         Statement::Interface(interface) if interface.span().contains(&span.start) => Some(interface.name.value),
         Statement::Enum(r#enum) if r#enum.span().contains(&span.start) => Some(r#enum.name.value),
         _ => None,

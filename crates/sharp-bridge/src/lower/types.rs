@@ -223,6 +223,28 @@ impl<'analysis> Types<'analysis> {
         }
     }
 
+    /// The name and type of each property `==` compares on the struct `class`, in the order the struct declares them.
+    pub(crate) fn struct_properties(&self, class: &[u8]) -> Vec<(&'analysis [u8], &'analysis TUnion)> {
+        let metadata = self
+            .codebase
+            .get_class_like(class)
+            .unwrap_or_else(|| unreachable!("the codex registers the struct `{}`", String::from_utf8_lossy(class)));
+
+        metadata
+            .struct_properties()
+            .into_iter()
+            .map(|property| {
+                let name = property.name.0.as_bytes();
+                let Some(r#type) = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())
+                else {
+                    unreachable!("semantics refuses a PHP# property without a type");
+                };
+
+                (name.strip_prefix(b"$").unwrap_or(name), &r#type.type_union)
+            })
+            .collect()
+    }
+
     /// The type of the keys a value of `r#type` holds, or none when part of it is no `Map` or `List`.
     pub(crate) fn map_key_type(&self, r#type: &TUnion) -> Option<TUnion> {
         let mut key_type = None;

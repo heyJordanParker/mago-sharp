@@ -38,6 +38,7 @@ pub(crate) mod sequence;
 pub(crate) mod statement;
 pub(crate) mod r#static;
 pub(crate) mod string;
+pub(crate) mod r#struct;
 pub(crate) mod tag;
 pub(crate) mod terminator;
 pub(crate) mod throw;

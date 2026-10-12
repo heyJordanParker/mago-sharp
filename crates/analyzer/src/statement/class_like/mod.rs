@@ -91,6 +91,7 @@ pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
 pub mod property;
+pub mod r#struct;
 pub mod unused_members;
 
 /// Reports a duplicate definition issue for class-like types, naming the class-like as the analyzed file writes it.
@@ -1519,7 +1520,14 @@ fn check_class_like_extends<'ctx, 'arena, A>(
                 continue;
             }
 
-            if extended_class_metadata.flags.is_static() {
+            if extended_class_metadata.flags.is_struct() {
+                context.collector.report_with_code(
+                    IssueCode::InvalidStruct,
+                    Issue::error(format!("`{extended_name}` is a struct, which can't be inherited."))
+                        .with_annotation(Annotation::primary(extended_type.span()).with_message("Inherited here."))
+                        .with_note("A struct is a value, so no class extends it."),
+                );
+            } else if extended_class_metadata.flags.is_static() {
                 let written_name = BytesDisplay(extended_type.value());
 
                 context.collector.report_with_code(

@@ -36,6 +36,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Variable;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
@@ -48,6 +49,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
+use crate::expression::with::CREATED_OBJECT_PREFIX;
 use crate::external::PropertyAccessKind;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::method::run_forwarded_methods;
@@ -785,6 +787,36 @@ pub(crate) fn resolve_property_for_external_access<'ctx>(
 }
 
 /// Finds a property in a class, gets its type, and handles template localization.
+/// Whether `object_expr` is the object `new` with an object initializer or `with` creates, spec section 16, which
+/// they set properties of while it is created.
+fn is_created_object(object_expr: &Expression) -> bool {
+    matches!(object_expr, Expression::Variable(Variable::Direct(variable))
+        if variable.name.starts_with(CREATED_OBJECT_PREFIX))
+}
+
+/// The first method, in declaration order, that the struct `r#struct` declares on its objects and that returns the
+/// struct: a method that returns a changed copy, as spec section 10's `moved` does.
+fn first_copying_method<A>(context: &Context<'_, '_, A>, r#struct: &ClassLikeMetadata) -> Option<String>
+where
+    A: Arena,
+{
+    r#struct
+        .methods
+        .iter()
+        .filter_map(|method| context.codebase.get_method(r#struct.name.as_bytes(), method.as_bytes()))
+        .filter(|method| {
+            method.method_metadata.as_ref().is_some_and(|metadata| !metadata.is_static && !metadata.is_constructor)
+                && method.return_type_metadata.as_ref().is_some_and(|return_type| {
+                    return_type.type_union.types.iter().any(|atomic| {
+                        matches!(atomic, TAtomic::Object(TObject::Named(object))
+                            if object.name.as_bytes().eq_ignore_ascii_case(r#struct.name.as_bytes()))
+                    })
+                })
+        })
+        .min_by_key(|method| method.span.start.offset)
+        .map(|method| method.original_name.to_string())
+}
+
 fn find_property_in_class<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -1087,13 +1119,34 @@ where
     // its class or a subclass, or in a named constructor, where C# allows an `init` accessor. A lambda may run after
     // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
     // its storage through `field`, on `this` only.
-    if for_assignment && context.dialect.is_sharp() && property_metadata.flags.is_init() {
+    // A struct never changes, spec section 10: every property is set only while the struct is created, `init` or not.
+    let is_struct = declaring_class_metadata.flags.is_struct();
+    if for_assignment && context.dialect.is_sharp() && (is_struct || property_metadata.flags.is_init()) {
         let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
-        let creates_this = is_this(object_expr, context.resolved_names)
-            && block_context.scope.get_function_like().is_some_and(|function_like| {
-                function_like.flags.is_named_constructor()
-                    || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
-            });
+        let creates_this = is_created_object(object_expr)
+            || is_this(object_expr, context.resolved_names)
+                && block_context.scope.get_function_like().is_some_and(|function_like| {
+                    function_like.flags.is_named_constructor()
+                        || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
+                });
+
+        if is_struct && !writes_its_storage && !creates_this {
+            let message = match first_copying_method(context, declaring_class_metadata) {
+                Some(method) => {
+                    format!("A struct never changes; return a changed copy from a method, such as `{method}`.")
+                }
+                None => "A struct never changes; return a changed copy built with `with`.".to_owned(),
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                    .with_note("A struct's properties are set only while it is created."),
+            );
+            result.has_error_path = true;
+
+            return None;
+        }
 
         if !writes_its_storage && !creates_this {
             let property = display_property_name(context, prop_name);
@@ -1116,6 +1169,7 @@ where
             &resolution,
             access_span,
             Some(selector.span()),
+            is_created_object(object_expr),
         )
     } else {
         check_resolved_property_read_visibility(context, block_context, &resolution, access_span, Some(selector.span()))

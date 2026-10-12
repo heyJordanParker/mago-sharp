@@ -102,6 +102,7 @@ pub struct ClassLikeMetadata {
     pub enum_cases: WordMap<EnumCaseMetadata>,
     pub invalid_dependencies: WordSet,
     pub attributes: Vec<AttributeMetadata>,
+    /// The backing type of a backed enum, or of a PHP# struct that declares one, spec section 10.
     pub enum_type: Option<TAtomic>,
     pub has_sealed_methods: Option<bool>,
     pub has_sealed_properties: Option<bool>,
@@ -119,6 +120,20 @@ pub struct ClassLikeMetadata {
 }
 
 impl ClassLikeMetadata {
+    /// The properties `==` compares on a PHP# struct, spec section 10: each one with storage that is not static, in the
+    /// order the struct declares them.
+    #[must_use]
+    pub fn struct_properties(&self) -> Vec<&PropertyMetadata> {
+        let mut properties: Vec<&PropertyMetadata> = self
+            .properties
+            .values()
+            .filter(|property| !property.flags.is_static() && !property.flags.is_virtual_property())
+            .collect();
+        properties.sort_by_key(|property| property.span.map(|span| span.start.offset));
+
+        properties
+    }
+
     /// Returns whether this class-like's inherited metadata is incomplete.
     ///
     /// Synthetic enum contracts are materialized by the scanner and do not make

@@ -66,6 +66,7 @@ use mago_syntax::cst::Statement;
 use mago_syntax::cst::StaticMethodCall;
 use mago_syntax::cst::StaticMethodPartialApplication;
 use mago_syntax::cst::StaticPropertyAccess;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
 use mago_syntax::cst::TryCatchClause;
@@ -450,6 +451,7 @@ fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<
             Statement::Trait(r#trait) => Some(IgnoringCase(r#trait.name.value)),
             Statement::Enum(r#enum) => Some(IgnoringCase(r#enum.name.value)),
             Statement::Event(event) => Some(IgnoringCase(event.name.value)),
+            Statement::Struct(r#struct) => Some(IgnoringCase(r#struct.name.value)),
             _ => None,
         })
         .collect()
@@ -1065,6 +1067,17 @@ where
         if self.sharp {
             self.class_members.pop();
         }
+    }
+
+    fn walk_in_struct(&mut self, r#struct: &'ast Struct<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(r#struct.name.value);
+
+        self.resolved_names.insert_at(r#struct.name.span, classlike, false);
+        self.class_members.push(class_member_names(&r#struct.members));
+    }
+
+    fn walk_out_struct(&mut self, _struct: &'ast Struct<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.class_members.pop();
     }
 
     fn walk_in_trait_use(&mut self, trait_use: &'ast TraitUse<'arena>, context: &mut NameResolutionContext<'arena, A>) {

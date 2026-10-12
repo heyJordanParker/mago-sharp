@@ -73,6 +73,7 @@ use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::NullableHint;
+use mago_syntax::cst::ObjectInitializer;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::PartialArgumentList;
@@ -87,12 +88,14 @@ use mago_syntax::cst::PropertyHookList;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Try;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::UnaryPostfixOperator;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::WhileBody;
+use mago_syntax::cst::With;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::php_shape;
 use mago_syntax_core::stack::ensure_sufficient_stack;
@@ -339,11 +342,13 @@ enum Search {
     Remove,
 }
 
-/// One side of an `==` the lowering writes: an expression of the source, or the hidden variable `name` holding a value
-/// of `r#type`, read on the line of `span`, as the element and the value a collection search compares.
+/// One side of an `==` the lowering writes: an expression of the source, the hidden variable `name` holding a value
+/// of `r#type`, read on the line of `span`, as the element and the value a collection search compares, or the
+/// `property` of type `r#type` of the hidden variable `object`, as a struct's `==` compares each of its properties.
 enum Side<'side, 'ast> {
     Expression(&'side Expression<'ast>),
     Hidden { span: Span, name: Vec<u8>, r#type: &'side TUnion },
+    Property { span: Span, object: &'static [u8], property: &'side [u8], r#type: &'side TUnion },
 }
 
 /// Lowers one checked file. Every node is pushed after its children, and each node's children are contiguous.
@@ -456,6 +461,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Interface(interface) => statements.push(self.interface(interface)),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
             Statement::Event(event) => statements.push(self.event(event)),
+            Statement::Struct(r#struct) => statements.push(self.r#struct(r#struct)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
         }
     }
@@ -468,8 +474,121 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn class(&mut self, class: &Class) -> u32 {
         self.class = self.names.get(&class.name);
         self.enter(class.name.value);
+        let (parent, interfaces, parent_name) = match &class.inheritance {
+            Some(inheritance) => self.class_header(inheritance),
+            None => (NULL, NULL, None),
+        };
+        let members =
+            self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
+        let attributes = self.attributes(&class.attribute_lists, None);
+
+        self.declaration(
+            SHARP_AST_CLASS,
+            class_flags(&class.modifiers),
+            class.class.span,
+            class.right_brace,
+            class.name.value,
+            &[parent, interfaces, members, attributes, NULL],
+        )
+    }
+
+    /// A struct is a final class, spec section 10, whose members are a class's, with its header as its interface list
+    /// and the `op_Equality` that compares it by value, as php-src's grammar builds
+    /// `final class Username implements \App\HasLabel`.
+    fn r#struct(&mut self, r#struct: &Struct) -> u32 {
+        self.class = self.names.get(&r#struct.name);
+        self.enter(r#struct.name.value);
+        let mut members = self.class_members(
+            &r#struct.members,
+            None,
+            r#struct.r#struct.span,
+            r#struct.left_brace,
+            r#struct.right_brace,
+        );
+        members.push(self.struct_equality(r#struct.name.span));
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
+        let attributes = self.attributes(&r#struct.attribute_lists, None);
+        let header = r#struct.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+
+        self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_FINAL,
+            r#struct.r#struct.span,
+            r#struct.right_brace,
+            r#struct.name.value,
+            &[NULL, header, members, attributes, NULL],
+        )
+    }
+
+    /// A struct's `==`, spec section 10, as `public static function op_Equality(mixed $a, mixed $b): bool`, spanning
+    /// the struct's name: `$a === $b` unless both are instances of the struct, so null equals only null and a value of
+    /// another type is unequal, and otherwise each property compared with that property's own `==`, joined by `&&`.
+    fn struct_equality(&mut self, span: Span) -> u32 {
+        let name = php_operator_name(&BinaryOperator::Equal(span), 2)
+            .unwrap_or_else(|| unreachable!("`==` runs as `op_Equality`"));
+        self.enter(name);
+        let line = self.line(span);
+        let mut parameters = Vec::new();
+        let mut not_instances = Vec::new();
+        for operand in [b"a", b"b"] {
+            let hint = self.string(ZEND_NAME_NOT_FQ, line, b"mixed");
+            let name = self.string(0, line, operand);
+            parameters.push(self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]));
+
+            let value = self.variable(span, operand);
+            let class = self.string(ZEND_NAME_FQ, line, self.class);
+            let instance = self.node(SHARP_AST_INSTANCEOF, 0, line, &[value, class]);
+            not_instances.push(self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[instance]));
+        }
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+
+        let either_is_other = self.node(SHARP_AST_OR, 0, line, &not_instances);
+        let a = self.variable(span, b"a");
+        let b = self.variable(span, b"b");
+        let identical = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[a, b]);
+        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[identical]);
+        let statements = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#return]);
+        let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[either_is_other, statements]);
+        let guard = self.node(SHARP_AST_IF, 0, line, &[branch]);
+
+        let mut equal = None;
+        for (property, r#type) in self.types.struct_properties(self.class) {
+            let side = |object| Side::Property { span, object, property, r#type };
+            let property_equal = self.equality(line, side(b"a"), side(b"b"), false);
+            equal = Some(match equal {
+                Some(earlier) => self.node(SHARP_AST_AND, 0, line, &[earlier, property_equal]),
+                None => property_equal,
+            });
+        }
+        let equal = equal.unwrap_or_else(|| self.zval(line, sharp_value::SHARP_TRUE, |_| {}));
+        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[equal]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[guard, r#return]);
+        let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"bool");
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
+            span,
+            span,
+            name,
+            &[parameters, NULL, body, return_type, NULL],
+        )
+    }
+
+    /// The members of a class or a struct, each lowered, with the constructor the class needs when it declares none
+    /// and has initial values to set, spanning `keyword` to `right_brace` on the line of `left_brace`. `parent_name` is
+    /// the full name of the parent a class's header names.
+    fn class_members(
+        &mut self,
+        class_members: &Sequence<ClassLikeMember>,
+        parent_name: Option<&'lowering [u8]>,
+        keyword: Span,
+        left_brace: Span,
+        right_brace: Span,
+    ) -> Vec<u32> {
         let mut initial_values = Vec::new();
-        for member in &class.members {
+        for member in class_members {
             if let ClassLikeMember::Property(property) = member
                 && property.initial_value_runs_in_constructor()
                 && let Some(value) = property.initial_value()
@@ -478,14 +597,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         }
 
-        let (parent, interfaces, parent_name) = match &class.inheritance {
-            Some(inheritance) => self.class_header(inheritance),
-            None => (NULL, NULL, None),
-        };
         let mut members = Vec::new();
         let mut has_constructor = false;
         // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
-        for member in class.members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
+        for member in class_members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
             let member = match member {
                 ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => {
                     has_constructor = true;
@@ -500,7 +615,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ClassLikeMember::Method(method)
                     if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
                 {
-                    let call = self.native_call(method, self.names.get(&class.name));
+                    let call = self.native_call(method, self.class);
                     let body = if method.returns_value() {
                         self.node(SHARP_AST_RETURN, 0, self.line(method.name.span), &[call])
                     } else {
@@ -522,7 +637,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         if !has_constructor && !initial_values.is_empty() {
-            let line = self.line(class.left_brace);
+            let line = self.line(left_brace);
             if self.types.parent_constructor(self.class).is_some() {
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
                 initial_values.push(self.parent_construct(line, arguments));
@@ -533,24 +648,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.push(self.declaration(
                 SHARP_AST_METHOD,
                 ZEND_ACC_PUBLIC,
-                class.class.span,
-                class.right_brace,
+                keyword,
+                right_brace,
                 b"__construct",
                 &[parameters, NULL, body, NULL, NULL],
             ));
         }
 
-        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
-        let attributes = self.attributes(&class.attribute_lists, None);
-
-        self.declaration(
-            SHARP_AST_CLASS,
-            class_flags(&class.modifiers),
-            class.class.span,
-            class.right_brace,
-            class.name.value,
-            &[parent, interfaces, members, attributes, NULL],
-        )
+        members
     }
 
     /// A class header's names as PHP's `extends` name and `implements` name list, with the parent's full name: the name
@@ -925,6 +1030,117 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             constructor.name.value,
             &[parameters, NULL, body, return_type, attributes],
         )
+    }
+
+    /// `new` on line `line`: `NEW` of the class by its full name, and `new Self(…)` is `new static(…)`, the name
+    /// php-src's grammar writes with `ZEND_NAME_NOT_FQ`. `new Artifact.fromJson(…)` calls the static method the named
+    /// constructor runs as, spec section 9.1. An object initializer then sets its values on the new object, spec
+    /// section 16, and `new Point { x: 1 }` creates it with no arguments.
+    fn instantiation(&mut self, line: u32, instantiation: &Instantiation) -> u32 {
+        let arguments = match &instantiation.argument_list {
+            Some(arguments) => self.arguments(arguments, &[]),
+            None => self.node(SHARP_AST_ARG_LIST, 0, line, &[]),
+        };
+        let created = match (instantiation.class, &instantiation.constructor) {
+            (Expression::Identifier(class), Some(constructor)) => {
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+                let method = self.string(0, self.line(constructor), constructor.name.value);
+
+                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+            }
+            (Expression::Identifier(class), None) => {
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+
+                self.node(SHARP_AST_NEW, 0, line, &[class, arguments])
+            }
+            (Expression::Self_(keyword), _) => {
+                let class = self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static");
+
+                self.node(SHARP_AST_NEW, 0, line, &[class, arguments])
+            }
+            _ => unreachable!("check_slice refuses `new` of a class written any other way"),
+        };
+        let Some(initializer) = &instantiation.initializer else {
+            return created;
+        };
+
+        // `(function ($value#1) { $this->x = $value#1; return $this; })->call(new \App\Point(), 1)`
+        self.bound_to(instantiation.span(), created, initializer, |lowering, span, values| {
+            let line = lowering.line(span);
+            let mut statements = Vec::new();
+            for (name, value) in values {
+                let this = lowering.variable(span, b"this");
+                let name = lowering.string(0, line, name);
+                let property = lowering.node(SHARP_AST_PROP, 0, line, &[this, name]);
+                statements.push(lowering.node(SHARP_AST_ASSIGN, 0, line, &[property, value]));
+            }
+            let this = lowering.variable(span, b"this");
+            statements.push(lowering.node(SHARP_AST_RETURN, 0, line, &[this]));
+
+            statements
+        })
+    }
+
+    /// `point with { y: 9 }` copies the object, spec section 16, as PHP 8.5's `clone` with values does:
+    /// `(function ($value#1) { return \clone($this, ['y' => $value#1]); })->call($point, 9)`. `clone` writes each
+    /// value through the property's accessor, after the copy's `__clone`.
+    fn with(&mut self, with: &With) -> u32 {
+        let object = self.expression(with.object);
+
+        self.bound_to(with.span(), object, &with.initializer, |lowering, span, values| {
+            let line = lowering.line(span);
+            let mut entries = Vec::new();
+            for (name, value) in values {
+                let key = lowering.string(0, line, name);
+                entries.push(lowering.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key]));
+            }
+            let this = lowering.variable(span, b"this");
+            let values = lowering.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &entries);
+            let function = lowering.string(ZEND_NAME_FQ, line, b"clone");
+            let arguments = lowering.node(SHARP_AST_ARG_LIST, 0, line, &[this, values]);
+            let copy = lowering.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+
+            vec![lowering.node(SHARP_AST_RETURN, 0, line, &[copy])]
+        })
+    }
+
+    /// Runs the statements `body` writes, as a closure bound to `object`, the object `new` or `with` at `span` creates,
+    /// spec section 16: `(function ($value#1, …) { … })->call($object, …)`. The closure runs with the object's class's
+    /// own access, so a write runs an `init` or `set` accessor wherever the code is, as a named constructor's body runs
+    /// (`Lowering::named_constructor`). Each value of `initializer` runs in the caller, in order after `object`, as an
+    /// argument, and `body` reads it through the hidden parameter it gets beside the property's name.
+    fn bound_to(
+        &mut self,
+        span: Span,
+        object: u32,
+        initializer: &ObjectInitializer,
+        body: impl FnOnce(&mut Self, Span, Vec<(&[u8], u32)>) -> Vec<u32>,
+    ) -> u32 {
+        let line = self.line(span);
+        let temporaries = self.temporaries;
+        let mut parameters = Vec::new();
+        let mut arguments = vec![object];
+        let mut values = Vec::new();
+        for value in initializer.values.iter() {
+            arguments.push(self.expression(value.value));
+
+            self.temporaries += 1;
+            let hidden = format!("value#{}", self.temporaries).into_bytes();
+            let name = self.string(0, line, &hidden);
+            parameters.push(self.node(SHARP_AST_PARAM, 0, line, &[NULL, name, NULL, NULL, NULL, NULL]));
+            values.push((value.name.value, self.variable(span, &hidden)));
+        }
+        self.temporaries = temporaries;
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let statements = body(self, span, values);
+        let statements = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let closure =
+            self.declaration(SHARP_AST_CLOSURE, 0, span, span, b"", &[parameters, NULL, statements, NULL, NULL]);
+        let call = self.string(0, line, b"call");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+
+        self.node(SHARP_AST_METHOD_CALL, 0, line, &[closure, call, arguments])
     }
 
     /// A type that also holds null: `?T`, as php-src's grammar builds `?\App\Money`, a union with `null` last, or the
@@ -1690,41 +1906,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
-            // `new Artifact.fromJson(…)` calls the static method the named constructor runs as, spec section 9.1.
-            Expression::Instantiation(Instantiation {
-                class: Expression::Identifier(class),
-                constructor: Some(constructor),
-                argument_list: Some(arguments),
-                ..
-            }) => {
-                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
-                let method = self.string(0, self.line(constructor), constructor.name.value);
-                let arguments = self.arguments(arguments, &[]);
-
-                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
-            }
-            Expression::Instantiation(Instantiation {
-                class: Expression::Identifier(class),
-                constructor: None,
-                argument_list: Some(arguments),
-                ..
-            }) => {
-                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
-                let arguments = self.arguments(arguments, &[]);
-
-                self.node(SHARP_AST_NEW, 0, line, &[class, arguments])
-            }
-            // `new Self(…)` is `new static(…)`, the name php-src's grammar writes with `ZEND_NAME_NOT_FQ`.
-            Expression::Instantiation(Instantiation {
-                class: Expression::Self_(keyword),
-                argument_list: Some(arguments),
-                ..
-            }) => {
-                let class = self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static");
-                let arguments = self.arguments(arguments, &[]);
-
-                self.node(SHARP_AST_NEW, 0, line, &[class, arguments])
-            }
+            Expression::Instantiation(instantiation) => self.instantiation(line, instantiation),
+            Expression::With(with) => self.with(with),
             // `Class.y`, and `y` read through a class value, is the fetch of the member the checker found on the class:
             // a constant or enum case, a static property, or a static method as a first-class callable.
             Expression::Access(Access::Property(access)) => match self.names.static_property_class(access) {
@@ -1972,22 +2155,29 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     {
         match side {
             Side::Expression(expression) => self.types.expression_type(expression),
-            Side::Hidden { r#type, .. } => r#type,
+            Side::Hidden { r#type, .. } | Side::Property { r#type, .. } => r#type,
         }
     }
 
-    /// A read of `side`: the expression, lowered, or its hidden variable.
+    /// A read of `side`: the expression, lowered, its hidden variable, or its hidden variable's property.
     fn side(&mut self, side: &Side) -> u32 {
         match side {
             Side::Expression(expression) => self.expression(expression),
             Side::Hidden { span, name, .. } => self.variable(*span, name),
+            Side::Property { span, object, property, .. } => {
+                let line = self.line(*span);
+                let object = self.variable(*span, object);
+                let property = self.string(0, line, property);
+
+                self.node(SHARP_AST_PROP, 0, line, &[object, property])
+            }
         }
     }
 
     fn side_span(side: &Side) -> Span {
         match side {
             Side::Expression(expression) => expression.span(),
-            Side::Hidden { span, .. } => *span,
+            Side::Hidden { span, .. } | Side::Property { span, .. } => *span,
         }
     }
 

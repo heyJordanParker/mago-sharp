@@ -281,6 +281,7 @@ pub(crate) fn check_resolved_property_write_visibility<'ctx, A>(
     resolution: &DeclaredProperty<'_>,
     access_span: Span,
     member_span: Option<Span>,
+    creating: bool,
 ) -> bool
 where
     A: Arena,
@@ -331,7 +332,13 @@ where
         return false;
     }
 
-    let visibility = effective_write_visibility(property_metadata, context.settings.version);
+    // `new` with an object initializer and `with` write with the class's own access, spec section 16, so an `init`
+    // property is written at its accessor's level.
+    let visibility = if creating {
+        property_metadata.write_visibility
+    } else {
+        effective_write_visibility(property_metadata, context.settings.version)
+    };
 
     let is_visible = is_visible_from_scope(
         context.codebase,
@@ -456,8 +463,13 @@ fn report_readonly_write_scope_issue<A>(
 }
 
 /// The visibility that governs writes to `property`, which is narrower than the
-/// declared write visibility for `readonly` properties.
+/// declared write visibility for `readonly` properties. A PHP# `init` property runs as
+/// `protected(set)` when its accessor is `public`, spec section 6.1.
 pub(crate) fn effective_write_visibility(property: &PropertyMetadata, version: PHPVersion) -> Visibility {
+    if property.flags.is_init() && property.write_visibility == Visibility::Public {
+        return Visibility::Protected;
+    }
+
     if !property.flags.is_readonly() {
         return property.write_visibility;
     }

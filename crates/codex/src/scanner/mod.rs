@@ -35,6 +35,7 @@ use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Return;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::Trivia;
 use mago_syntax::cst::UnaryPrefix;
@@ -47,6 +48,7 @@ use mago_syntax::walker::walk_enum_mut;
 use mago_syntax::walker::walk_event_mut;
 use mago_syntax::walker::walk_interface_mut;
 use mago_syntax::walker::walk_module_mut;
+use mago_syntax::walker::walk_struct_mut;
 use mago_syntax::walker::walk_trait_mut;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -69,6 +71,7 @@ use crate::scanner::class_like::register_enum;
 use crate::scanner::class_like::register_event;
 use crate::scanner::class_like::register_interface;
 use crate::scanner::class_like::register_module;
+use crate::scanner::class_like::register_struct;
 use crate::scanner::class_like::register_trait;
 use crate::scanner::constant::scan_constant;
 use crate::scanner::constant::scan_defined_constant;
@@ -803,6 +806,27 @@ where
 
     #[inline]
     fn walk_out_event(&mut self, _event: &'arena Event<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        finalize_class_like(self, context);
+    }
+
+    /// A PHP# struct registers as the final class it runs as, spec section 10.
+    #[inline]
+    fn walk_struct(&mut self, r#struct: &'arena Struct<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some((id, templates, type_aliases, imported_aliases)) =
+            register_struct(&mut self.codebase, r#struct, context, &mut self.scope)
+        {
+            self.apply_polyfill_flag_to_class_like(id);
+            self.file_type_aliases.extend(type_aliases);
+            self.file_imported_aliases.extend(imported_aliases);
+            self.stack.push(id);
+            self.template_constraints.push(templates);
+
+            walk_struct_mut(self, r#struct, context);
+        }
+    }
+
+    #[inline]
+    fn walk_out_struct(&mut self, _struct: &'arena Struct<'arena>, context: &mut Context<'ctx, 'arena, A>) {
         finalize_class_like(self, context);
     }
 

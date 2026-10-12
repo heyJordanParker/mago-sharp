@@ -224,6 +224,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
 
                     event.analyze(context, block_context, artifacts)
                 }
+                Statement::Struct(r#struct) => {
+                    let struct_name = context.resolved_names.get(&r#struct.name);
+
+                    Arc::make_mut(&mut context.scope).add(NameKind::Default, struct_name, &None::<&str>);
+
+                    r#struct.analyze(context, block_context, artifacts)
+                }
                 Statement::Constant(constant) => {
                     for item in &constant.items {
                         let constant_item_name = context.resolved_names.get(&item.name);

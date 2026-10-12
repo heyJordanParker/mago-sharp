@@ -158,6 +158,7 @@ use crate::cst::cst::ModuleMember;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
+use crate::cst::cst::NamedValue;
 use crate::cst::cst::Namespace;
 use crate::cst::cst::NamespaceBody;
 use crate::cst::cst::NamespaceImplicitBody;
@@ -166,6 +167,7 @@ use crate::cst::cst::NotPattern;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
+use crate::cst::cst::ObjectInitializer;
 use crate::cst::cst::OpeningTag;
 use crate::cst::cst::Operator;
 use crate::cst::cst::Parenthesized;
@@ -213,6 +215,7 @@ use crate::cst::cst::StaticMethodCall;
 use crate::cst::cst::StaticMethodPartialApplication;
 use crate::cst::cst::StaticPropertyAccess;
 use crate::cst::cst::StringPart;
+use crate::cst::cst::Struct;
 use crate::cst::cst::Switch;
 use crate::cst::cst::SwitchBody;
 use crate::cst::cst::SwitchBraceDelimitedBody;
@@ -260,6 +263,7 @@ use crate::cst::cst::VariadicPlaceholderArgument;
 use crate::cst::cst::While;
 use crate::cst::cst::WhileBody;
 use crate::cst::cst::WhileColonDelimitedBody;
+use crate::cst::cst::With;
 use crate::cst::cst::Yield;
 use crate::cst::cst::YieldFrom;
 use crate::cst::cst::YieldPair;
@@ -449,6 +453,7 @@ generate_ast_walker! {
             Statement::Trait(r#trait) => walker.walk_trait(r#trait, context),
             Statement::Enum(r#enum) => walker.walk_enum(r#enum, context),
             Statement::Event(event) => walker.walk_event(event, context),
+            Statement::Struct(r#struct) => walker.walk_struct(r#struct, context),
             Statement::Block(block) => walker.walk_block(block, context),
             Statement::Constant(constant) => walker.walk_constant(constant, context),
             Statement::Function(function) => walker.walk_function(function, context),
@@ -866,6 +871,31 @@ generate_ast_walker! {
         }
 
         for class_member in &r#enum.members {
+            walker.walk_class_like_member(class_member, context);
+        }
+    }
+
+    'arena Struct as r#struct => {
+        for attribute_list in &r#struct.attribute_lists {
+            walker.walk_attribute_list(attribute_list, context);
+        }
+
+        for modifier in &r#struct.modifiers {
+            walker.walk_modifier(modifier, context);
+        }
+
+        walker.walk_keyword(&r#struct.r#struct, context);
+        walker.walk_local_identifier(&r#struct.name, context);
+
+        if let Some(backing_type_hint) = &r#struct.backing_type_hint {
+            walker.walk_enum_backing_type_hint(backing_type_hint, context);
+        }
+
+        if let Some(inheritance) = &r#struct.inheritance {
+            walker.walk_inheritance(inheritance, context);
+        }
+
+        for class_member in &r#struct.members {
             walker.walk_class_like_member(class_member, context);
         }
     }
@@ -1938,6 +1968,7 @@ generate_ast_walker! {
             Expression::As(r#as) => walker.walk_as(r#as, context),
             Expression::PatternMatch(pattern_match) => walker.walk_pattern_match(pattern_match, context),
             Expression::TypeOf(type_of) => walker.walk_type_of(type_of, context),
+            Expression::With(with) => walker.walk_with(with, context),
             Expression::Error(_) => {
                 // Nothing to walk for error expressions
             }
@@ -2729,6 +2760,9 @@ generate_ast_walker! {
         if let Some(argument_list) = &instantiation.argument_list {
             walker.walk_argument_list(argument_list, context);
         }
+        if let Some(initializer) = &instantiation.initializer {
+            walker.walk_object_initializer(initializer, context);
+        }
     }
 
     'arena MagicConstant as magic_constant => {
@@ -2743,6 +2777,23 @@ generate_ast_walker! {
     'arena TypeOf as type_of => {
         walker.walk_keyword(&type_of.r#typeof, context);
         walker.walk_identifier(&type_of.class, context);
+    }
+
+    'arena With as with => {
+        walker.walk_expression(with.object, context);
+        walker.walk_keyword(&with.with, context);
+        walker.walk_object_initializer(&with.initializer, context);
+    }
+
+    'arena ObjectInitializer as object_initializer => {
+        for value in object_initializer.values.iter() {
+            walker.walk_named_value(value, context);
+        }
+    }
+
+    'arena NamedValue as named_value => {
+        walker.walk_local_identifier(&named_value.name, context);
+        walker.walk_expression(named_value.value, context);
     }
 
     'arena Hint as hint => {

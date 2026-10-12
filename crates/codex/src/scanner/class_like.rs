@@ -27,6 +27,7 @@ use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAdaptation;
 use mago_syntax::cst::TraitUseMethodReference;
@@ -75,10 +76,13 @@ use crate::ttype::atomic::object::r#enum::TEnum;
 use crate::ttype::atomic::reference::TReference;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::builder;
+use crate::ttype::get_bool;
+use crate::ttype::get_keyed_array;
 use crate::ttype::get_list;
 use crate::ttype::get_mixed;
 use crate::ttype::get_named_object;
 use crate::ttype::get_non_empty_list;
+use crate::ttype::get_object;
 use crate::ttype::get_string;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
@@ -314,6 +318,43 @@ where
     class_like_metadata.add_declaring_method_id(constructor.name, method_identifier);
     class_like_metadata.inheritable_method_ids.insert(constructor.name, method_identifier);
     codebase.function_likes.insert((class_like_metadata.name, constructor.name), constructor);
+
+    finish_registration(codebase, class_like_metadata)
+}
+
+/// Registers a PHP# struct, spec section 10, as the final class it runs as, with its backing type where an enum keeps
+/// one, the `operator ==` that compares it by value, and its `parse` and `tryParse`.
+#[inline]
+pub fn register_struct<'arena, A>(
+    codebase: &mut CodebaseMetadata,
+    r#struct: &'arena Struct<'arena>,
+    context: &Context<'_, 'arena, A>,
+    scope: &mut NamespaceScope,
+) -> ClassLikeRegistration
+where
+    A: Arena,
+{
+    let span = r#struct.span();
+    let mut class_like_metadata = scan_class_like(
+        codebase,
+        word(context.resolved_names.get(&r#struct.name)),
+        SymbolKind::Class,
+        Some(r#struct.name.span),
+        span,
+        span.start.offset,
+        r#struct.left_brace.start.offset,
+        &r#struct.attribute_lists,
+        Some(&r#struct.modifiers),
+        &r#struct.members,
+        None,
+        None,
+        r#struct.inheritance.as_ref(),
+        r#struct.backing_type_hint.as_ref(),
+        context,
+        scope,
+    )?;
+    class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::STRUCT;
+    create_struct_methods(codebase, &mut class_like_metadata, span);
 
     finish_registration(codebase, class_like_metadata)
 }
@@ -1596,91 +1637,114 @@ where
     Some(class_like_metadata)
 }
 
+/// Adds `function_like_metadata`, a method no source declares, to `class_like_metadata` under `name`.
+fn add_method(
+    codebase: &mut CodebaseMetadata,
+    name: &[u8],
+    class_like_metadata: &mut ClassLikeMetadata,
+    function_like_metadata: FunctionLikeMetadata,
+) {
+    let name = ascii_lowercase_word(name);
+    let method_id = (class_like_metadata.name, name);
+
+    let method_identifier = MethodIdentifier::new(class_like_metadata.name, name);
+
+    class_like_metadata.methods.insert(name);
+    class_like_metadata.add_declaring_method_id(name, method_identifier);
+    class_like_metadata.inheritable_method_ids.insert(name, method_identifier);
+    codebase.function_likes.insert(method_id, function_like_metadata);
+}
+
+/// A struct's `operator ==`, which the bridge writes to compare each property, spec section 10, and its `parse` and
+/// `tryParse`, which read a `Map<string, Any?>` or an object's public properties. `operator ==` takes any value, so an
+/// `Any?` compares with a struct, and is false when the other value is no instance of the struct. The analyzer
+/// decides which values `==` may compare with a struct.
+fn create_struct_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
+    let instance = get_named_object(class_like.original_name, None);
+    let operand = |name: &str| create_parameter(name, get_mixed(), span);
+    let equality = create_static_method("op_Equality", span, vec![operand("$a"), operand("$b")], get_bool(), vec![]);
+    add_method(codebase, b"op_Equality", class_like, equality);
+
+    let input = || {
+        let map = get_keyed_array(get_string(), get_mixed());
+        create_parameter("$value", TUnion::from_vec([map.types.as_ref(), get_object().types.as_ref()].concat()), span)
+    };
+    let parse = create_static_method("parse", span, vec![input()], instance.clone(), vec![]);
+    add_method(codebase, b"parse", class_like, parse);
+    let try_parse = create_static_method("tryParse", span, vec![input()], instance.as_nullable(), vec![]);
+    add_method(codebase, b"tryParse", class_like, try_parse);
+}
+
 fn create_enum_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
-    let mut add_method =
-        |name: &[u8], class_like_metadata: &mut ClassLikeMetadata, function_like_metadata: FunctionLikeMetadata| {
-            let name = ascii_lowercase_word(name);
-            let method_id = (class_like_metadata.name, name);
-
-            let method_identifier = MethodIdentifier::new(class_like_metadata.name, name);
-
-            class_like_metadata.methods.insert(name);
-            class_like_metadata.add_declaring_method_id(name, method_identifier);
-            class_like_metadata.inheritable_method_ids.insert(name, method_identifier);
-            codebase.function_likes.insert(method_id, function_like_metadata);
-        };
-
     let enum_name_word = class_like.name;
     let backing_type = class_like.enum_type.clone();
 
     if let Some(backing_type) = backing_type {
-        let from_method = create_enum_method(
+        let value = || create_parameter("$value", TUnion::from_vec(vec![backing_type.clone()]), span);
+        let from_method = create_static_method(
             "from",
             span,
-            vec![create_enum_value_parameter(backing_type.clone(), span)],
+            vec![value()],
             enum_instance_union(enum_name_word),
             vec![TypeMetadata::new(get_named_object(word("ValueError"), None), span)],
         );
-        add_method(b"from", class_like, from_method);
+        add_method(codebase, b"from", class_like, from_method);
 
-        let try_from_method = create_enum_method(
+        let try_from_method = create_static_method(
             "tryFrom",
             span,
-            vec![create_enum_value_parameter(backing_type, span)],
+            vec![value()],
             TUnion::from_vec(vec![
                 TAtomic::Object(TObject::Enum(TEnum { name: enum_name_word, case: None })),
                 TAtomic::Null,
             ]),
             vec![],
         );
-        add_method(b"tryFrom", class_like, try_from_method);
+        add_method(codebase, b"tryFrom", class_like, try_from_method);
     }
 
     let case_list = enum_instance_union(enum_name_word);
     let cases_return_type =
         if class_like.enum_cases.is_empty() { get_list(case_list) } else { get_non_empty_list(case_list) };
-    let cases_method = create_enum_method("cases", span, vec![], cases_return_type, vec![]);
-    add_method(b"cases", class_like, cases_method);
+    let cases_method = create_static_method("cases", span, vec![], cases_return_type, vec![]);
+    add_method(codebase, b"cases", class_like, cases_method);
 }
 
 fn enum_instance_union(name: Word) -> TUnion {
     TUnion::from_vec(vec![TAtomic::Object(TObject::Enum(TEnum { name, case: None }))])
 }
 
-fn create_enum_value_parameter(backing_type: TAtomic, enum_method_span: Span) -> FunctionLikeParameterMetadata {
+fn create_parameter(name: &str, parameter_type: TUnion, span: Span) -> FunctionLikeParameterMetadata {
     FunctionLikeParameterMetadata {
         attributes: vec![],
-        name: VariableIdentifier(word("$value")),
-        type_declaration_metadata: Some(TypeMetadata::new(
-            TUnion::from_vec(vec![backing_type.clone()]),
-            enum_method_span,
-        )),
-        type_metadata: Some(TypeMetadata::new(TUnion::from_vec(vec![backing_type]), enum_method_span)),
+        name: VariableIdentifier(word(name)),
+        type_declaration_metadata: Some(TypeMetadata::new(parameter_type.clone(), span)),
+        type_metadata: Some(TypeMetadata::new(parameter_type, span)),
         out_type: None,
         closure_this_type: None,
         default_type: None,
-        span: enum_method_span,
-        name_span: enum_method_span,
+        span,
+        name_span: span,
         flags: MetadataFlags::empty(),
     }
 }
 
-fn create_enum_method(
+fn create_static_method(
     name: &str,
-    enum_method_span: Span,
+    span: Span,
     parameters: Vec<FunctionLikeParameterMetadata>,
     return_type: TUnion,
     thrown_types: Vec<TypeMetadata>,
 ) -> FunctionLikeMetadata {
     FunctionLikeMetadata {
         kind: FunctionLikeKind::Method,
-        span: enum_method_span,
+        span,
         name: word(name),
         original_name: word(name),
-        name_span: Some(enum_method_span),
+        name_span: Some(span),
         parameters,
-        return_type_declaration_metadata: Some(TypeMetadata::new(return_type.clone(), enum_method_span)),
-        return_type_metadata: Some(TypeMetadata::new(return_type, enum_method_span)),
+        return_type_declaration_metadata: Some(TypeMetadata::new(return_type.clone(), span)),
+        return_type_metadata: Some(TypeMetadata::new(return_type, span)),
         refined_this_type: None,
         return_from_body: None,
         template_types: TemplateTypes::default(),

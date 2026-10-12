@@ -35,6 +35,7 @@ use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::Pipe;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Switch;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAliasAdaptation;
@@ -174,6 +175,12 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
     #[inline]
     fn walk_in_event(&self, event: &'ast Event<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
         checker::sharp::check_event_name(event, context);
+    }
+
+    #[inline]
+    fn walk_in_struct(&self, r#struct: &'ast Struct<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
+        checker::class_like::check_struct(r#struct, context);
+        checker::sharp::check_class_name(&r#struct.name, context);
     }
 
     #[inline]

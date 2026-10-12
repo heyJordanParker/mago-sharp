@@ -40,6 +40,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::with::analyze_object_initializer;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -127,10 +128,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
             resulting_type = Some(add_optional_union_type(type_candidate, resulting_type.as_ref(), context.codebase));
         }
 
-        if let Some(resulting_type) = resulting_type {
-            artifacts.set_expression_type(self, resulting_type);
-        } else {
-            artifacts.set_expression_type(self, get_object()); // Fallback to object if no valid instantiation was found
+        let resulting_type = resulting_type.unwrap_or_else(get_object); // Fallback to object if no valid instantiation was found
+        match &self.initializer {
+            // The initializer sets properties of the object `new` creates, spec section 16.
+            Some(initializer) => analyze_object_initializer(
+                context,
+                block_context,
+                artifacts,
+                self.span(),
+                &resulting_type,
+                initializer,
+                "an object initializer",
+            )?,
+            None => artifacts.set_expression_type(self, resulting_type),
         }
 
         Ok(())

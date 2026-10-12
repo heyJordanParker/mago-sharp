@@ -12025,3 +12025,183 @@ fn every_operand_shape_the_checker_accepts_calls_the_class_that_declares_the_ope
         "#}
     );
 }
+
+/// Spec section 10: the struct `Point`, whose `==` compares an `int`, a `float` and a nullable `Money`.
+const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(public int x { get; }, public float y { get; }, public Money? total { get; }) { }\n\n    public Point moved(int dx) => new Point(this.x + dx, this.y, this.total);\n}\n";
+
+/// ```php
+/// final class Point
+/// {
+///     public function __construct(public readonly int $x, public readonly float $y, public readonly ?\App\Money $total) {}
+///
+///     public function moved(int $dx): \App\Point { return new \App\Point($this->x + $dx, $this->y, $this->total); }
+///
+///     public static function op_Equality(mixed $a, mixed $b): bool
+///     {
+///         if (!$a instanceof \App\Point || !$b instanceof \App\Point) { return $a === $b; }
+///         return $a->x === $b->x && $a->y === $b->y && \App\Money::op_Equality($a->total, $b->total);
+///     }
+/// }
+/// ```
+///
+/// A struct is a final class, `ZEND_ACC_FINAL` being 32, whose get-only properties are `readonly`, 128. Its `==` is the
+/// `op_Equality` the bridge writes: two instances of the struct are equal when each property equals its pair by the
+/// property's own `==`, and any other pair, `null` included, is equal only when identical. The parameters take `mixed`,
+/// so an `Any?` compares with a struct.
+#[test]
+fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
+    assert_eq!(
+        Lowered::with(POINT, &[("src/App/Money.sharp", MONEY)]).tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [32] "Point" @3-8
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "__construct" @5-5
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "x"
+                        null
+                        null
+                        null
+                        null
+                      PARAM [129]
+                        ZVAL [1] "float"
+                        ZVAL "y"
+                        null
+                        null
+                        null
+                        null
+                      PARAM [129]
+                        ZVAL [256] "App\\Money"
+                        ZVAL "total"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                  METHOD [1] "moved" @7-7
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "int"
+                        ZVAL "dx"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        NEW
+                          ZVAL "App\\Point"
+                          ARG_LIST
+                            BINARY_OP [1]
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "x"
+                              VAR
+                                ZVAL "dx"
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "y"
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "total"
+                    ZVAL "App\\Point"
+                    null
+                  METHOD [17] "op_Equality" @3-3
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "mixed"
+                        ZVAL "a"
+                        null
+                        null
+                        null
+                        null
+                      PARAM
+                        ZVAL [1] "mixed"
+                        ZVAL "b"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          OR
+                            UNARY_OP [14]
+                              INSTANCEOF
+                                VAR
+                                  ZVAL "a"
+                                ZVAL "App\\Point"
+                            UNARY_OP [14]
+                              INSTANCEOF
+                                VAR
+                                  ZVAL "b"
+                                ZVAL "App\\Point"
+                          STMT_LIST
+                            RETURN
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "a"
+                                VAR
+                                  ZVAL "b"
+                      RETURN
+                        AND
+                          AND
+                            BINARY_OP [16]
+                              PROP
+                                VAR
+                                  ZVAL "a"
+                                ZVAL "x"
+                              PROP
+                                VAR
+                                  ZVAL "b"
+                                ZVAL "x"
+                            BINARY_OP [16]
+                              PROP
+                                VAR
+                                  ZVAL "a"
+                                ZVAL "y"
+                              PROP
+                                VAR
+                                  ZVAL "b"
+                                ZVAL "y"
+                          STATIC_CALL
+                            ZVAL "App\\Money"
+                            ZVAL "op_Equality"
+                            ARG_LIST
+                              PROP
+                                VAR
+                                  ZVAL "a"
+                                ZVAL "total"
+                              PROP
+                                VAR
+                                  ZVAL "b"
+                                ZVAL "total"
+                    ZVAL [1] "bool"
+                    null
+                null
+                null
+        "#}
+    );
+}

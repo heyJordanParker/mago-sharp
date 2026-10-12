@@ -40,6 +40,7 @@ use crate::cst::cst::UnaryPostfix;
 use crate::cst::cst::UnaryPostfixOperator;
 use crate::cst::cst::UnaryPrefix;
 use crate::cst::cst::UnaryPrefixOperator;
+use crate::cst::cst::With;
 use crate::dialect::Dialect;
 use crate::error::ParseError;
 use crate::parser::MAX_RECURSION_DEPTH;
@@ -181,6 +182,25 @@ where
                 continue;
             }
 
+            // `point with { y: 9 }` copies the object, spec section 16. It binds looser than unary `-` and the casts
+            // and tighter than `!`, at the level of PHP's `instanceof`, which PHP# does not have.
+            if self.dialect.is_sharp()
+                && next.kind == T![Identifier]
+                && next.value == b"with"
+                && self.stream.peek_kind(1)? == Some(T!["{"])
+            {
+                if Precedence::Instanceof < precedence {
+                    break;
+                }
+
+                left = self.arena.alloc(Expression::With(With {
+                    object: left,
+                    with: self.expect_any_keyword()?,
+                    initializer: self.parse_object_initializer()?,
+                }));
+                continue;
+            }
+
             // Don't allow function calls on error expressions.
             // This prevents `if(...)` from being parsed as a function call when `if` is an unexpected token.
             if matches!(left, Expression::Error(_)) && matches!(kind, T!["("]) {
@@ -282,6 +302,7 @@ where
                     name: self.parse_local_identifier()?,
                 }),
                 argument_list: self.parse_optional_argument_list()?,
+                initializer: self.parse_optional_object_initializer()?,
             })));
         }
 
