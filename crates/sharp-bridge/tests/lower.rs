@@ -438,12 +438,16 @@ fn a_file_declares_strict_types_then_its_namespace_and_classes() {
 /// An `extern` declaration only tells the checker what plain PHP does, so the engine gets the same tree without it.
 #[test]
 fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them() {
-    let library = [("vendor/acme/Mailer.php", "<?php\n\nnamespace Acme;\n\nclass Mailer\n{\n}\n")];
+    let library =
+        [("vendor/acme/Mailer.php", "<?php\n\nnamespace Acme;\n\nclass Mailer\n{\n}\n\nclass Failed\n{\n}\n")];
     let with = Lowered::with(
-        "namespace App.Tenant;\n\nimport Acme.Mailer;\n\nextern Mailer uses Mail, Http;\nextern trim;\n\nclass Report\n{\n}\n",
+        "namespace App.Tenant;\n\nimport Acme.Failed;\nimport Acme.Mailer;\n\nextern Mailer uses Mail, Http;\nextern trim;\nextern event Failed;\n\nclass Report\n{\n}\n",
         &library,
     );
-    let without = Lowered::with("namespace App.Tenant;\n\nimport Acme.Mailer;\n\n\n\n\nclass Report\n{\n}\n", &library);
+    let without = Lowered::with(
+        "namespace App.Tenant;\n\nimport Acme.Failed;\nimport Acme.Mailer;\n\n\n\n\n\nclass Report\n{\n}\n",
+        &library,
+    );
 
     assert_eq!(with.tree(), without.tree());
 }
@@ -5292,6 +5296,121 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
                 NAME_LIST
                   ZVAL "App\\Tenant\\Linkable"
                 STMT_LIST
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// interface OrderEvent
+/// {
+///     public int $orderId { get; }
+/// }
+/// final class OrderPaid implements \App\OrderEvent
+/// {
+///     public function __construct(public readonly int $orderId, public readonly int $amount = 0) {}
+/// }
+/// class Order
+/// {
+///     public function pay(int $orderId): \App\OrderPaid { return new \App\OrderPaid($orderId); }
+/// }
+/// ```
+///
+/// Spec section 15: an event is a final class, `[32]` `ZEND_ACC_FINAL`, whose constructor promotes each parameter to a
+/// public get-only property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and its header is the `implements` name
+/// list. An interface's get-only property is a public property, `[1]`, with an abstract `get` hook.
+#[test]
+fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n\npublic class Order\n{\n    public OrderPaid pay(int orderId) => new OrderPaid(orderId);\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [1] "OrderEvent" @3-6
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [1]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "orderId"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @5-5
+                            null
+                            null
+                            null
+                            null
+                            null
+                    null
+                null
+                null
+              CLASS [32] "OrderPaid" @8-8
+                null
+                NAME_LIST
+                  ZVAL "App\\OrderEvent"
+                STMT_LIST
+                  METHOD [1] "__construct" @8-8
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "orderId"
+                        null
+                        null
+                        null
+                        null
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "amount"
+                        ZVAL 0
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                null
+                null
+              CLASS "Order" @10-13
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "pay" @12-12
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "int"
+                        ZVAL "orderId"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        NEW
+                          ZVAL "App\\OrderPaid"
+                          ARG_LIST
+                            VAR
+                              ZVAL "orderId"
+                    ZVAL "App\\OrderPaid"
+                    null
                 null
                 null
         "#}

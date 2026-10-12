@@ -49,6 +49,7 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
@@ -72,6 +73,8 @@ use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
+use crate::statement::function_like::FunctionLikeBody;
+use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
@@ -90,7 +93,7 @@ pub mod override_attribute;
 pub mod property;
 pub mod unused_members;
 
-/// Reports a duplicate definition issue for class-like types.
+/// Reports a duplicate definition issue for class-like types, naming the class-like as the analyzed file writes it.
 fn report_duplicate_definition<A>(
     context: &mut Context<'_, '_, A>,
     title: &str,
@@ -101,7 +104,11 @@ fn report_duplicate_definition<A>(
 ) where
     A: Arena,
 {
-    let name = BytesDisplay(name);
+    let name = if context.dialect.is_sharp() {
+        display_class_like_name(context, word(name)).to_string()
+    } else {
+        BytesDisplay(name).to_string()
+    };
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
         Issue::error(format!("{title} `{name}` is already defined elsewhere."))
@@ -631,6 +638,104 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
 
         Ok(())
     }
+}
+
+/// A PHP# event, spec section 15, analyzes as the final class it runs as, whose constructor's parameters are its
+/// get-only properties. Its header names interfaces only, because no event extends another.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Event<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        _block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        // The scanner registers every event, or the class-like declared first under its name.
+        let name = context.resolved_names.get(&self.name);
+
+        context
+            .codebase
+            .get_class_like(name)
+            .map_or(Ok(()), |class_like_metadata| analyze_event(self, class_like_metadata, context, artifacts))
+    }
+}
+
+fn analyze_event<'ctx, 'arena, A>(
+    event: &Event<'arena>,
+    class_like_metadata: &'ctx ClassLikeMetadata,
+    context: &mut Context<'ctx, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    // An interface or a class declared first in the file under the event's name keeps it, and has no constructor.
+    if class_like_metadata.span != event.span() {
+        let name = class_like_metadata.original_name.as_bytes();
+        report_duplicate_definition(context, "Event", "event", name, event.span(), class_like_metadata.span);
+        return Ok(());
+    }
+
+    let codebase = context.codebase;
+    let named_class_likes: Vec<_> = event
+        .inheritance
+        .iter()
+        .flat_map(|inheritance| inheritance.types.iter())
+        .filter_map(|type_name| Some((type_name, codebase.get_class_like(context.resolved_names.get(type_name))?)))
+        .filter(|(_, named)| !named.kind.is_interface())
+        .collect();
+
+    for (type_name, named) in &named_class_likes {
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!(
+                "An event's header names interfaces only, and `{}` is not one.",
+                display_class_like_name(context, named.original_name)
+            ))
+            .with_annotation(Annotation::primary(type_name.span()).with_message("Named here."))
+            .with_note("No event extends another: a family of events shares an interface."),
+        );
+    }
+
+    // The class the header names is the event's parent, which every other check would read.
+    if !named_class_likes.is_empty() {
+        return Ok(());
+    }
+
+    analyze_class_like(
+        context,
+        artifacts,
+        Some(event.name.span),
+        event.span(),
+        None,
+        None,
+        event.inheritance.as_ref(),
+        class_like_metadata,
+        &[],
+    )?;
+
+    // The constructor has no body: its parameters' types and defaults are checked as a method's.
+    let constructor = context.codebase.get_method(class_like_metadata.name.as_bytes(), b"__construct");
+    constructor.map_or(Ok(()), |constructor| {
+        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, constructor.name)));
+        scope.set_class_like(Some(class_like_metadata));
+        scope.set_function_like(Some(constructor));
+
+        let mut constructor_block_context = BlockContext::new(scope, context.settings.register_super_globals);
+        analyze_function_like(
+            context,
+            artifacts,
+            &mut constructor_block_context,
+            constructor,
+            &event.parameter_list,
+            None,
+            FunctionLikeBody::Statements(&[], event.parameter_list.span()),
+            None,
+        )
+        .map(drop)
+    })
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
@@ -3965,6 +4070,122 @@ fn check_class_like_properties<'ctx, A>(
                 );
             }
         }
+    }
+
+    if context.dialect.is_sharp() {
+        check_interface_properties(context, class_like_metadata);
+    }
+}
+
+/// Checks each property a PHP# class or event ends up with against the property each interface above it states, as
+/// the engine links the class against it. A property the class declares answers to every interface above it. One it
+/// inherits answers to the interfaces the class names itself, because a base class that names an interface answers for
+/// it there. A base class's `private` property counts, as PHP links against it too.
+fn check_interface_properties<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let names_itself = |interface_name: &Word| {
+        class_like_metadata.direct_parent_interfaces.iter().any(|named| {
+            named == interface_name
+                || codebase.get_class_like(named.as_bytes()).is_some_and(|named| named.has_parent(*interface_name))
+        })
+    };
+
+    for interface_name in &class_like_metadata.all_parent_interfaces {
+        let Some(interface) = codebase.get_class_like(interface_name.as_bytes()) else {
+            continue;
+        };
+
+        for (property_name, stated) in &interface.properties {
+            let owner = std::iter::successors(Some(class_like_metadata), |metadata| {
+                metadata.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+            })
+            .find_map(|metadata| metadata.properties.get(property_name).map(|property| (metadata, property)));
+            let Some((owner, property)) = owner else {
+                continue;
+            };
+
+            if owner.name == class_like_metadata.name || names_itself(interface_name) {
+                report_unfit_interface_property(context, class_like_metadata, owner, interface, property, stated);
+            }
+        }
+    }
+}
+
+/// Reports a PHP# class's or event's property, declared by `owner`, that does not fit the property `interface` states,
+/// as the engine refuses the class: it is public, on each object, and of the stated type or a narrower one for a
+/// get-only property. Every interface property is virtual, so its hooks alone say whether it is get-only. A property
+/// the class inherits is reported on the class's name, naming the base class to change.
+fn report_unfit_interface_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    owner: &ClassLikeMetadata,
+    interface: &ClassLikeMetadata,
+    property: &PropertyMetadata,
+    stated: &PropertyMetadata,
+) where
+    A: Arena,
+{
+    let name = display_class_like_name(context, class_like_metadata.original_name);
+    let interface_name = display_class_like_name(context, interface.original_name);
+    let property_name = display_property_name(context, property.name.0);
+    let property_span = property.name_span.unwrap_or(owner.span);
+    let stated_span = stated.name_span.unwrap_or(interface.span);
+    let (from, place) = if owner.name == class_like_metadata.name {
+        (String::new(), String::new())
+    } else {
+        let owner_name = display_class_like_name(context, owner.original_name);
+
+        (format!(", from `{owner_name}`"), format!(" in `{owner_name}`"))
+    };
+    let report = |context: &mut Context<'_, '_, A>, code: IssueCode, given: String, stated: String, help: String| {
+        let issue = Issue::error(format!(
+            "`{name}` gives `{property_name}` {given}{from}, and `{interface_name}` states it {stated}."
+        ));
+        let issue = if from.is_empty() {
+            issue.with_annotation(Annotation::primary(property_span).with_message("Given here."))
+        } else {
+            issue
+                .with_annotation(
+                    Annotation::primary(class_like_metadata.name_span.unwrap_or(class_like_metadata.span))
+                        .with_message("Inherited here."),
+                )
+                .with_annotation(Annotation::secondary(property_span).with_message("Declared here."))
+        };
+
+        context.collector.report_with_code(
+            code,
+            issue.with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")).with_help(help),
+        );
+    };
+
+    if property.read_visibility != stated.read_visibility {
+        let (given, stated) = (property.read_visibility, stated.read_visibility);
+        let help = format!("Declare `{property_name}` `{stated}`{place}.");
+        report(context, IssueCode::IncompatiblePropertyAccess, format!("as `{given}`"), format!("`{stated}`"), help);
+    }
+
+    if property.flags.is_static() != stated.flags.is_static() {
+        let (given, help) = ("as `static`".to_owned(), format!("Remove `static`{place}."));
+        report(context, IssueCode::IncompatibleStaticModifier, given, "on each object".to_owned(), help);
+    }
+
+    if let Some((given, stated_type)) =
+        property.type_declaration_metadata.as_ref().zip(stated.type_declaration_metadata.as_ref())
+        && is_property_type_variance_invalid(
+            context.codebase,
+            &given.type_union,
+            &stated_type.type_union,
+            !stated.hooks.contains_key(&word("set")),
+            false,
+        )
+    {
+        let stated_type = display_type(context, &stated_type.type_union);
+        let given = format!("as `{}`", display_type(context, &given.type_union));
+        let help = format!("Give `{property_name}` the type `{stated_type}`{place}.");
+        report(context, IssueCode::IncompatiblePropertyType, given, format!("as `{stated_type}`"), help);
     }
 }
 

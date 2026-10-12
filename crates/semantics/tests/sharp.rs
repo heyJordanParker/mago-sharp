@@ -112,6 +112,53 @@ fn an_extern_uses_only_effects() {
     assert_eq!(issues(class), [format!("6:21 `Order` {NOT_AN_EFFECT}")]);
 }
 
+/// `extern event` marks a plain PHP class as an event, spec section 15, so it names a class, with or without the
+/// effects its `uses` lists.
+#[test]
+fn an_extern_event_names_a_class() {
+    let code = "namespace App.Stubs;\n\nimport Carbon.Carbon;\nimport Illuminate.Queue.Events.JobFailed;\nimport Illuminate.Queue.Events.JobQueued;\n\nextern event JobFailed;\nextern event JobQueued uses Database;\nextern event Carbon.now;\n";
+
+    assert_eq!(issues(code), ["9:14 An `extern event` names a class, and `Carbon.now` names a member."]);
+}
+
+/// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
+/// `public`, and each parameter is a type, a name and an optional default. An event named with a word PHP reserves
+/// cannot run as a class.
+#[test]
+fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
+    let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\npublic event Empty();\npublic event Print(int id);\npublic event Exit(int code);\n";
+    let fixed = "namespace App.Shop;\n\npublic event Moved(int id);\n\nevent Emptied();\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:1 An event takes only `public`.",
+            "4:1 An event takes only `public`.",
+            "5:20 An event's parameter takes no modifier: it is a public get-only property of the event.",
+            "5:39 An event's parameter cannot be variadic: it is one property of the event.",
+            "6:21 A `Set` parameter of an event is not supported yet in PHP#.",
+            "7:1 This construct is not supported yet in PHP#.",
+            "8:29 An event's parameter takes no accessors: it is a get-only property of the event.",
+            "9:28 A `Set` parameter of an event is not supported yet in PHP#.",
+            "13:14 Event `Empty` name cannot be a reserved keyword.",
+            "14:14 Event `Print` name cannot be a reserved keyword.",
+            "15:14 Event `Exit` name cannot be a reserved keyword."
+        ]
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+    let construct_notes: Vec<Vec<String>> = check("src/Report.sharp", code)
+        .into_iter()
+        .filter(|issue| issue.message == "This construct is not supported yet in PHP#.")
+        .map(|issue| issue.notes)
+        .collect();
+    assert_eq!(
+        construct_notes,
+        [[
+            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
+        ]]
+    );
+}
+
 /// An import of a class named like an effect shadows the effect, spec section 23, so the refusal names the imported
 /// class and the import that frees the name. A class the file declares under that name keeps the plain refusal.
 #[test]
@@ -1009,16 +1056,20 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
     );
 }
 
+/// An interface states a `public` get-only property its classes give, as `OrderEvent` states the `orderId` its events
+/// give, spec section 15. A `set` accessor or an accessor body is not supported yet, and PHP's own check asks for
+/// `public`.
 #[test]
-fn an_interface_property_is_not_supported_yet_with_or_without_accessor_bodies() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    public string name { get; }\n    public string label { get => \"label\"; }\n}\n";
+fn an_interface_property_is_public_and_get_only() {
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    public string name { get; }\n    public string label { get => \"label\"; }\n    public string title { get; set; }\n    string code { get; }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "6:31 Interface virtual property `Named.label` must be abstract.",
-            "5:5 This class member is not supported yet in PHP#.",
-            "6:5 This class member is not supported yet in PHP#."
+            "8:5 Interface virtual property `Named.code` must be declared public.",
+            "6:5 This class member is not supported yet in PHP#.",
+            "7:5 This class member is not supported yet in PHP#."
         ]
     );
 
@@ -1284,19 +1335,22 @@ fn a_clashing_import_is_helped_with_the_import_renamed() {
 }
 
 /// Spec section 24 capitalizes every type but the built-in ones, and the parser reads a capitalized name before `<` as
-/// a type with type arguments. So a class, an interface and an enum start with a capital letter.
+/// a type with type arguments. So a class, an interface, an enum and an event start with a capital letter.
 #[test]
 fn a_class_interface_or_enum_name_starts_with_a_capital_letter() {
-    let lowercase =
-        "namespace App.Tenant;\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n";
-    let capitalized =
-        "namespace App.Tenant;\n\nclass Box\n{\n}\n\ninterface Priced\n{\n}\n\nenum Status\n{\n    case Open;\n}\n";
+    let lowercase = "namespace App.Tenant;\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n\nevent paid(int id);\n";
+    let capitalized = "namespace App.Tenant;\n\nclass Box\n{\n}\n\ninterface Priced\n{\n}\n\nenum Status\n{\n    case Open;\n}\n\nevent Paid(int id);\n";
     let rule =
         "must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones.";
 
     assert_eq!(
         issues(lowercase),
-        [format!("3:7 `box` {rule}"), format!("7:11 `priced` {rule}"), format!("11:6 `status` {rule}")]
+        [
+            format!("3:7 `box` {rule}"),
+            format!("7:11 `priced` {rule}"),
+            format!("11:6 `status` {rule}"),
+            format!("16:7 `paid` {rule}")
+        ]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
 }
@@ -3025,7 +3079,7 @@ fn a_null_start_needs_a_type() {
 
 #[test]
 fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() {
-    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d)\n    {\n        return [];\n    }\n}\n";
+    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d, Map<string, void> e)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -3035,6 +3089,7 @@ fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() 
             "3:47 This type is not supported yet in PHP#.",
             "3:65 This type is not supported yet in PHP#.",
             "3:80 This type is not supported yet in PHP#.",
+            "3:95 This type is not supported yet in PHP#.",
         ]
     );
 }
