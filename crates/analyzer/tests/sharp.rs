@@ -7173,9 +7173,25 @@ fn a_php_caller_of_group_by_keys_the_array_by_an_array_key() {
     );
 }
 
+/// A `.sharp` call keeps a function's own template bounds, as a `.php` call does, unless the function keys a `Map` by
+/// what its function gives, as `groupBy` and `associateBy` do. A bound that names another template, `U of T`, is
+/// checked only through the call's template result, so `Pick.pair(1, "a")` is refused at the call.
+#[test]
+fn a_sharp_call_keeps_a_functions_template_bounds_unless_it_keys_a_map() {
+    let sharp =
+        "namespace Demo;\n\nimport Lib.Pick;\n\nclass Picks\n{\n    public string pair() => Pick.pair(1, \"a\");\n}\n";
+    let pick = "<?php\n\nnamespace Lib;\n\nfinal class Pick\n{\n    /**\n     * @template T of int\n     * @template U of T\n     * @param T $a\n     * @param U $b\n     * @return U\n     */\n    public static function pair($a, $b) { return $b; }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Picks.sharp", sharp), &[("src/Lib/Pick.php", pick)]),
+        ["7:42 template-constraint-violation", "7:42 invalid-argument", "7:29 invalid-return-statement"]
+    );
+}
+
 /// A PHP# field's and typed local's written types are checked where they are written, as a parameter's is, though
 /// their names have no `$`. A type that names no type is reported once, there, and a value of it adds no second issue
-/// where it is used: a parameter, a `Map` key, a local, a field, a return and an argument. A PHP declaration that names
+/// where it is used: a parameter, a `Map` key, a local, a field's and a property's initial value, a return, in a block or an
+/// expression body, and an argument. A PHP declaration that names
 /// no type stays checked where PHP# meets it, so a call that passes it a wrong value is refused.
 #[test]
 fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_is() {
@@ -7188,16 +7204,20 @@ fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_
     );
     assert_eq!(messages(("src/Demo/Tally.sharp", sharp), &[]), ["Cannot find type `Missing`."; 3]);
 
-    let used = "namespace Demo;\n\nclass Tally\n{\n    public Missing? kept = null;\n\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        Missing? local = item;\n        return strlen(item) + count(counts) + strlen(local) + strlen(this.kept) + strlen(this.found(5));\n    }\n\n    public Missing found(Missing item) => item;\n}\n";
+    let used = "namespace Demo;\n\nclass Tally\n{\n    public Missing? kept = null;\n    public Missing owner = 5;\n    public Missing named { get; set; } = 5;\n\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        Missing? local = item;\n        return strlen(item) + count(counts) + strlen(local) + strlen(this.kept) + strlen(this.found(5));\n    }\n\n    public Missing found(Missing item) => item;\n\n    public Missing made() => 5;\n\n    public Missing madeInBlock()\n    {\n        return 5;\n    }\n}\n";
     assert_eq!(
         issues(("src/Demo/Tally.sharp", used), &[]),
         [
             "5:12 non-existent-class-like",
-            "7:21 non-existent-class-like",
-            "7:35 non-existent-class-like",
-            "9:9 non-existent-class-like",
-            "13:12 non-existent-class-like",
-            "13:26 non-existent-class-like",
+            "6:12 non-existent-class-like",
+            "7:12 non-existent-class-like",
+            "9:21 non-existent-class-like",
+            "9:35 non-existent-class-like",
+            "11:9 non-existent-class-like",
+            "15:12 non-existent-class-like",
+            "15:26 non-existent-class-like",
+            "17:12 non-existent-class-like",
+            "19:12 non-existent-class-like",
         ]
     );
 
