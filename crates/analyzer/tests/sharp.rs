@@ -10510,15 +10510,15 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
         ["7:14 invalid-property-write", "8:15 invalid-property-write", "11:46 invalid-argument"]
     );
     assert_eq!(
-        worded(writer, &ORDER_EVENTS)[0],
-        "7:14 invalid-property-write Event `OrderPaid` sets `orderId` once, by `new`. | Written here. | An event's parameters are its properties, and nothing changes them after `new`. | Create a new event with the value instead."
+        worded(writer, &ORDER_EVENTS)[..2],
+        [
+            "7:14 invalid-property-write Event `OrderPaid` sets `orderId` once, by `new`. | Written here. | An event's parameters are its properties, and nothing changes them after `new`. | Create a new event with the value instead.",
+            "8:15 invalid-property-write `orderId` of `OrderEvent` is get-only. | Written here. | Declared get-only here."
+        ]
     );
     assert_eq!(
-        messages(writer, &ORDER_EVENTS)[1..],
-        [
-            "Cannot write to read-only property `OrderEvent.orderId` - property only has a get hook.",
-            "Invalid argument type for argument #1 of `OrderPaid.__construct`: expected `int`, but found `string`."
-        ]
+        messages(writer, &ORDER_EVENTS)[2],
+        "Invalid argument type for argument #1 of `OrderPaid.__construct`: expected `int`, but found `string`."
     );
     assert_eq!(messages(sub, &ORDER_EVENTS), ["Class `Sub` cannot extend final class `OrderPaid`"]);
 }

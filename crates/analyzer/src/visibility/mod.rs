@@ -312,6 +312,28 @@ where
         && !property_metadata.hooks.contains_key(&word(b"set"))
         && property_metadata.flags.is_virtual_property()
     {
+        // PHP# states a property get-only with `{ get; }`, and names it as it reads: `orderId` of `OrderEvent`.
+        if context.dialect.is_sharp() {
+            let class = display_class_like_name(context, declaring_class_metadata.original_name);
+            let property = display_property_name(context, property_name);
+
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(format!("`{property}` of `{class}` is get-only."))
+                    .with_annotation(
+                        Annotation::primary(member_span.unwrap_or(access_span)).with_message("Written here."),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(
+                            property_metadata.span.or(property_metadata.name_span).unwrap_or(access_span),
+                        )
+                        .with_message("Declared get-only here."),
+                    ),
+            );
+
+            return false;
+        }
+
         let property = display_member(context, declaring_class_metadata.original_name, property_name);
 
         context.collector.report_with_code(
