@@ -458,15 +458,21 @@ where
     A: Arena,
 {
     let key_type = map_type.types.iter().fold(None, |key_type, atomic| match atomic {
-        TAtomic::Array(TArray::Keyed(keyed_array)) => keyed_array
-            .get_generic_parameters()
-            .map(|(key, _)| add_optional_union_type(key.clone(), key_type.as_ref(), context.codebase))
-            .or(key_type),
+        TAtomic::Array(map @ TArray::Keyed(_)) => {
+            let key = get_array_parameters(map, context.codebase).0;
+            Some(add_optional_union_type(key, key_type.as_ref(), context.codebase))
+        }
         _ => key_type,
     });
-    let Some(key_type) = key_type else {
-        return false;
-    };
+
+    key_type.is_some_and(|key_type| key_type_mixes_a_backed_enum(context, &key_type))
+}
+
+/// Whether `key_type` mixes a backed enum with other types, as `Status|int` or `Status|Rank` do.
+pub(crate) fn key_type_mixes_a_backed_enum<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
+where
+    A: Arena,
+{
     let mut keys = key_type.types.iter().filter(|atomic| !atomic.is_null());
     let is_one_enum = match keys.next() {
         Some(TAtomic::Object(TObject::Enum(first))) => {
@@ -475,7 +481,7 @@ where
         _ => false,
     };
 
-    matches!(get_backing_key_type(&key_type, context.codebase), Cow::Owned(_)) && !is_one_enum
+    matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_enum
 }
 
 /// Reports the `Map` `collection`, whose keys mix a backed enum with other types, where `reader`, the loop or `keys()`,
@@ -499,6 +505,32 @@ pub(crate) fn report_keys_read_back<A>(
         .with_annotation(Annotation::primary(span).with_message("Its key is read here."))
         .with_note(
             "The engine holds each key as its backing value, and reads it back as a case through one enum's `from`.",
+        )
+        .with_help("Key the `Map` by one backed enum alone."),
+    );
+}
+
+/// Reports the `Map` at `collection`, whose keys mix a backed enum with other types, where `finder`, such as `has`,
+/// an index or a literal, looks a key up or puts one in, as `annotation` marks it.
+pub(crate) fn report_keys_sharing_entries<A>(
+    context: &mut Context<'_, '_, A>,
+    code: IssueCode,
+    collection: Span,
+    finder: &str,
+    annotation: Annotation,
+) where
+    A: Arena,
+{
+    let collection = quoted_source(context, collection);
+
+    context.collector.report_with_code(
+        code,
+        Issue::error(format!(
+            "The keys of `{collection}` mix a backed enum with other types, so {finder} cannot tell them apart."
+        ))
+        .with_annotation(annotation)
+        .with_note(
+            "The engine holds each key as its backing value, so a case and the `int` or `string` key of its backing value share one entry.",
         )
         .with_help("Key the `Map` by one backed enum alone."),
     );

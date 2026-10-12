@@ -3820,6 +3820,168 @@ fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
 }
 
 /// ```php
+/// $grid[0]->clear();
+/// !isset($sets[0][4]) && $sets[0]->put(4, 4) !== null;
+/// $maps[0]->put('c', 3);
+/// $maps[0]['d'] ?? $maps[0]->put('d', 4);
+/// ((${'index#2'} = \array_find_key($grid[${'index#1'} = $this->next()], …)) !== null)
+///     && $grid[${'index#1'}]->removeAt(${'index#2'}) === null;
+/// return (($stock['a'] ?? null) === null) ? null : \count($stock['a']);
+/// ```
+///
+/// Spec section 12 makes a `List` index a place, which only the engine's collection of the element reaches, so a
+/// change through it is a `Sharp\Collection` method on the index: `clear`, and `put` for a `Set`'s `add` and for a
+/// write into a `Map` element, whose `??=` puts only for a missing key. An index that runs something is held in a
+/// hidden variable, so it runs once. A null-safe method that runs as PHP reads a missing `Map` key as null.
+#[test]
+fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
+    assert_eq!(
+        body_in(
+            "int? run(List<List<int>> grid, List<Set<int>> sets, List<Map<string, int>> maps, Map<string, List<int>> stock)",
+            "        grid[0].clear();\n        sets[0].add(4);\n        maps[0][\"c\"] = 3;\n        maps[0][\"d\"] ??= 4;\n        grid[this.next()].remove(2);\n        return stock[\"a\"]?.count();\n    }\n\n    private int next()\n    {\n        return 0;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                DIM
+                  VAR
+                    ZVAL "grid"
+                  ZVAL 0
+                ZVAL "clear"
+                ARG_LIST
+              AND
+                UNARY_OP [14]
+                  ISSET
+                    DIM
+                      DIM
+                        VAR
+                          ZVAL "sets"
+                        ZVAL 0
+                      ZVAL 4
+                BINARY_OP [17]
+                  METHOD_CALL
+                    DIM
+                      VAR
+                        ZVAL "sets"
+                      ZVAL 0
+                    ZVAL "put"
+                    ARG_LIST
+                      ZVAL 4
+                      ZVAL 4
+                  ZVAL null
+              METHOD_CALL
+                DIM
+                  VAR
+                    ZVAL "maps"
+                  ZVAL 0
+                ZVAL "put"
+                ARG_LIST
+                  ZVAL "c"
+                  ZVAL 3
+              COALESCE
+                DIM
+                  DIM
+                    VAR
+                      ZVAL "maps"
+                    ZVAL 0
+                  ZVAL "d"
+                METHOD_CALL
+                  DIM
+                    VAR
+                      ZVAL "maps"
+                    ZVAL 0
+                  ZVAL "put"
+                  ARG_LIST
+                    ZVAL "d"
+                    ZVAL 4
+              AND
+                BINARY_OP [17]
+                  ASSIGN
+                    VAR
+                      ZVAL "index#2"
+                    CALL
+                      ZVAL "array_find_key"
+                      ARG_LIST
+                        DIM
+                          VAR
+                            ZVAL "grid"
+                          ASSIGN
+                            VAR
+                              ZVAL "index#1"
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "next"
+                              ARG_LIST
+                        CALL
+                          ARROW_FUNC "" @13-13
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "value#3"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            ARROW_FUNC "" @13-13
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "element#4"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "element#4"
+                                VAR
+                                  ZVAL "value#3"
+                              null
+                              null
+                            null
+                            null
+                          ARG_LIST
+                            ZVAL 2
+                  ZVAL null
+                BINARY_OP [16]
+                  METHOD_CALL
+                    DIM
+                      VAR
+                        ZVAL "grid"
+                      VAR
+                        ZVAL "index#1"
+                    ZVAL "removeAt"
+                    ARG_LIST
+                      VAR
+                        ZVAL "index#2"
+                  ZVAL null
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    COALESCE
+                      DIM
+                        VAR
+                          ZVAL "stock"
+                        ZVAL "a"
+                      ZVAL null
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      DIM
+                        VAR
+                          ZVAL "stock"
+                        ZVAL "a"
+        "#}
+    );
+}
+
+/// ```php
 /// $lines = ($holder === null) ? null : \count($holder->lines);
 /// $next = (($nullsafe#1 = $other->next) === null) ? null : \count($nullsafe#1->lines);
 /// $made = ($holder === null) ? null : \count($holder->make());

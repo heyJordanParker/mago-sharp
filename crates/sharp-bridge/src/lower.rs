@@ -17,6 +17,7 @@ use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Array;
+use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Assignment;
@@ -325,6 +326,9 @@ enum CollectionReceiver<'receiver, 'ast> {
     Place(&'receiver Expression<'ast>),
     /// A property of an object, which the method reads again.
     Property(Reread<'receiver, 'ast>, &'receiver ClassLikeMemberSelector<'ast>),
+    /// An index of a `List`, a place by spec section 12, which a change reaches only through a `Sharp\Collection`
+    /// method: the engine reads the element of a method call's receiver index through the list's collection.
+    Index(Box<CollectionReceiver<'receiver, 'ast>>, Reread<'receiver, 'ast>),
     /// Any other value, which lives nowhere, so a change changes a copy.
     Value(Reread<'receiver, 'ast>),
 }
@@ -1632,6 +1636,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(kind, 0, line, &[operand])
             }
             Expression::Assignment(assignment) => {
+                if let Expression::ArrayAccess(access) = assignment.lhs
+                    && let Expression::ArrayAccess(element) = access.array.unparenthesized()
+                    && self.is_list(element.array)
+                {
+                    return self.element_write(line, assignment, access);
+                }
+
                 // A compound assignment to an instance assigns what the operator its class declares returns.
                 if let Some(operator) = compound_operator(&assignment.operator)
                     && let Some(name) = php_operator_name(&operator, 2)
@@ -2054,6 +2065,41 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[lhs, rhs]);
 
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// A write into the element of a `List`, a place by spec section 12, which only the engine's collection of the
+    /// element reaches where the list stores it: `list[i][key] = value` is `$list[$i]->put($key, $value)`, which
+    /// gives the value, and `list[i][key] ??= value` is `$list[$i][$key] ?? $list[$i]->put($key, $value)`, which
+    /// holds the index and the key that run something in hidden variables. The checker refuses every other operator
+    /// there, since it reads the element of the `Map` bare.
+    fn element_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
+        let coalesce = match assignment.operator {
+            AssignmentOperator::Assign(_) => false,
+            AssignmentOperator::Coalesce(_) => true,
+            _ => unreachable!("the checker refuses `{}` on a `Map` element, which reads it bare", assignment.operator),
+        };
+        let mut element = self.collection_receiver(access.array, coalesce);
+        let mut key = if coalesce { self.reread(access.index, "key") } else { Reread::once(access.index) };
+        let held = coalesce.then(|| {
+            let element = self.read_collection(&mut element, line, false);
+            let key = self.read_key(&mut key);
+
+            self.node(SHARP_AST_DIM, 0, line, &[element, key])
+        });
+        let place = self.read_collection(&mut element, line, false);
+        let read = self.read_key(&mut key);
+        // The variables stay taken until the value is lowered, as in a compound assignment.
+        let value = self.expression(assignment.rhs);
+        self.release(key);
+        self.release_collection(element);
+        let put = self.string(0, line, b"put");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[read, value]);
+        let put = self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, put, arguments]);
+
+        match held {
+            Some(held) => self.node(SHARP_AST_COALESCE, 0, line, &[held, put]),
+            None => put,
+        }
     }
 
     /// `target op= value` as `target = operation(target, value)`, for an operator that differs from PHP's: `/=` on ints
@@ -2495,6 +2541,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
     }
 
+    /// Whether the analysis gave `expression` a `List` type, whose index spec section 12 makes a place.
+    fn is_list(&self, expression: &Expression) -> bool {
+        self.types
+            .expression_type(expression)
+            .types
+            .iter()
+            .any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+    }
+
     /// Spec section 12 stores a `Set` as the array of its elements, each under its key, so a `Set` literal is
     /// `["vip" => "vip"]`. One with a spread is `\Sharp\Set::from` of the list literal.
     fn set_literal(&mut self, array: &Array) -> u32 {
@@ -2609,8 +2664,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The PHP a call of one of the [`INLINED_COLLECTION_METHODS`] runs on the array, or none for any other call. A
-    /// change reaches a property through the property, which runs its hooks, and a value that lives nowhere changes as
-    /// a copy. A null-safe call tests its receiver first and gives null for null.
+    /// change reaches a property through the property, which runs its hooks, an element of a `List` through a
+    /// `Sharp\Collection` method, and a value that lives nowhere changes as a copy. A null-safe call tests its
+    /// receiver first and gives null for null, which a missing key of a `Map` reads as.
     fn collection_call(
         &mut self,
         call: &Expression,
@@ -2672,9 +2728,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let key = self.read_key(&mut element);
                 let value = self.read(&mut element);
                 self.release(element);
-                let entry = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key]);
-                let entries = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[entry]);
-                let added = self.node(SHARP_AST_ASSIGN_OP, ZEND_ADD, line, &[place, entries]);
+                let added = if matches!(collection, CollectionReceiver::Index(..)) {
+                    // `$list[$i]->put($key, $value) !== null`, which gives the element, never null in a `Set`.
+                    let put = self.string(0, line, b"put");
+                    let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[key, value]);
+                    let put = self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, put, arguments]);
+                    let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+                    self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[put, null])
+                } else {
+                    let entry = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key]);
+                    let entries = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[entry]);
+
+                    self.node(SHARP_AST_ASSIGN_OP, ZEND_ADD, line, &[place, entries])
+                };
 
                 self.node(SHARP_AST_AND, 0, line, &[absent, added])
             }
@@ -2694,13 +2761,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             ("List" | "Set", b"clear") => {
                 let place = self.read_collection(&mut collection, line, false);
-                if matches!(collection, CollectionReceiver::Value(Reread { hidden: None, .. })) {
+                match collection {
                     // The receiver lives nowhere, so clearing it changes nothing anyone reads.
-                    place
-                } else {
-                    let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
+                    CollectionReceiver::Value(Reread { hidden: None, .. }) => place,
+                    CollectionReceiver::Index(..) => {
+                        let clear = self.string(0, line, b"clear");
+                        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
 
-                    self.node(SHARP_AST_ASSIGN, 0, line, &[place, empty])
+                        self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, clear, arguments])
+                    }
+                    _ => {
+                        let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
+
+                        self.node(SHARP_AST_ASSIGN, 0, line, &[place, empty])
+                    }
                 }
             }
             (_, b"count") | ("Set", b"tolist") | ("Map", b"keys") => {
@@ -2882,6 +2956,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             CollectionReceiver::Property(object, _) | CollectionReceiver::Value(object) => {
                 self.is_pure(object.expression)
             }
+            CollectionReceiver::Index(list, index) => self.runs_nothing(list) && self.is_pure(index.expression),
         }
     }
 
@@ -2938,6 +3013,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             {
                 CollectionReceiver::Property(hold(self, object), property)
             }
+            Expression::ArrayAccess(access) if self.is_list(access.array) => {
+                let list = self.collection_receiver(access.array, twice);
+                let index = if twice { self.reread(access.index, "index") } else { Reread::once(access.index) };
+
+                CollectionReceiver::Index(Box::new(list), index)
+            }
             _ => CollectionReceiver::Value(hold(self, receiver)),
         }
     }
@@ -2954,14 +3035,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(kind, 0, line, &[object, property])
             }
+            CollectionReceiver::Index(list, index) => {
+                let list = self.read_collection(list, line, false);
+                let index = self.read(index);
+
+                self.node(SHARP_AST_DIM, 0, line, &[list, index])
+            }
+            CollectionReceiver::Value(value) if null_safe => self.read_as(value, Self::null_safe_object),
             CollectionReceiver::Value(value) => self.read(value),
         }
     }
 
+    /// Frees the hidden variables of `collection`, the last ones taken first.
     fn release_collection(&mut self, collection: CollectionReceiver) {
         match collection {
             CollectionReceiver::Place(_) => {}
             CollectionReceiver::Property(object, _) => self.release(object),
+            CollectionReceiver::Index(list, index) => {
+                self.release(index);
+                self.release_collection(*list);
+            }
             CollectionReceiver::Value(value) => self.release(value),
         }
     }
@@ -2981,8 +3074,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A read of `value`, whose first read assigns its hidden variable.
     fn read(&mut self, value: &mut Reread) -> u32 {
+        self.read_as(value, Self::expression)
+    }
+
+    /// A read of `value` as `lower` lowers it, whose first read assigns its hidden variable.
+    fn read_as(&mut self, value: &mut Reread, lower: fn(&mut Self, &Expression) -> u32) -> u32 {
         let Some(name) = value.hidden.clone() else {
-            return self.expression(value.expression);
+            return lower(self, value.expression);
         };
         let variable = self.variable(value.expression.span(), &name);
         if value.assigned {
@@ -2990,7 +3088,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         value.assigned = true;
-        let lowered = self.expression(value.expression);
+        let lowered = lower(self, value.expression);
 
         self.node(SHARP_AST_ASSIGN, 0, self.line(value.expression), &[variable, lowered])
     }

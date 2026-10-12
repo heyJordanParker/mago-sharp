@@ -5354,19 +5354,14 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
 }
 
 /// Writing `x[i] = v` to a `List` could leave a gap in its keys, so spec section 12 writes a `List` with `set` and
-/// `add`. Every step of the target that is a `List` is reported.
+/// `add`. A write into a `List`'s element is a change through its index, which the index change rule decides.
 #[test]
 fn an_index_write_to_a_list_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public void change(List<int> sizes, Map<string, List<int>> groups, List<Map<string, int>> rows)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        groups[\"a\"][0] = 1;\n        rows[0][\"a\"] = 1;\n        groups[\"b\"] = [1];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        grid[0][1] = 1;\n        groups[\"b\"] = [1];\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Sizes.sharp", sharp), &[]),
-        [
-            "7:9 invalid-array-access",
-            "8:9 invalid-array-access",
-            "9:9 invalid-array-access",
-            "10:9 invalid-array-access"
-        ]
+        ["7:9 invalid-array-access", "8:9 invalid-array-access", "9:9 invalid-array-access"]
     );
 }
 
@@ -5439,8 +5434,9 @@ fn a_list_read_takes_any_int_index_under_strict_list_index_checks() {
 }
 
 /// A `Map` key is an `int`, a `string` or a backed enum, as the `Map` declares it (spec section 12), and never null. A
-/// handled read takes the key a bare read takes, so a key that may be null or of another type is an error. A plain PHP
-/// `array<string, int>` keeps reading a handled key of any array key type, as PHP does.
+/// handled read takes the key a bare read takes, so a key that may be null or of another type is an error. A write
+/// takes it too, by the index's PHP# type, so `stock["5"] = 1` writes a `string` key that a loop reads as one. A plain
+/// PHP `array<string, int>` keeps reading a handled key of any array key type, as PHP does.
 #[test]
 fn a_map_read_with_a_key_outside_its_key_type_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, string? name, int id, int|string either)\n    {\n        const a = counts[name] ?? 0;\n        const b = counts[id] ?? 0;\n        const c = counts[either] ?? 0;\n        const d = isset(counts[name]) ? 1 : 0;\n        return a + b + c + d;\n    }\n}\n";
@@ -5474,6 +5470,15 @@ fn a_map_read_with_a_key_outside_its_key_type_is_an_error() {
     assert_eq!(
         sharp_issues[0].primary_annotation().and_then(|annotation| annotation.message.as_deref()),
         Some("This key may not be of type `string`.")
+    );
+
+    let writes = "namespace Demo;\n\nclass Writes\n{\n    private Map<int, int> ids = [:];\n\n    public List<int> write()\n    {\n        Map<int, int> local = [:];\n        local[\"x\"] = 1;\n        this.ids[\"y\"] = 2;\n        Map<string, int> stock = [:];\n        stock[\"5\"] = 1;\n        for (const [string sku, int n] of stock) {\n        }\n        return local.keys();\n    }\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Writes.sharp", writes), &[]),
+        [
+            "10:15 mismatched-array-index `Map<int, int>` is keyed by `int`, but this key is `\"x\"`. | Check the key with `is int` first, as in `if (name is int) { … }`.",
+            "11:18 mismatched-array-index `Map<int, int>` is keyed by `int`, but this key is `\"y\"`. | Check the key with `is int` first, as in `if (name is int) { … }`.",
+        ]
     );
 
     let either = "namespace Demo;\n\nclass Keys\n{\n    public int read(Map<int|string, int> counts, Any? value) => counts[value] ?? 0;\n}\n";
@@ -6872,6 +6877,30 @@ fn a_changing_set_method_needs_a_place_and_a_reading_one_runs_on_a_value() {
     );
 }
 
+/// Spec section 12 makes a `List` index a place, as a Rust `Vec` index and a Go slice index are, so a change through
+/// it changes the element the list stores: a changing method, a write into its `Map` and a change through a nested
+/// `List` index, on a local or a property. A change through a `Map` index is refused, as Go refuses `m[k].x = 5`,
+/// because a `Map` read is a copy: a changing method on it, a write into it, and a change through a `List` index of
+/// it, each once. Reading the copy, changing it and storing it back, as the help writes it, compiles.
+#[test]
+fn a_list_index_is_a_place_and_a_change_through_a_map_index_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Stock\n{\n    public List<List<int>> rows { get; set; } = [[1]];\n\n    public void places(List<List<int>> grid, List<Set<int>> sets, List<Map<string, int>> maps, List<List<List<int>>> cube)\n    {\n        grid[0].add(5);\n        grid[1].insert(0, 7);\n        grid[0].remove(1);\n        grid[0].clear();\n        sets[0].add(4);\n        maps[0].remove(\"a\");\n        maps[1][\"c\"] = 3;\n        maps[1][\"d\"] ??= 4;\n        cube[1][0].add(3);\n        this.rows[0].add(9);\n    }\n\n    public void copies(Map<string, List<int>> stock, Map<string, Map<string, int>> nested, Map<string, Set<int>> tags, List<Map<string, List<int>>> deep, Map<string, List<int>> groups)\n    {\n        stock[\"a\"]?.add(5);\n        stock[\"a\"]?.insert(0, 1);\n        nested[\"a\"]?.remove(\"b\");\n        nested[\"a\"][\"b\"] = 1;\n        tags[\"t\"]?.add(2);\n        deep[0][\"k\"]?.add(3);\n        groups[\"a\"][0] = 1;\n    }\n\n    public Map<string, List<int>> storedBack(Map<string, List<int>> map, string key)\n    {\n        List<int> counts = map[key] ?? [];\n        counts.add(5);\n        map[key] = counts;\n        return map;\n    }\n}\n";
+
+    let copy = "A `Map` read is a copy: read it, change it, and store it back. | Change a local and store it back, as in `List<int> counts = map[key] ?? []; counts.add(5); map[key] = counts;`.";
+    assert_eq!(
+        refusals(("src/Demo/Stock.sharp", sharp), &[]),
+        [
+            format!("23:9 invalid-pass-by-reference {copy}"),
+            format!("24:9 invalid-pass-by-reference {copy}"),
+            format!("25:9 invalid-pass-by-reference {copy}"),
+            format!("26:9 invalid-pass-by-reference {copy}"),
+            format!("27:9 invalid-pass-by-reference {copy}"),
+            format!("28:9 invalid-pass-by-reference {copy}"),
+            format!("29:9 invalid-pass-by-reference {copy}"),
+        ]
+    );
+}
+
 /// `order?.ids?.add(1)` changes `order.ids` when `order` is an object, so a property reached with `?.` is a place as
 /// it is with `.`, for a `List`, a `Map` and a `Set` alike, and its `set` decides whether the caller may change it.
 #[test]
@@ -6977,7 +7006,7 @@ const STATUS: &str = "<?php\n\nnamespace Lib;\n\nenum Status: string\n{\n    cas
 /// take from their function.
 #[test]
 fn a_map_keyed_by_a_backed_enum_takes_the_case_in_every_key_position() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    private Map<Status, int> counts = [:];\n    private Map<Status, int> seeded = [Status.Active: 0];\n\n    public int count(Status status, Size size)\n    {\n        this.counts[status] = (this.counts[status] ?? 0) + 1;\n        this.counts[status] ??= 0;\n        Map<Status, Map<Size, int>> nested = [:];\n        nested[status] = [:];\n        nested[status][size] = 1;\n        Map<Status, int> built = [Status.Active: 1, status: 2];\n        built.remove(Status.Closed);\n        return (this.counts[status] ?? 0) + (built.get(status) ?? 0) + (this.seeded.get(status) ?? 0) + (nested[status][size] ?? 0) + (built.has(status) ? 1 : 0);\n    }\n\n    public int group(List<Size> sizes, Map<string, Size> named)\n    {\n        Map<Size, List<Size>> bySize = sizes.groupBy(size => size);\n        Map<Status, Size> byStatus = named.associateBy(size => Status.Active);\n        return count(bySize) + count(byStatus);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    private Map<Status, int> counts = [:];\n    private Map<Status, int> seeded = [Status.Active: 0];\n\n    public int count(Status status, Size size)\n    {\n        this.counts[status] = (this.counts[status] ?? 0) + 1;\n        this.counts[status] ??= 0;\n        List<Map<Size, int>> nested = [[:]];\n        nested[0][size] = 1;\n        Map<Status, int> built = [Status.Active: 1, status: 2];\n        built.remove(Status.Closed);\n        return (this.counts[status] ?? 0) + (built.get(status) ?? 0) + (this.seeded.get(status) ?? 0) + (nested[0][size] ?? 0) + (built.has(status) ? 1 : 0);\n    }\n\n    public int group(List<Size> sizes, Map<string, Size> named)\n    {\n        Map<Size, List<Size>> bySize = sizes.groupBy(size => size);\n        Map<Status, Size> byStatus = named.associateBy(size => Status.Active);\n        return count(bySize) + count(byStatus);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
@@ -6993,7 +7022,7 @@ fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
         issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
             "10:16 mismatched-array-index",
-            "11:16 invalid-array-index",
+            "11:16 mismatched-array-index",
             "12:34 invalid-local-assignment-value",
             "13:37 invalid-local-assignment-value",
             "14:99 invalid-argument"
@@ -7188,12 +7217,13 @@ fn a_loop_over_a_map_keyed_by_a_backed_enum_reads_each_key_as_its_case() {
 
 /// The engine holds a backed enum key as its backing value, and reads it back as a case only through one enum. So the
 /// keys of a `Map` that mix a backed enum with other types are refused where they are read back, by a loop and by
-/// `keys()`. They are refused where `get`, `has` or `remove` looks a key up too, even a key of one enum: the case
-/// `Status.Active` and the `int` key of its backing value share one entry. The keys of a `Map` keyed by one enum read
-/// back.
+/// `keys()`. They are refused where a key goes in or is looked up too, even a key of one enum, because the case
+/// `Size.Small` and the `int` key `1` share one entry: by `get`, `has` and `remove`, by an index read, write and `??=`,
+/// by a literal whose written or spread keys mix, and by a `groupBy` or `associateBy` function whose keys mix. Each
+/// position is refused once. The keys of a `Map` keyed by one enum read back and go in.
 #[test]
 fn a_map_key_type_that_mixes_a_backed_enum_with_other_types_is_refused_where_a_key_goes_in_or_out() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key)\n    {\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key)\n    {\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranks, Map<Size, int> sizes, Map<int, int> ids, List<int> amounts)\n    {\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
@@ -7207,6 +7237,13 @@ fn a_map_key_type_that_mixes_a_backed_enum_with_other_types_is_refused_where_a_k
             "The keys of `totals` mix a backed enum with other types, so `remove` cannot tell them apart.",
             "The keys of `totals` mix a backed enum with other types, so `has` cannot tell them apart.",
             "The keys of `totals` mix a backed enum with other types, so `remove` cannot tell them apart.",
+            "The keys of `[1: 5, Size.Small: 6]` mix a backed enum with other types, so the literal cannot tell them apart.",
+            "The keys of `ranks` mix a backed enum with other types, so the index cannot tell them apart.",
+            "The keys of `ranks` mix a backed enum with other types, so the index cannot tell them apart.",
+            "The keys of `ranks` mix a backed enum with other types, so the index cannot tell them apart.",
+            "The keys of `[...sizes, ...ids]` mix a backed enum with other types, so the literal cannot tell them apart.",
+            "The keys of `amounts.groupBy(n => n > 5 ? Size.Small : n)` mix a backed enum with other types, so `groupBy` cannot tell them apart.",
+            "The keys of `amounts.associateBy(n => n > 5 ? Size.Small : n)` mix a backed enum with other types, so `associateBy` cannot tell them apart.",
         ]
     );
     assert_eq!(
@@ -7221,6 +7258,13 @@ fn a_map_key_type_that_mixes_a_backed_enum_with_other_types_is_refused_where_a_k
             "20:32 invalid-argument",
             "21:31 invalid-argument",
             "21:60 invalid-argument",
+            "27:25 invalid-array-element",
+            "28:28 invalid-array-access",
+            "29:15 invalid-array-access",
+            "30:15 invalid-array-access",
+            "31:24 invalid-array-element",
+            "32:41 template-constraint-violation",
+            "33:48 template-constraint-violation",
         ]
     );
 }
@@ -7586,18 +7630,18 @@ fn an_empty_list_literal_written_as_a_value_of_a_map_of_maps_is_an_error() {
     );
 }
 
-/// A value written two levels into a `Map` of `Map`s of `Map`s takes only a literal of the collection its value type
-/// declares there, so `deep["a"]["b"]` refuses `[]` and takes `[:]`, as `deep["a"]` does. PHP has one empty array.
+/// A value written two levels into a `List` of `Map`s of `Map`s takes only a literal of the collection its value type
+/// declares there, so `deep[0]["b"]` refuses `[]` and takes `[:]`, as `deep.add` does. PHP has one empty array.
 #[test]
-fn an_empty_list_literal_written_two_levels_into_a_map_of_maps_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put()\n    {\n        Map<string, Map<string, Map<string, int>>> deep = [:];\n        deep[\"a\"][\"b\"] = [];\n        deep[\"a\"][\"b\"] = [:];\n        deep[\"a\"] = [:];\n        return count(deep);\n    }\n}\n";
+fn an_empty_list_literal_written_two_levels_into_a_list_of_maps_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put()\n    {\n        List<Map<string, Map<string, int>>> deep = [[:]];\n        deep[0][\"b\"] = [];\n        deep[0][\"b\"] = [:];\n        deep.add([:]);\n        return count(deep);\n    }\n}\n";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[])
             .iter()
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
-        ["8:26 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
+        ["8:24 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
     );
 }
 

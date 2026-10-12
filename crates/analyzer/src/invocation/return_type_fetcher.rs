@@ -29,6 +29,8 @@ use crate::invocation::InvocationTarget;
 use crate::invocation::resolver::resolve_invocation_type;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::map_key_error;
+use crate::statement::key_type_mixes_a_backed_enum;
+use crate::statement::report_keys_sharing_entries;
 use crate::utils::names::display_sharp_type;
 
 pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
@@ -84,6 +86,21 @@ where
                 TKeyedArray::new_with_parameters(Arc::new(TUnion::from_atomic(TAtomic::Error)), Arc::new(value_type));
 
             return Ok(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(map))));
+        } else if keys_a_map_by_its_function(&invocation.target)
+            && fills_key_parameter
+            && key_type_mixes_a_backed_enum(context, key_type)
+        {
+            // The engine holds a `Map`'s key as its backing value, so keys that mix a backed enum with other types
+            // share entries where a case and the key of its backing value meet.
+            let method =
+                if is_collection_method(&invocation.target, b"groupBy") { "`groupBy`" } else { "`associateBy`" };
+            report_keys_sharing_entries(
+                context,
+                IssueCode::TemplateConstraintViolation,
+                invocation.span,
+                method,
+                Annotation::primary(selector.span()).with_message("Its keys come from here."),
+            );
         }
     }
 

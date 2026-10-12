@@ -57,6 +57,8 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::statement::function_like::map_key_error;
+use crate::statement::keys_mix_a_backed_enum;
+use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_atomic;
@@ -83,7 +85,23 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Array<'arena> {
     where
         A: Arena,
     {
-        analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())
+        analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())?;
+
+        // The engine holds a `Map`'s key as its backing value, so a literal whose keys, written or spread in, mix a
+        // backed enum with other types cannot tell a case from the key of its backing value.
+        if context.dialect.is_sharp()
+            && artifacts.get_expression_type(self).is_some_and(|literal| keys_mix_a_backed_enum(context, literal))
+        {
+            report_keys_sharing_entries(
+                context,
+                IssueCode::InvalidArrayElement,
+                self.span(),
+                "the literal",
+                Annotation::primary(self.span()).with_message("Its keys go in here."),
+            );
+        }
+
+        Ok(())
     }
 }
 

@@ -31,7 +31,6 @@ use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::PropertyAccess;
@@ -44,6 +43,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
@@ -78,12 +78,12 @@ use crate::resolver::property::check_redundant_nullsafe;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::keys_mix_a_backed_enum;
 use crate::statement::report_keys_read_back;
+use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
 use crate::utils::names::display_type;
 use crate::utils::names::sharp_collection_name;
-use crate::utils::quoted_source;
 use crate::visibility::check_method_visibility;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodCall<'arena> {
@@ -534,7 +534,14 @@ where
         if method.value.eq_ignore_ascii_case(b"keys") {
             report_keys_read_back(context, IssueCode::InvalidArrayAccess, object, "`keys()`", selector.span());
         } else {
-            report_key_mixing_a_backed_enum(context, object, method);
+            let finder = format!("`{}`", String::from_utf8_lossy(method.value));
+            report_keys_sharing_entries(
+                context,
+                IssueCode::InvalidArgument,
+                object.span(),
+                &finder,
+                Annotation::primary(method.span()).with_message("Its key is looked up here."),
+            );
         }
     }
 
@@ -559,31 +566,6 @@ where
     }
 
     Ok(())
-}
-
-/// Reports `method`, the `get`, `has` or `remove` of the `Map` `collection`, whose keys mix a backed enum with other
-/// types.
-fn report_key_mixing_a_backed_enum<A>(
-    context: &mut Context<'_, '_, A>,
-    collection: &Expression<'_>,
-    method: &LocalIdentifier<'_>,
-) where
-    A: Arena,
-{
-    let collection = quoted_source(context, collection.span());
-    let name = String::from_utf8_lossy(method.value);
-
-    context.collector.report_with_code(
-        IssueCode::InvalidArgument,
-        Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so `{name}` cannot tell them apart."
-        ))
-        .with_annotation(Annotation::primary(method.span()).with_message("Its key is looked up here."))
-        .with_note(
-            "The engine holds each key as its backing value, so a case and the `int` or `string` key of its backing value share one entry.",
-        )
-        .with_help("Key the `Map` by one backed enum alone."),
-    );
 }
 
 /// Reports one of the [`INLINED_COLLECTION_METHODS`] called on `object` when its value can also be an object, as
@@ -631,9 +613,10 @@ where
 
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the
 /// collection is a place the caller can write: a local or a parameter, `field`, which its accessor writes as the
-/// storage, or a property whose `set` the caller reaches, which the property write check decides as it does for an
-/// index write. The change may fill the collection past any literal the analyzer saw in it, so the place holds the
-/// collections it is declared as from then on, beside whatever else, such as `null`, it held.
+/// storage, a property whose `set` the caller reaches, which the property write check decides as it does for an
+/// index write, or a `List` index of a place, which changes that place too. The change may fill the collection past
+/// any literal the analyzer saw in it, so the place holds the collections it is declared as from then on, beside
+/// whatever else, such as `null`, it held.
 fn check_changed_collection<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -700,6 +683,13 @@ where
             None,
             PropertyWriteKind::Mutation,
         ),
+        Expression::ArrayAccess(access) => {
+            if check_change_through_index(access, context, block_context, artifacts) {
+                check_changed_collection(context, block_context, artifacts, access.array)
+            } else {
+                Ok(())
+            }
+        }
         _ => {
             context.collector.report_with_code(
                 IssueCode::InvalidPassByReference,
