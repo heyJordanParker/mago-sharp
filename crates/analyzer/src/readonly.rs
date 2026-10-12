@@ -619,6 +619,17 @@ fn report_invalid_write<A>(
 ) where
     A: Arena,
 {
+    // PHP# says get-only where PHP says readonly, spec section 6.1.
+    if context.dialect.is_sharp() && matches!(reason, InvalidWriteReason::AlreadyInitialized) {
+        context.collector.report_with_code(
+            IssueCode::InvalidPropertyWrite,
+            Issue::error(format!("`{}` is get-only, and it is already set.", sharp_property_name(pending)))
+                .with_annotation(Annotation::primary(pending.member_span).with_message("Set again here.")),
+        );
+
+        return;
+    }
+
     let declaring_class = context
         .codebase
         .get_class_like(pending.declaring_class.as_bytes())
@@ -665,13 +676,16 @@ where
     context.collector.report_with_code(
         IssueCode::InvalidPropertyWrite,
         Issue::error(format!(
-            "`{}` is already set by the main constructor, and a get-only property is set once.",
-            BytesDisplay(
-                pending.property_name.as_bytes().strip_prefix(b"$").unwrap_or(pending.property_name.as_bytes())
-            )
+            "`{}` is get-only, and the main constructor already set it.",
+            sharp_property_name(pending)
         ))
         .with_annotation(Annotation::primary(pending.member_span).with_message("Set again here.")),
     );
+}
+
+/// The property a pending write sets, as PHP# writes it, without PHP's `$`.
+fn sharp_property_name(pending: &PendingReadonlyPropertyWrite) -> BytesDisplay<'_> {
+    BytesDisplay(pending.property_name.as_bytes().strip_prefix(b"$").unwrap_or(pending.property_name.as_bytes()))
 }
 
 fn report_possible_write<A>(context: &mut Context<'_, '_, A>, pending: &PendingReadonlyPropertyWrite)

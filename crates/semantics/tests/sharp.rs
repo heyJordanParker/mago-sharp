@@ -849,10 +849,11 @@ fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_thi
 }
 
 /// Spec section 9.1: a named constructor is declared on its own class's name with an access modifier and nothing else,
-/// a name that is neither its class's nor one PHP reserves, parameters that declare no property, and a body.
+/// a name that is neither its class's nor one PHP reserves, parameters that declare no property, and a body. An
+/// abstract class has no objects of its own, and named constructors are not inherited, so it declares none.
 #[test]
 fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
-    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n}\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -864,6 +865,7 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
             "11:11 A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.",
             "12:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
             "13:35 A named constructor needs a body, even an empty `{ }`.",
+            "20:18 An abstract class has no objects of its own, so it declares no named constructor.",
         ]
     );
 }

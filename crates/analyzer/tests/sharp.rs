@@ -4653,10 +4653,11 @@ fn new_with_a_named_constructor_checks_its_arguments_and_creates_its_class() {
 }
 
 /// Spec section 9.1: a named constructor is its own class's, so `new` on a subclass finds none, and `new` names only a
-/// named constructor the class declares.
+/// named constructor the class declares. A subclass may declare its own of the same name, which keeps a signature PHP
+/// accepts for the static method it runs as.
 #[test]
 fn a_named_constructor_is_not_inherited() {
-    let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n}\n";
+    let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n}\n\nclass Resized : Base\n{\n    public Resized(int size) : super(size) { }\n\n    public Resized.sized(int size) : this(size * 2) { }\n}\n\nclass Restrung : Base\n{\n    public Restrung(int size) : super(size) { }\n\n    public Restrung.sized(string size) : this(strlen(size)) { }\n}\n";
 
     assert_messages(
         sharp,
@@ -4664,15 +4665,37 @@ fn a_named_constructor_is_not_inherited() {
         &[
             "14:47 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
             "15:46 non-existent-method: `Base` has no constructor `missing`.",
+            "30:21 incompatible-parameter-type: Parameter `size` of `Restrung.sized` expects type `string` but parent `Base.sized` expects type `int`",
         ],
     );
 }
 
-/// Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`, and the fix compiles.
+/// Spec section 9.1: a named constructor runs as a static method, and PHP refuses a static and an instance method of
+/// one name in a class and its parent or interface. Each such class is refused once, naming the named constructor, and
+/// a named constructor is never final, overridden or abstract.
+#[test]
+fn a_method_and_a_named_constructor_of_one_name_are_one_error() {
+    let sharp = "namespace Demo;\n\ninterface Copyable\n{\n    Copyable copy();\n}\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public virtual int copy() => this.size;\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Instanced : Base\n{\n    public Instanced() : super(1) { }\n\n    public int sized() => 2;\n}\n\nclass Clash : Base\n{\n    public Clash(string text) : super(strlen(text)) { }\n\n    public Clash.copy() : this(\"x\") { }\n}\n\nclass Sheet : Copyable\n{\n    public Sheet() { }\n\n    public Sheet.copy() : this() { }\n}\n\nclass Refused\n{\n    public Refused(public int size { get; }) { }\n\n    public Refused.empty() : this(1);\n}\n";
+
+    // `Refused.empty` without a body is the checker's error, so the analyzer adds no abstract method to implement.
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "21:16 incompatible-static-modifier: `Instanced.sized` cannot share its name with `Base`'s named constructor `sized`.",
+            "28:18 incompatible-static-modifier: The named constructor `Clash.copy` cannot share its name with the method `Base.copy`.",
+            "35:18 incompatible-static-modifier: The named constructor `Sheet.copy` cannot share its name with the method `Copyable.copy`.",
+        ],
+    );
+}
+
+/// Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`, and the fix compiles. Read as
+/// a value, it would create objects without `new`, so that is the same error.
 #[test]
 fn a_named_constructor_called_without_new_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static int make() => Artifact.sized(2).size;\n}\n";
     let fixed = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static int make() => new Artifact.sized(2).size;\n}\n";
+    let value = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static Artifact held()\n    {\n        const make = Artifact.sized;\n        return make(2);\n    }\n}\n";
 
     assert_messages(
         sharp,
@@ -4680,6 +4703,13 @@ fn a_named_constructor_called_without_new_is_an_error() {
         &["9:33 named-constructor-without-new: `Artifact.sized` is a constructor: write `new Artifact.sized(2)`."],
     );
     assert_messages(fixed, &[], &[]);
+    assert_messages(
+        value,
+        &[],
+        &[
+            "11:22 named-constructor-without-new: `Artifact.sized` is a constructor, so it is no function value: create the object with `new Artifact.sized(…)`.",
+        ],
+    );
 }
 
 /// PHP calls a named constructor as the static method it runs as, which returns its class.
@@ -4710,12 +4740,20 @@ fn this_arguments_are_checked_against_the_main_constructor() {
 }
 
 /// Spec section 9.1: a named constructor's body runs on the object its `: this(…)` creates, as `this`, so it reads
-/// and writes the object's members with their types, and `return;` ends it.
+/// and writes the object's members with their types and calls its base class's methods with `super.m()`. It returns
+/// that object, so `return;` ends it and a returned value is an error.
 #[test]
 fn a_named_constructor_body_runs_on_this() {
-    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public string label { get; set; } = \"\";\n\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.labeled(string label) : this(strlen(label))\n    {\n        if (label == \"\") {\n            return;\n        }\n        this.label = label;\n        this.label = this.size;\n        const read = () => this.label;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Entity\n{\n    public Entity() { }\n\n    public string describe() => \"entity\";\n}\n\nclass Artifact : Entity\n{\n    public string label { get; set; } = \"\";\n\n    public Artifact(public int size { get; }) : super() { }\n\n    public Artifact.labeled(string label) : this(strlen(label))\n    {\n        if (label == \"\") {\n            return;\n        }\n        this.label = label;\n        this.label = this.size;\n        this.label = super.describe();\n        const read = () => this.label;\n        if (label == \"x\") {\n            return 5;\n        }\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Artifact.sharp", sharp), &[]), ["15:22 invalid-property-assignment-value"]);
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "22:22 invalid-property-assignment-value: Invalid type for property `Artifact.label`: expected `string`, but got `int`.",
+            "26:20 invalid-return-statement: A named constructor returns the object it creates: write `return;`.",
+        ],
+    );
 }
 
 /// Spec section 9.1: the main constructor sets a get-only property once, so a named constructor that sets it again is
@@ -4728,24 +4766,20 @@ fn a_named_constructor_that_overwrites_a_get_only_property_the_main_constructor_
         sharp,
         &[],
         &[
-            "16:14 invalid-property-write: `size` is already set by the main constructor, and a get-only property is set once.",
-            "17:14 invalid-property-write: `count` is already set by the main constructor, and a get-only property is set once.",
-            "18:14 invalid-property-write: `code` is already set by the main constructor, and a get-only property is set once.",
-            "20:14 invalid-property-write: Cannot modify a readonly property after initialization.",
+            "16:14 invalid-property-write: `size` is get-only, and the main constructor already set it.",
+            "17:14 invalid-property-write: `count` is get-only, and the main constructor already set it.",
+            "18:14 invalid-property-write: `code` is get-only, and the main constructor already set it.",
+            "20:14 invalid-property-write: `label` is get-only, and it is already set.",
         ],
     );
 }
 
-/// An abstract class has no instances, so `new` refuses its named constructor as it refuses its main one, and a
-/// private named constructor is its class's own to call.
+/// A private named constructor is its class's own to call.
 #[test]
-fn new_with_a_named_constructor_keeps_the_abstract_and_visibility_refusals() {
-    let sharp = "namespace Demo;\n\nabstract class Shape\n{\n    public Shape() { }\n\n    public Shape.unit() : this() { }\n}\n\nclass Secret\n{\n    public Secret() { }\n\n    private Secret.hidden() : this() { }\n\n    public static Secret make() => new Secret.hidden();\n}\n\nclass Use\n{\n    public static Shape shape() => new Shape.unit();\n\n    public static Secret secret() => new Secret.hidden();\n}\n";
+fn new_with_a_named_constructor_keeps_the_visibility_refusal() {
+    let sharp = "namespace Demo;\n\nclass Secret\n{\n    public Secret() { }\n\n    private Secret.hidden() : this() { }\n\n    public static Secret make() => new Secret.hidden();\n}\n\nclass Use\n{\n    public static Secret secret() => new Secret.hidden();\n}\n";
 
-    assert_eq!(
-        issues(("src/Demo/Shape.sharp", sharp), &[]),
-        ["21:40 abstract-instantiation", "23:38 invalid-method-access"]
-    );
+    assert_eq!(issues(("src/Demo/Secret.sharp", sharp), &[]), ["14:38 invalid-method-access"]);
 }
 
 /// `Self.count()` is PHP's `static::count()`.
@@ -8417,7 +8451,7 @@ fn a_member_access_refusal_names_the_member_as_sharp_writes_it() {
     assert_eq!(
         refusals(("src/Demo/Run.sharp", sharp)),
         [
-            "14:14 invalid-property-write Cannot modify a readonly property after initialization. | This readonly property is already initialized | Write to `Order.count` occurs here | Property is defined as `readonly` here | Readonly properties may be initialized only once. Every later assignment throws an `Error` at runtime. | Remove this assignment or move the property's one-time initialization to this location.",
+            "14:14 invalid-property-write `count` is get-only, and it is already set. | Set again here.",
             "22:15 invalid-property-write Cannot write to private property `Order.total`. | This member is private and cannot be accessed here | Invalid access occurs here, from within `Run` | Member is defined as `private` here | Make the property `Order.total` writable (e.g., `public` or `public(set)`), or add a public setter method.",
             "24:22 invalid-method-access Cannot access private method `Order.secret`. | This member is private and cannot be accessed here | Invalid access occurs here, from within `Run` | Member is defined as `private` here | Change the visibility of method `secret` to `public`, or call it from an allowed scope.",
             "24:39 invalid-method-access Cannot access private method `Order.secret`. | This member is private and cannot be accessed here | Invalid access occurs here, from within `Run` | Member is defined as `private` here | Change the visibility of method `secret` to `public`, or call it from an allowed scope.",

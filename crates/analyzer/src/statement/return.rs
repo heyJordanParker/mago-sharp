@@ -68,6 +68,20 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     where
         A: Arena,
     {
+        // A PHP# named constructor returns the object it creates, spec section 9.1, so its `return;` takes no value.
+        if let Some(return_value) = self.value.as_ref()
+            && block_context
+                .scope
+                .get_function_like()
+                .is_some_and(|function_like| function_like.flags.is_named_constructor())
+        {
+            context.collector.report_with_code(
+                IssueCode::InvalidReturnStatement,
+                Issue::error("A named constructor returns the object it creates: write `return;`.")
+                    .with_annotation(Annotation::primary(return_value.span()).with_message("Returned here.")),
+            );
+        }
+
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
             let return_type = block_context.scope.get_function_like().and_then(body_return_type);
             expect_function_type(

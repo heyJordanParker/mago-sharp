@@ -536,7 +536,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             }
             for member in &class.members {
                 if let ClassLikeMember::NamedConstructor(constructor) = member {
-                    check_named_constructor(constructor, class.name.value, context);
+                    check_named_constructor(constructor, class, context);
                 }
             }
 
@@ -2795,18 +2795,27 @@ fn has_required_constructor(class: &ClassLike) -> bool {
     })
 }
 
-/// Checks a named constructor of `class`, spec section 9.1: it is declared on its own class's name, as in
-/// `Artifact.fromJson`, takes only an access modifier, has a name that is neither its class's nor one PHP reserves, and
-/// passes control to the main constructor with `: this(…)`. `check_members` reports a name another member of the class
-/// has, as PHP's duplicate-method check, since the named constructor runs as the static method of its name.
-fn check_named_constructor(constructor: &NamedConstructor, class: &[u8], context: &mut Context<'_, '_, '_>) {
-    let class_name = BytesDisplay(class);
+/// Checks a named constructor of `class`, spec section 9.1: its class has objects of its own, it is declared on its own
+/// class's name, as in `Artifact.fromJson`, takes only an access modifier, has a name that is neither its class's nor
+/// one PHP reserves, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
+/// another member of the class has, as PHP's duplicate-method check, since the named constructor runs as the static
+/// method of its name.
+fn check_named_constructor(constructor: &NamedConstructor, class: &Class, context: &mut Context<'_, '_, '_>) {
+    let class_name = BytesDisplay(class.name.value);
     let name = BytesDisplay(constructor.name.value);
     let mut report = |message: String, span: Span, written: &str| {
         context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
     };
 
-    if constructor.class.value != class {
+    if class.modifiers.contains_abstract() {
+        report(
+            "An abstract class has no objects of its own, so it declares no named constructor.".to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    if constructor.class.value != class.name.value {
         report(
             format!("A named constructor is declared on its own class, as in `{class_name}.{name}`."),
             constructor.class.span,
@@ -2814,7 +2823,7 @@ fn check_named_constructor(constructor: &NamedConstructor, class: &[u8], context
         );
     }
 
-    if constructor.name.value.eq_ignore_ascii_case(class) {
+    if constructor.name.value.eq_ignore_ascii_case(class.name.value) {
         report(
             format!(
                 "A named constructor cannot have its class's name: `new {class_name}(…)` calls the main constructor."
