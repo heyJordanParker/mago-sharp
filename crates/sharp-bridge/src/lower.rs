@@ -1045,7 +1045,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     PropertyHookBody::Abstract(_) if uses_field => continue,
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
-                hooks.push(lowering.hook(accessor.name.value, accessor.name, accessor, body));
+                // An `init` body is the `set` hook, and the property's set visibility keeps it to object creation.
+                let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
+                hooks.push(lowering.hook(name, accessor.name, accessor, body));
             }
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
@@ -3337,20 +3339,24 @@ fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
 }
 
 /// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the
-/// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` accessor's
-/// access modifier. A get-only property whose body uses `field` takes `protected(set)`, the set visibility of
-/// `readonly`, and one without storage takes none, because PHP refuses a set visibility on a read-only virtual
-/// property. PHP drops a set visibility equal to the property's own, so a private property, or a protected one with
-/// `protected(set)`, takes none, and the flags carry only what the engine keeps.
+/// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` or `init`
+/// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property whose body uses
+/// `field` takes `protected(set)`, the set visibility of `readonly`, and one without storage takes none, because PHP
+/// refuses a set visibility on a read-only virtual property. PHP drops a set visibility equal to the property's own,
+/// so a private property, or a protected one with `protected(set)`, takes none, and the flags carry only what the
+/// engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
     if accessors.is_readonly() {
         return ZEND_ACC_READONLY;
     }
 
-    let flags = match accessors.hooks.iter().find(|accessor| accessor.name.value == b"set") {
+    let flags = match accessors.setter() {
         None if names.uses_field(accessors) => ZEND_ACC_PROTECTED_SET,
         None => 0,
-        Some(set) => match set.modifiers.first() {
+        Some(setter) => match setter.modifiers.first() {
+            // `init` sets the property while the object is created, in the constructors of its class and its
+            // subclasses, so it runs as `protected(set)`, and the analyzer refuses every write after that.
+            None if setter.name.value == b"init" => ZEND_ACC_PROTECTED_SET,
             None => 0,
             Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED_SET,
             Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE_SET,

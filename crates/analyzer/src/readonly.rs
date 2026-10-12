@@ -670,7 +670,8 @@ where
                 pending.property_name.as_bytes().strip_prefix(b"$").unwrap_or(pending.property_name.as_bytes())
             )
         ))
-        .with_annotation(Annotation::primary(pending.member_span).with_message("Set again here.")),
+        .with_annotation(Annotation::primary(pending.member_span).with_message("Set again here."))
+        .with_help("Declare it `{ get; init; }` to let a named constructor set it again."),
     );
 }
 

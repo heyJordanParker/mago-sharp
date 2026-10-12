@@ -696,15 +696,19 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
 /// public readonly int $id;
 /// protected protected(set) int $total;   // written `public int total { get; protected set; }`
 /// private readonly int $hidden;
+/// public protected(set) string $title;   // written `public string title { get; init; }`
+/// public private(set) string $tag;       // written `public string tag { get; private init; }`
 /// ```
 ///
 /// An auto-property is a property with asymmetric visibility. `[4097]` is `ZEND_ACC_PUBLIC | ZEND_ACC_PRIVATE_SET`,
 /// and `[2049]` is `ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED_SET`. A get-only property is `readonly`, so `[129]` is
-/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY` and `[132]` is `ZEND_ACC_PRIVATE | ZEND_ACC_READONLY`.
+/// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY` and `[132]` is `ZEND_ACC_PRIVATE | ZEND_ACC_READONLY`. An `init` property is
+/// `protected(set)` without `readonly`, so a named constructor sets it again, and the analyzer refuses each write after
+/// the object is created. PHP has no set visibility for that, so a plain PHP subclass can still write it.
 #[test]
 fn an_auto_property_is_a_property_with_its_set_visibility() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n}\n",
+        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n}\n",
     );
     let groups: Vec<(u32, String)> = lowered
         .nodes()
@@ -722,6 +726,8 @@ fn an_auto_property_is_a_property_with_its_set_visibility() {
             (129, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"id\"\n    null\n    null\n    null\n".to_owned()),
             (2049, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"total\"\n    null\n    null\n    null\n".to_owned()),
             (132, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"hidden\"\n    null\n    null\n    null\n".to_owned()),
+            (2049, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"title\"\n    null\n    null\n    null\n".to_owned()),
+            (4097, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"tag\"\n    null\n    null\n    null\n".to_owned()),
         ]
     );
 }
@@ -887,10 +893,12 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 /// public int $size { get => $this->size; set { $this->resize($value); } }
 /// public protected(set) int $kept = 3 { get => $this->kept * 2; }
 /// protected int $guarded { get => $this->guarded; }
+/// public protected(set) int $slug { set { $this->slug = $value * 2; } }
 /// ```
 ///
 /// Each accessor body is a hook: `get => expr;` keeps PHP's short body, and a block or `set => expr;` is a statement
-/// list, because PHP stores the result of a short `set` body. `field` is `$this->name` and `value` is `$value`. An auto
+/// list, because PHP stores the result of a short `set` body. An `init` body is the `set` hook, under
+/// `protected(set)`. `field` is `$this->name` and `value` is `$value`. An auto
 /// accessor beside a body that uses `field` is PHP's backing store, so it lowers to nothing, and otherwise it is the
 /// hook over the storage, so the property stays backed. A public get-only property whose body uses `field` takes
 /// `protected(set)`, the set visibility of `readonly`, which PHP refuses on a hooked property. A protected one takes
@@ -900,7 +908,7 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 #[test]
 fn accessor_bodies_are_property_hooks() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n\n    public void resize(int to)\n    {\n    }\n}\n",
+        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public void resize(int to)\n    {\n    }\n}\n",
     );
 
     assert_eq!(
@@ -1062,6 +1070,32 @@ fn accessor_bodies_are_property_hooks() {
                               VAR
                                 ZVAL "this"
                               ZVAL "guarded"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [2049]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "slug"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "set" @9-9
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "slug"
+                              BINARY_OP [3]
+                                VAR
+                                  ZVAL "value"
+                                ZVAL 2
                           null
                           null
                   null

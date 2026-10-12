@@ -1847,6 +1847,16 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
             )));
         }
 
+        if let Property::Hooked(auto_property) = property
+            && let Some(init) = auto_property.hook_list.setter().filter(|setter| setter.name.value == b"init")
+        {
+            return Err(Box::new(
+                Issue::error("A static property has no `init`: `init` sets a property while its object is created.")
+                    .with_annotation(Annotation::primary(init.span()).with_message("Declared here."))
+                    .with_help("Write `set;`, or `private set;` to set it only inside its class."),
+            ));
+        }
+
         if let Some(value) = property.initial_value()
             && !value.is_constant(version, false)
         {
@@ -1924,14 +1934,21 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
                 )))
             } else if let Some(initial_value) = &auto_property.initial_value
                 && !initial_value.value.is_constant(version, false)
-                && auto_property.hook_list.hooks.iter().any(|accessor| {
-                    accessor.name.value == b"set" && matches!(accessor.body, PropertyHookBody::Concrete(_))
-                })
+                && let Some(setter) = auto_property
+                    .hook_list
+                    .setter()
+                    .filter(|setter| matches!(setter.body, PropertyHookBody::Concrete(_)))
             {
+                let setter = BytesDisplay(setter.name.value);
+
                 Err(Box::new(not_supported(
                     initial_value.value.span(),
-                    "An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#.",
-                    "A constant initial value is the property's default, while any other would run the `set` body at the start of the constructor.",
+                    &format!(
+                        "An initial value that is not constant, on a property whose `{setter}` has a body, is not supported yet in PHP#."
+                    ),
+                    &format!(
+                        "A constant initial value is the property's default, while any other would run the `{setter}` body at the start of the constructor."
+                    ),
                 )))
             } else if auto_property.initial_value.is_none()
                 && matches!(auto_property.hint, Some(Hint::Nullable(_)))
@@ -2036,9 +2053,9 @@ fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
 }
 
 /// Checks the accessors of a property, declared in the class body or on a constructor parameter: `get` once, and an
-/// optional `set` once, which may take an access modifier narrower than the property's, as in C#. Each is `;`, an
-/// expression body `=> expr;` or a block. `init`, an access modifier on `get` and a parameter list on `set` are not
-/// supported yet.
+/// optional `set` or `init` once, which may take an access modifier narrower than the property's, as in C#. `init`
+/// sets the property only while its object is created, spec section 6.1. Each is `;`, an expression body `=> expr;`
+/// or a block. An access modifier on `get` and a parameter list on `set` are not supported yet.
 fn check_accessors(
     modifiers: &Sequence<Modifier>,
     accessors: &PropertyHookList,
@@ -2054,7 +2071,7 @@ fn check_accessors(
             report_not_supported(
                 accessor.span(),
                 "accessor",
-                "A PHP# property's accessors are `get` and `set`, each written `;`, `=> expr;` or with a block body, and `set` may take `private` or `protected`.",
+                "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private` or `protected`.",
                 context,
             );
         } else if declared.contains(&name) {
@@ -2062,11 +2079,23 @@ fn check_accessors(
                 Issue::error("A PHP# property declares each accessor once.")
                     .with_annotation(Annotation::primary(accessor.name.span).with_message("Declared again here.")),
             );
-        } else if accessor.modifiers.first().is_some_and(|modifier| visibility_reach(modifier) >= reach) {
+        } else if accessor.is_setter() && declared.iter().any(|declared| *declared == b"set" || *declared == b"init") {
             context.report(
-                Issue::error("The `set` accessor of a PHP# property must be narrower than the property.")
+                Issue::error("A PHP# property is written by `set` or by `init`, not both.")
+                    .with_annotation(Annotation::primary(accessor.name.span).with_message("Declared here."))
+                    .with_help(
+                        "Keep `init` to set it only while the object is created, or `set` to set it at any time.",
+                    ),
+            );
+        } else if accessor.modifiers.first().is_some_and(|modifier| visibility_reach(modifier) >= reach) {
+            let setter = BytesDisplay(name);
+
+            context.report(
+                Issue::error(format!("The `{setter}` accessor of a PHP# property must be narrower than the property."))
                     .with_annotation(Annotation::primary(accessor.span()).with_message("Declared here."))
-                    .with_help("Write `private set;` or `protected set;` narrower than the property, or `set;`."),
+                    .with_help(format!(
+                        "Write `private {setter};` or `protected {setter};` narrower than the property, or `{setter};`."
+                    )),
             );
         }
 
@@ -2082,17 +2111,16 @@ fn check_accessors(
     }
 }
 
-/// Whether the slice has an accessor: `get` or `set` without attributes, `&` or a parameter list, where only `set`
-/// takes an access modifier, `private`, `protected` or `public`, which `check_accessors` compares with the property's.
+/// Whether the slice has an accessor: `get`, `set` or `init` without attributes, `&` or a parameter list, where only
+/// `set` and `init` take an access modifier, `private`, `protected` or `public`, which `check_accessors` compares with
+/// the property's.
 fn is_slice_accessor(accessor: &PropertyHook) -> bool {
-    let name = accessor.name.value;
-
     accessor.attribute_lists.is_empty()
         && accessor.ampersand.is_none()
         && accessor.parameter_list.is_none()
         && match accessor.modifiers.as_slice() {
-            [] => name == b"get" || name == b"set",
-            [Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)] => name == b"set",
+            [] => accessor.name.value == b"get" || accessor.is_setter(),
+            [Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)] => accessor.is_setter(),
             _ => false,
         }
 }
@@ -2122,7 +2150,7 @@ fn check_accessor_bodies(accessors: &PropertyHookList, property: &[u8], context:
 }
 
 /// php-src gives a `get` hook the property's type and a `set` hook `void`, so a `get` block returns a value and a
-/// `set` block returns none. A lambda's returns are its own.
+/// `set` or `init` block, which runs as the `set` hook, returns none. A lambda's returns are its own.
 fn check_accessor_returns(accessor: &[u8], block: &Block, context: &mut Context<'_, '_, '_>) {
     for r#return in mago_syntax::utils::find_returns_in_block(block) {
         match (accessor, &r#return.value) {
@@ -2132,11 +2160,15 @@ fn check_accessor_returns(accessor: &[u8], block: &Block, context: &mut Context<
                     .with_note("PHP gives a `get` hook the property's type.")
                     .with_help("Return the property's value, such as `return field;`."),
             ),
-            (b"set", Some(value)) => context.report(
-                Issue::error("A `set` accessor must not return a value.")
-                    .with_annotation(Annotation::primary(value.span()).with_message("Returned here."))
-                    .with_note("PHP gives a `set` hook the return type `void`.")
-                    .with_help("Write the value with `field = value;`, then `return;` if the body ends early."),
+            (b"set", Some(value)) | (b"init", Some(value)) => context.report(
+                Issue::error(if accessor == b"init" {
+                    "An `init` accessor must not return a value."
+                } else {
+                    "A `set` accessor must not return a value."
+                })
+                .with_annotation(Annotation::primary(value.span()).with_message("Returned here."))
+                .with_note("PHP gives a `set` hook the return type `void`.")
+                .with_help("Write the value with `field = value;`, then `return;` if the body ends early."),
             ),
             _ => {}
         }
@@ -3218,7 +3250,7 @@ const fn supported(place: Place) -> &'static str {
         }
         Place::Module => "A PHP# module states laws.",
         Place::FieldOrProperty => {
-            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
+            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
             "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."

@@ -656,8 +656,8 @@ where
     }
 
     /// A PHP# accessor runs as a function of its own, as PHP runs a hook. Its accessor list declares `field`, the
-    /// storage, apart from any constructor parameter that declares the same property, and `set` declares `value`, the
-    /// incoming value, as PHP's `set` hook declares `$value`.
+    /// storage, apart from any constructor parameter that declares the same property, and `set` or `init` declares
+    /// `value`, the incoming value, as PHP's `set` hook declares `$value`.
     fn walk_in_property_hook(
         &mut self,
         hook: &'ast PropertyHook<'arena>,
@@ -669,7 +669,7 @@ where
 
         self.locals.enter_method();
         self.locals.declare(b"field", Local { declaration: accessors, kind: LocalKind::Parameter });
-        if hook.name.value == b"set" && hook.parameter_list.is_none() {
+        if hook.is_setter() && hook.parameter_list.is_none() {
             self.locals.declare(b"value", Local { declaration: hook.name.span, kind: LocalKind::Parameter });
         }
     }

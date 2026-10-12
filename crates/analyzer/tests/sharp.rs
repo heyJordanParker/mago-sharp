@@ -4724,15 +4724,53 @@ fn a_named_constructor_body_runs_on_this() {
 fn a_named_constructor_that_overwrites_a_get_only_property_the_main_constructor_set_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public string code { get; } = \"none\";\n    public int count { get; }\n    public string label { get; }\n\n    public Artifact(public int size { get; }, int count)\n    {\n        this.count = count;\n    }\n\n    public Artifact.rebuilt() : this(1, 2)\n    {\n        this.size = 3;\n        this.count = 4;\n        this.code = \"x\";\n        this.label = \"set\";\n        this.label = \"again\";\n    }\n}\n";
 
-    assert_messages(
-        sharp,
-        &[],
-        &[
-            "16:14 invalid-property-write: `size` is already set by the main constructor, and a get-only property is set once.",
-            "17:14 invalid-property-write: `count` is already set by the main constructor, and a get-only property is set once.",
-            "18:14 invalid-property-write: `code` is already set by the main constructor, and a get-only property is set once.",
-            "20:14 invalid-property-write: Cannot modify a readonly property after initialization.",
-        ],
+    let help = "Declare it `{ get; init; }` to let a named constructor set it again.";
+    assert_eq!(
+        refusals(("src/Demo/Artifact.sharp", sharp), &[]),
+        [
+            format!(
+                "16:14 invalid-property-write `size` is already set by the main constructor, and a get-only property is set once. | {help}"
+            ),
+            format!(
+                "17:14 invalid-property-write `count` is already set by the main constructor, and a get-only property is set once. | {help}"
+            ),
+            format!(
+                "18:14 invalid-property-write `code` is already set by the main constructor, and a get-only property is set once. | {help}"
+            ),
+            "20:14 invalid-property-write Cannot modify a readonly property after initialization. | Remove this assignment or move the property's one-time initialization to this location.".to_owned(),
+        ]
+    );
+
+    // The help's fix: `{ get; init; }` lets the named constructor set each property again.
+    let fixed = "namespace Demo;\n\nclass Artifact\n{\n    public string code { get; init; } = \"none\";\n    public int count { get; init; }\n\n    public Artifact(public int size { get; init; }, int count)\n    {\n        this.count = count;\n    }\n\n    public Artifact.rebuilt() : this(1, 2)\n    {\n        this.size = 3;\n        this.count = 4;\n        this.code = \"x\";\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Artifact.sharp", fixed), &[]), Vec::<String>::new());
+}
+
+/// Spec section 6.1: an `init` property is set only while its object is created, where C# allows an `init` accessor:
+/// on `this`, in a constructor of its class or a subclass, or in a named constructor, and by its own accessor body
+/// through `field`. A lambda may run after the object is created, so it cannot set one, as C# refuses with CS8852.
+#[test]
+fn an_init_property_is_set_only_on_this_while_the_object_is_created() {
+    let sharp = "namespace Demo;\n\nclass Label\n{\n    public string text { get; init; }\n    public string shown { get; init => field = trim(value); } = \"\";\n\n    public Label(string text)\n    {\n        this.text = text;\n        this.shown = text;\n        const later = () => { this.text = \"late\"; };\n        later();\n    }\n\n    public Label.shouting(string text) : this(text)\n    {\n        this.text = strtoupper(text);\n    }\n\n    public void rename(string text)\n    {\n        this.text = text;\n    }\n}\n\nclass Badge : Label\n{\n    public Badge(string text, Label source) : super(text)\n    {\n        this.text = \"badge\";\n        source.text = text;\n    }\n}\n\nclass Use\n{\n    public static void relabel(Label label)\n    {\n        label.text = \"x\";\n    }\n}\n\nclass Point\n{\n    public Point(public int x { get; init; }) { }\n\n    public void move()\n    {\n        this.x = 2;\n    }\n}\n";
+    let help = "Set it on `this` in a constructor or a named constructor.";
+    let refused = format!("invalid-property-write `text` is set only while the object is created. | {help}");
+
+    assert_eq!(
+        refusals(("src/Demo/Label.sharp", sharp), &[]),
+        [
+            format!("12:36 {refused}"),
+            format!("23:14 {refused}"),
+            format!("32:16 {refused}"),
+            format!("40:15 {refused}"),
+            format!("50:14 invalid-property-write `x` is set only while the object is created. | {help}"),
+        ]
+    );
+
+    // Plain PHP sees the `protected(set)` the property runs as, which lets a PHP subclass write it at any time.
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Relabel\n{\n    public static function run(Label $label): void\n    {\n        $label->text = 'x';\n    }\n}\n\nfinal class Fancy extends Label\n{\n    public function retitle(): void\n    {\n        $this->text = 'y';\n    }\n}\n";
+    assert_eq!(
+        issues(("src/Demo/Relabel.php", php), &[("src/Demo/Label.sharp", sharp)]),
+        ["9:17 invalid-property-write"]
     );
 }
 
