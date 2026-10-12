@@ -697,12 +697,22 @@ fn declare_strict_types_is_one_error_wherever_it_is_written() {
     let before = "declare(strict_types=1);\n\nnamespace App.Tenant;\n\nclass Report\n{\n}\n";
     let after = "namespace App.Tenant;\n\ndeclare(strict_types=1);\n\nclass Report\n{\n}\n";
     let inside = leak(method("        declare(strict_types=1);\n        return extra;\n"));
+    let after_a_class = "class Report\n{\n}\n\ndeclare(strict_types=1);\n";
     let removed = leak(method("        return extra;\n"));
 
     assert_eq!(issues(before), [format!("1:1 {message}")]);
     assert_eq!(issues(after), [format!("3:1 {message}")]);
     assert_eq!(issues(inside), [format!("7:9 {message}")]);
+    assert_eq!(issues(after_a_class), [format!("5:1 {message}")]);
     assert_eq!(issues(removed), Vec::<String>::new());
+    // PHP keeps its own two checks of `declare`.
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\necho 1;\n\ndeclare(strict_types=2);\n"),
+        [
+            "5:1 Strict type declaration must be the first statement in the file.",
+            "5:22 The `strict_types` directive must be set to either `0` or `1`."
+        ]
+    );
 }
 
 #[test]
@@ -1192,6 +1202,10 @@ fn new_self_cannot_name_a_named_constructor() {
         ]
     );
     assert_eq!(issues(leak(fixed)), Vec::<String>::new());
+
+    // A class that inherits `of` shows no declaring class here, so the analyzer reports it with that class's name.
+    let inherited = "namespace App.Tenant;\n\nclass Summary : Report\n{\n    public Summary(int count) : super(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
+    assert_eq!(issues(inherited), Vec::<String>::new());
 }
 
 #[test]

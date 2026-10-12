@@ -2617,15 +2617,10 @@ const fn runs_code(statement: &Statement) -> bool {
 /// Whether the walk is inside a statement at file level that runs code, which the file-level rule refuses whole, so
 /// a refusal of a part of it would report the statement twice.
 fn is_in_file_level_code(context: &Context<'_, '_, '_>) -> bool {
-    context
-        .ancestors
-        .iter()
-        .find_map(|node| match node {
-            Node::Statement(Statement::Namespace(_)) => None,
-            Node::Statement(statement) => Some(runs_code(statement)),
-            _ => None,
-        })
-        .unwrap_or(false)
+    let mut ancestors =
+        context.ancestors.iter().skip_while(|node| matches!(node, Node::Statement(Statement::Namespace(_))));
+
+    matches!(ancestors.next(), Some(Node::Statement(statement)) if runs_code(statement))
 }
 
 /// The first body of an `if`, `else` or loop that is not a block in braces, with the block to write in its place. An
