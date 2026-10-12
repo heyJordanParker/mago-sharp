@@ -31,6 +31,7 @@ use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::PropertyAccess;
@@ -532,8 +533,8 @@ where
     {
         if method.value.eq_ignore_ascii_case(b"keys") {
             report_keys_read_back(context, IssueCode::InvalidArrayAccess, object, "`keys()`", selector.span());
-        } else if let Some(key) = argument_list.arguments.first().map(Argument::value) {
-            report_key_mixing_a_backed_enum(context, object, key, method.value);
+        } else {
+            report_key_mixing_a_backed_enum(context, object, method);
         }
     }
 
@@ -560,30 +561,24 @@ where
     Ok(())
 }
 
-/// Reports one of the [`INLINED_COLLECTION_METHODS`] called on `object` when its value can also be an object, as
-/// `List<int>|Box`, or `on_several_collections`, when the call resolves on more than one collection, as `List|Set`.
-/// The bridge lowers such a call to PHP on the array from the checker's one collection method, so an object the value
-/// holds never reaches its own method of that name, and a value that may be another collection runs as a
-/// `Sharp\Collection` method that is not that collection's. Returns whether it reported the call.
-/// Reports the key `key` that `method`, the `get`, `has` or `remove` of the `Map` `collection`, is given, where the keys
-/// of `collection` mix a backed enum with other types.
+/// Reports `method`, the `get`, `has` or `remove` of the `Map` `collection`, whose keys mix a backed enum with other
+/// types.
 fn report_key_mixing_a_backed_enum<A>(
     context: &mut Context<'_, '_, A>,
     collection: &Expression<'_>,
-    key: &Expression<'_>,
-    method: &[u8],
+    method: &LocalIdentifier<'_>,
 ) where
     A: Arena,
 {
     let collection = quoted_source(context, collection.span());
-    let method = String::from_utf8_lossy(method);
+    let name = String::from_utf8_lossy(method.value);
 
     context.collector.report_with_code(
         IssueCode::InvalidArgument,
         Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so `{method}` cannot tell them apart."
+            "The keys of `{collection}` mix a backed enum with other types, so `{name}` cannot tell them apart."
         ))
-        .with_annotation(Annotation::primary(key.span()).with_message("Its key is looked up here."))
+        .with_annotation(Annotation::primary(method.span()).with_message("Its key is looked up here."))
         .with_note(
             "The engine holds each key as its backing value, so a case and the `int` or `string` key of its backing value share one entry.",
         )
@@ -591,6 +586,11 @@ fn report_key_mixing_a_backed_enum<A>(
     );
 }
 
+/// Reports one of the [`INLINED_COLLECTION_METHODS`] called on `object` when its value can also be an object, as
+/// `List<int>|Box`, or `on_several_collections`, when the call resolves on more than one collection, as `List|Set`.
+/// The bridge lowers such a call to PHP on the array from the checker's one collection method, so an object the value
+/// holds never reaches its own method of that name, and a value that may be another collection runs as a
+/// `Sharp\Collection` method that is not that collection's. Returns whether it reported the call.
 fn report_collection_method_on_object<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,

@@ -1502,25 +1502,26 @@ where
     )
 }
 
-/// `union` with each template its method defines unbounded, there and in the return type of a function type it holds,
-/// as the `G` of `\Closure(T): G`.
-fn without_method_template_bounds(union: &TUnion) -> TUnion {
-    let types = union.types.iter().map(|atomic| match atomic {
-        TAtomic::GenericParameter(parameter) if matches!(parameter.defining_entity, GenericParent::FunctionLike(_)) => {
-            TAtomic::GenericParameter(parameter.with_constraint(get_mixed()))
-        }
-        TAtomic::Callable(TCallable::Signature(signature)) => {
-            let mut signature = signature.clone();
-            if let Some(return_type) = signature.get_return_type_mut() {
-                *return_type = without_method_template_bounds(return_type);
-            }
+/// The type of the key function of a `groupBy` or `associateBy`, `\Closure(T): G`, with its method's `G` unbounded.
+fn without_method_template_bounds(key_function: &TUnion) -> TUnion {
+    let types = key_function.types.iter().map(|atomic| {
+        let TAtomic::Callable(TCallable::Signature(signature)) = atomic else {
+            unreachable!("the stub declares the key function as `\\Closure(T): G`");
+        };
+        let mut signature = signature.clone();
+        let Some(return_type) = signature.get_return_type_mut() else {
+            unreachable!("the stub declares the key function's return type as `G`");
+        };
+        let keys = return_type.types.iter().map(|key| match key {
+            TAtomic::GenericParameter(key) => TAtomic::GenericParameter(key.with_constraint(get_mixed())),
+            _ => unreachable!("the stub declares the key function's return type as `G`"),
+        });
+        *return_type = return_type.clone_with_types(keys.collect());
 
-            TAtomic::Callable(TCallable::Signature(signature))
-        }
-        atomic => atomic.clone(),
+        TAtomic::Callable(TCallable::Signature(signature))
     });
 
-    union.clone_with_types(types.collect())
+    key_function.clone_with_types(types.collect())
 }
 
 /// Expands `self`/`static`/`parent` and class-level context in a type declared on a function-like,

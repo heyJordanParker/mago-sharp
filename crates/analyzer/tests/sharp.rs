@@ -7044,11 +7044,11 @@ fn a_map_key_type_that_mixes_a_backed_enum_with_other_types_is_refused_where_a_k
             "12:21 invalid-foreach-key",
             "16:49 invalid-array-access",
             "17:29 invalid-array-access",
-            "18:33 invalid-argument",
-            "19:34 invalid-argument",
-            "20:39 invalid-argument",
-            "21:35 invalid-argument",
-            "21:67 invalid-argument",
+            "18:29 invalid-argument",
+            "19:30 invalid-argument",
+            "20:32 invalid-argument",
+            "21:31 invalid-argument",
+            "21:60 invalid-argument",
         ]
     );
 }
