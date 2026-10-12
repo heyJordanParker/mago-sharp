@@ -1186,7 +1186,7 @@ where
 /// [`get_declared_collection`] finds whose kind, `List`, `Map` or `Set`, the value does not hold. The engine runs every
 /// collection as a PHP array, so a place keeps the kinds it is declared as whatever it holds, and a place that may be a
 /// `Set` or a `Map` has no index while it holds the `Map`. The value's keys and elements still type what it reads.
-/// A method call takes the declared collections whole instead, because `add`, `set` and `delete` write the place's
+/// A method call takes the declared collections whole instead, because `add`, `set` and `remove` write the place's
 /// declared elements. None when nothing is added: a `.php` file, a value that holds no collection, or a place with no
 /// other kind.
 pub(crate) fn with_declared_kinds<'arena, A>(

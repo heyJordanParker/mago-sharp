@@ -316,6 +316,16 @@ impl<'analysis> Types<'analysis> {
         Some((collection, method.as_bytes().to_ascii_lowercase()))
     }
 
+    /// Whether the property `property` of an object of `r#type` has hooks in a class the object can be. PHP gives no
+    /// reference to a hooked property, so a write into the `Map` it holds cannot go through one.
+    pub(crate) fn property_has_hooks(&self, r#type: &TUnion, property: &[u8]) -> bool {
+        let variable = [b"$", property].concat();
+
+        receiver_classes(r#type).into_iter().flatten().any(|class| {
+            self.codebase.get_declaring_property(class, &variable).is_some_and(|metadata| !metadata.hooks.is_empty())
+        })
+    }
+
     /// The property `class` declares or inherits by the name `property`, if any.
     fn property_declaration(&self, class: &[u8], property: &[u8]) -> Option<Declaration> {
         let variable = [b"$", property].concat();

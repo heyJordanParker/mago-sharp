@@ -46,6 +46,7 @@ use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::add_properties_to_context;
 use crate::statement::function_like::get_this_type;
+use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_missing_return;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::r#return::handle_return_value;
@@ -178,6 +179,9 @@ where
                     ..Default::default()
                 },
             );
+            if class_metadata.flags.is_sharp() {
+                declared_type = known_type_or_error(declared_type);
+            }
             let value_type = get_set_literal_type(context, artifacts, value, &declared_type).unwrap_or(value_type);
 
             let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
