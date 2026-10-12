@@ -2628,6 +2628,55 @@ fn a_set_literal_holds_each_element_under_its_key() {
 }
 
 /// ```php
+/// $sets = [[1 => 1, 1 => 1], [2 => 2]];
+/// $named['b'] = ['y' => 'y'];
+/// ```
+///
+/// A list literal inside a literal whose elements are declared `Set`s, or written into a `Map` entry declared a
+/// `Set`, is that `Set`, each element under its key.
+#[test]
+fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
+    assert_eq!(
+        body_in(
+            "void run(Map<string, Set<string>> named)",
+            "        List<Set<int>> sets = [[1, 1], [2]];\n        named[\"b\"] = [\"y\"];\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "sets"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 1
+                        ZVAL 1
+                      ARRAY_ELEM
+                        ZVAL 1
+                        ZVAL 1
+                    null
+                  ARRAY_ELEM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 2
+                        ZVAL 2
+                    null
+              ASSIGN
+                DIM
+                  VAR
+                    ZVAL "named"
+                  ZVAL "b"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "y"
+                    ZVAL "y"
+        "#}
+    );
+}
+
+/// ```php
 /// $tags = [];
 /// $tags = ["b" => "b"];
 /// ```

@@ -6921,10 +6921,11 @@ fn a_changing_set_method_needs_a_place_and_a_reading_one_runs_on_a_value() {
 /// it changes the element the list stores: a changing method, a write into its `Map` and a change through a nested
 /// `List` index, on a local or a property. A change through a `Map` index is refused, as Go refuses `m[k].x = 5`,
 /// because a `Map` read is a copy: a changing method on it, a write into it, and a change through a `List` index of
-/// it, each once. Reading the copy, changing it and storing it back, as the help writes it, compiles.
+/// it, each once, a bare read included, whose own rule adds nothing there. Reading the copy, changing it and storing
+/// it back, as the help writes it, compiles.
 #[test]
 fn a_list_index_is_a_place_and_a_change_through_a_map_index_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Stock\n{\n    public List<List<int>> rows { get; set; } = [[1]];\n\n    public void places(List<List<int>> grid, List<Set<int>> sets, List<Map<string, int>> maps, List<List<List<int>>> cube)\n    {\n        grid[0].add(5);\n        grid[1].insert(0, 7);\n        grid[0].remove(1);\n        grid[0].clear();\n        sets[0].add(4);\n        maps[0].remove(\"a\");\n        maps[1][\"c\"] = 3;\n        maps[1][\"d\"] ??= 4;\n        cube[1][0].add(3);\n        this.rows[0].add(9);\n    }\n\n    public void copies(Map<string, List<int>> stock, Map<string, Map<string, int>> nested, Map<string, Set<int>> tags, List<Map<string, List<int>>> deep, Map<string, List<int>> groups)\n    {\n        stock[\"a\"]?.add(5);\n        stock[\"a\"]?.insert(0, 1);\n        nested[\"a\"]?.remove(\"b\");\n        nested[\"a\"][\"b\"] = 1;\n        tags[\"t\"]?.add(2);\n        deep[0][\"k\"]?.add(3);\n        groups[\"a\"][0] = 1;\n    }\n\n    public Map<string, List<int>> storedBack(Map<string, List<int>> map, string key)\n    {\n        List<int> counts = map[key] ?? [];\n        counts.add(5);\n        map[key] = counts;\n        return map;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Stock\n{\n    public List<List<int>> rows { get; set; } = [[1]];\n\n    public void places(List<List<int>> grid, List<Set<int>> sets, List<Map<string, int>> maps, List<List<List<int>>> cube)\n    {\n        grid[0].add(5);\n        grid[1].insert(0, 7);\n        grid[0].remove(1);\n        grid[0].clear();\n        sets[0].add(4);\n        maps[0].remove(\"a\");\n        maps[1][\"c\"] = 3;\n        maps[1][\"d\"] ??= 4;\n        cube[1][0].add(3);\n        this.rows[0].add(9);\n    }\n\n    public void copies(Map<string, List<int>> stock, Map<string, Map<string, int>> nested, Map<string, Set<int>> tags, List<Map<string, List<int>>> deep, Map<string, List<int>> groups)\n    {\n        stock[\"a\"]?.add(5);\n        stock[\"a\"]?.insert(0, 1);\n        nested[\"a\"]?.remove(\"b\");\n        nested[\"a\"][\"b\"] = 1;\n        tags[\"t\"]?.add(2);\n        deep[0][\"k\"]?.add(3);\n        groups[\"a\"][0] = 1;\n        stock[\"a\"].add(6);\n    }\n\n    public Map<string, List<int>> storedBack(Map<string, List<int>> map, string key)\n    {\n        List<int> counts = map[key] ?? [];\n        counts.add(5);\n        map[key] = counts;\n        return map;\n    }\n}\n";
 
     let copy = "A `Map` read is a copy: read it, change it, and store it back. | Change a local and store it back, as in `List<int> counts = map[key] ?? []; counts.add(5); map[key] = counts;`.";
     assert_eq!(
@@ -6937,6 +6938,7 @@ fn a_list_index_is_a_place_and_a_change_through_a_map_index_is_refused() {
             format!("27:9 invalid-pass-by-reference {copy}"),
             format!("28:9 invalid-pass-by-reference {copy}"),
             format!("29:9 invalid-pass-by-reference {copy}"),
+            format!("30:9 invalid-pass-by-reference {copy}"),
         ]
     );
 }
@@ -7605,39 +7607,6 @@ fn a_list_literal_in_a_conditional_where_a_set_is_declared_is_refused() {
     assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["7:28 invalid-local-assignment-value"]);
 }
 
-/// Only a literal whose own place is declared `Set` is a `Set`, so a list literal inside a `List` of `Set`s is a
-/// `List`, which the place refuses.
-#[test]
-fn a_list_literal_inside_a_list_of_sets_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public List<Set<string>> all()\n    {\n        List<Set<string>> all = [[\"a\"]];\n        return all;\n    }\n}\n";
-
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["7:33 invalid-local-assignment-value"]);
-}
-
-/// A list literal that is a value of a `Map` literal of `Set`s is a `List`, which the place refuses.
-#[test]
-fn a_list_literal_as_a_value_in_a_map_of_sets_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public Map<string, Set<string>> named()\n    {\n        Map<string, Set<string>> named = [\"x\": [\"a\"]];\n        return named;\n    }\n}\n";
-
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["7:42 invalid-local-assignment-value"]);
-}
-
-/// A list literal assigned to an entry of a `Map` of `Set`s is a `List`, which the `Map` refuses, whether a property,
-/// a parameter or a local holds it. Each keeps its `Set`s, so a later `get` never reads a list as a `Set`.
-#[test]
-fn a_list_literal_assigned_to_an_entry_of_a_map_of_sets_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    private Map<string, Set<string>> named = [:];\n\n    public bool put(Map<string, Set<string>> given)\n    {\n        this.named[\"x\"] = [\"a\"];\n        given[\"x\"] = [\"a\"];\n        Map<string, Set<string>> local = [:];\n        local[\"x\"] = [\"a\"];\n        return local.get(\"x\")?.contains(\"a\") ?? false;\n    }\n}\n";
-
-    assert_eq!(
-        issues(("src/Demo/Tags.sharp", sharp), &[]),
-        [
-            "9:9 invalid-property-assignment-value",
-            "10:9 invalid-local-assignment-value",
-            "12:9 invalid-local-assignment-value",
-        ]
-    );
-}
-
 /// A PHP# local, parameter or `field` is the collection it is declared as, so an element written into it must fit
 /// that type, as one written into a property must, and the place keeps its type. PHP keeps widening an array.
 #[test]
@@ -7746,14 +7715,17 @@ fn a_loop_over_a_set_reads_its_elements_and_no_keys() {
 }
 
 /// Spec section 12: the declared type makes a list literal a `Set`, at a typed local, an assignment, a property's
-/// initial value, a parameter's default and a return, so each takes the literal and checks its elements.
+/// initial value, a parameter's default and a return, so each takes the literal and checks its elements. A literal
+/// inside a `List` or `Map` literal whose elements are declared `Set`s is a `Set` too, at any depth, as an element of
+/// a `List<List<int>>` literal is a `List`, beside a spread or a missing element, which is refused once on its own.
+/// So is one written into a `Map` entry declared a `Set`.
 #[test]
 fn a_list_literal_where_a_set_is_declared_is_a_set() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tags\n{\n    public Set<string> all = [];\n    public Set<Status> open = [Status.Active];\n\n    public Set<string> run(Set<string> extra = [\"new\"])\n    {\n        Set<string> tags = [\"vip\", \"new\"];\n        tags = [\"old\"];\n        this.all = [\"a\", \"b\"];\n        Set<string> wrong = [\"vip\", 1];\n        return [\"x\"];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tags\n{\n    public Set<string> all = [];\n    public Set<Status> open = [Status.Active];\n    public Map<string, Set<string>> groups = [\"d\": [\"w\"]];\n\n    public Set<string> run(Set<string> extra = [\"new\"])\n    {\n        Set<string> tags = [\"vip\", \"new\"];\n        tags = [\"old\"];\n        this.all = [\"a\", \"b\"];\n        Set<string> wrong = [\"vip\", 1];\n        return [\"x\"];\n    }\n\n    public List<Set<int>> nested(Map<string, Set<string>> given, List<Set<int>> fallback = [[0]])\n    {\n        List<Set<int>> sets = [[1, 1], [2]];\n        Map<string, Set<string>> named = [\"a\": [\"x\"]];\n        named[\"b\"] = [\"y\"];\n        given[\"c\"] = [\"z\"];\n        this.groups[\"e\"] = [\"v\"];\n        List<List<Set<int>>> deep = [[[3]]];\n        List<Set<int>> wrong = [[\"a\"]];\n        List<Set<int>> spread = [...sets, [5]];\n        Map<string, Set<string>> merged = [...named, \"f\": [\"u\"]];\n        List<Set<int>> skipped = [, [6]];\n        return [[4]];\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tags.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
-        ["15:29 invalid-local-assignment-value"]
+        ["16:29 invalid-local-assignment-value", "28:32 invalid-local-assignment-value", "31:35 invalid-array-element"]
     );
 }
 

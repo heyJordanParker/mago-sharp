@@ -44,6 +44,7 @@ use crate::context::block::BlockContext;
 use crate::context::block::ReferenceConstraintSource;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_set_literal_type;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
@@ -101,8 +102,10 @@ where
 
     // A value written into a PHP# `Map` takes only a literal of the collection its value type declares, as a value
     // written to a declared place does, at any depth, through the `Map`s and the `List` indexes that are places on
-    // the way. A `List` and a `Set` are never written by index, which their own checks refuse.
+    // the way. A `List` and a `Set` are never written by index, which their own checks refuse. A list literal written
+    // where the value type declares a `Set` is that `Set`, at any depth.
     let last_step = array_target_expressions.len() - 1;
+    let mut set_literal_type = None;
     if context.dialect.is_sharp()
         && let Some(value) = assign_value
         && let Some(declared) = get_declared_type(context, block_context, artifacts, root_array_expression)
@@ -123,7 +126,9 @@ where
         })
     {
         check_sharp_literal_kind(context, value, &element);
+        set_literal_type = get_set_literal_type(context, artifacts, value, &element);
     }
+    let assign_value_type = set_literal_type.as_ref().unwrap_or(assign_value_type);
 
     let root_var_id = get_block_expression_id(root_array_expression, context, block_context);
     let current_index = analyze_nested_array_assignment(
