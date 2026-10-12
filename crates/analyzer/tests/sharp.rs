@@ -1685,11 +1685,11 @@ fn an_override_of_a_plain_php_method_takes_no_assertion_from_the_parent() {
 /// A parse error reports its spot once, so returning what failed to parse adds no `never-return`, in PHP# and PHP.
 #[test]
 fn returning_a_value_that_failed_to_parse_adds_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public Report make(string json)\n    {\n        return new Report.fromJson(json);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int make()\n    {\n        return );\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfunction make(): int\n{\n    return );\n}\n";
 
     assert_eq!(issues(("src/Demo/make.php", php), &[]), ["7:12 parse"]);
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:20 parse"]);
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:16 parse"]);
 }
 
 /// `super` names the base class, so a class whose header names only interfaces has none, as `parent::` in a PHP
@@ -4672,6 +4672,145 @@ fn initial_values_in_the_constructor_under_a_base_class_constructor_with_paramet
             "13:7 not-supported-yet: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Pinned`'s initial values run in its constructor.",
         ],
     );
+}
+
+/// Spec section 9.1: `new Artifact.sized(…)` calls the named constructor `sized`, so its arguments are checked against
+/// its parameters with PHP's codes, and it creates an `Artifact`.
+#[test]
+fn new_with_a_named_constructor_checks_its_arguments_and_creates_its_class() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static int make()\n    {\n        const made = new Artifact.sized(2);\n        return made.size + new Artifact.sized(\"two\").size + new Artifact.sized().size;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Artifact.sharp", sharp), &[]), ["12:47 invalid-argument", "12:79 too-few-arguments"]);
+}
+
+/// Spec section 9.1: a named constructor is its own class's, so `new` on a subclass finds none, and `new` names only a
+/// named constructor the class declares. A subclass may declare its own of the same name, which keeps a signature PHP
+/// accepts for the static method it runs as.
+#[test]
+fn a_named_constructor_is_not_inherited() {
+    let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n}\n\nclass Resized : Base\n{\n    public Resized(int size) : super(size) { }\n\n    public Resized.sized(int size) : this(size * 2) { }\n}\n\nclass Restrung : Base\n{\n    public Restrung(int size) : super(size) { }\n\n    public Restrung.sized(string size) : this(strlen(size)) { }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "14:47 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
+            "15:46 non-existent-method: `Base` has no constructor `missing`.",
+            "30:21 incompatible-parameter-type: Parameter `size` of `Restrung.sized` expects type `string` but parent `Base.sized` expects type `int`",
+        ],
+    );
+}
+
+/// Spec section 9.1: a named constructor runs as a static method, and PHP refuses a static and an instance method of
+/// one name in a class and its parent or interface. Each such class is refused once, naming the named constructor, and
+/// a named constructor is never final, overridden or abstract.
+#[test]
+fn a_method_and_a_named_constructor_of_one_name_are_one_error() {
+    let sharp = "namespace Demo;\n\ninterface Copyable\n{\n    Copyable copy();\n}\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public virtual int copy() => this.size;\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Instanced : Base\n{\n    public Instanced() : super(1) { }\n\n    public int sized() => 2;\n}\n\nclass Clash : Base\n{\n    public Clash(string text) : super(strlen(text)) { }\n\n    public Clash.copy() : this(\"x\") { }\n}\n\nclass Sheet : Copyable\n{\n    public Sheet() { }\n\n    public Sheet.copy() : this() { }\n}\n\nclass Refused\n{\n    public Refused(public int size { get; }) { }\n\n    public Refused.empty() : this(1);\n}\n";
+
+    // `Refused.empty` without a body is the checker's error, so the analyzer adds no abstract method to implement.
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "21:16 incompatible-static-modifier: `Instanced.sized` cannot share its name with `Base`'s named constructor `sized`.",
+            "28:18 incompatible-static-modifier: The named constructor `Clash.copy` cannot share its name with the method `Base.copy`.",
+            "35:18 incompatible-static-modifier: The named constructor `Sheet.copy` cannot share its name with the method `Copyable.copy`.",
+        ],
+    );
+}
+
+/// Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`, and the fix compiles. Read as
+/// a value, it would create objects without `new`, so that is the same error.
+#[test]
+fn a_named_constructor_called_without_new_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static int make() => Artifact.sized(2).size;\n}\n";
+    let fixed = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static int make() => new Artifact.sized(2).size;\n}\n";
+    let value = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static Artifact held()\n    {\n        const make = Artifact.sized;\n        return make(2);\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &["9:33 named-constructor-without-new: `Artifact.sized` is a constructor: write `new Artifact.sized(2)`."],
+    );
+    assert_messages(fixed, &[], &[]);
+    assert_messages(
+        value,
+        &[],
+        &[
+            "11:22 named-constructor-without-new: `Artifact.sized` is a constructor, so it is no function value: create the object with `new Artifact.sized(…)`.",
+        ],
+    );
+}
+
+/// PHP calls a named constructor as the static method it runs as, which returns its class.
+#[test]
+fn php_calls_a_named_constructor_as_the_static_method_it_runs_as() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n}\n";
+    let caller = "<?php\n\nnamespace App;\n\nfunction run(): string\n{\n    return \\Demo\\Artifact::sized(2)->size . \\Demo\\Artifact::sized('two')->size;\n}\n";
+
+    assert_eq!(issues(("src/App/run.php", caller), &[("src/Demo/Artifact.sharp", sharp)]), ["7:67 invalid-argument"]);
+}
+
+/// Spec section 9.1: a named constructor's `: this(…)` creates its object with the main constructor, so its arguments
+/// are checked against that constructor with PHP's codes. A class without a constructor takes `: this()` and no
+/// arguments.
+#[test]
+fn this_arguments_are_checked_against_the_main_constructor() {
+    let sharp = "namespace Demo;\n\nclass Entity\n{\n    public Entity(int count, string label) { }\n\n    public Entity.one() : this(1, \"one\") { }\n    public Entity.few() : this(1) { }\n    public Entity.wrong() : this(\"one\", \"one\") { }\n    public Entity.many() : this(1, \"one\", 2) { }\n}\n\nclass Plain\n{\n    public Plain.empty() : this() { }\n    public Plain.full(int count) : this(count) { }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Entity.sharp", sharp), &[]),
+        ["8:31 too-few-arguments", "9:34 invalid-argument", "10:43 too-many-arguments", "16:40 too-many-arguments"]
+    );
+    assert_messages(
+        "namespace Demo;\n\nclass Plain\n{\n    public Plain.full(int count) : this(count) { }\n}\n",
+        &[],
+        &["5:40 too-many-arguments: `Plain` has no constructor to call: remove the arguments."],
+    );
+}
+
+/// Spec section 9.1: a named constructor's body runs on the object its `: this(…)` creates, as `this`, so it reads
+/// and writes the object's members with their types and calls its base class's methods with `super.m()`. It returns
+/// that object, so `return;` ends it and a returned value is an error.
+#[test]
+fn a_named_constructor_body_runs_on_this() {
+    let sharp = "namespace Demo;\n\nclass Entity\n{\n    public Entity() { }\n\n    public string describe() => \"entity\";\n}\n\nclass Artifact : Entity\n{\n    public string label { get; set; } = \"\";\n\n    public Artifact(public int size { get; }) : super() { }\n\n    public Artifact.labeled(string label) : this(strlen(label))\n    {\n        if (label == \"\") {\n            return;\n        }\n        this.label = label;\n        this.label = this.size;\n        this.label = super.describe();\n        const read = () => this.label;\n        if (label == \"x\") {\n            return 5;\n        }\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "22:22 invalid-property-assignment-value: Invalid type for property `Artifact.label`: expected `string`, but got `int`.",
+            "26:20 invalid-return-statement: A named constructor returns the object it creates: write `return;`.",
+        ],
+    );
+}
+
+/// Spec section 9.1: the main constructor sets a get-only property once, so a named constructor that sets it again is
+/// an error. One the main constructor leaves unset is the named constructor's to set, once.
+#[test]
+fn a_named_constructor_that_overwrites_a_get_only_property_the_main_constructor_set_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public string code { get; } = \"none\";\n    public int count { get; }\n    public string label { get; }\n\n    public Artifact(public int size { get; }, int count)\n    {\n        this.count = count;\n    }\n\n    public Artifact.rebuilt() : this(1, 2)\n    {\n        this.size = 3;\n        this.count = 4;\n        this.code = \"x\";\n        this.label = \"set\";\n        this.label = \"again\";\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "16:14 invalid-property-write: `size` is get-only, and the main constructor already set it.",
+            "17:14 invalid-property-write: `count` is get-only, and the main constructor already set it.",
+            "18:14 invalid-property-write: `code` is get-only, and the main constructor already set it.",
+            "20:14 invalid-property-write: `label` is get-only, and it is already set.",
+        ],
+    );
+}
+
+/// A private named constructor is its class's own to call.
+#[test]
+fn new_with_a_named_constructor_keeps_the_visibility_refusal() {
+    let sharp = "namespace Demo;\n\nclass Secret\n{\n    public Secret() { }\n\n    private Secret.hidden() : this() { }\n\n    public static Secret make() => new Secret.hidden();\n}\n\nclass Use\n{\n    public static Secret secret() => new Secret.hidden();\n}\n";
+
+    assert_eq!(issues(("src/Demo/Secret.sharp", sharp), &[]), ["14:38 invalid-method-access"]);
 }
 
 /// `Self.count()` is PHP's `static::count()`.
@@ -9740,6 +9879,19 @@ fn a_generic_call_nothing_fixes_is_refused() {
     );
 }
 
+/// The checker refuses a named constructor of a generic class, so a call of one adds no missing type argument, which
+/// `new Box.of(1)` has no place to write. The main constructor's `new Box(1)` still needs it.
+#[test]
+fn a_named_constructor_call_of_a_generic_class_adds_no_missing_type_argument() {
+    let others = [(
+        "src/Demo/Box.sharp",
+        "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Box(public TItem item { get; }) { }\n\n    public Box.of(TItem item) : this(item) { }\n}\n",
+    )];
+    let shop = "namespace Demo;\n\npublic class Shop\n{\n    public Any named() => new Box.of(1);\n\n    public Any main() => new Box(1);\n}\n";
+
+    assert_eq!(issues(("src/Demo/Shop.sharp", shop), &others), ["7:30 missing-template-parameter"]);
+}
+
 /// A type argument a plain PHP value fixes is refused when PHP# can't write it, since the engine carries a type
 /// argument as its PHP# text: `array-key`, `scalar`, `numeric` and `resource`, on a static call and an instance call
 /// alike. A refinement PHP# writes as a wider type is that type: `list<int>` is `List<int>`, an `array{a: int}` shape is
@@ -10540,7 +10692,7 @@ fn a_member_access_refusal_names_the_member_as_sharp_writes_it() {
     assert_eq!(
         refusals(("src/Demo/Run.sharp", sharp)),
         [
-            "14:14 invalid-property-write Cannot modify a readonly property after initialization. | This readonly property is already initialized | Write to `Order.count` occurs here | Property is defined as `readonly` here | Readonly properties may be initialized only once. Every later assignment throws an `Error` at runtime. | Remove this assignment or move the property's one-time initialization to this location.",
+            "14:14 invalid-property-write `count` is get-only, and it is already set. | Set again here.",
             "22:15 invalid-property-write Cannot write to private property `Order.total`. | This member is private and cannot be accessed here | Invalid access occurs here, from within `Run` | Member is defined as `private` here | Make the property `Order.total` writable (e.g., `public` or `public(set)`), or add a public setter method.",
             "24:22 invalid-method-access Cannot access private method `Order.secret`. | This member is private and cannot be accessed here | Invalid access occurs here, from within `Run` | Member is defined as `private` here | Change the visibility of method `secret` to `public`, or call it from an allowed scope.",
             "24:39 invalid-method-access Cannot access private method `Order.secret`. | This member is private and cannot be accessed here | Invalid access occurs here, from within `Run` | Member is defined as `private` here | Change the visibility of method `secret` to `public`, or call it from an allowed scope.",
@@ -11673,18 +11825,25 @@ fn an_extern_written_with_a_renamed_import_declares_the_same_target() {
     assert_eq!(refused, ["5:1 duplicate-extern `Client` already has an `extern` declaration."]);
 }
 
-/// An `extern` target that names no class, method or function is reported with the code a call of it would get.
+/// An `extern` target that names no class, method or function is reported with the code a call of it would get. An
+/// `extern event` names a class, spec section 15.
 #[test]
 fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_function() {
     let stub = (
         "app/Stubs/Stripe.sharp",
-        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Stripe.Missing;\n\nextern Missing;\nextern StripeClient.refund;\nextern nowhere;\n",
+        "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Stripe.Missing;\n\nextern Missing;\nextern StripeClient.refund;\nextern nowhere;\nextern event Nowhere;\n",
     );
 
     assert_eq!(
         issues(stub, &[STRIPE]),
-        ["6:8 non-existent-class-like", "7:8 non-existent-method", "8:8 non-existent-function"]
+        [
+            "6:8 non-existent-class-like",
+            "7:8 non-existent-method",
+            "8:8 non-existent-function",
+            "9:14 non-existent-class-like"
+        ]
     );
+    assert_eq!(messages(stub, &[STRIPE])[3], "Cannot find class, interface, enum, or type alias `Nowhere`.");
 }
 
 /// PHP# infers the effects of PHP# code, so an `extern` names only plain PHP.
@@ -11703,6 +11862,37 @@ fn an_extern_of_a_plain_php_class_is_accepted() {
         ("app/Stubs/Stripe.sharp", "namespace App.Stubs;\n\nimport Stripe.StripeClient;\n\nextern StripeClient;\n");
 
     assert_eq!(issues(stub, &[STRIPE]), Vec::<String>::new());
+}
+
+/// An `extern event` gives the plain PHP class it marks the effects its `uses` lists, spec section 15, as an `extern`
+/// of the class does, so creating the event has them.
+#[test]
+fn an_extern_event_gives_its_class_the_effects_it_lists() {
+    let events = (
+        "src/Queue/Events.php",
+        "<?php\n\nnamespace Illuminate\\Queue\\Events;\n\nfinal class JobFailed\n{\n    public function __construct(public int $id) {}\n}\n",
+    );
+    let failure = (
+        "app/Shop/Failure.sharp",
+        "namespace App.Shop;\n\nimport Illuminate.Queue.Events.JobFailed;\n\npublic class Failure\n{\n    public JobFailed last => new JobFailed(1);\n}\n",
+    );
+    let pure = (
+        "app/Stubs/Queue.sharp",
+        "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed;\n",
+    );
+    let database = (
+        "app/Stubs/Queue.sharp",
+        "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed uses Database;\n",
+    );
+
+    assert_eq!(issues(database, &[events]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[failure, events, pure]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[failure, events, database]),
+        [
+            "app/Shop/Failure.sharp:7:30 impure-getter: Getter `last` calls `JobFailed`, which has the effect `Database`. Getters must be pure."
+        ]
+    );
 }
 
 const LABEL: (&str, &str) = (
@@ -12160,6 +12350,23 @@ fn a_getter_creating_an_object_whose_super_call_has_an_effect_is_refused() {
         [
             "app/Shop/Stamp.sharp:25:24 impure-getter: Getter `late` reaches `Late.Late`, which calls `now` with the effect `Clock`. Getters must be pure.",
             "app/Shop/Stamp.sharp:27:26 impure-getter: Getter `child` reaches `Timed.Timed`, which calls `now` with the effect `Clock`. Getters must be pure.",
+        ]
+    );
+}
+
+/// `new Stamp.now()` runs the named constructor's body, so a getter reaches its effects, and those of its `: this(…)`.
+#[test]
+fn a_getter_creating_an_object_whose_named_constructor_has_an_effect_is_refused() {
+    let stamps = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n\n    public Stamp.zero() : this(0) { }\n    public Stamp.current() : this(now()) { }\n    public Stamp.logged() : this(0) { now(); }\n}\n\npublic class Card\n{\n    public int zero => new Stamp.zero().at;\n\n    public int current => new Stamp.current().at;\n\n    public int logged => new Stamp.logged().at;\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[stamps, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Stamp.sharp:16:27 impure-getter: Getter `current` reaches `Stamp.current`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:18:26 impure-getter: Getter `logged` reaches `Stamp.logged`, which calls `now` with the effect `Clock`. Getters must be pure.",
         ]
     );
 }
@@ -12707,10 +12914,6 @@ fn an_any_nullable_argument_fixes_the_type_argument_it_meets() {
     assert_eq!(issues(("src/Demo/Tools.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// A generic call in an argument takes the type arguments its parameter's type fixes only once that type holds no type
-/// parameter of the outer call that nothing has fixed yet. `this.pair(order, this.make())` fixes `make`'s `T` as
-/// `Order`, the first argument having fixed `pair`'s. `this.wrap(this.make())` fixes nothing, so it is refused, instead
-/// of giving `make` the outer call's own `T`.
 /// A plain PHP property typed by a template keeps upstream Mago's unchecked default, even one outside the template's
 /// bound. PHP# checks a type parameter's default, since a PHP# type parameter is opaque.
 #[test]
@@ -12729,6 +12932,10 @@ fn a_plain_php_class_string_checks_the_template_arguments_of_its_class() {
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["17:16 excess-template-parameter"]);
 }
 
+/// A generic call in an argument takes the type arguments its parameter's type fixes only once that type holds no type
+/// parameter of the outer call that nothing has fixed yet. `this.pair(order, this.make())` fixes `make`'s `T` as
+/// `Order`, the first argument having fixed `pair`'s. `this.wrap(this.make())` fixes nothing, so it is refused, instead
+/// of giving `make` the outer call's own `T`.
 #[test]
 fn a_call_in_an_argument_takes_no_type_argument_the_outer_call_has_not_fixed() {
     let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Shop\n{\n    public T make<T>() => this.make();\n\n    public T wrap<T>(T value) => value;\n\n    public List<T> pair<T>(T first, T second) => [first, second];\n\n    public List<Order> run(Order order)\n    {\n        this.wrap(this.make());\n        return this.pair(order, this.make());\n    }\n}\n";
@@ -12737,6 +12944,230 @@ fn a_call_in_an_argument_takes_no_type_argument_the_outer_call_has_not_fixed() {
         worded(("src/Demo/Shop.sharp", sharp), &[]),
         [
             "17:19 missing-template-parameter Nothing fixes the type argument `T` of the call to `Shop.make`. | `Shop.make` is called here | A generic method call takes its type arguments from its arguments, from the ones it writes and from the declared type its result goes into. | Write the type argument on the call, or give the result a declared type."
+        ]
+    );
+}
+
+/// Spec section 15: the interface a family of events shares and one of its events, each declared at file level in its
+/// own file.
+const ORDER_EVENTS: [(&str, &str); 2] = [
+    (
+        "app/Shop/OrderEvent.sharp",
+        "namespace App.Shop;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n",
+    ),
+    (
+        "app/Shop/OrderPaid.sharp",
+        "namespace App.Shop;\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n",
+    ),
+];
+
+/// Spec section 15: an event is a final class whose parameters are its public get-only properties, and its header
+/// names the interfaces it gives. So its properties read by name and its interface types it, a write is refused, and
+/// `new` checks its arguments as a constructor's.
+#[test]
+fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
+    let reader = (
+        "app/Shop/Reader.sharp",
+        "namespace App.Shop;\n\npublic class Reader\n{\n    public int read(OrderPaid paid) => paid.orderId + paid.amount;\n\n    public int family(OrderEvent event) => event.orderId;\n\n    public OrderEvent make() => new OrderPaid(1, amount: 2);\n}\n",
+    );
+    let writer = (
+        "app/Shop/Writer.sharp",
+        "namespace App.Shop;\n\npublic class Writer\n{\n    public void write(OrderPaid paid, OrderEvent event)\n    {\n        paid.orderId = 2;\n        event.orderId = 2;\n    }\n\n    public OrderPaid make() => new OrderPaid(\"one\");\n}\n",
+    );
+    let sub = ("app/Shop/Sub.sharp", "namespace App.Shop;\n\npublic class Sub : OrderPaid\n{\n}\n");
+
+    assert_eq!(worded(reader, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(
+        issues(writer, &ORDER_EVENTS),
+        ["7:14 invalid-property-write", "8:15 invalid-property-write", "11:46 invalid-argument"]
+    );
+    assert_eq!(
+        messages(writer, &ORDER_EVENTS),
+        [
+            "Cannot initialize readonly property `OrderPaid.orderId` from within `Writer`.",
+            "Cannot write to read-only property `OrderEvent.orderId` - property only has a get hook.",
+            "Invalid argument type for argument #1 of `OrderPaid.__construct`: expected `int`, but found `string`."
+        ]
+    );
+    assert_eq!(messages(sub, &ORDER_EVENTS), ["Class `Sub` cannot extend final class `OrderPaid`"]);
+}
+
+/// Spec section 15: no event extends another, so an event's header names interfaces only, and a type names an event
+/// only once: an interface, a class or another event of the same full name keeps the name.
+#[test]
+fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
+    let based = (
+        "app/Shop/Moved.sharp",
+        "namespace App.Shop;\n\npublic class Base\n{\n}\n\npublic event Moved(int id) : Base, OrderEvent;\n",
+    );
+    let twice =
+        ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id);\n\npublic event Moved(int id);\n");
+    let interface =
+        ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic interface Moved { }\n\npublic event Moved(int id);\n");
+    let class =
+        ("app/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n\npublic event Cart(int id);\n");
+
+    assert_eq!(messages(interface, &[]), ["Event `Moved` is already defined elsewhere."]);
+    assert_eq!(messages(class, &[]), ["Event `Cart` is already defined elsewhere."]);
+    assert_eq!(
+        worded(based, &ORDER_EVENTS),
+        [
+            "7:30 invalid-event An event's header names interfaces only, and `Base` is not one. | Named here. | No event extends another: a family of events shares an interface."
+        ]
+    );
+    assert_eq!(messages(twice, &ORDER_EVENTS), ["Event `Moved` is already defined elsewhere."]);
+}
+
+/// Spec section 15: the interface a family of events shares states the get-only properties each event gives, so an
+/// event or a class that names it and lacks one, or gives one that is not public, on each object and of its type, is
+/// refused, as the engine refuses the class it runs as. A get-only property may give a narrower type, and a PHP
+/// interface's property with `set` takes its type exactly. A class that names the interface answers for the property
+/// it inherits too, from a PHP# or a plain PHP base class, a base's `private` field included.
+#[test]
+fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
+    let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : OrderEvent;\n");
+    let class = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic class Moved : OrderEvent\n{\n}\n");
+    let typed = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(string orderId) : OrderEvent;\n");
+    let class_typed = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : OrderEvent\n{\n    public string orderId { get; }\n\n    public Kept(string orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n",
+    );
+    let private = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : OrderEvent\n{\n    private int orderId;\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n\n    public int read() => this.orderId;\n}\n",
+    );
+    let shared = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\npublic class Kept : OrderEvent\n{\n    public static int orderId { get; } = 1;\n}\n",
+    );
+    let named = (
+        "src/Shop/Named.php",
+        "<?php\n\nnamespace App\\Shop;\n\ninterface Named\n{\n    public int|string $id { get; set; }\n}\n",
+    );
+    let settable = (
+        "app/Shop/Tag.sharp",
+        "namespace App.Shop;\n\npublic class Tag : Named\n{\n    public int id { get; set; } = 0;\n}\n",
+    );
+    let given = (
+        "app/Shop/Moved.sharp",
+        "namespace App.Shop;\n\npublic event Moved(int orderId) : OrderEvent;\n\npublic class Kept : OrderEvent\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n\npublic interface Priced\n{\n    public int? total { get; }\n}\n\npublic class Bill : Priced\n{\n    public int total { get; }\n\n    public Bill(int total)\n    {\n        this.total = total;\n    }\n}\n",
+    );
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let string_base = (
+        "app/Shop/StringBase.sharp",
+        "namespace App.Shop;\n\npublic class StringBase\n{\n    public string orderId { get; } = \"x\";\n}\n",
+    );
+    let private_base = (
+        "app/Shop/PrivateBase.sharp",
+        "namespace App.Shop;\n\npublic class PrivateBase\n{\n    private int orderId = 1;\n\n    public int read() => this.orderId;\n}\n",
+    );
+    let legacy_base = (
+        "src/Legacy/LegacyBase.php",
+        "<?php\n\nnamespace Legacy;\n\nclass LegacyBase\n{\n    public string $orderId = 'x';\n}\n",
+    );
+    let int_base = (
+        "app/Shop/IntBase.sharp",
+        "namespace App.Shop;\n\npublic class IntBase\n{\n    public int orderId { get; } = 7;\n}\n",
+    );
+    let from_string =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : StringBase, OrderEvent\n{\n}\n");
+    let from_private =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : PrivateBase, OrderEvent\n{\n}\n");
+    let from_legacy = (
+        "app/Shop/Child.sharp",
+        "namespace App.Shop;\n\nimport Legacy.LegacyBase;\n\npublic class Child : LegacyBase, OrderEvent\n{\n}\n",
+    );
+    let from_int = ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : IntBase, OrderEvent\n{\n}\n");
+    let paid_event =
+        ("app/Shop/PaidEvent.sharp", "namespace App.Shop;\n\npublic interface PaidEvent : OrderEvent\n{\n}\n");
+    let below_named =
+        ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : StringBase, PaidEvent\n{\n}\n");
+    let wrong_base = (
+        "app/Shop/WrongBase.sharp",
+        "namespace App.Shop;\n\npublic class WrongBase : OrderEvent\n{\n    public string orderId { get; } = \"x\";\n}\n",
+    );
+    let from_wrong = ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : WrongBase\n{\n}\n");
+
+    assert_eq!(issues(event, &ORDER_EVENTS), ["3:14 unimplemented-abstract-property-hook"]);
+    assert_eq!(issues(class, &ORDER_EVENTS), ["3:14 unimplemented-abstract-property-hook"]);
+    assert_eq!(
+        worded(typed, &ORDER_EVENTS),
+        [
+            "3:27 incompatible-property-type `Moved` gives `orderId` as `string`, and `OrderEvent` states it as `int`. | Given here. | Stated here. | Give `orderId` the type `int`."
+        ]
+    );
+    assert_eq!(
+        worded(class_typed, &ORDER_EVENTS),
+        [
+            "5:19 incompatible-property-type `Kept` gives `orderId` as `string`, and `OrderEvent` states it as `int`. | Given here. | Stated here. | Give `orderId` the type `int`."
+        ]
+    );
+    assert_eq!(
+        worded(private, &ORDER_EVENTS),
+        [
+            "5:17 incompatible-property-access `Kept` gives `orderId` as `private`, and `OrderEvent` states it `public`. | Given here. | Stated here. | Declare `orderId` `public`."
+        ]
+    );
+    assert_eq!(
+        worded(shared, &ORDER_EVENTS),
+        [
+            "5:23 incompatible-static-modifier `Kept` gives `orderId` as `static`, and `OrderEvent` states it on each object. | Given here. | Stated here. | Remove `static`."
+        ]
+    );
+    assert_eq!(
+        worded(settable, &[named]),
+        [
+            "5:16 incompatible-property-type `Tag` gives `id` as `int`, and `Named` states it as `int|string`. | Given here. | Stated here. | Give `id` the type `int|string`."
+        ]
+    );
+    assert_eq!(worded(given, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(
+        worded(from_string, &[order_event, order_paid, string_base]),
+        [
+            "3:14 incompatible-property-type `Child` gives `orderId` as `string`, from `StringBase`, and `OrderEvent` states it as `int`. | Inherited here. | Declared here. | Stated here. | Give `orderId` the type `int` in `StringBase`."
+        ]
+    );
+    assert_eq!(
+        worded(from_private, &[order_event, order_paid, private_base]),
+        [
+            "3:14 incompatible-property-access `Child` gives `orderId` as `private`, from `PrivateBase`, and `OrderEvent` states it `public`. | Inherited here. | Declared here. | Stated here. | Declare `orderId` `public` in `PrivateBase`."
+        ]
+    );
+    assert_eq!(
+        worded(from_legacy, &[order_event, order_paid, legacy_base]),
+        [
+            "5:14 incompatible-property-type `Child` gives `orderId` as `string`, from `LegacyBase`, and `OrderEvent` states it as `int`. | Inherited here. | Declared here. | Stated here. | Give `orderId` the type `int` in `LegacyBase`."
+        ]
+    );
+    assert_eq!(worded(from_int, &[order_event, order_paid, int_base]), Vec::<String>::new());
+    assert_eq!(
+        issues(below_named, &[order_event, order_paid, string_base, paid_event]),
+        ["3:14 incompatible-property-type"]
+    );
+    assert_eq!(issues(from_wrong, &[order_event, order_paid, wrong_base]), Vec::<String>::new());
+}
+
+/// A generic interface states its property in its type parameter's terms, and a class's header gives the type
+/// argument: under `: Holder<int>` the class gives `item` as `int`, or as a narrower type.
+#[test]
+fn a_generic_interface_states_its_property_with_the_type_argument_the_header_gives() {
+    let holder = (
+        "app/Shop/Holder.sharp",
+        "namespace App.Shop;\n\npublic interface Holder<TItem>\n{\n    public TItem item { get; }\n}\n",
+    );
+    let kept = |item: &str| {
+        let code = format!(
+            "namespace App.Shop;\n\npublic class Kept : Holder<int>\n{{\n    public {item} item {{ get; }}\n\n    public Kept({item} item)\n    {{\n        this.item = item;\n    }}\n}}\n"
+        );
+
+        ("app/Shop/Kept.sharp", Box::leak(code.into_boxed_str()) as &'static str)
+    };
+
+    assert_eq!(worded(kept("int"), &[holder]), Vec::<String>::new());
+    assert_eq!(
+        worded(kept("string"), &[holder]),
+        [
+            "5:19 incompatible-property-type `Kept` gives `item` as `string`, and `Holder` states it as `int`. | Given here. | Stated here. | Give `item` the type `int`."
         ]
     );
 }

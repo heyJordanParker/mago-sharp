@@ -41,6 +41,15 @@ public class Report
         this.name = "report";
     }
 
+    protected Report.fresh(int start) : this(start, new Calc(start), 0)
+    {
+        if (start < 0) {
+            return;
+        }
+        this.name = "fresh";
+        const read = () => this.count;
+    }
+
     public int run([Field] [Entity(false)] int extra, float rate = 1.5, string label = "\u{41}\n", bool strict = !false)
     {
         let total = extra * 2 + 1;
@@ -106,6 +115,7 @@ public class Report
         const made = Calc.make();
         const read = calc.rate;
         const fresh = new Calc(1, rate: 2);
+        const copy = new Report.fresh(1);
         const chained = Calc.make().add(1).rate;
         const sum = Calc.make().add(1, 2);
         const big = 0xFFFFFFFFFFFFFFFF;
@@ -468,3 +478,19 @@ public static class Slug
 
     public static string join(string title) => title + Slug.SEPARATOR;
 }
+
+public interface OrderEvent
+{
+    public int orderId { get; }
+}
+
+public event OrderPaid(int orderId, int amount = 0) : OrderEvent;
+
+public class Order
+{
+    public OrderPaid pay(int orderId) => new OrderPaid(orderId);
+
+    public int amountOf(OrderPaid paid) => paid.amount;
+}
+
+public event Shipped(int shipmentId);

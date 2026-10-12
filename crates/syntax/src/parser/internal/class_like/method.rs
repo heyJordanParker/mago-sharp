@@ -11,6 +11,7 @@ use crate::cst::cst::MethodAbstractBody;
 use crate::cst::cst::MethodBody;
 use crate::cst::cst::MethodExpressionBody;
 use crate::cst::cst::Modifier;
+use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::Operator;
 use crate::cst::sequence::Sequence;
 use crate::error::ParseError;
@@ -49,8 +50,9 @@ where
     /// The type is parsed once, and the name after it decides: a name followed by `(`, or by `<` and its type
     /// parameters, makes a method, anything else a field. A type has no length limit, so no fixed lookahead can decide before it. A PHP property, which starts
     /// with `var` or a `$` variable, still parses so the rest of the class does, and its PHP syntax is an error. So do
-    /// a named constructor and `required` on any member but the constructor, which are one "not supported yet" error
-    /// each.
+    /// `required` on any member but the constructor, which is one "not supported yet" error, and a type declared inside
+    /// the class-like. A class name, a `.` and a name followed by `(` is a named constructor. `class` followed by `<`
+    /// is the type `Class<Order>`, since a declared class names itself first.
     pub(crate) fn parse_sharp_member_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -60,6 +62,12 @@ where
             return Ok(ClassLikeMember::Property(
                 self.parse_property_with_attributes_and_modifiers(attributes, modifiers)?,
             ));
+        }
+        if self.is_at_event()?
+            || matches!(self.stream.peek_kind(0)?, Some(T!["interface" | "enum" | "trait"]))
+            || (self.stream.is_at(T!["class"])? && self.stream.peek_kind(1)? != Some(T!["<"]))
+        {
+            return Err(self.parse_nested_type(attributes, modifiers)?);
         }
 
         // `required` or `extern` written before any other modifier starts the member's modifiers.
@@ -75,22 +83,21 @@ where
         };
 
         let hint = self.parse_type_hint()?;
-        // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1, parses whole
-        // and is left out of the class, which parses on.
+        // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1.
         if let Hint::Identifier(Identifier::Local(class)) = hint
             && self.stream.is_at(T!["."])?
             && self.stream.peek_kind(2)? == Some(T!["("])
         {
-            self.stream.consume()?;
-            let name = class.span.join(self.parse_local_identifier()?.span);
-            self.parse_function_like_parameter_list()?;
-            if self.stream.is_at(T![":"])? {
-                self.stream.consume()?;
-                self.parse_expression()?;
-            }
-            self.parse_method_body()?;
-
-            return Err(ParseError::NotSupportedYetInSharp("A named constructor", name));
+            return Ok(ClassLikeMember::NamedConstructor(NamedConstructor {
+                attribute_lists: attributes,
+                modifiers,
+                class,
+                dot: self.stream.eat_span(T!["."])?,
+                name: self.parse_local_identifier()?,
+                parameter_list: self.parse_function_like_parameter_list()?,
+                initializer: self.parse_optional_constructor_initializer()?,
+                body: self.parse_method_body()?,
+            }));
         }
         if let Hint::Identifier(Identifier::Local(name)) = hint
             && self.stream.is_at(T!["("])?
@@ -152,6 +159,42 @@ where
             initializer: None,
             body: self.parse_method_body()?,
         }))
+    }
+
+    /// Parses a type declared inside a PHP# class-like whole, so the class-like parses on, and returns its refusal:
+    /// every type, events and interfaces included, is declared in its own file. The caller has seen `event Name(`,
+    /// `interface`, `class`, `enum` or `trait`.
+    fn parse_nested_type(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+    ) -> Result<ParseError, ParseError> {
+        // The nested type's own members overwrite which class-like the parser reads.
+        let owner = self.state.members_of;
+        let (name, span) = match self.stream.peek_kind(0)? {
+            Some(T!["interface"]) => {
+                let interface = self.parse_interface_with_attributes_and_modifiers(attributes, modifiers)?;
+                (interface.name, interface.span())
+            }
+            Some(T!["class"]) => {
+                let class = self.parse_class_with_attributes_and_modifiers(attributes, modifiers)?;
+                (class.name, class.span())
+            }
+            Some(T!["enum"]) => {
+                let r#enum = self.parse_enum_with_attributes_and_modifiers(attributes, modifiers)?;
+                (r#enum.name, r#enum.span())
+            }
+            Some(T!["trait"]) => {
+                let r#trait = self.parse_trait_with_attributes_and_modifiers(attributes, modifiers)?;
+                (r#trait.name, r#trait.span())
+            }
+            _ => {
+                let event = self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?;
+                (event.name, event.span())
+            }
+        };
+
+        Ok(ParseError::NestedTypeInSharp(owner, String::from_utf8_lossy(name.value).into(), span))
     }
 
     /// Parses a PHP# constructor's `: super(…)` or `: this(…)`, spec section 9.1. Anything else after `:`, such as
@@ -221,7 +264,7 @@ where
 
     /// Parses the operator's symbol after `operator`, which is one of the binary operators. Semantics decides which of
     /// them a class declares. Any other token, such as `!`, is an error that names the operators a class declares: the
-    /// operator parses whole and is left out of the class, which parses on, as a named constructor is.
+    /// operator parses whole and is left out of the class, which parses on.
     fn parse_operator_symbol(&mut self) -> Result<BinaryOperator<'arena>, ParseError> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let symbol: fn(Span) -> BinaryOperator<'arena> = match token.kind {

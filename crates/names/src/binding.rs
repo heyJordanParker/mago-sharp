@@ -7,6 +7,7 @@ use mago_syntax::cst::FunctionLikeReturnTypeHint;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::TypeParameterList;
@@ -61,7 +62,7 @@ pub struct MethodParts<'ast, 'arena> {
     pub span: Span,
     pub attribute_lists: &'ast Sequence<'arena, AttributeList<'arena>>,
     pub modifiers: &'ast Sequence<'arena, Modifier<'arena>>,
-    /// The method's PHP# type parameters. An operator declares none.
+    /// The method's PHP# type parameters. An operator and a named constructor declare none.
     pub type_parameters: Option<&'ast TypeParameterList<'arena>>,
     pub parameter_list: &'ast FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<&'ast FunctionLikeReturnTypeHint<'arena>>,
@@ -105,6 +106,25 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             returns_value: true,
             returns_by_reference: false,
         })
+    }
+
+    /// The parts of a named constructor, spec section 9.1, which runs as the static method of its name. Its body runs
+    /// on the object `: this(…)` creates and returns nothing.
+    #[must_use]
+    pub fn of_named_constructor(named_constructor: &'ast NamedConstructor<'arena>) -> Self {
+        Self {
+            name: named_constructor.name.value,
+            name_span: named_constructor.name.span,
+            span: named_constructor.span(),
+            attribute_lists: &named_constructor.attribute_lists,
+            modifiers: &named_constructor.modifiers,
+            type_parameters: None,
+            parameter_list: &named_constructor.parameter_list,
+            return_type_hint: None,
+            body: &named_constructor.body,
+            returns_value: false,
+            returns_by_reference: false,
+        }
     }
 }
 

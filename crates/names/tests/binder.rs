@@ -585,6 +585,23 @@ fn a_law_binds_its_parameters_as_its_own_locals_and_their_types_through_the_impo
     assert_eq!(names.binding_errors(), []);
 }
 
+/// A named constructor binds as a constructor does, spec section 9.1: its parameters are locals of that constructor
+/// alone, in its `: this(…)` as in its body, its body reads `this`, and `new` names its class as any class name.
+#[test]
+fn a_named_constructor_binds_its_parameters_as_its_own_locals_and_this() {
+    const CODE: &str = "namespace App.Shared;\n\nimport App.Billing.Currency;\n\nclass Money\n{\n    public Money(public int cents { get; }) { }\n\n    public Money.of(Currency currency, int amount) : this(amount) { this.add(amount); }\n\n    public Money.zero(int amount) : this(amount) { }\n\n    public static Money make() => new Money.zero(0);\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(resolved(&names, CODE, "Currency currency", 0), b"App\\Billing\\Currency");
+    assert_eq!(binding(&names, CODE, "amount", 1), Some(local(CODE, "amount", 0, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "amount", 2), Some(local(CODE, "amount", 0, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "amount", 4), Some(local(CODE, "amount", 3, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "this.add", 0), Some(Binding::This));
+    assert_eq!(resolved(&names, CODE, "Money.zero(0)", 0), b"App\\Shared\\Money");
+    assert_eq!(names.binding_errors(), []);
+}
+
 /// A bare `extern` target that the file does not import is a global function, since PHP# has no functions of its own.
 #[test]
 fn a_bare_extern_target_that_is_not_imported_is_a_global_function() {

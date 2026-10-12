@@ -38,7 +38,9 @@ use mago_syntax::cst::Construct;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DirectVariable;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOf;
@@ -49,6 +51,7 @@ use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::GenericHint;
 use mago_syntax::cst::Global;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
@@ -66,6 +69,7 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
@@ -129,8 +133,12 @@ const ANY: &[u8] = b"Any";
 /// - At file level: `namespace`, `import`, `class`, `interface` and `enum`. A file has at most one namespace, named
 ///   and written without braces.
 /// - A class: attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters, an optional
-///   `: Base, Interface` header, constants, fields, properties, methods, operators and laws, with no other modifiers,
-///   `extends` or `implements`. The engine tells the base class from the interfaces when it links the class.
+///   `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no
+///   other modifiers, `extends` or `implements`. The engine tells the base class from the interfaces when it links the
+///   class.
+/// - A named constructor, spec section 9.1: an access modifier, its class's name, a `.` and its own name, parameters
+///   that declare no property, `: this(…)` without `this` in its arguments, and a body. `check_named_constructor`
+///   decides each part, and an interface, an enum and a static class declare none.
 /// - A law, spec section 28, in a class or an enum: `law`, a name, parameters checked as a method's and an expression
 ///   body. `check_members` refuses a default and a variadic parameter, because a law's parameters range over every
 ///   value.
@@ -281,8 +289,8 @@ const ANY: &[u8] = b"Any";
 ///   static field or property there is an error when this file declares it, and the analyzer reports it otherwise.
 /// - In expressions: literals, list literals `[a, b]` and `[...a, b]`, map literals `["key": value]` and `[:]`, index reads
 ///   `value[key]`, templates, parentheses, bare names, assignment, the operators below, and method calls and property
-///   reads written with `.` or `?.` and a member name, `new Class(...)` on a class written by its short name,
-///   `new Self(...)` in a class whose constructor is `required`, calls of a function by its bare name,
+///   reads written with `.` or `?.` and a member name, `new Class(...)` and `new Class.name(...)` on a class written by
+///   its short name, `new Self(...)` in a class whose constructor is `required`, calls of a function by its bare name,
 ///   `super.method(...)`, which calls the parent's method, and `Self.method(...)`, which calls a static method of the
 ///   class a static method is called on, each with positional, named and spread arguments, as in
 ///   `Money.sum(...prices)` and `max(...prices)`, `throw`, which is an expression as in PHP, `exit(code)` and
@@ -418,10 +426,12 @@ pub enum Place {
     Signature,
     /// An enum and its members.
     Enum,
-    /// The types of a class, interface or enum header, written after `:`.
+    /// The types of a class, interface, enum or event header, written after `:`.
     Header,
     /// The type parameters of a class, an interface or a method: each one's variance, name and bound.
     TypeParameter,
+    /// An event, spec section 15: its modifiers, parameters and header.
+    Event,
     /// A module and its members.
     Module,
     /// A field or a property, both of which the CST calls a property: its modifiers, type and name.
@@ -536,6 +546,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Keyword(_) | Node::LocalIdentifier(_) | Node::Identifier(Identifier::Local(_)), _) => Some(place),
         (Node::Terminator(Terminator::Semicolon(_)), _) => Some(place),
+        (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
 
         (
             Node::Program(_)
@@ -546,7 +557,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Statement::Module(_)
                 | Statement::Class(_)
                 | Statement::Interface(_)
-                | Statement::Enum(_),
+                | Statement::Enum(_)
+                | Statement::Event(_),
             )
             | Node::Namespace(_)
             | Node::NamespaceBody(_)
@@ -568,15 +580,32 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             if class.modifiers.contains_static() {
                 check_static_class(class, context);
             }
+            for member in &class.members {
+                if let ClassLikeMember::NamedConstructor(constructor) = member {
+                    check_named_constructor(constructor, class, context);
+                }
+            }
 
             Some(Class)
         }
-        // The walk checks a class's, an interface's and an enum's name in `check_class_name`.
+        // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
+        (Node::Event(_), File) => Some(Place::Event),
+        (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
+        (Node::Modifier(modifier), Place::Event) => {
+            context.report(
+                Issue::error("An event takes only `public`.")
+                    .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier."))
+                    .with_note("An event runs as a final class, and its parameters are its public get-only properties."),
+            );
+
+            None
+        }
+        (Node::FunctionLikeParameter(parameter), Place::Event) => check_event_parameter(parameter, context),
         (Node::Module(module), File) => check_module_file_name(module, context),
         (Node::ModuleMember(ModuleMember::Law(_)), Place::Module) => Some(Place::Module),
-        (Node::FunctionLikeParameterList(parameters), Method | Signature) => {
+        (Node::FunctionLikeParameterList(parameters), Method | Signature | Place::Event) => {
             report_optional_before_required(parameters, context);
 
             Some(place)
@@ -613,7 +642,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Class,
         ) => Some(Class),
-        (Node::Inheritance(inheritance), Class | Interface | Enum) => {
+        (Node::Inheritance(inheritance), Class | Interface | Enum | Place::Event) => {
             check_header(inheritance, place, context);
 
             Some(Header)
@@ -657,6 +686,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(Hint::Generic(_)), Place::TypeParameter) => Some(Parameter),
         (Node::Modifier(Modifier::Public(_)), Interface | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
+        // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
+        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
+            if is_interface_property(property) =>
+        {
+            Some(FieldOrProperty)
+        }
         (Node::Modifier(modifier), Signature) => {
             context.report(
                 Issue::error("An interface method takes no modifier: every interface method is public.")
@@ -699,7 +734,25 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Law(_)), Class | Enum) => Some(place),
         // A law's parameters and body are checked as a method's. `check_members` refuses a default and a variadic one.
         (Node::Law(_), Class | Enum | Place::Module) => Some(Method),
-        (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Class) => Some(Class),
+        (Node::ClassLikeMember(ClassLikeMember::Operator(_) | ClassLikeMember::NamedConstructor(_)), Class) => {
+            Some(Class)
+        }
+        // A named constructor's parts are a method's, and `check_named_constructor` decides its class, name, modifiers
+        // and `: this(…)` when the walk enters its class.
+        (Node::NamedConstructor(_), Class) => Some(Method),
+        (Node::ClassLikeMember(ClassLikeMember::NamedConstructor(constructor)), Interface | Enum) => {
+            let message = if place == Interface {
+                "An interface has no constructor: a named constructor creates an object of its own class."
+            } else {
+                "An enum has no constructor: its cases are its only values."
+            };
+            context.report(
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(constructor.name.span).with_message("Declared here.")),
+            );
+
+            None
+        }
         // An operator's parts are a method's, and `check_operator` decides its modifiers and its symbol, the one binary
         // operator a method's parts hold.
         (Node::Operator(operator), Class) => {
@@ -910,17 +963,22 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::MethodAbstractBody(_),
             Method,
         ) => Some(Method),
-        (Node::ConstructorInitializer(initializer), Method) if !initializer.is_super() => {
+        (Node::ConstructorInitializer(initializer), Method)
+            if initializer.is_super() == is_named_constructor_initializer(initializer, context.program) =>
+        {
+            let message = if initializer.is_super() {
+                "A named constructor passes control to the main constructor with `: this(…)`."
+            } else {
+                "The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`."
+            };
             context.report(
-                Issue::error(
-                    "The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.",
-                )
-                .with_annotation(Annotation::primary(initializer.keyword.span).with_message("Written here.")),
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(initializer.keyword.span).with_message("Written here.")),
             );
 
             None
         }
-        // `: super(…)`'s arguments are a method body's expressions, without `this`.
+        // The arguments of `: super(…)` and `: this(…)` are a method body's expressions, without `this`.
         (Node::ConstructorInitializer(initializer), Method) => {
             report_this_in_initializer(initializer, context);
 
@@ -1447,6 +1505,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // `check_instantiation` reported PHP's `self` and `static`.
         (
             Node::Instantiation(_)
+            | Node::ConstructorName(_)
             | Node::Expression(
                 Expression::Identifier(Identifier::Local(_)) | Expression::Self_(_) | Expression::Static(_),
             ),
@@ -1742,6 +1801,9 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
             {
                 report("A static class has no constructor.".to_owned(), method.name.span, "Declared here.");
             }
+            ClassLikeMember::NamedConstructor(constructor) => {
+                report("A static class has no constructor.".to_owned(), constructor.name.span, "Declared here.");
+            }
             ClassLikeMember::Method(method) if !method.is_static() && !is_extern(method) => {
                 report(non_static(method.name.value), method.name.span, "Declared without `static` here.");
             }
@@ -1780,6 +1842,67 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
         Place::Method,
         context,
     )
+}
+
+/// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
+/// effects its `uses` lists.
+fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let Identifier::Dotted(target) = &r#extern.target else {
+        return Some(Place::File);
+    };
+
+    let issue =
+        Issue::error(format!("An `extern event` names a class, and `{}` names a member.", BytesDisplay(target.value)))
+            .with_annotation(Annotation::primary(target.span).with_message("Named here."))
+            .with_help("Name the event's class, as in `extern event JobFailed;`.");
+
+    report_refusal(issue, r#extern.span(), Place::File, context)
+}
+
+/// Decides an event's parameter, which runs as a public get-only property of the event, spec section 15: a type, a
+/// name and an optional default. PHP refuses a variadic promoted property, and the event decides the property's
+/// access, so a modifier, accessors and `...` are refused. The rest is checked as a method's parameter.
+fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let remove = |span: Span, message: &str| {
+        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
+    };
+    let issue = if let Some(modifier) = parameter.modifiers.first() {
+        remove(
+            modifier.span(),
+            "An event's parameter takes no modifier: it is a public get-only property of the event.",
+        )
+    } else if let Some(accessors) = &parameter.hooks {
+        remove(accessors.span(), "An event's parameter takes no accessors: it is a get-only property of the event.")
+    } else if let Some(ellipsis) = parameter.ellipsis {
+        remove(ellipsis, "An event's parameter cannot be variadic: it is one property of the event.")
+    } else if let Some(Hint::Generic(set) | Hint::Nullable(NullableHint { hint: Hint::Generic(set), .. })) =
+        &parameter.hint
+        && set.name.value == b"Set"
+    {
+        Issue::error("A `Set` parameter of an event is not supported yet in PHP#.")
+            .with_annotation(Annotation::primary(set.span()).with_message("Not supported yet."))
+            .with_note("An event's parameter is its property, and an event cannot yet make its argument a `Set`.")
+    } else {
+        return enter(Node::FunctionLikeParameter(parameter), Place::Method, context);
+    };
+
+    report_refusal(issue, parameter.span(), Place::Parameter, context)
+}
+
+/// Whether the slice has an interface property: `public`, a type, a name and `{ get; }`, which PHP runs as an
+/// interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15.
+/// PHP's own check reports one without `public`.
+fn is_interface_property(property: &HookedProperty) -> bool {
+    property.attribute_lists.is_empty()
+        && property.var.is_none()
+        && property.modifiers.iter().all(|modifier| matches!(modifier, Modifier::Public(_)))
+        && property.hint.is_some()
+        && matches!(property.item, PropertyItem::Abstract(_))
+        && property.initial_value.is_none()
+        && matches!(
+            property.hook_list.hooks.as_slice(),
+            [accessor] if accessor.name.value == b"get" && is_slice_accessor(accessor) && matches!(accessor.body, PropertyHookBody::Abstract(_))
+        )
 }
 
 /// Reports each name in a `uses` that is no effect, spec section 29. A name is an effect when it resolves to one of the
@@ -3211,6 +3334,117 @@ fn has_required_constructor(class: &ClassLike) -> bool {
     })
 }
 
+/// Checks a named constructor of `class`, spec section 9.1: its class has objects of its own, it is declared on its own
+/// class's name, as in `Artifact.fromJson`, takes only an access modifier, has a name that is neither its class's nor
+/// one PHP reserves, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
+/// another member of the class has, as PHP's duplicate-method check, since the named constructor runs as the static
+/// method of its name. A generic class declares none yet: the static method would need its class's type arguments,
+/// which reach a static member of a generic class in R4.
+fn check_named_constructor(constructor: &NamedConstructor, class: &Class, context: &mut Context<'_, '_, '_>) {
+    let class_name = BytesDisplay(class.name.value);
+    let name = BytesDisplay(constructor.name.value);
+    if class.type_parameters.is_some() {
+        context.report(
+            Issue::error(format!(
+                "A named constructor is not supported yet in a generic class, because it runs as a static method every `{class_name}<…>` shares."
+            ))
+            .with_annotation(Annotation::primary(constructor.name.span).with_message("Not supported yet."))
+            .with_note(format!("The main constructor is supported, as in `new {class_name}<Order>(…)`.")),
+        );
+
+        return;
+    }
+
+    let mut report = |message: String, span: Span, written: &str| {
+        context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
+    };
+
+    if class.modifiers.contains_abstract() {
+        report(
+            "An abstract class has no objects of its own, so it declares no named constructor.".to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    if constructor.class.value != class.name.value {
+        report(
+            format!("A named constructor is declared on its own class, as in `{class_name}.{name}`."),
+            constructor.class.span,
+            "Written here.",
+        );
+    }
+
+    if constructor.name.value.eq_ignore_ascii_case(class.name.value) {
+        report(
+            format!(
+                "A named constructor cannot have its class's name: `new {class_name}(…)` calls the main constructor."
+            ),
+            constructor.name.span,
+            "Declared here.",
+        );
+    } else if constructor.name.value.starts_with(b"__") {
+        report(
+            "A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods."
+                .to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    for modifier in &constructor.modifiers {
+        if !modifier.is_read_visibility() {
+            report(
+                format!(
+                    "A named constructor takes only `public`, `protected` or `private`: remove `{}`.",
+                    BytesDisplay(modifier.get_keyword().value)
+                ),
+                modifier.span(),
+                "Written here.",
+            );
+        }
+    }
+
+    if !constructor.modifiers.iter().any(Modifier::is_read_visibility) {
+        report(
+            "A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    if constructor.initializer.is_none() {
+        report(
+            "A named constructor passes control to the main constructor with `: this(…)`.".to_owned(),
+            constructor.name.span,
+            "Declared without `: this(…)` here.",
+        );
+    }
+
+    for modifier in constructor.parameter_list.parameters.iter().flat_map(|parameter| parameter.modifiers.iter()) {
+        report(
+            "A named constructor's parameter declares no property: only the main constructor's parameters do."
+                .to_owned(),
+            modifier.span(),
+            "Written here.",
+        );
+    }
+
+    if let MethodBody::Abstract(body) = &constructor.body {
+        report("A named constructor needs a body, even an empty `{ }`.".to_owned(), body.span(), "Written here.");
+    }
+}
+
+/// Whether `: this(…)` or `: super(…)` belongs to a named constructor rather than to the main one.
+fn is_named_constructor_initializer(initializer: &ConstructorInitializer, program: &Program) -> bool {
+    enclosing_class(program, initializer.span()).is_some_and(|class| {
+        class.members.iter().any(|member| {
+            matches!(member, ClassLikeMember::NamedConstructor(constructor)
+                if constructor.initializer.as_ref().is_some_and(|written| written.span() == initializer.span()))
+        })
+    })
+}
+
 /// Whether a parameter belongs to a class's constructor, the one method where an access modifier declares a property.
 fn is_constructor_parameter(parameter: &FunctionLikeParameter, program: &Program) -> bool {
     enclosing_class(program, parameter.span()).is_some_and(|class| {
@@ -3547,12 +3781,12 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// What the slice has at a place, as the note of a refusal there.
 const fn supported(place: Place) -> &'static str {
     match place {
-        Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface` and `enum`.",
+        Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
         Place::Class => {
-            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, operators and laws, with no other modifiers, `extends` or `implements`."
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header and methods, with no attributes, other modifiers, `extends`, constants or properties."
+            "A PHP# interface has an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and `public` get-only properties, as in `public int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
             "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
@@ -3565,6 +3799,9 @@ const fn supported(place: Place) -> &'static str {
         }
         Place::TypeParameter => {
             "A PHP# type parameter is a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<TItem : DatabaseEntity & Shareable>`."
+        }
+        Place::Event => {
+            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
         Place::Module => "A PHP# module states laws.",
         Place::FieldOrProperty => {
@@ -3589,7 +3826,7 @@ const fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -3798,6 +4035,27 @@ pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, 
     } else {
         check_capitalized(class_name.value, class_name.span, context);
     }
+}
+
+/// Checks an event's name as a class's: PHP refuses a class named with a reserved keyword, as `Empty`, and an event
+/// runs as a class, spec section 15.
+#[inline]
+pub fn check_event_name(event: &Event, context: &mut Context<'_, '_, '_>) {
+    let name = event.name.value;
+    if RESERVED_KEYWORDS
+        .iter()
+        .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
+        .any(|keyword| keyword.eq_ignore_ascii_case(name))
+    {
+        context.report(
+            Issue::error(format!("Event `{}` name cannot be a reserved keyword.", BytesDisplay(name)))
+                .with_annotation(Annotation::primary(event.name.span).with_message("A reserved keyword."))
+                .with_note("An event runs as a class, and PHP reserves this name.")
+                .with_help("Rename the event."),
+        );
+    }
+
+    check_class_name(&event.name, context);
 }
 
 /// Reports a type name or a namespace part a PHP# file gives that does not start with a capital letter, A to Z, as

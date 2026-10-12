@@ -763,7 +763,8 @@ where
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
     /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
-    /// the class `new` names decides when no class declares one.
+    /// the class `new` names decides when no class declares one. A named constructor is the class's own, spec section
+    /// 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
         let class_name = match instantiation.class.unparenthesized() {
@@ -777,11 +778,18 @@ where
         };
 
         let span = instantiation.span();
-        let constructor = word(b"__construct");
-        let declaring = codebase
-            .get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
-            .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
-            .unwrap_or(class);
+        let (declaring, constructor) = match &instantiation.constructor {
+            Some(constructor) => (class, ascii_lowercase_word(constructor.name.value)),
+            None => {
+                let constructor = word(b"__construct");
+                let declaring = codebase
+                    .get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
+                    .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
+                    .unwrap_or(class);
+
+                (declaring, constructor)
+            }
+        };
         if declaring.flags.is_sharp() {
             let Some(metadata) = codebase.get_method(declaring.name.as_bytes(), constructor.as_bytes()) else {
                 return;

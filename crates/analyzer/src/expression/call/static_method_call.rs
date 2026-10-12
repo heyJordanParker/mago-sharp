@@ -1,5 +1,7 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
@@ -8,6 +10,7 @@ use mago_syntax::cst::TypeArgumentList;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
@@ -27,6 +30,7 @@ use crate::plugin::hook::StaticCall;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_member;
+use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodCall<'arena> {
     fn analyze<'ctx, A>(
@@ -125,6 +129,20 @@ where
             resolved_method.method_identifier.get_method_name(),
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, call.span);
+
+        // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static
+        // method it runs as.
+        if context.dialect.is_sharp() && method_metadata.flags.is_named_constructor() {
+            let constructor = quoted_source(context, call.class.span().join(call.method.span()));
+            context.collector.report_with_code(
+                IssueCode::NamedConstructorWithoutNew,
+                Issue::error(format!(
+                    "`{constructor}` is a constructor: write `new {}`.",
+                    quoted_source(context, call.span)
+                ))
+                .with_annotation(Annotation::primary(call.span).with_message("Called without `new` here.")),
+            );
+        }
 
         let method_target_context = MethodTargetContext {
             invocation_kind: MethodInvocationKind::Static,

@@ -6,8 +6,12 @@ use mago_names::resolver::NameResolver;
 use mago_syntax::parser::parse_file;
 
 fn fingerprint_code(code: &'static [u8]) -> u64 {
+    fingerprint_file(b"test.php", code)
+}
+
+fn fingerprint_file(name: &'static [u8], code: &'static [u8]) -> u64 {
     let arena = LocalArena::new();
-    let file = File::ephemeral(b"test.php".into(), code.into());
+    let file = File::ephemeral(name.into(), code.into());
     let program = parse_file(&arena, &file);
     assert!(!program.has_errors(), "Parse failed: {:?}", program.errors);
     let resolved_names = NameResolver::new(&arena).resolve(program);
@@ -78,4 +82,25 @@ fn test_instantiation_no_parens_vs_with_args() {
     let with_args = fingerprint_code(b"<?php $a = new Foo(1);");
 
     assert_ne!(no_parens, with_args, "Instantiation without parens should differ from instantiation with arguments");
+}
+
+/// Spec section 9.1: `new Artifact.fromJson(…)` and `new Artifact.copy(…)` call two named constructors, and
+/// `new Artifact(…)` the main one, so each fingerprints apart.
+#[test]
+fn test_instantiation_with_another_named_constructor_differs() {
+    let from_json = fingerprint_file(
+        b"test.sharp",
+        b"namespace App;\n\nclass Use\n{\n    public static Artifact make() => new Artifact.fromJson(\"{}\");\n}\n",
+    );
+    let copy = fingerprint_file(
+        b"test.sharp",
+        b"namespace App;\n\nclass Use\n{\n    public static Artifact make() => new Artifact.copy(\"{}\");\n}\n",
+    );
+    let main = fingerprint_file(
+        b"test.sharp",
+        b"namespace App;\n\nclass Use\n{\n    public static Artifact make() => new Artifact(\"{}\");\n}\n",
+    );
+
+    assert_ne!(from_json, copy, "Instantiations naming different named constructors should differ");
+    assert_ne!(from_json, main, "A named constructor should differ from the main constructor");
 }

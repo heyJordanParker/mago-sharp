@@ -43,6 +43,18 @@ where
         Some(self.lower_method_parts(parts, name, owner))
     }
 
+    /// Lowers a PHP# named constructor as the static method it runs as, spec section 9.1.
+    pub(crate) fn lower_named_constructor(
+        &mut self,
+        named_constructor: &'scratch cst::NamedConstructor<'scratch>,
+        owner: Identifier<'arena>,
+    ) -> Method<'arena, (), (), ()> {
+        let parts = MethodParts::of_named_constructor(named_constructor);
+        let name = Name { span: parts.name_span, value: self.interner.intern(parts.name) };
+
+        self.lower_method_parts(parts, name, owner)
+    }
+
     fn lower_method_parts(
         &mut self,
         parts: MethodParts<'scratch, 'scratch>,

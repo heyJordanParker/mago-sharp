@@ -36,10 +36,12 @@ use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::ExitConstruct;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::For;
@@ -50,6 +52,7 @@ use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Inheritance;
@@ -66,6 +69,7 @@ use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::NamedArgument;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafePropertyAccess;
@@ -473,6 +477,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Class(class) => statements.push(self.class(class)),
             Statement::Interface(interface) => statements.push(self.interface(interface)),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
+            Statement::Event(event) => statements.push(self.event(event)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
         }
     }
@@ -528,6 +533,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 ClassLikeMember::Method(method) => self.method(method, modifier_flags(&method.modifiers), &[]),
                 ClassLikeMember::Operator(operator) => self.operator(operator),
+                ClassLikeMember::NamedConstructor(
+                    constructor @ NamedConstructor { initializer: Some(initializer), .. },
+                ) => self.named_constructor(constructor, initializer),
                 ClassLikeMember::Property(property) => self.property(property, parent_name),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
                 _ => unreachable!("check_slice refuses the class member `{member}`"),
@@ -625,6 +633,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
         for member in &interface.members {
+            if let ClassLikeMember::Property(Property::Hooked(property)) = member {
+                members.push(self.interface_property(property));
+                continue;
+            }
             let ClassLikeMember::Method(method) = member else {
                 unreachable!("check_slice refuses the interface member `{member}`");
             };
@@ -642,6 +654,66 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             interface.interface.span,
             interface.right_brace,
             interface.name.value,
+            &[NULL, header, members, NULL, NULL],
+        )
+    }
+
+    /// An interface property is `public` with the abstract hook `get`, as php-src's grammar builds
+    /// `public int $orderId { get; }`. PHP has no `readonly` interface property, and a `readonly` property implements
+    /// it.
+    fn interface_property(&mut self, property: &HookedProperty) -> u32 {
+        let variable = property.item.variable();
+        let line = self.line(variable);
+        let hint = property.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
+        let name = self.string(0, line, variable.name);
+        let mut hooks = Vec::new();
+        for accessor in &property.hook_list.hooks {
+            hooks.push(self.hook(accessor.name.value, accessor.name, accessor, NULL));
+        }
+
+        let hooks = self.node(SHARP_AST_STMT_LIST, 0, self.line(&property.hook_list), &hooks);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
+    }
+
+    /// An event is a final class, whose constructor promotes each parameter to a `public readonly` property, with its
+    /// header as its interface list, as php-src's grammar builds
+    /// `final class OrderPaid implements \App\OrderEvent { public function __construct(public readonly int $orderId) {} }`.
+    /// The constructor spans the event's name and parameters.
+    fn event(&mut self, event: &Event) -> u32 {
+        self.class = self.names.get(&event.name);
+        self.enter(b"__construct");
+        let mut parameters = Vec::new();
+        for parameter in &event.parameter_list.parameters {
+            let index = self.parameter(parameter);
+            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            parameters.push(index);
+        }
+
+        let line = self.line(&event.parameter_list);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+        let constructor = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            event.name.span,
+            &event.parameter_list,
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        );
+        let mut members = vec![constructor];
+        members.extend(self.class_metadata(self.line(event.name)));
+        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
+        let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+
+        self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_FINAL,
+            event.event.span,
+            event.terminator,
+            event.name.value,
             &[NULL, header, members, NULL, NULL],
         )
     }
@@ -827,6 +899,81 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             &operator.return_type_hint,
             operator.body.span(),
             name,
+            &[parameters, NULL, body, return_type, attributes],
+        )
+    }
+
+    /// A named constructor is the static method it runs as, spec section 9.1, as php-src's grammar builds
+    /// `public static function fromJson(string $json): \Demo\Artifact { ${'this#1'} = new \Demo\Artifact(…);
+    /// (function ($json) { … })->call(${'this#1'}, $json); return ${'this#1'}; }`: its `: this(…)` creates the object
+    /// with the main constructor, and its body is a closure bound to that object, so it runs as a method body on a real
+    /// `$this`, where `super.m()` and `return;` run as they do in a method.
+    fn named_constructor(&mut self, constructor: &NamedConstructor, initializer: &ConstructorInitializer) -> u32 {
+        self.enter(constructor.name.value);
+        let mut parameters = Vec::new();
+        for parameter in &constructor.parameter_list.parameters {
+            parameters.push(self.parameter(parameter));
+        }
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&constructor.parameter_list), &parameters);
+        let mut statements = self.set_parameters(&constructor.parameter_list);
+        let line = self.line(initializer);
+        let object = self.variable(initializer.keyword.span, b"this#1");
+        let class = self.string(ZEND_NAME_FQ, line, self.class);
+        let arguments = self.arguments(&initializer.argument_list, &[]);
+        let new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+        statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[object, new]));
+
+        // The closure takes the method's parameters untyped, as the method already checked and converted each one.
+        let line = self.line(&constructor.body);
+        let mut closure_parameters = Vec::new();
+        let mut arguments = vec![self.variable(constructor.body.span(), b"this#1")];
+        for parameter in &constructor.parameter_list.parameters {
+            let parameter_line = self.line(parameter);
+            let name = self.string(0, parameter_line, parameter.variable.name);
+            let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
+            closure_parameters.push(self.node(
+                SHARP_AST_PARAM,
+                variadic_flag,
+                parameter_line,
+                &[NULL, name, NULL, NULL, NULL, NULL],
+            ));
+
+            let argument = self.variable(parameter.variable.span, parameter.variable.name);
+            arguments.push(if parameter.is_variadic() {
+                self.node(SHARP_AST_UNPACK, 0, parameter_line, &[argument])
+            } else {
+                argument
+            });
+        }
+
+        let closure_parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &closure_parameters);
+        let body = self.method_body(&constructor.body, false, Vec::new());
+        let closure = self.declaration(
+            SHARP_AST_CLOSURE,
+            0,
+            &constructor.body,
+            &constructor.body,
+            b"",
+            &[closure_parameters, NULL, body, NULL, NULL],
+        );
+        let call = self.string(0, line, b"call");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+        statements.push(self.node(SHARP_AST_METHOD_CALL, 0, line, &[closure, call, arguments]));
+
+        let end = self.lines.line(constructor.body.span().end.offset);
+        let object = self.variable(constructor.body.span(), b"this#1");
+        statements.push(self.node(SHARP_AST_RETURN, 0, end, &[object]));
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let return_type = self.string(ZEND_NAME_FQ, self.line(constructor.class), self.class);
+        let attributes = self.attributes(&constructor.attribute_lists, None);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            modifier_flags(&constructor.modifiers) | ZEND_ACC_STATIC,
+            constructor.class,
+            constructor.body.span(),
+            constructor.name.value,
             &[parameters, NULL, body, return_type, attributes],
         )
     }
@@ -1741,10 +1888,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
+            // `new Artifact.fromJson(…)` calls the static method the named constructor runs as, spec section 9.1.
+            Expression::Instantiation(Instantiation {
+                class: Expression::Identifier(class),
+                constructor: Some(constructor),
+                argument_list: Some(arguments),
+                ..
+            }) => {
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+                let method = self.string(0, self.line(constructor), constructor.name.value);
+                let arguments = self.arguments(arguments, &[]);
+
+                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+            }
             // `new` of a PHP# generic class carries the type arguments the checker found in a `SHARP_TYPE_ARGS` over it.
             Expression::Instantiation(
                 instantiation @ Instantiation {
                     class: Expression::Identifier(class),
+                    constructor: None,
                     argument_list: Some(arguments),
                     ..
                 },
@@ -3180,7 +3341,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(name);
 
         match self.names.binding(&name.name) {
-            Some(Binding::Local(_) | Binding::This) => self.variable(name.span(), name.name.value()),
+            Some(Binding::Local(_)) => self.variable(name.span(), name.name.value()),
+            Some(Binding::This) => self.variable(name.span(), b"this"),
             Some(Binding::Field) => self.storage(line),
             Some(Binding::Constant) => {
                 let constant = self.string(ZEND_NAME_NOT_FQ, line, name.name.value());

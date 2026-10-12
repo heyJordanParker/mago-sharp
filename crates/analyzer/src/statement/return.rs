@@ -39,6 +39,7 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::is_refused;
+use crate::statement::function_like::body_return_type;
 use crate::statement::function_like::expect_type;
 use crate::statement::function_like::get_scope_static_class_type;
 use crate::utils::docblock::check_docblock_type_incompatibility;
@@ -68,9 +69,22 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     where
         A: Arena,
     {
+        // A PHP# named constructor returns the object it creates, spec section 9.1, so its `return;` takes no value.
+        if let Some(return_value) = self.value.as_ref()
+            && block_context
+                .scope
+                .get_function_like()
+                .is_some_and(|function_like| function_like.flags.is_named_constructor())
+        {
+            context.collector.report_with_code(
+                IssueCode::InvalidReturnStatement,
+                Issue::error("A named constructor returns the object it creates: write `return;`.")
+                    .with_annotation(Annotation::primary(return_value.span()).with_message("Returned here.")),
+            );
+        }
+
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
-            let return_type =
-                block_context.scope.get_function_like().and_then(|function| function.return_type_metadata.as_ref());
+            let return_type = block_context.scope.get_function_like().and_then(body_return_type);
             expect_type(context, artifacts, return_value, return_type.map(|return_type| &return_type.type_union));
             if let Some(return_type) = return_type {
                 check_sharp_literal_kind(context, return_value, &return_type.type_union);
@@ -254,37 +268,36 @@ pub fn handle_return_value<'ctx, A>(
     }
 
     let require_return_value;
-    let mut expected_return_type =
-        if let Some(expected_return_type) = function_like_metadata.return_type_metadata.as_ref() {
-            let mut expected_type = expected_return_type.type_union.clone();
+    let mut expected_return_type = if let Some(expected_return_type) = body_return_type(function_like_metadata) {
+        let mut expected_type = expected_return_type.type_union.clone();
 
-            expand_union(
-                context.codebase,
-                &mut expected_type,
-                &TypeExpansionOptions {
-                    self_class: block_context.scope.get_class_like_name(),
-                    static_class_type: get_scope_static_class_type(context, &block_context.scope),
-                    function_is_final: if let Some(method_metadata) = &function_like_metadata.method_metadata {
-                        method_metadata.is_final
-                    } else {
-                        false
-                    },
-                    ..Default::default()
+        expand_union(
+            context.codebase,
+            &mut expected_type,
+            &TypeExpansionOptions {
+                self_class: block_context.scope.get_class_like_name(),
+                static_class_type: get_scope_static_class_type(context, &block_context.scope),
+                function_is_final: if let Some(method_metadata) = &function_like_metadata.method_metadata {
+                    method_metadata.is_final
+                } else {
+                    false
                 },
-            );
+                ..Default::default()
+            },
+        );
 
-            if function_like_metadata.return_type_declaration_metadata.is_some() {
-                require_return_value = !expected_type.is_void();
-            } else {
-                require_return_value = !expected_type.has_nullish();
-            }
-
-            expected_type
+        if function_like_metadata.return_type_declaration_metadata.is_some() {
+            require_return_value = !expected_type.is_void();
         } else {
-            require_return_value = false;
+            require_return_value = !expected_type.has_nullish();
+        }
 
-            get_mixed()
-        };
+        expected_type
+    } else {
+        require_return_value = false;
+
+        get_mixed()
+    };
 
     if function_like_metadata.flags.has_yield() {
         if let Some((return_type, is_from_generator)) = get_generator_return_type(context, &expected_return_type) {
