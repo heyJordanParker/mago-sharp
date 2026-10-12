@@ -1162,6 +1162,10 @@ fn internal_is_not_supported_yet() {
 
         assert_eq!(issues(code), [format!("3:1 {message}")], "{declaration}");
     }
+
+    // An anonymous class is not supported yet, and `internal` among its modifiers is no other error.
+    let anonymous = leak(method("        const other = new readonly internal class {};\n        return 1;\n"));
+    assert_eq!(issues(anonymous), ["7:23 This expression is not supported yet in PHP#."]);
 }
 
 #[test]
