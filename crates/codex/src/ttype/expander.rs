@@ -809,6 +809,13 @@ fn resolve_static_type(
                 || (static_obj.type_parameters.is_some() && should_use_static_type_params(named, static_obj, codebase))
             {
                 named.type_parameters.clone_from(&static_obj.type_parameters);
+            } else if codebase
+                .get_class_like(static_obj.name.as_bytes())
+                .is_some_and(|class| class.template_types.is_empty())
+            {
+                // The type arguments `named` holds are the declaring class's, and a receiver class that declares no
+                // templates takes none.
+                named.type_parameters = None;
             }
 
             named.name = static_obj.name;

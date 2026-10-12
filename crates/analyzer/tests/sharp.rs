@@ -7907,6 +7907,20 @@ fn an_inherited_constructor_and_method_of_a_php_child_take_its_extends_type_argu
     );
 }
 
+/// Plain PHP keeps Mago's results under the generics slice: a template a call binds to the caller's own template stays
+/// that template, through a trait and a parent class and through `array_filter`'s keys. The one change is the fix
+/// `ReflectionEnum` gets: its template is bounded by `UnitEnum`, so a plain `class-string` may not be an enum.
+#[test]
+fn plain_php_keeps_its_generic_results_and_reflection_enum_takes_only_an_enum() {
+    let bag = "<?php\n\nnamespace Demo;\n\n/** @template TValue */\ntrait HoldsItems\n{\n    /** @return list<TValue> */\n    protected function itemsOf(mixed $items): array\n    {\n        return [];\n    }\n}\n\n/** @template TValue */\nabstract class BaseBag\n{\n    /** @return TValue */\n    abstract public function first(): mixed;\n}\n\n/**\n * @template TValue\n * @extends BaseBag<TValue>\n */\nfinal class Bag extends BaseBag\n{\n    /** @use HoldsItems<TValue> */\n    use HoldsItems;\n\n    /** @param TValue $value */\n    public function __construct(private mixed $value) {}\n\n    public function first(): mixed\n    {\n        return $this->value;\n    }\n\n    /** @return list<TValue> */\n    public function fromTrait(): array\n    {\n        $items = [];\n        foreach ($this->itemsOf(null) as $item) {\n            $items[] = $item;\n        }\n\n        return $items;\n    }\n\n    /** @return TValue */\n    public function fromParent(): mixed\n    {\n        $first = $this->first();\n\n        return $first;\n    }\n}\n";
+    let filter = "<?php\n\nnamespace Demo;\n\n/**\n * @template Tk\n * @template Tv\n * @param iterable<Tk, Tv> $iterable\n * @param (\\Closure(Tk): bool)|null $predicate\n * @return list<Tv>\n */\nfunction keep_keys(iterable $iterable, null|\\Closure $predicate = null): array\n{\n    $predicate ??=\n        /** @param Tk $key */\n        static fn(mixed $key): bool => (bool) $key;\n\n    if (is_array($iterable)) {\n        return array_values(array_filter($iterable, $predicate, ARRAY_FILTER_USE_KEY));\n    }\n\n    return [];\n}\n";
+    let reflection = "<?php\n\nnamespace Demo;\n\nfinal class EnumName\n{\n    /** @param class-string $name */\n    public function __construct(private string $name) {}\n\n    /** @throws \\ReflectionException */\n    public function has(string $value): bool\n    {\n        return (new \\ReflectionEnum($this->name))->hasCase($value);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Bag.php", bag), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/filter.php", filter), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/EnumName.php", reflection), &[]), ["13:37 possibly-invalid-argument"]);
+}
+
 /// A PHP class that passes its own template on, `@extends Page<T>` once or through `Section<T>`, takes its `T` from the
 /// argument of an inherited constructor, as `new` names no type arguments in PHP.
 #[test]
@@ -8980,7 +8994,7 @@ fn self_inherited_by_a_subclass_is_the_subclass_with_its_own_type_arguments() {
         explained(("src/Demo/Box.php", php), &[]),
         [
             "51:30 invalid-argument Invalid argument type for argument #1 of `Demo\\Tagged::tag`: expected `string`, but found `int(1)`. Change the argument value to match `string`, or update the parameter's type declaration.",
-            "52:22 invalid-argument Invalid argument type for argument #1 of `Demo\\Report::keep`: expected `int`, but found `Demo\\OrderBox<mixed>&static`. Change the argument value to match `int`, or update the parameter's type declaration.",
+            "52:22 invalid-argument Invalid argument type for argument #1 of `Demo\\Report::keep`: expected `int`, but found `Demo\\OrderBox&static`. Change the argument value to match `int`, or update the parameter's type declaration.",
         ]
     );
     assert_eq!(
@@ -9294,7 +9308,7 @@ fn a_call_and_its_method_value_give_one_type_on_every_receiver() {
             "Invalid return type for function `Demo\\Report::plainValue`: expected `(closure(): bool)`, but found `(closure(): Demo\\Plain&static)`.",
             "Invalid return type for function `Demo\\Report::boxed`: expected `bool`, but found `Demo\\Box<int>&static`.",
             "Invalid return type for function `Demo\\Report::boxedValue`: expected `(closure(): bool)`, but found `(closure(): Demo\\Box<mixed>&static)`.",
-            "Invalid return type for function `Demo\\Report::orders`: expected `bool`, but found `Demo\\OrderBox<mixed>&static`.",
+            "Invalid return type for function `Demo\\Report::orders`: expected `bool`, but found `Demo\\OrderBox&static`.",
             "Invalid return type for function `Demo\\Report::ordersValue`: expected `(closure(): bool)`, but found `(closure(): demo\\box<mixed>&static)`.",
             "Invalid return type for function `Demo\\Report::pairs`: expected `bool`, but found `Demo\\Pair<mixed, mixed>&static`.",
             "Invalid return type for function `Demo\\Report::pairsValue`: expected `(closure(): bool)`, but found `(closure(): demo\\box<mixed>&static)`.",

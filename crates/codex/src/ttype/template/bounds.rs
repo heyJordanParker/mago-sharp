@@ -37,7 +37,7 @@ pub fn get_root_template_type(
     mut visited_entities: HashSet<GenericParent>,
     codebase: &CodebaseMetadata,
 ) -> Option<TUnion> {
-    if !visited_entities.insert(*defining_entity) {
+    if visited_entities.contains(defining_entity) {
         return None;
     }
 
@@ -53,6 +53,8 @@ pub fn get_root_template_type(
         let first_template = &mapped_type.get_single();
 
         if let TAtomic::GenericParameter(TGenericParameter { parameter_name, defining_entity, .. }) = first_template {
+            visited_entities.insert(*defining_entity);
+
             return Some(
                 get_root_template_type(lower_bounds, *parameter_name, defining_entity, visited_entities, codebase)
                     .unwrap_or(mapped_type),
