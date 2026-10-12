@@ -48,6 +48,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
 use mago_syntax::cst::Module;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
@@ -606,6 +607,23 @@ where
     fn walk_out_operator(
         &mut self,
         _operator: &'ast Operator<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.exit_method();
+    }
+
+    /// A PHP# named constructor's parameters are its locals, as a constructor's are, spec section 9.1.
+    fn walk_in_named_constructor(
+        &mut self,
+        _named_constructor: &'ast NamedConstructor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_method();
+    }
+
+    fn walk_out_named_constructor(
+        &mut self,
+        _named_constructor: &'ast NamedConstructor<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.locals.exit_method();

@@ -31,6 +31,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Operator;
 
 use crate::analyzable::Analyzable;
@@ -96,6 +97,25 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Operator<'arena> {
         }
 
         Ok(())
+    }
+}
+
+/// A PHP# named constructor analyzes as the static method it runs as, spec section 9.1. Its `: this(…)` creates the
+/// object with the main constructor, and its body runs on that object.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for NamedConstructor<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let method = MethodParts::of_named_constructor(self);
+
+        analyze_method(&method, self.initializer.as_ref(), word(self.name.value), context, block_context, artifacts)
+            .map(|_| ())
     }
 }
 
@@ -299,8 +319,9 @@ where
 
 /// Spec section 9.1: `: super(…)` runs as PHP's `parent::__construct(…)` before the constructor's body, so its
 /// arguments are checked against the base class's constructor, and it counts as the call of that constructor. A base
-/// class without a constructor takes `: super()`, which does nothing, and no arguments, as C#'s `object()` does.
-/// Semantics refuses `: this(…)` on the main constructor.
+/// class without a constructor takes `: super()`, which does nothing, and no arguments, as C#'s `object()` does. A named
+/// constructor's `: this(…)` creates its object with the main constructor, so its arguments are checked against that
+/// constructor. Semantics refuses `: this(…)` on the main constructor and `: super(…)` on a named one.
 pub(crate) fn analyze_constructor_initializer<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -310,22 +331,30 @@ pub(crate) fn analyze_constructor_initializer<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    let is_named = block_context.scope.get_function_like().is_some_and(|method| method.flags.is_named_constructor());
     let Some(class) = block_context
         .scope
         .get_class_like()
-        .filter(|class| initializer.is_super() && !class.has_incomplete_hierarchy())
+        .filter(|class| initializer.is_super() != is_named && !class.has_incomplete_hierarchy())
     else {
         return Ok(());
     };
 
-    if context.codebase.get_parent_constructor(class.name.as_bytes()).is_some() {
-        let parent = Expression::Parent(initializer.keyword);
+    let (receiver, constructed) = if is_named {
+        (Expression::Self_(initializer.keyword), Some(class.name))
+    } else {
+        (Expression::Parent(initializer.keyword), class.direct_parent_class)
+    };
+
+    if constructed.is_some_and(|constructed| {
+        context.codebase.get_declaring_method(constructed.as_bytes(), b"__construct").is_some()
+    }) {
         let method = ClassLikeMemberSelector::Identifier(LocalIdentifier {
             span: initializer.keyword.span,
             value: b"__construct",
         });
         let call = StaticCall {
-            class: &parent,
+            class: &receiver,
             method: &method,
             argument_list: &initializer.argument_list,
             span: initializer.span(),
@@ -335,7 +364,7 @@ where
     }
 
     if !initializer.argument_list.arguments.is_empty() {
-        let message = match class.direct_parent_class {
+        let message = match constructed {
             Some(base) => {
                 format!(
                     "`{}` has no constructor to call: remove the arguments.",
