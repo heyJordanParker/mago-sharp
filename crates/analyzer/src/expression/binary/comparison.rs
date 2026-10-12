@@ -48,6 +48,7 @@ use crate::expression::binary::utils::is_always_greater_than_or_equal;
 use crate::expression::binary::utils::is_always_identical_to;
 use crate::expression::binary::utils::is_always_less_than;
 use crate::expression::binary::utils::is_always_less_than_or_equal;
+use crate::expression::binary::utils::takes_operands;
 use crate::utils::expression::get_literal_array_key;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_bool;
@@ -1026,9 +1027,10 @@ where
 /// Reports `value`, of `value_type`, which a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare
 /// an element of `element_type` with it, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and
 /// `Set<T>` need `==` on the element type." A search refuses what `element == value` refuses, so it agrees with
-/// `any(element => element == value)`: a class that declares no `operator ==` is refused with the reason `==` gives, a
-/// collection is not supported yet, as `==` on a collection is, and an `Any` element is refused unless the value is a
-/// string, a number or an enum case. A `null_safe` call's help keeps its `?.`.
+/// `any(element => element == value)`: a class that declares no `operator ==` is refused with the reason `==` gives, as
+/// is an element the operator's call does not always take, a collection is not supported yet, as `==` on a collection
+/// is, and an `Any` element is refused unless the value is a string, a number or an enum case. A `null_safe` call's help
+/// keeps its `?.`.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
     method: &str,
@@ -1046,7 +1048,16 @@ pub(crate) fn check_element_equality<A>(
         display_operand(context, &element_type.to_non_nullable()),
         display_operand(context, &value_type.to_non_nullable()),
     );
-    let (code, issue) = match sharp_refusal(&equality, element_type, value_type, context.codebase) {
+    // `==` checks the operands of a declared operator as the arguments of its call, so `Money::op_Equality` refuses a
+    // `Money|Line` element as `element == money` does. An `Any` element keeps its own report.
+    let refusal = sharp_refusal(&equality, element_type, value_type, context.codebase).or_else(|| {
+        let method = get_comparison_method(&equality, element_type, value_type, context.codebase)?;
+        let operands = [&element_type.to_non_nullable(), &value_type.to_non_nullable()];
+
+        (!element_type.is_mixed() && !takes_operands(context.codebase, method, &operands))
+            .then_some(Refusal::DifferentTypes)
+    });
+    let (code, issue) = match refusal {
         None => {
             if element_type.is_mixed() {
                 let subject = format!("Each element of `List<{}>`", display_operand(context, element_type));
@@ -1091,8 +1102,9 @@ pub(crate) fn check_element_equality<A>(
             .with_help("Compare the elements one by one."),
         ),
         Some(Refusal::DifferentTypes) => {
+            // The value is an element, so its class is the one whose operator runs.
             let class =
-                display_refused_side(context, element_type, value_type, |comparand| comparand == Comparand::Instance);
+                display_refused_side(context, value_type, element_type, |comparand| comparand == Comparand::Instance);
 
             (
                 IssueCode::InvalidArgument,
