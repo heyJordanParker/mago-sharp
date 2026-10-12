@@ -5,6 +5,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
 
+use crate::package;
 use crate::package::Message;
 use crate::runner::Refusal;
 use crate::runner::Refused;
@@ -258,12 +259,18 @@ fn one_line(message: &str) -> String {
 }
 
 /// Why the workspace Lean file `file`, in the PSR-4 folder of `namespace`, cannot be built: Lean or Mago owns the root of
-/// `namespace`.
+/// `namespace`, in this case or in another, which names the same build folder on a disk that ignores case.
 pub(crate) fn owned_root(namespace: &str, file: &str) -> String {
-    let owner = namespace.split('.').next().unwrap_or(namespace);
+    let first = namespace.split('.').next().unwrap_or(namespace);
+    let kept = match package::owner(namespace) {
+        Some(owner) if owner != first => format!(
+            "`{first}` names the same folder as `{owner}` on a disk that ignores case, and `{owner}` is a name Lean or Mago keeps"
+        ),
+        _ => format!("`{first}` is a name Lean or Mago keeps"),
+    };
 
     format!(
-        "`{owner}` is a name Lean or Mago keeps, so Lean files under the `{}\\` root, such as {file}, can't be built. Move them under one of your own namespaces",
+        "{kept}, so Lean files under the `{}\\` root, such as {file}, can't be built. Move them under one of your own namespaces",
         namespace.replace('.', "\\")
     )
 }

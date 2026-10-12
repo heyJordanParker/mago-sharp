@@ -1375,8 +1375,9 @@ fn a_structure_rule_that_reaches_more_than_lean_checks_does_not_run() {
 /// So a Lean file of the project never builds as one, and a PSR-4 folder under one of them gets no link. Its Lean files
 /// cannot be built, which refuses each file that needs one, naming the root, and every other rule still runs. Each row
 /// is a project with `App\` in `app/`: the reviewer's helper in a `Code\Evil\` root that reaches `Rule.breaks`, a
-/// `Std\Evil\` file that a `Module.lean` imports, and a `Module.lean`, a Lean file nothing imports and a law in a
-/// `Code\Evil\` root inside `app/`.
+/// `code\` root whose module differs from a generated one only in case, so on a disk that ignores case both would build
+/// to one file, a `Std\Evil\` file that a `Module.lean` imports, and a `Module.lean`, a Lean file nothing imports and a
+/// law in a `Code\Evil\` root inside `app/`.
 #[test]
 fn a_lean_file_under_a_root_lean_or_mago_owns_is_refused_and_every_other_rule_runs() {
     let outside = "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", \"Code\\\\Evil\\\\\": \"code-evil/\", \"Std\\\\Evil\\\\\": \"std-evil/\"}}}\n";
@@ -1388,6 +1389,10 @@ fn a_lean_file_under_a_root_lean_or_mago_owns_is_refused_and_every_other_rule_ru
     };
     let code = owned("Code", "Code\\Evil\\", "code-evil/Names.lean");
     let std = owned("Std", "Std\\Evil\\", "std-evil/Names.lean");
+    let lower = "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", \"code\\\\\": \"code/\"}}}\n";
+    let lower_code = "`code` names the same folder as `Code` on a disk that ignores case, and `Code` is a name Lean or Mago keeps, so Lean files under the `code\\` root, such as code/App/Tenant/Store/Module.lean, can't be built. Move them under one of your own namespaces";
+    let lower_names = "import Code\nopen Sharp\n\ndef legacy : Namespace := App.Shared\n";
+    let via_lower = "import Code.App.Tenant.Store.Module\nimport code.App.Tenant.Store.Module\nopen Sharp\n\n@[rule] def lower : Rule := .neverImports legacy\n";
     let names = "import Sharp.Lean.Facts\nopen Sharp\n\ndef Code.Evil.Names.neverImports (forbidden : String) : Rule :=\n  .imports fun _ i => Rule.breaks (.imports fun ns j => under j.name ns) forbidden {} (.import { i with namespace_ := forbidden })\n";
     let via_code = "import Code.App.Tenant.Store.Module\nimport Code.Evil.Names\nopen Sharp\n\n@[rule] def viaCodeModule : Rule := Code.Evil.Names.neverImports \"App.Shared.Ledgr\"\n@[rule] def viaCodeModuleLegacy : Rule := Code.Evil.Names.neverImports \"App.Shared\"\n";
     let via_std = format!("import Code.App.Tenant.Store.Module\nimport Std.Evil.Names\nopen Sharp\n\n{IMPORTS_ONLY}\n");
@@ -1407,6 +1412,18 @@ fn a_lean_file_under_a_root_lean_or_mago_owns_is_refused_and_every_other_rule_ru
                 LEDGER_BREAKS.to_owned(),
                 store_rejected("Receipts", "line 2, column 1", &code),
                 store_rejected("StoreService", "line 2, column 1", &code),
+            ],
+        ),
+        (
+            vec![
+                ("composer.json", lower),
+                ("code/App/Tenant/Store/Module.lean", lower_names),
+                ("app/Tenant/Store/Module.lean", via_lower),
+            ],
+            vec![
+                LEDGER_BREAKS.to_owned(),
+                store_rejected("Receipts", "line 2, column 1", lower_code),
+                store_rejected("StoreService", "line 2, column 1", lower_code),
             ],
         ),
         (

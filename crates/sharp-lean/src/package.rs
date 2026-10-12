@@ -35,8 +35,9 @@ pub const PACKAGE_FOLDER: &str = ".lean";
 const NAMESPACES: &str = "Code";
 
 /// The roots of the module names Lean and Mago own: Lean's, Lake's, the generated modules' and the runtime library's.
-/// No PSR-4 folder under them gets a link, so no Lean file of the project builds as a module the runner trusts.
-/// `ownedRoots` in `Sharp/Lean/Runner.lean` holds the same roots.
+/// No PSR-4 folder under them, in any case, gets a link, so no Lean file of the project builds as a module the runner
+/// trusts, nor into the build folder of one on a disk that ignores case. `ownedRoots` in `Sharp/Lean/Runner.lean` holds
+/// the same roots.
 const OWNED_ROOTS: [&str; 6] = ["Init", "Lean", "Std", "Lake", NAMESPACES, library::NAMESPACE];
 
 /// The file in the package that lists the Lean files the last structure rules check read, each with its hash.
@@ -398,8 +399,15 @@ fn closest_root<'root>(roots: &'root [Root], file: &Path) -> Option<(&'root Root
         .min_by_key(|(_, relative)| relative.components().count())
 }
 
+/// The root Lean or Mago owns that the first name of `namespace` spells, in any case: `Code` of `code.Evil`.
+pub(crate) fn owner(namespace: &str) -> Option<&'static str> {
+    let first = namespace.split('.').next()?;
+
+    OWNED_ROOTS.into_iter().find(|owned| owned.eq_ignore_ascii_case(first))
+}
+
 fn is_owned(root: &Root) -> bool {
-    root.namespace.split('.').next().is_some_and(|first| OWNED_ROOTS.contains(&first))
+    owner(&root.namespace).is_some()
 }
 
 #[derive(Serialize)]
@@ -746,14 +754,16 @@ mod tests {
 
     #[test]
     fn a_root_under_a_name_lean_or_mago_owns_gets_no_link() {
-        let roots: Vec<Root> = ["App", "Init", "Lean.Evil", "Std.Evil", "Lake", "Code.Evil", "Sharp.Lean", "Coder"]
-            .into_iter()
-            .map(|namespace| Root { namespace: namespace.to_owned(), directory: std::env::temp_dir() })
-            .collect();
+        let roots: Vec<Root> =
+            ["App", "Init", "Lean.Evil", "Std.Evil", "Lake", "Code.Evil", "Sharp.Lean", "Coder", "code", "STD.Evil"]
+                .into_iter()
+                .map(|namespace| Root { namespace: namespace.to_owned(), directory: std::env::temp_dir() })
+                .collect();
 
         let linked: Vec<&str> = linked_roots(&roots).iter().map(|root| root.namespace.as_str()).collect();
 
         assert_eq!(linked, ["App", "Coder"]);
+        assert_eq!(owner("code.Evil"), Some("Code"));
     }
 
     /// The runner trusts every module under a root Lean or Mago owns, so it must own the roots no PSR-4 folder links.
