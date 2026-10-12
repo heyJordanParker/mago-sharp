@@ -52,6 +52,7 @@ use crate::utils::expression::get_literal_array_key;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_bool;
 use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 
 /// Analyzes standard comparison operations (e.g., `==`, `===`, `<`, `<=`, `>`, `>=`).
 ///
@@ -1026,6 +1027,88 @@ where
     context.collector.report_with_code(
         IssueCode::InvalidArgument,
         issue.with_annotation(Annotation::primary(selector.span()).with_message(format!("This returns `{key_name}`."))),
+    );
+}
+
+/// Reports `value`, the value a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare two elements
+/// of `element_type`, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and `Set<T>` need `==` on
+/// the element type." A class that declares no `operator ==` is refused with the reason `==` gives, and a collection
+/// element is not supported yet, as `==` on a collection is, and an `Any` element is refused as `==` refuses an `Any`
+/// operand. `==` lifts `null`, so only the other elements must compare. A `null_safe` call's help keeps its `?.`.
+pub(crate) fn check_element_equality<A>(
+    context: &mut Context<'_, '_, A>,
+    method: &str,
+    receiver: &Expression<'_>,
+    value: &Expression<'_>,
+    element_type: &TUnion,
+    null_safe: bool,
+) where
+    A: Arena,
+{
+    // The operator's span only marks it as written in the source, which `sharp_refusal` checks.
+    let equality = BinaryOperator::Equal(value.span());
+    if element_type.is_mixed() {
+        let subject = format!("Each element of `List<{}>`", display_operand(context, element_type));
+        check_comparison_operand(context, value, element_type, element_type, &subject, &equality);
+
+        return;
+    }
+
+    let element_type = element_type.to_non_nullable();
+    let element_name = display_operand(context, &element_type);
+    let (code, issue) = match sharp_refusal(&equality, &element_type, &element_type, context.codebase) {
+        None => return,
+        Some(
+            refusal @ (Refusal::Instance | Refusal::Identity | Refusal::NullableOperand | Refusal::UnorderedOperand),
+        ) => {
+            debug_assert!(matches!(refusal, Refusal::Instance), "`==` on two elements of one type refuses an instance");
+            let class = display_refused_part(context, &element_type, |comparand| comparand == Comparand::Instance);
+            let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
+            // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses it.
+            let initial = class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
+            let element = if initial == receiver || initial == value { "element".to_owned() } else { initial };
+            let access = if null_safe { "?." } else { "." };
+
+            (
+                IssueCode::InvalidArgument,
+                Issue::error(format!(
+                    "`{method}` compares elements with `==`, and `{class}` declares no `operator ==`."
+                ))
+                .with_note("`==` on a class instance exists only where its class declares `operator ==`.")
+                .with_help(format!(
+                    "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
+                         `{receiver}{access}any({element} => {element} === {value})`."
+                )),
+            )
+        }
+        Some(Refusal::Collection) => (
+            IssueCode::NotSupportedYet,
+            Issue::error(format!(
+                "`{method}` on `List<{element_name}>` is not supported yet: `==` on a collection is not supported yet."
+            ))
+            .with_note("A `List`, `Map` or `Set` is a PHP array at runtime, which `==` cannot compare strictly yet.")
+            .with_help("Compare the elements one by one."),
+        ),
+        Some(Refusal::DifferentTypes) => {
+            let class = display_refused_part(context, &element_type, |comparand| comparand == Comparand::Instance);
+
+            (
+                IssueCode::InvalidArgument,
+                Issue::error(format!(
+                    "`{method}` compares elements with `==`, and the `operator ==` of `{class}` does not take two `{class}`."
+                ))
+                .with_note("A search compares two elements, both of the element type.")
+                .with_help(format!("Make the `operator ==` of `{class}` take two `{class}`.")),
+            )
+        }
+    };
+
+    context.collector.report_with_code(
+        code,
+        issue.with_annotation(
+            Annotation::primary(value.span())
+                .with_message(format!("Each `{element_name}` element is compared with this by `==`.")),
+        ),
     );
 }
 
