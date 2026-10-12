@@ -1086,12 +1086,9 @@ where
     // A PHP# `init` property is set only while its object is created, spec section 6.1: on `this`, in a constructor of
     // its class or a subclass, or in a named constructor, where C# allows an `init` accessor. A lambda may run after
     // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
-    // its storage through `field`.
+    // its storage through `field`, on `this` only.
     if for_assignment && context.dialect.is_sharp() && property_metadata.flags.is_init() {
-        let writes_its_storage = block_context
-            .scope
-            .get_property_hook()
-            .is_some_and(|(accessor_property, _)| accessor_property == prop_name);
+        let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
         let creates_this = is_this(object_expr, context.resolved_names)
             && block_context.scope.get_function_like().is_some_and(|function_like| {
                 function_like.flags.is_named_constructor()

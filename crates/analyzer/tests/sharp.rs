@@ -4785,10 +4785,11 @@ fn a_named_constructor_that_overwrites_a_get_only_property_the_main_constructor_
 
 /// Spec section 6.1: an `init` property is set only while its object is created, where C# allows an `init` accessor:
 /// on `this`, in a constructor of its class or a subclass, or in a named constructor, and by its own accessor body
-/// through `field`. A lambda may run after the object is created, so it cannot set one, as C# refuses with CS8852.
+/// through `field`. A lambda may run after the object is created, so it cannot set one, as C# refuses with CS8852. An
+/// accessor body writes only its own object's property, so not the same property on another object.
 #[test]
 fn an_init_property_is_set_only_on_this_while_the_object_is_created() {
-    let sharp = "namespace Demo;\n\nclass Label\n{\n    public string text { get; init; }\n    public string shown { get; init => field = trim(value); } = \"\";\n\n    public Label(string text)\n    {\n        this.text = text;\n        this.shown = text;\n        const later = () => { this.text = \"late\"; };\n        later();\n    }\n\n    public Label.shouting(string text) : this(text)\n    {\n        this.text = strtoupper(text);\n    }\n\n    public void rename(string text)\n    {\n        this.text = text;\n    }\n}\n\nclass Badge : Label\n{\n    public Badge(string text, Label source) : super(text)\n    {\n        this.text = \"badge\";\n        source.text = text;\n    }\n}\n\nclass Use\n{\n    public static void relabel(Label label)\n    {\n        label.text = \"x\";\n    }\n}\n\nclass Point\n{\n    public Point(public int x { get; init; }) { }\n\n    public void move()\n    {\n        this.x = 2;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Label\n{\n    public string text { get; init; }\n    public string shown { get; init => field = trim(value); } = \"\";\n\n    public Label(string text)\n    {\n        this.text = text;\n        this.shown = text;\n        const later = () => { this.text = \"late\"; };\n        later();\n    }\n\n    public Label.shouting(string text) : this(text)\n    {\n        this.text = strtoupper(text);\n    }\n\n    public void rename(string text)\n    {\n        this.text = text;\n    }\n}\n\nclass Badge : Label\n{\n    public Badge(string text, Label source) : super(text)\n    {\n        this.text = \"badge\";\n        source.text = text;\n    }\n}\n\nclass Use\n{\n    public static void relabel(Label label)\n    {\n        label.text = \"x\";\n    }\n}\n\nclass Point\n{\n    public Point(public int x { get; init; }) { }\n\n    public void move()\n    {\n        this.x = 2;\n    }\n}\n\nclass Peer\n{\n    public Peer? link { get; init; }\n    public string name\n    {\n        get;\n        init\n        {\n            field = value;\n            if (this.link != null) {\n                this.link.name = value;\n            }\n        }\n    } = \"\";\n\n    public Peer(string name, Peer? link)\n    {\n        this.link = link;\n        this.name = name;\n    }\n}\n";
     let help = "Set it on `this` in a constructor or a named constructor.";
     let refused = format!("invalid-property-write `text` is set only while the object is created. | {help}");
 
@@ -4800,6 +4801,7 @@ fn an_init_property_is_set_only_on_this_while_the_object_is_created() {
             format!("32:16 {refused}"),
             format!("40:15 {refused}"),
             format!("50:14 invalid-property-write `x` is set only while the object is created. | {help}"),
+            format!("64:27 invalid-property-write `name` is set only while the object is created. | {help}"),
         ]
     );
 
