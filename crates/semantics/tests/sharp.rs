@@ -879,6 +879,70 @@ fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_t
     );
 }
 
+/// Spec section 9.1: a named constructor passes control to the main constructor with `: this(…)`, never `: super(…)`,
+/// and the arguments of `: this(…)` cannot use `this`, which does not exist before the main constructor runs.
+#[test]
+fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_this() {
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Order.single() : this(1) { }\n    public Order.none() { }\n    public Order.base() : super() { }\n    public Order.early() : this(this.count) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "8:18 A named constructor passes control to the main constructor with `: this(…)`.",
+            "9:27 A named constructor passes control to the main constructor with `: this(…)`.",
+            "10:33 `this` is not available before the constructor runs: pass a parameter instead.",
+        ]
+    );
+}
+
+/// Spec section 9.1: a named constructor is declared on its own class's name with an access modifier and nothing else,
+/// a name that is neither its class's nor one PHP reserves, parameters that declare no property, and a body. An
+/// abstract class has no objects of its own, and named constructors are not inherited, so it declares none.
+#[test]
+fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n}\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:12 A named constructor is declared on its own class, as in `Order.copy`.",
+            "8:18 A named constructor cannot have its class's name: `new Order(…)` calls the main constructor.",
+            "9:18 A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods.",
+            "10:12 A named constructor takes only `public`, `protected` or `private`: remove `static`.",
+            "11:11 A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.",
+            "12:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
+            "13:35 A named constructor needs a body, even an empty `{ }`.",
+            "20:18 An abstract class has no objects of its own, so it declares no named constructor.",
+        ]
+    );
+}
+
+/// Spec section 9.1: a named constructor runs as the static method of its name, so it shares no name with another
+/// member, as PHP's duplicate-method check reports.
+#[test]
+fn a_named_constructor_shares_no_name_with_a_method() {
+    let after = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Order.copy() : this(1) { }\n    public int copy() => 1;\n}\n";
+    let before = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public int Copy() => 1;\n    public Order.copy() : this(1) { }\n}\n";
+
+    assert_eq!(issues(after), ["8:16 class method `Order.copy` has already been defined"]);
+    assert_eq!(issues(before), ["8:18 class method `Order.copy` has already been defined"]);
+}
+
+/// Spec section 9.1: only a class has constructors, so an interface, an enum and a static class declare no named one.
+#[test]
+fn only_a_class_with_instances_declares_a_named_constructor() {
+    let interface = "namespace App.Tenant;\n\npublic interface Priced\n{\n    public Priced.free() : this() { }\n}\n";
+    let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit.red() : this() { }\n}\n";
+    let r#static = "namespace App.Tenant;\n\npublic static class Text\n{\n    public Text.empty() : this() { }\n}\n";
+
+    assert_eq!(
+        issues(interface),
+        ["5:19 An interface has no constructor: a named constructor creates an object of its own class."]
+    );
+    assert_eq!(issues(r#enum), ["7:17 An enum has no constructor: its cases are its only values."]);
+    assert_eq!(issues(r#static), ["5:17 A static class has no constructor."]);
+}
+
 /// Spec section 9.1: a constructor runs once, when `new` creates the object, so no code calls a member named
 /// `__construct`. The base class's arguments go in `: super(…)`.
 #[test]
@@ -2057,15 +2121,35 @@ fn lazy_off_a_parameter_is_not_supported_yet() {
     );
 }
 
-/// Spec section 9.1: a class has one unnamed main constructor, and no overloading by argument types.
+/// Spec section 9.1: a class has one unnamed main constructor, and no overloading by argument types. The help's named
+/// constructor compiles. A method named after its class has only its own error, before the constructor or after it.
 #[test]
 fn a_class_has_one_main_constructor() {
     let second = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report(string name) {}\n}\n";
-    let after_a_method =
-        "namespace App.Tenant;\n\nclass Report\n{\n    public int Report() => 1;\n    public Report(int id) {}\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report.fromName(string name) : this(strlen(name)) { }\n}\n";
 
-    assert_eq!(issues(second), ["6:12 A class has one main constructor: PHP# has no overloading by argument types."]);
-    assert_eq!(issues(after_a_method), ["5:16 A method named after its class is not supported yet in PHP#."]);
+    let issue = check("src/Report.sharp", second).remove(0);
+    assert_eq!(issue.message, "A class has one main constructor: PHP# has no overloading by argument types.");
+    assert_eq!(
+        issue.help.as_deref(),
+        Some(
+            "Give it a name that passes control to the main constructor, as in `public Report.fromName(…) : this(…) { }`."
+        )
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+
+    for (code, expected) in [
+        (
+            "namespace App.Tenant;\n\nclass Report\n{\n    public int Report() => 1;\n    public Report(int id) {}\n}\n",
+            "5:16 A method named after its class is not supported yet in PHP#.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public int Report() => 1;\n}\n",
+            "6:16 A method named after its class is not supported yet in PHP#.",
+        ),
+    ] {
+        assert_eq!(issues(code), [expected], "{code}");
+    }
 }
 
 #[test]
@@ -2484,15 +2568,15 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
 }
 
 #[test]
-fn an_auto_property_has_get_an_optional_narrower_set_and_an_optional_constant_initial_value() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; } = \"none\";\n    public float rate { get; protected set; }\n    protected int total { get; private set; }\n    public int id { get; }\n    private int hidden { get; set; }\n}\n";
+fn an_auto_property_has_get_an_optional_narrower_set_or_init_and_an_optional_constant_initial_value() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; } = \"none\";\n    public float rate { get; protected set; }\n    protected int total { get; private set; }\n    public int id { get; }\n    private int hidden { get; set; }\n    public string title { get; init; } = \"\";\n    public string label { get; private init; } = \"\";\n    public string slug { get; init => field = strtolower(value); } = \"\";\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
 fn an_auto_property_breaking_the_accessor_rules_is_an_error() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; public set; }\n    private int b { get; private set; }\n    protected int c { get; public set; }\n    public int d { set; }\n    public int e { get; get; }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; public set; }\n    private int b { get; private set; }\n    protected int c { get; public set; }\n    public int d { set; }\n    public int e { get; get; }\n    protected int f { get; public init; }\n    public int g { get; set; init; }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2502,6 +2586,8 @@ fn an_auto_property_breaking_the_accessor_rules_is_an_error() {
             "7:28 The `set` accessor of a PHP# property must be narrower than the property.",
             "8:16 A PHP# property needs a `get` accessor.",
             "9:25 A PHP# property declares each accessor once.",
+            "10:28 The `init` accessor of a PHP# property must be narrower than the property.",
+            "11:30 A PHP# property is written by `set` or by `init`, not both.",
         ]
     );
 }
@@ -2548,7 +2634,7 @@ fn a_static_computed_property_or_one_without_an_access_modifier_is_not_supported
 
 #[test]
 fn properties_outside_the_slice_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int a { get; set; }\n    public static int b { get; }\n    public int c { private get; set; }\n    public abstract int d { get; }\n    public override int e { get => 1; }\n    public int f { get; init; }\n    public int g = 0 { get; }\n    public int h { get; set(int value); }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int a { get; set; }\n    public static int b { get; }\n    public int c { private get; set; }\n    public abstract int d { get; }\n    public override int e { get => 1; }\n    public int g = 0 { get; }\n    public int h { get; set(int value); }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2559,9 +2645,8 @@ fn properties_outside_the_slice_are_not_supported_yet() {
             "7:20 This accessor is not supported yet in PHP#.",
             "8:12 This modifier is not supported yet in PHP#.",
             "9:25 Overriding a property is not supported yet in PHP#.",
-            "10:25 This accessor is not supported yet in PHP#.",
-            "11:16 An initial value before the accessors is not supported yet in PHP#.",
-            "12:25 This accessor is not supported yet in PHP#.",
+            "10:16 An initial value before the accessors is not supported yet in PHP#.",
+            "11:25 This accessor is not supported yet in PHP#.",
         ]
     );
 
@@ -2621,14 +2706,18 @@ fn the_property_read_through_this_inside_its_own_accessor_is_an_error_that_names
 }
 
 /// PHP gives a `get` hook the property's type and a `set` hook `void`, so `get` returns a value and `set` returns
-/// none. A lambda in an accessor returns for itself.
+/// none, as does `init`, which runs as the `set` hook. A lambda in an accessor returns for itself.
 #[test]
 fn a_get_returns_a_value_and_a_set_returns_none_as_php_hooks_do() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { return; } }\n    public int b { get => field; set { return value; } }\n    public int c { get => field; set { const run = () => { return 1; }; return; } }\n    public int d { get { const run = () => { return; }; return 1; } }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { return; } }\n    public int b { get => field; set { return value; } }\n    public int c { get => field; set { const run = () => { return 1; }; return; } }\n    public int d { get { const run = () => { return; }; return 1; } }\n    public int e { get => field; init { return value; } }\n}\n";
 
     assert_eq!(
         issues(code),
-        ["5:26 A `get` accessor must return a value.", "6:47 A `set` accessor must not return a value.",]
+        [
+            "5:26 A `get` accessor must return a value.",
+            "6:47 A `set` accessor must not return a value.",
+            "9:48 An `init` accessor must not return a value.",
+        ]
     );
 }
 
@@ -2670,15 +2759,17 @@ fn an_initial_value_or_a_constructor_parameter_needs_storage() {
     );
 }
 
-/// A constant initial value is the property's default, but any other would run the `set` body in the constructor.
+/// A constant initial value is the property's default, but any other would run the `set` or `init` body in the
+/// constructor.
 #[test]
 fn an_initial_value_that_is_not_constant_on_a_property_whose_set_has_a_body_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n    public int d { get; init => field = value; } = strlen(\"x\");\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#."
+            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#.",
+            "8:52 An initial value that is not constant, on a property whose `init` has a body, is not supported yet in PHP#.",
         ]
     );
 }
@@ -2689,6 +2780,20 @@ fn a_static_property_with_an_accessor_body_is_not_supported_yet() {
         "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n}\n";
 
     assert_eq!(issues(code), ["5:12 A static property with an accessor body is not supported yet in PHP#."]);
+}
+
+/// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.
+/// The help's `set;` and `private set;` compile.
+#[test]
+fn a_static_property_has_no_init() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int count { get; init; } = 0;\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Report\n{\n    public static int count { get; set; } = 0;\n    public static int total { get; private set; } = 0;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["5:36 A static property has no `init`: `init` sets a property while its object is created."]
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
 }
 
 #[test]
@@ -3941,6 +4046,31 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
             "class method `Order.total` has already been defined | previous definition | class `Order` defined here.",
         ]
     );
+}
+
+/// A construct outside the slice is refused with a note that lists what PHP# has where it is written, so the note of
+/// a refused class member names a class's members and the note of a refused expression names a body's expressions.
+#[test]
+fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
+    let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
+    let body = leak(method("        const copy = clone this;\n        return extra;\n"));
+
+    for (code, note) in [
+        (
+            class,
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`.",
+        ),
+        (
+            body,
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
+        ),
+    ] {
+        assert_eq!(
+            check("src/Report.sharp", code).into_iter().flat_map(|issue| issue.notes).collect::<Vec<_>>(),
+            [note],
+            "{code}"
+        );
+    }
 }
 
 /// A class-level error names the class by the name the file writes: `Order` in a `.sharp` file, and its full name

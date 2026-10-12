@@ -59,6 +59,15 @@ where
                         terminator: None,
                     });
                 }
+                cst::ClassLikeMember::NamedConstructor(named_constructor) => {
+                    let node = self.arena.alloc(self.lower_named_constructor(named_constructor, owner));
+                    collected.push(MemberItem {
+                        meta: (),
+                        span: member.span(),
+                        kind: MemberItemKind::Method(node),
+                        terminator: None,
+                    });
+                }
                 cst::ClassLikeMember::Property(cst::Property::Plain(property)) => {
                     let lowered = self.lower_plain_property(property);
                     let last = lowered.len().saturating_sub(1);

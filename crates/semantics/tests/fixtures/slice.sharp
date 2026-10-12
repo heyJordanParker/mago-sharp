@@ -41,6 +41,15 @@ public class Report
         this.name = "report";
     }
 
+    protected Report.fresh(int start) : this(start, new Calc(start), 0)
+    {
+        if (start < 0) {
+            return;
+        }
+        this.name = "fresh";
+        const read = () => this.count;
+    }
+
     public int run([Field] [Entity(false)] int extra, float rate = 1.5, string label = "\u{41}\n", bool strict = !false)
     {
         let total = extra * 2 + 1;
@@ -106,6 +115,7 @@ public class Report
         const made = Calc.make();
         const read = calc.rate;
         const fresh = new Calc(1, rate: 2);
+        const copy = new Report.fresh(1);
         const chained = Calc.make().add(1).rate;
         const sum = Calc.make().add(1, 2);
         const big = 0xFFFFFFFFFFFFFFFF;

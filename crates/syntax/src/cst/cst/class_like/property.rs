@@ -322,11 +322,19 @@ impl<'arena> Property<'arena> {
     }
 }
 
-impl PropertyHookList<'_> {
-    /// Returns `true` when the list has no `set` hook, which makes a PHP# auto-property get-only (spec section 6.1).
+impl<'arena> PropertyHookList<'arena> {
+    /// Returns `true` when the list has no `set` hook and no PHP# `init` accessor, which makes a PHP# auto-property
+    /// get-only (spec section 6.1).
     #[must_use]
     pub fn is_get_only(&self) -> bool {
-        !self.hooks.iter().any(|hook| hook.name.value == b"set")
+        self.setter().is_none()
+    }
+
+    /// The hook that writes the property: PHP's `set`, or a PHP# `init` accessor, which writes it only while the
+    /// object is created (spec section 6.1) and runs as the `set` hook.
+    #[must_use]
+    pub fn setter(&self) -> Option<&PropertyHook<'arena>> {
+        self.hooks.iter().find(|hook| hook.is_setter())
     }
 
     /// Returns `true` when a PHP# property with these accessors runs as `readonly`: a get-only auto-property, which
@@ -334,6 +342,15 @@ impl PropertyHookList<'_> {
     #[must_use]
     pub fn is_readonly(&self) -> bool {
         self.is_get_only() && !self.hooks.iter().any(|hook| matches!(hook.body, PropertyHookBody::Concrete(_)))
+    }
+}
+
+impl PropertyHook<'_> {
+    /// Returns `true` for the hook that writes the property: PHP's `set`, or a PHP# `init` accessor, which runs as the
+    /// `set` hook and takes `value` as `set` does.
+    #[must_use]
+    pub fn is_setter(&self) -> bool {
+        self.name.value == b"set" || self.name.value == b"init"
     }
 }
 

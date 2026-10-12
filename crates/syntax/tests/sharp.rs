@@ -260,7 +260,11 @@ fn any_other_word_after_a_constructor_colon_is_one_error() {
         let [error] = program.errors else {
             panic!("expected one error for `{member}`, got {:#?}", program.errors);
         };
-        assert_eq!(error.to_string(), "A constructor passes control to its base class with `: super(…)`.", "{member}");
+        assert_eq!(
+            error.to_string(),
+            "A constructor passes control to its base class with `: super(…)`, and a named constructor to the main one with `: this(…)`.",
+            "{member}"
+        );
         assert_eq!(source(code, error), start, "{member}");
         let [ClassLikeMember::Method(constructor), ClassLikeMember::Method(run)] = class_members(program).as_slice()
         else {
@@ -269,6 +273,79 @@ fn any_other_word_after_a_constructor_colon_is_one_error() {
         assert_eq!(source(code, &constructor.body), "{}", "{member}");
         assert_eq!(source(code, &run.name), "run", "{member}");
     }
+}
+
+/// Spec section 9.1: a named constructor is its modifiers, its class's name, a `.`, its own name, parameters, an
+/// optional `: this(…)` and a body. Semantics requires `: this(…)`.
+#[test]
+fn a_named_constructor_is_its_class_a_dot_its_name_parameters_this_and_a_body() {
+    for (member, name, initializer, body) in [
+        ("public Report.fromJson(string json) : this(json.length) {}", "fromJson", Some(": this(json.length)"), "{}"),
+        ("[Shown] private Report.empty() : this(0) => this.reset();", "empty", Some(": this(0)"), "=> this.reset();"),
+        ("protected Report.raw(int id) { }", "raw", None, "{ }"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{member}: {:#?}", program.errors);
+        let [ClassLikeMember::NamedConstructor(constructor), ClassLikeMember::Method(run)] =
+            class_members(program).as_slice()
+        else {
+            panic!("expected a named constructor and a method for `{member}`, got {:#?}", class_members(program));
+        };
+        assert_eq!(source(code, constructor), member);
+        assert_eq!(source(code, &constructor.class), "Report", "{member}");
+        assert_eq!(source(code, &constructor.name), name, "{member}");
+        assert_eq!(
+            constructor.initializer.as_ref().map(|initializer| source(code, initializer)),
+            initializer,
+            "{member}"
+        );
+        assert_eq!(source(code, &constructor.body), body, "{member}");
+        assert_eq!(source(code, &run.name), "run", "{member}");
+    }
+}
+
+/// Spec section 9.1: `new Report.fromJson(…)` creates an object with the named constructor `fromJson`. PHP reads
+/// `new Report . fromJson(…)` as the new object joined to a function's result.
+#[test]
+fn new_with_a_dot_names_a_named_constructor_and_php_keeps_its_concatenation() {
+    const SHARP: &str = "class Use\n{\n    public Report make() => new Report.fromJson(\"{}\");\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Use.sharp", SHARP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(ClassLikeMember::Method(method)) = class_members(program).first() else {
+        panic!("expected a method, got {:#?}", class_members(program));
+    };
+    let MethodBody::Expression(body) = &method.body else {
+        panic!("expected an expression body, got {:#?}", method.body);
+    };
+    let Expression::Instantiation(instantiation) = body.expression else {
+        panic!("expected `new`, got {:#?}", body.expression);
+    };
+    assert_eq!(source(SHARP, instantiation), "new Report.fromJson(\"{}\")");
+    assert_eq!(source(SHARP, instantiation.class), "Report");
+    assert_eq!(instantiation.constructor.as_ref().map(|constructor| source(SHARP, constructor)), Some(".fromJson"));
+
+    const PHP: &str = "<?php $made = new Report.fromJson('{}');";
+    let program = parse(&arena, "src/use.php", PHP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Expression(statement)) = program.statements.get(1) else {
+        panic!("expected an expression statement, got {:#?}", program.statements);
+    };
+    let Expression::Assignment(assignment) = statement.expression else {
+        panic!("expected an assignment, got {:#?}", statement.expression);
+    };
+    let Expression::Binary(concatenation) = assignment.rhs else {
+        panic!("expected a concatenation, got {:#?}", assignment.rhs);
+    };
+    assert_eq!(source(PHP, concatenation.lhs), "new Report");
+    assert_eq!(source(PHP, concatenation.rhs), "fromJson('{}')");
 }
 
 #[test]
@@ -351,8 +428,8 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required`, `via` and a named constructor are spec syntax outside the slice. Each one is a
-/// single error where it starts, and the class around it still parses.
+/// `required` and `via` are spec syntax outside the slice. Each one is a single error where it starts, and the class
+/// around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
@@ -362,16 +439,6 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
             "public Report(public int id { get; } via Tracked, int other) {}",
             "`via` is not supported yet in PHP#.",
             "via",
-        ),
-        (
-            "public Report.fromJson(string json) : this(json.length) {}",
-            "A named constructor is not supported yet in PHP#.",
-            "Report.fromJson",
-        ),
-        (
-            "public Report make() { return new Report.fromJson(\"{}\"); }",
-            "A named constructor is not supported yet in PHP#.",
-            "Report.fromJson",
         ),
     ] {
         let arena = LocalArena::new();

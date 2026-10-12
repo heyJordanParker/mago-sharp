@@ -57,6 +57,12 @@ impl MetadataFlags {
     /// A PHP# module, spec section 32: the class-like `<Namespace>\Module` its `Module.sharp` declares, which holds only
     /// laws and never runs.
     pub const MODULE: MetadataFlags = MetadataFlags(1 << 45);
+    /// A PHP# named constructor, spec section 9.1: the public static method it runs as, which creates its class's
+    /// object with the main constructor and is called as `new Class.name(…)`.
+    pub const NAMED_CONSTRUCTOR: MetadataFlags = MetadataFlags(1 << 46);
+    /// A PHP# property declared with `init`, spec section 6.1: it is set only while the object is created, and runs as
+    /// PHP's `set` hook or set visibility.
+    pub const INIT: MetadataFlags = MetadataFlags(1 << 47);
 }
 
 impl MetadataFlags {
@@ -127,6 +133,18 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_module(self) -> bool {
         self.contains(Self::MODULE)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_named_constructor(self) -> bool {
+        self.contains(Self::NAMED_CONSTRUCTOR)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_init(self) -> bool {
+        self.contains(Self::INIT)
     }
 
     #[inline]

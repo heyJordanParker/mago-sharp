@@ -30,6 +30,7 @@ use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
@@ -60,6 +61,7 @@ use crate::metadata::r#extern::ExternMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::metadata::ttype::TypeMetadata;
 use crate::scanner::class_alias::scan_class_like_alias;
 use crate::scanner::class_like::register_anonymous_class;
 use crate::scanner::class_like::register_class;
@@ -75,6 +77,7 @@ use crate::scanner::function_like::scan_closure;
 use crate::scanner::function_like::scan_function;
 use crate::scanner::function_like::scan_method;
 use crate::scanner::property::scan_promoted_property;
+use crate::ttype::get_named_object;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
 
@@ -857,6 +860,42 @@ where
 
     #[inline]
     fn walk_out_operator(&mut self, _operator: &'arena Operator<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    /// A PHP# named constructor registers as the public static method it runs as, spec section 9.1, which returns an
+    /// object of the class that declares it. It is not inherited, so a subclass may declare its own of the same name:
+    /// the method is neither final, as a PHP# method without `virtual` is, nor abstract, as one without a body is.
+    #[inline]
+    fn walk_in_named_constructor(
+        &mut self,
+        named_constructor: &'arena NamedConstructor<'arena>,
+        context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        let parts = MethodParts::of_named_constructor(named_constructor);
+        self.register_method(&parts, context);
+
+        if let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
+            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, ascii_lowercase_word(parts.name)))
+            && let Some(method_metadata) = &mut method.method_metadata
+        {
+            method_metadata.is_static = true;
+            method_metadata.is_final = false;
+            method_metadata.is_abstract = false;
+            method.flags |= MetadataFlags::NAMED_CONSTRUCTOR;
+            method.set_return_type_declaration_metadata(Some(TypeMetadata::new(
+                get_named_object(class.original_name, None),
+                named_constructor.name.span,
+            )));
+        }
+    }
+
+    #[inline]
+    fn walk_out_named_constructor(
+        &mut self,
+        _named_constructor: &'arena NamedConstructor<'arena>,
+        _context: &mut Context<'ctx, 'arena, A>,
+    ) {
         self.template_constraints.pop().expect("Expected template stack to be non-empty");
     }
 
