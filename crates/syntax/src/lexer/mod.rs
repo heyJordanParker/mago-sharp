@@ -176,6 +176,16 @@ impl<'input> Lexer<'input> {
         self.input.current_position()
     }
 
+    /// The line of the input that holds the byte at `offset`, without its line break, and the offset it starts at.
+    pub(crate) fn line_at(&self, offset: u32) -> (u32, &'input [u8]) {
+        let before = self.input.slice_in_range(0, offset);
+        let start = offset - before.iter().rev().take_while(|byte| **byte != b'\n').count() as u32;
+        let after = self.input.slice_in_range(offset, u32::MAX);
+        let end = offset + after.iter().take_while(|byte| **byte != b'\n').count() as u32;
+
+        (start, self.input.slice_in_range(start, end))
+    }
+
     /// Tokenizes the next input from the source code.
     ///
     /// This method reads from the input and produces the next [`Token`] based on the current [`LexerMode`].

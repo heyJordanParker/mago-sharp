@@ -8,6 +8,7 @@ use crate::lexer::lookup_keyword;
 use crate::parser::Parser;
 use crate::token::Token;
 use crate::token::TokenKind;
+use crate::token::is_sharp_keyword;
 
 impl<'arena, A> Parser<'_, 'arena, A>
 where
@@ -34,17 +35,23 @@ where
 
     /// Reads the name at the head of the stream, or after `static` there, as the PHP keyword it spells where PHP's
     /// construct follows it, as [`Self::read_php_keyword`] decides. A `.sharp` file reads a PHP keyword that PHP#
-    /// doesn't use as a plain name, spec section 2, so PHP's construct parses only where a member, an expression or a
-    /// part of a PHP construct starts, and its own error names the PHP# form.
+    /// doesn't use as a plain name, spec section 2, so PHP's construct parses only where a member or a part of a PHP
+    /// construct starts, and its own error names the PHP# form.
     pub(crate) fn read_php_construct(&mut self) -> Result<(), ParseError> {
-        self.read_php_keyword(false)
+        self.read_php_keyword(Head::Declaration)
     }
 
-    /// Reads the name at the head of a statement as [`Self::read_php_construct`] does, and also as the statement PHP
+    /// Reads the name at the head of an expression as [`Self::read_php_construct`] does, and also a keyword written
+    /// in another case, as `New` in `New Cart()`, as [`Self::miscased_keyword`] decides.
+    pub(crate) fn read_php_expression(&mut self) -> Result<(), ParseError> {
+        self.read_php_keyword(Head::Expression)
+    }
+
+    /// Reads the name at the head of a statement as [`Self::read_php_expression`] does, and also as the statement PHP
     /// writes with a colon body or a braceless body, as in `foreach (items as item):`, and as `declare(…)`. The token
     /// after an `if` statement's body is a statement's head too, where `elseif` may follow.
     pub(crate) fn read_php_statement(&mut self) -> Result<(), ParseError> {
-        self.read_php_keyword(true)
+        self.read_php_keyword(Head::Statement)
     }
 
     /// Reads the PHP keyword a name spells where its construct follows it: an operand, as in `echo total;` or
@@ -54,10 +61,22 @@ where
     /// `switch` and `elseif` at a statement's start, where `declare` always starts PHP's construct. Anywhere else
     /// they are a call, as in `flag ? print(1) : 0`. A PHP# infix word never starts an operand, so `empty is bool`
     /// reads `empty` as a name.
-    fn read_php_keyword(&mut self, at_statement: bool) -> Result<(), ParseError> {
+    ///
+    /// A PHP# keyword written in another case reads as the keyword with one error that writes its line in lowercase,
+    /// as rustc reads `Fn`. A PHP keyword PHP# doesn't use reads as its construct, whose own error names the PHP# form.
+    fn read_php_keyword(&mut self, head: Head) -> Result<(), ParseError> {
+        let at_statement = head == Head::Statement;
         let n = usize::from(self.stream.is_at(T!["static"])?);
-        let Some(keyword) = self.stream.lookahead(n)?.and_then(|token| self.php_keyword(token)) else {
+        let Some(token) = self.stream.lookahead(n)? else {
             return Ok(());
+        };
+        let (keyword, miscased) = match self.php_keyword(token) {
+            Some(keyword) => (keyword, false),
+            None if head != Head::Declaration && n == 0 => match self.miscased_keyword(token)? {
+                Some(keyword) => (keyword, true),
+                None => return Ok(()),
+            },
+            None => return Ok(()),
         };
         let starts_lambda = matches!(keyword, T!["fn" | "function"]);
         let starts_body = at_statement && matches!(keyword, T!["foreach" | "switch" | "elseif"]);
@@ -82,9 +101,34 @@ where
             };
         if construct_follows {
             self.stream.read_as(n, keyword);
+            let lowercase = token.value.to_ascii_lowercase();
+            if miscased && is_sharp_keyword(&lowercase) {
+                let (line_start, line) = self.stream.line_at(token.start.offset);
+                let start = (token.start.offset - line_start) as usize;
+                let mut fixed = line.to_vec();
+                fixed[start..start + token.value.len()].make_ascii_lowercase();
+
+                self.errors.push(ParseError::MiscasedKeywordInSharp(
+                    String::from_utf8_lossy(&lowercase).into(),
+                    String::from_utf8_lossy(&fixed).trim().into(),
+                    token.span_for(self.stream.file_id()),
+                ));
+            }
         }
 
         Ok(())
+    }
+
+    /// The keyword a name in a `.sharp` file spells in another case, as `Return` or `IF`, unless it starts a local
+    /// whose type it names, as in `Return refund = new Return();`.
+    fn miscased_keyword(&mut self, token: Token<'_>) -> Result<Option<TokenKind>, ParseError> {
+        let Some(keyword) = lookup_keyword(token.value)
+            .filter(|keyword| self.dialect.is_sharp() && token.kind == T![Identifier] && !keyword.is_magic_constant())
+        else {
+            return Ok(None);
+        };
+
+        Ok((!self.is_at_local_declaration()?).then_some(keyword))
     }
 
     /// Whether the head of the stream is PHP's keyword `kind` where a PHP construct expects it, as `endif` ends
@@ -147,6 +191,15 @@ where
             Err(self.stream.unexpected(Some(token), kinds))
         }
     }
+}
+
+/// Where the parser reads a name that may spell a PHP keyword: in a declaration, as a member's or an import's head,
+/// at an expression's head, or at a statement's head.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Head {
+    Declaration,
+    Expression,
+    Statement,
 }
 
 /// Whether `token` is a PHP# infix word, which follows an operand and never starts one.

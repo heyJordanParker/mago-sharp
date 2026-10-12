@@ -37,6 +37,7 @@ use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
+use mago_syntax::cst::DeclareBody;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extern;
@@ -508,11 +509,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Statement(Statement::Declare(declare)), _) => {
             let head = BytesDisplay(context.get_code_snippet(declare.declare.span.join(declare.right_parenthesis)));
-            context.report(
+            let issue = if declare.items.iter().all(|item| item.name.value.eq_ignore_ascii_case(b"strict_types")) {
                 Issue::error(format!("PHP# is always strict: remove `{head};`."))
-                    .with_annotation(Annotation::primary(declare.span()).with_message("Written here."))
-                    .with_note("Every `.sharp` file runs with `strict_types=1`."),
-            );
+                    .with_note("Every `.sharp` file runs with `strict_types=1`.")
+            } else {
+                let help = match declare.body {
+                    DeclareBody::Statement(Statement::Noop(_)) => "Delete it.",
+                    _ => "Write its body's code without the `declare` around it.",
+                };
+
+                Issue::error(format!("PHP# has no `{head}`: a `.sharp` file runs with PHP's default settings."))
+                    .with_help(help)
+            };
+            context.report(issue.with_annotation(Annotation::primary(declare.span()).with_message("Written here.")));
 
             None
         }
@@ -750,6 +759,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Ok(()) => {
                 let name = &constant.first_item().name;
                 check_declared_name(name.value, name.span, context);
+                // PHP reserves `X::class` for the class's name, so it loads no constant named `class` in any case.
+                if name.value.eq_ignore_ascii_case(b"class")
+                    && let Some(class) = enclosing_class_like_name(context.program, constant.span())
+                {
+                    context.report(
+                        Issue::error(format!(
+                            "`{}` can't name a constant: `{}.class` already names the class.",
+                            BytesDisplay(name.value),
+                            BytesDisplay(class)
+                        ))
+                        .with_annotation(Annotation::primary(name.span).with_message("Declared here.")),
+                    );
+                }
 
                 Some(ClassConstant)
             }
@@ -1488,10 +1510,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         // PHP# never has top-level functions, `global`, `compact()` or `extract()`: `check_function`, `check_global` and
-        // `check_function_call` report them. A function is reported at its name, so its parameters and body are checked
-        // as a method's. `global` holds only the names it declares, and `compact()` and `extract()` are reported over
-        // the whole call.
-        (Node::Statement(Statement::Function(_)), File) => Some(File),
+        // `check_function_call` report them. A function, at file level or in a body, is reported at its name, so its
+        // parameters and body are checked as a method's. `global` holds only the names it declares, and `compact()`
+        // and `extract()` are reported over the whole call.
+        (Node::Statement(Statement::Function(_)), File | Body) => Some(File),
         (Node::Function(_), File) => Some(Method),
         (Node::Statement(Statement::Global(_)), Body) => None,
         (Node::Expression(Expression::Call(Call::Function(function_call))), Body)
@@ -3869,9 +3891,16 @@ fn imported_name<'arena>(import: &UseItem<'arena>) -> &'arena [u8] {
 pub fn check_constant_access(constant_access: &ConstantAccess, context: &mut Context<'_, '_, '_>) {
     match context.names.binding(&constant_access.name) {
         Some(Binding::Member) => report_bare_member(constant_access.span(), constant_access.name.value(), context),
-        // A bare `die`, which no local names, is PHP's construct.
+        // A bare `die`, which no local names, is PHP's construct, and `TRUE` is `true` written in another case.
         Some(Binding::Constant) if !is_in_file_level_code(context) => {
-            report_removed_construct(constant_access.name.value(), constant_access.span(), context);
+            let name = constant_access.name.value();
+            match ["true", "false", "null"].into_iter().find(|literal| literal.as_bytes().eq_ignore_ascii_case(name)) {
+                Some(literal) => context.report(
+                    Issue::error(format!("Write `{literal}` in lowercase."))
+                        .with_annotation(Annotation::primary(constant_access.span()).with_message("Written here.")),
+                ),
+                None => report_removed_construct(name, constant_access.span(), context),
+            }
         }
         _ => {}
     }

@@ -13,6 +13,7 @@ use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -392,13 +393,49 @@ where
         &TypeExpansionOptions { self_class: block_context.scope.get_class_like_name(), ..Default::default() },
     );
 
-    report_undefined_types(context, &local_type, hint.span());
+    match miscased_local_keyword(hint, &local_type) {
+        Some(keyword) => report_miscased_local_keyword(context, keyword, hint.span()),
+        None => report_undefined_types(context, &local_type, hint.span()),
+    }
     report_map_keys_without_backing_value(context, &local_type, hint.span());
     report_unsupported_set_elements(context, &local_type, hint.span());
     let local_type = (Rc::new(known_type_or_error(local_type)), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
     Some(local_type)
+}
+
+/// The keyword `const` or `let` a local's written type spells in another case, as in `CONST total = 1;`, when that
+/// type names no declared type. A plain PHP class named `Let` keeps `Let total = …;` a local of that class.
+fn miscased_local_keyword(hint: &Hint<'_>, local_type: &TUnion) -> Option<&'static str> {
+    let Hint::Identifier(identifier) = hint else {
+        return None;
+    };
+
+    ["const", "let"].into_iter().find(|keyword| {
+        keyword.as_bytes().eq_ignore_ascii_case(identifier.value())
+            && matches!(local_type.get_single(), TAtomic::Reference(TReference::Symbol { .. }))
+    })
+}
+
+/// Reports `keyword`, written in another case at `span`, with its line written in lowercase.
+fn report_miscased_local_keyword<A>(context: &mut Context<'_, '_, A>, keyword: &str, span: Span)
+where
+    A: Arena,
+{
+    let file = context.source_file;
+    let line_number = file.line_number(span.start.offset);
+    let start = file.get_line_start_offset(line_number).unwrap_or(span.start.offset);
+    let end = file.get_line_end_offset(line_number).unwrap_or(span.end.offset);
+    let mut line = file.contents[start as usize..end as usize].to_vec();
+    line[span.start.offset as usize - start as usize..][..keyword.len()].make_ascii_lowercase();
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentClassLike,
+        Issue::error(format!("Write the keyword `{keyword}` in lowercase."))
+            .with_annotation(Annotation::primary(span).with_message("Written here."))
+            .with_help(format!("Write `{}`.", String::from_utf8_lossy(&line).trim())),
+    );
 }
 
 /// Analyzes a PHP# `for … of` as the PHP `foreach` over its collection, into the variables it declares. A written type

@@ -644,11 +644,18 @@ fn writing_a_const_local_after_its_block_closes_reports_only_the_scope_error() {
     assert_eq!(issues(code), ["10:9 `inner` is used after the block that declares it closes."]);
 }
 
+/// A function declared in a method is one PHP declares globally when the method runs, so it is the same error, once.
 #[test]
 fn a_top_level_function_is_an_error() {
-    let code = "namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n";
-
-    assert_eq!(issues(code), ["3:10 PHP# has no top-level functions: move `total` into a class as a static method."]);
+    let message = "PHP# has no top-level functions: move `total` into a class as a static method.";
+    for (code, at) in [
+        ("namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n", "3:10"),
+        ("namespace App.Tenant;\n\nFUNCTION total(int extra) { return extra; }\n", "3:10"),
+        (leak(method("        function total() { }\n        return extra;\n")), "7:18"),
+        (leak(method("        FUNCTION total() { }\n        return extra;\n")), "7:18"),
+    ] {
+        assert_eq!(issues(code), [format!("{at} {message}")], "{code}");
+    }
 }
 
 /// Spec section 27: a `.sharp` file declares one type, so a statement at file level is never valid, whatever it is.
@@ -714,6 +721,61 @@ fn declare_strict_types_is_one_error_wherever_it_is_written() {
             "5:22 The `strict_types` directive must be set to either `0` or `1`."
         ]
     );
+}
+
+/// PHP#'s `true`, `false` and `null` are lowercase, so a value written in another case is one error that names it.
+#[test]
+fn true_false_or_null_written_in_another_case_is_one_error() {
+    for (value, literal) in [("TRUE", "true"), ("False", "false"), ("NULL", "null"), ("Null", "null")] {
+        let code = leak(method(&format!("        let x = {value};\n        return extra;\n")));
+
+        assert_eq!(issues(code), [format!("7:17 Write `{literal}` in lowercase.")], "{code}");
+    }
+}
+
+/// PHP reserves `X::class` for a class's name, so a constant named `class` in any case fails when PHP loads the file.
+#[test]
+fn a_constant_named_class_is_an_error() {
+    for (code, at, name, class) in [
+        ("class Report\n{\n    public const int class = 1;\n}\n", "3:22", "class", "Report"),
+        ("class Report\n{\n    public const int CLASS = 1;\n}\n", "3:22", "CLASS", "Report"),
+        ("enum Suit\n{\n    case Hearts;\n\n    public const int class = 1;\n}\n", "5:22", "class", "Suit"),
+    ] {
+        assert_eq!(
+            issues(code),
+            [format!("{at} `{name}` can't name a constant: `{class}.class` already names the class.")],
+            "{code}"
+        );
+    }
+}
+
+/// PHP's other `declare` settings, `ticks` and `encoding`, set what PHP# leaves at PHP's defaults, so each is one error
+/// that names it, and the help removes it or the `declare` around its body.
+#[test]
+fn declare_of_another_setting_is_one_error_that_names_it() {
+    for (body, head, help) in [
+        ("        declare(ticks=1);\n", "declare(ticks=1)", "Delete it."),
+        ("        declare(encoding=\"UTF-8\");\n", "declare(encoding=\"UTF-8\")", "Delete it."),
+        (
+            "        declare(ticks=1) { extra = 2; }\n",
+            "declare(ticks=1)",
+            "Write its body's code without the `declare` around it.",
+        ),
+        ("        declare(strict_types=1, ticks=1);\n", "declare(strict_types=1, ticks=1)", "Delete it."),
+    ] {
+        let code = leak(method(&format!("{body}        return extra;\n")));
+        let issues: Vec<(String, Option<String>)> =
+            check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.help)).collect();
+
+        assert_eq!(
+            issues,
+            [(
+                format!("PHP# has no `{head}`: a `.sharp` file runs with PHP's default settings."),
+                Some(help.to_owned())
+            )],
+            "{code}"
+        );
+    }
 }
 
 #[test]

@@ -7336,6 +7336,46 @@ fn a_sharp_call_keeps_a_functions_template_bounds_unless_it_keys_a_map() {
 /// where it is used: a parameter, a `Map` key, a local, a field's and a property's initial value, a return, in a block or an
 /// expression body, and an argument. A PHP declaration that names
 /// no type stays checked where PHP# meets it, so a call that passes it a wrong value is refused.
+/// `CONST base = 2;` reads as a local whose type is `CONST`, as `Cart base = …;` does. When no type has that name, the
+/// type is the keyword `const` or `let` written in another case, and the help writes the line in lowercase.
+#[test]
+fn a_local_typed_const_or_let_in_another_case_is_the_keyword_written_in_another_case() {
+    let method = |body: &'static str| -> &'static str {
+        Box::leak(
+            format!("namespace Demo;\n\nclass Report\n{{\n    public int run()\n    {{\n{body}    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    for (body, keyword, line) in [
+        ("        CONST base = 2;\n        return base;\n", "const", "const base = 2;"),
+        ("        Let total = 1;\n        return total;\n", "let", "let total = 1;"),
+        ("        LET total = 1; return total;\n", "let", "let total = 1; return total;"),
+    ] {
+        assert_eq!(
+            refusals(("src/Demo/Report.sharp", method(body)), &[]),
+            [format!("7:9 non-existent-class-like Write the keyword `{keyword}` in lowercase. | Write `{line}`.")],
+            "{body}"
+        );
+    }
+
+    let let_class = ("src/Demo/Let.php", "<?php\n\nnamespace Demo;\n\nclass Let\n{\n}\n");
+    let typed = method("        Let total = new Let();\n        return 1;\n");
+    assert_eq!(issues(("src/Demo/Report.sharp", typed), &[let_class]), Vec::<String>::new());
+}
+
+/// The semantic checks refuse `TRUE` as `true` written in another case, so its value keeps its type and adds no issue.
+#[test]
+fn true_false_or_null_in_another_case_keeps_its_value_type() {
+    for (returns, value) in [("bool", "TRUE"), ("bool", "False"), ("int?", "NULL")] {
+        let code = Box::leak(
+            format!("namespace Demo;\n\nclass Report\n{{\n    public {returns} run()\n    {{\n        return {value};\n    }}\n}}\n")
+                .into_boxed_str(),
+        );
+        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), Vec::<String>::new(), "{value}");
+    }
+}
+
 #[test]
 fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_is() {
     let sharp = "namespace Demo;\n\nclass Tally\n{\n    public Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        Missing? local = null;\n        return 0;\n    }\n}\n";

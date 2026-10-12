@@ -61,6 +61,11 @@ where
         self.position
     }
 
+    /// The line of the source that holds the byte at `offset`, without its line break, and the offset it starts at.
+    pub(crate) fn line_at(&self, offset: u32) -> (u32, &'input [u8]) {
+        self.lexer.line_at(offset)
+    }
+
     /// Returns whether the stream has consumed all tokens up to EOF.
     ///
     /// # Errors

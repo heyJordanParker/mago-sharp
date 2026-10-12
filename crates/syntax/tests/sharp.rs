@@ -2097,6 +2097,62 @@ fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
     }
 }
 
+/// PHP#'s keywords are lowercase. A PHP# keyword written in another case where only its construct can follow reads as
+/// the keyword with one error, whose help writes the line in lowercase, as rustc reads `Fn`. A PHP keyword PHP#
+/// doesn't use reads as its construct, whose own error names the PHP# form, and a word that starts a local stays a
+/// name.
+#[test]
+fn a_keyword_written_in_another_case_is_one_error_that_writes_it_in_lowercase() {
+    let method = |body: &str| -> &'static str {
+        Box::leak(
+            format!("class Report\n{{\n    public Any run(Any value, bool flag)\n    {{\n{body}    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    for (code, keyword, line) in [
+        (method("        Return 5;\n"), "return", "return 5;"),
+        (method("        RETURN value;\n"), "return", "return value;"),
+        (method("        IF (flag) { }\n        return 1;\n"), "if", "if (flag) { }"),
+        (method("        const c = New Report();\n        return c;\n"), "new", "const c = new Report();"),
+        (method("        New Report();\n        return 1;\n"), "new", "new Report();"),
+        (method("        return flag ? New Report() : value;\n"), "new", "return flag ? new Report() : value;"),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let issues: Vec<(String, Option<String>)> =
+            program.errors.iter().map(Issue::from).map(|issue| (issue.message, issue.help)).collect();
+        assert_eq!(
+            issues,
+            [(format!("Write the keyword `{keyword}` in lowercase."), Some(format!("Write `{line}`.")))],
+            "{code}"
+        );
+    }
+
+    let messages = |code: &'static str| -> Vec<String> {
+        let arena = LocalArena::new();
+
+        parse(&arena, "src/Report.sharp", code).errors.iter().map(ToString::to_string).collect()
+    };
+    assert_eq!(
+        messages(method("        Foreach (value as item) { }\n        return 1;\n")),
+        messages(method("        foreach (value as item) { }\n        return 1;\n")),
+    );
+
+    for (code, word, names) in [
+        (method("        Return refund = new Return();\n        return refund;\n"), "Return", 2),
+        (method("        List<int> items = [];\n        return items;\n"), "List", 1),
+        (method("        const print = Print.make();\n        return print;\n"), "Print", 1),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        assert_eq!(name_count(program, word), names, "{code}");
+    }
+}
+
 #[test]
 fn a_php_closure_reports_its_function_and_its_use_clause() {
     let arena = LocalArena::new();

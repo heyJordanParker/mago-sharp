@@ -375,6 +375,16 @@ fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_a_class() {
     );
 }
 
+/// The lowercase line each error on a keyword, `true`, `false` or `null` written in another case quotes compiles.
+#[test]
+fn the_lowercase_line_a_keyword_in_another_case_names_compiles() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int run(bool flag)\n    {\n        const base = 2;\n        let total = 1;\n        if (flag) { }\n        const c = new Report();\n        new Report();\n        let on = true;\n        let off = false;\n        int? none = null;\n        return flag ? base : total;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+}
+
 /// The PHP# form each refusal of `isset`, `empty`, `unset`, `array` and `list` quotes compiles.
 #[test]
 fn the_php_sharp_form_a_refused_php_construct_names_compiles() {

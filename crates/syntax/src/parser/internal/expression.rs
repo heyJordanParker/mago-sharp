@@ -231,7 +231,7 @@ where
 
     #[inline]
     fn parse_lhs_expression(&mut self, precedence: Precedence) -> Result<&'arena Expression<'arena>, ParseError> {
-        self.read_php_construct()?;
+        self.read_php_expression()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let next = self.stream.peek_kind(1)?;
 
