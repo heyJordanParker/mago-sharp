@@ -661,29 +661,26 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Event<'arena> {
     where
         A: Arena,
     {
-        // The scanner registers every event, with its constructor.
+        // The scanner registers every event, or the class-like declared first under its name.
         let name = context.resolved_names.get(&self.name);
-        let codebase = context.codebase;
 
-        codebase.get_class_like(name).zip(codebase.get_method(name, b"__construct")).map_or(
-            Ok(()),
-            |(class_like_metadata, constructor)| {
-                analyze_event(self, class_like_metadata, constructor, context, artifacts)
-            },
-        )
+        context
+            .codebase
+            .get_class_like(name)
+            .map_or(Ok(()), |class_like_metadata| analyze_event(self, class_like_metadata, context, artifacts))
     }
 }
 
 fn analyze_event<'ctx, 'arena, A>(
     event: &Event<'arena>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    constructor: &'ctx FunctionLikeMetadata,
     context: &mut Context<'ctx, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
 {
+    // An interface or a class declared first in the file under the event's name keeps it, and has no constructor.
     if class_like_metadata.span != event.span() {
         let name = class_like_metadata.original_name.as_bytes();
         report_duplicate_definition(context, "Event", "event", name, event.span(), class_like_metadata.span);
@@ -729,23 +726,25 @@ where
     )?;
 
     // The constructor has no body: its parameters' types and defaults are checked as a method's.
-    let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, constructor.name)));
-    scope.set_class_like(Some(class_like_metadata));
-    scope.set_function_like(Some(constructor));
+    let constructor = context.codebase.get_method(class_like_metadata.name.as_bytes(), b"__construct");
+    constructor.map_or(Ok(()), |constructor| {
+        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, constructor.name)));
+        scope.set_class_like(Some(class_like_metadata));
+        scope.set_function_like(Some(constructor));
 
-    let mut constructor_block_context = BlockContext::new(scope, context.settings.register_super_globals);
-    analyze_function_like(
-        context,
-        artifacts,
-        &mut constructor_block_context,
-        constructor,
-        &event.parameter_list,
-        None,
-        FunctionLikeBody::Statements(&[], event.parameter_list.span()),
-        None,
-    )?;
-
-    Ok(())
+        let mut constructor_block_context = BlockContext::new(scope, context.settings.register_super_globals);
+        analyze_function_like(
+            context,
+            artifacts,
+            &mut constructor_block_context,
+            constructor,
+            &event.parameter_list,
+            None,
+            FunctionLikeBody::Statements(&[], event.parameter_list.span()),
+            None,
+        )
+        .map(drop)
+    })
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
@@ -4032,6 +4031,16 @@ fn check_class_like_properties<'ctx, A>(
                 continue;
             };
 
+            if context.dialect.is_sharp() {
+                report_unfit_interface_property(
+                    context,
+                    class_like_metadata,
+                    interface_metadata,
+                    property_metadata,
+                    interface_property,
+                );
+            }
+
             for (hook_name, interface_hook) in &interface_property.hooks {
                 if !interface_hook.returns_by_ref {
                     continue;
@@ -4080,6 +4089,62 @@ fn check_class_like_properties<'ctx, A>(
                 );
             }
         }
+    }
+}
+
+/// Reports a PHP# class's or event's property that does not fit the property `interface` states, as the engine refuses
+/// the class: it is public, on each object, and of the stated type or a narrower one for a get-only property.
+fn report_unfit_interface_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    interface: &ClassLikeMetadata,
+    property: &PropertyMetadata,
+    stated: &PropertyMetadata,
+) where
+    A: Arena,
+{
+    let name = display_class_like_name(context, class_like_metadata.original_name);
+    let interface_name = display_class_like_name(context, interface.original_name);
+    let property_name = display_property_name(context, property.name.0);
+    let span = property.name_span.unwrap_or(class_like_metadata.span);
+    let stated_span = stated.name_span.unwrap_or(interface.span);
+    let report = |context: &mut Context<'_, '_, A>, code: IssueCode, given: String, stated: String, help: String| {
+        context.collector.report_with_code(
+            code,
+            Issue::error(format!(
+                "`{name}` gives `{property_name}` {given}, and `{interface_name}` states it {stated}."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Given here."))
+            .with_annotation(Annotation::secondary(stated_span).with_message("Stated here."))
+            .with_help(help),
+        );
+    };
+
+    if property.read_visibility != stated.read_visibility {
+        let (given, stated) = (property.read_visibility, stated.read_visibility);
+        let help = format!("Declare `{property_name}` `{stated}`.");
+        report(context, IssueCode::IncompatiblePropertyAccess, format!("as `{given}`"), format!("`{stated}`"), help);
+    }
+
+    if property.flags.is_static() != stated.flags.is_static() {
+        let (given, help) = ("as `static`".to_owned(), "Remove `static`.".to_owned());
+        report(context, IssueCode::IncompatibleStaticModifier, given, "on each object".to_owned(), help);
+    }
+
+    if let Some((given, stated_type)) =
+        property.type_declaration_metadata.as_ref().zip(stated.type_declaration_metadata.as_ref())
+        && is_property_type_variance_invalid(
+            context.codebase,
+            &given.type_union,
+            &stated_type.type_union,
+            stated.flags.is_virtual_property() && !stated.hooks.contains_key(&word("set")),
+            false,
+        )
+    {
+        let stated_type = display_type(context, &stated_type.type_union);
+        let given = format!("as `{}`", display_type(context, &given.type_union));
+        let help = format!("Give `{property_name}` the type `{stated_type}`.");
+        report(context, IssueCode::IncompatiblePropertyType, given, format!("as `{stated_type}`"), help);
     }
 }
 

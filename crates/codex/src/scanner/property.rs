@@ -278,8 +278,6 @@ where
                 .collect()
         }
         Property::Hooked(hooked_property) => {
-            // A PHP# interface property runs as PHP's `public int $orderId { get; }`, with no storage.
-            let is_sharp = is_sharp && !class_like_metadata.kind.is_interface();
             let verdict = evaluate_version_attributes(&hooked_property.attribute_lists, context, context.php_version);
             let attributes = scan_attribute_lists(
                 &hooked_property.attribute_lists,

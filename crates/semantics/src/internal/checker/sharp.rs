@@ -38,6 +38,7 @@ use mago_syntax::cst::Construct;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DirectVariable;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
@@ -549,7 +550,20 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Interface(_), File | Class) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
         (Node::Event(_), File | Class) => Some(Place::Event),
-        (Node::ClassLikeMember(ClassLikeMember::Event(_) | ClassLikeMember::Interface(_)), Class) => Some(Class),
+        (Node::ClassLikeMember(ClassLikeMember::Event(event)), Class) => {
+            let written = event.event.span().join(event.terminator.span());
+            let message = "An event takes only `public`.";
+            check_nested_type(message, event.event.span(), &event.name, event.modifiers.is_empty(), written, context);
+
+            Some(Class)
+        }
+        (Node::ClassLikeMember(ClassLikeMember::Interface(interface)), Class) => {
+            let (keyword, name) = (interface.interface.span(), &interface.name);
+            let message = "A nested interface takes only `public`.";
+            check_nested_type(message, keyword, name, interface.modifiers.is_empty(), keyword.join(name.span), context);
+
+            Some(Class)
+        }
         (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
         (Node::Modifier(modifier), Place::Event) => {
             context.report(
@@ -1738,6 +1752,37 @@ fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> O
     };
 
     report_refusal(issue, r#extern.span(), Place::File, context)
+}
+
+/// Decides a type a class nests, spec section 15: an event or an interface, from its `keyword` to the end of what
+/// `written` spans. A member without an access modifier is private (spec section 5), and a nested type is public, so
+/// it writes `public`. A nested type named like its class would take the class's name inside it, which C# refuses too
+/// (CS0542).
+fn check_nested_type(
+    message: &str,
+    keyword: Span,
+    name: &LocalIdentifier,
+    is_unmodified: bool,
+    written: Span,
+    context: &mut Context<'_, '_, '_>,
+) {
+    if is_unmodified {
+        context.report(
+            Issue::error(message)
+                .with_annotation(Annotation::primary(keyword).with_message("Private without `public`."))
+                .with_note("A member without an access modifier is private, and a type nested in a class is public.")
+                .with_help(format!("Write `public {}`.", BytesDisplay(context.get_code_snippet(written)))),
+        );
+    }
+
+    let class = context.get_name(name.span.start).rsplit(|byte| *byte == b'\\').nth(1).unwrap_or_default();
+    if class == name.value {
+        context.report(
+            Issue::error(format!("`{0}` cannot declare a nested type named `{0}`.", BytesDisplay(name.value)))
+                .with_annotation(Annotation::primary(name.span).with_message("Named here."))
+                .with_note("Inside the class, its name would name the nested type."),
+        );
+    }
 }
 
 /// Decides an event's parameter, which runs as a public get-only property of the event, spec section 15: a type, a
@@ -3427,6 +3472,27 @@ pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, 
     } else {
         check_capitalized(class_name.value, class_name.span, context);
     }
+}
+
+/// Checks an event's name as a class's: PHP refuses a class named with a reserved keyword, as `Empty`, and an event
+/// runs as a class, spec section 15.
+#[inline]
+pub fn check_event_name(event: &Event, context: &mut Context<'_, '_, '_>) {
+    let name = event.name.value;
+    if RESERVED_KEYWORDS
+        .iter()
+        .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
+        .any(|keyword| keyword.eq_ignore_ascii_case(name))
+    {
+        context.report(
+            Issue::error(format!("Event `{}` name cannot be a reserved keyword.", BytesDisplay(name)))
+                .with_annotation(Annotation::primary(event.name.span).with_message("A reserved keyword."))
+                .with_note("An event runs as a class, and PHP reserves this name.")
+                .with_help("Rename the event."),
+        );
+    }
+
+    check_class_name(&event.name, context);
 }
 
 /// Reports a type name or a namespace part a PHP# file gives that does not start with a capital letter, A to Z, as

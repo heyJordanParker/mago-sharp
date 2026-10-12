@@ -3703,10 +3703,11 @@ fn php_keeps_reading_operator_as_a_name() {
 }
 
 /// Spec section 15 declares an event as its name and its parameters, with an optional header of the interfaces it
-/// implements, inside the class that raises it or on its own in a file.
+/// implements, inside the class that raises it or on its own in a file. A name PHP reserves, such as `Empty`, still
+/// declares an event, which the checks refuse.
 #[test]
 fn an_event_declares_its_parameters_and_its_interfaces() {
-    const CODE: &str = "namespace App;\n\npublic event Shipped(int shipmentId);\n\npublic class Order\n{\n    public event Paid(int orderId, Money amount) : Event;\n    event Refunded(int orderId) : Event, Audited;\n    public event Cleared();\n}\n";
+    const CODE: &str = "namespace App;\n\npublic event Shipped(int shipmentId);\n\npublic event Exit(int code);\n\npublic class Order\n{\n    public event Paid(int orderId, Money amount) : Event;\n    event Refunded(int orderId) : Event, Audited;\n    public event Cleared();\n    public event Empty();\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/App/Order.sharp", CODE);
 
@@ -3749,6 +3750,7 @@ fn an_event_declares_its_parameters_and_its_interfaces() {
         events,
         [
             ("Shipped", vec!["int shipmentId"], vec![], "public event Shipped(int shipmentId);"),
+            ("Exit", vec!["int code"], vec![], "public event Exit(int code);"),
             (
                 "Paid",
                 vec!["int orderId", "Money amount"],
@@ -3762,6 +3764,7 @@ fn an_event_declares_its_parameters_and_its_interfaces() {
                 "event Refunded(int orderId) : Event, Audited;"
             ),
             ("Cleared", vec![], vec![], "public event Cleared();"),
+            ("Empty", vec![], vec![], "public event Empty();"),
         ]
     );
 }
@@ -3788,23 +3791,24 @@ fn an_event_with_a_body_is_one_parse_error_and_the_class_parses_on() {
     assert_eq!(run.name.value, b"run");
 }
 
-/// `event` declares an event only before a name and `(`, so a parameter, a field, a local and a call such as
-/// Laravel's `event(…)` keep it as a name.
+/// `event` declares an event only before a name and `(`, so a parameter, a field, a local, a call such as Laravel's
+/// `event(…)` and an operand of a word operator keep it as a name.
 #[test]
 fn event_stays_a_name_where_no_declaration_follows() {
-    const CODE: &str = "class Order\n{\n    public void run(int event)\n    {\n        event(new Paid(event));\n        const total = event + 1;\n    }\n\n    private int event = 0;\n}\n";
+    const CODE: &str = "class Order\n{\n    public void run(int event)\n    {\n        event(new Paid(event));\n        const total = event + 1;\n        event and (event);\n    }\n\n    private int event = 0;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Order.sharp", CODE);
 
     assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let [call, Statement::LocalDeclaration(total)] = method_body(program) else {
-        panic!("expected a call and a local, got {:#?}", method_body(program));
+    let [call, Statement::LocalDeclaration(total), both] = method_body(program) else {
+        panic!("expected a call, a local and an expression, got {:#?}", method_body(program));
     };
     let Expression::Call(Call::Function(call)) = expression(call) else {
         panic!("expected a call, got {call:#?}");
     };
     assert_eq!(source(CODE, call.function), "event");
     assert_eq!(source(CODE, total.value), "event + 1");
+    assert!(matches!(expression(both), Expression::Binary(_)), "{both:#?}");
     let [ClassLikeMember::Method(_), ClassLikeMember::Property(field)] = class_members(program).as_slice() else {
         panic!("expected a method and a field, got {:#?}", class_members(program));
     };
