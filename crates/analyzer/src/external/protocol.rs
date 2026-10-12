@@ -3445,6 +3445,29 @@ pub(super) mod testing {
         assert_eq!(snapshot_key_and_value(TArray::Keyed(array), &codebase), ["int", "int"]);
     }
 
+    /// A `Map`'s key and a `Set`'s element, which a snapshot encodes as the key of the array they run as, nest as deep as
+    /// a `List`'s element and a `Map`'s value do: each level of each passes three levels of the maximum depth, so 86
+    /// levels of any of them are refused.
+    #[test]
+    fn a_map_key_and_a_set_element_nest_as_deep_as_a_list_element() {
+        let levels = MAXIMUM_TYPE_DEPTH / 3 + 1;
+        let array = |array: TArray| TUnion::from_atomic(TAtomic::Array(array));
+        let (mut list, mut key, mut value, mut set) = (get_int(), get_int(), get_int(), get_int());
+        for _ in 0..levels {
+            list = get_list(list);
+            key = array(TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key), Arc::new(get_int()))));
+            value = array(TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(get_int()), Arc::new(value))));
+            set = array(TArray::Set(Arc::new(set)));
+        }
+
+        for nested in [list, key, value, set] {
+            let refusal =
+                encode_union_snapshot(&mut PayloadWriter::new(), &nested, &mut Vec::new(), &CodebaseMetadata::new(), 0);
+
+            assert!(matches!(refusal, Err(error) if error.to_string().contains("maximum nesting depth")));
+        }
+    }
+
     #[test]
     fn initialization_rejects_duplicate_stub_filenames() {
         let mut writer = message_writer(INITIALIZE_RESPONSE);
