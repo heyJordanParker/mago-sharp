@@ -208,9 +208,10 @@ impl<'analysis> Types<'analysis> {
     /// The metadata of the method `method` of the fully qualified class name `class` that the engine reads on a call:
     /// the bounds of its own type parameters, which a call from plain PHP gives it, and a type text list with one entry
     /// per parameter that a call from plain PHP checks its argument against. An entry is the parameter's type when part
-    /// of it is a PHP# class with type arguments or a type parameter, and `Any?` otherwise: plain PHP's generics are
-    /// erased, since an object of a plain PHP generic class carries no type arguments. Each half is None when the method
-    /// declares no type parameter, or no parameter needs a check.
+    /// of it is a PHP# class with a type argument the check can test, or a type parameter of the class, and `Any?`
+    /// otherwise: plain PHP's generics are erased, since an object of a plain PHP generic class carries no type
+    /// arguments, and a call from plain PHP gives the method's own type parameters none, so they match any value. Each
+    /// half is None when the method declares no type parameter, or no parameter needs a check.
     pub(crate) fn method_metadata(&self, class: &[u8], method: &[u8]) -> (Option<String>, Option<String>) {
         let Some(metadata) = self.codebase.get_method(class, method) else {
             return (None, None);
@@ -221,16 +222,29 @@ impl<'analysis> Types<'analysis> {
             .values()
             .map(|template| text(&template.constraint, self.codebase, Parameter::Bound))
             .collect();
+        let is_method_parameter = |r#type: &TUnion| {
+            r#type.types.iter().filter(|atomic| !atomic.is_null()).all(|atomic| {
+                matches!(
+                    atomic,
+                    TAtomic::GenericParameter(parameter)
+                        if matches!(parameter.defining_entity, GenericParent::FunctionLike(_))
+                )
+            })
+        };
         let checked = |r#type: &TUnion| {
             r#type.types.iter().any(|atomic| match atomic {
                 TAtomic::Object(TObject::Named(object)) => {
-                    object.get_type_parameters().is_some_and(|arguments| !arguments.is_empty())
+                    object
+                        .get_type_parameters()
+                        .is_some_and(|arguments| arguments.iter().any(|argument| !is_method_parameter(argument)))
                         && self
                             .codebase
                             .get_class_like(object.name.as_bytes())
                             .is_some_and(|class| class.flags.is_sharp())
                 }
-                TAtomic::GenericParameter(_) => true,
+                TAtomic::GenericParameter(parameter) => {
+                    matches!(parameter.defining_entity, GenericParent::ClassLike(_))
+                }
                 _ => false,
             })
         };

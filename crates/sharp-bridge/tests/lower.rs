@@ -3883,7 +3883,7 @@ fn a_type_parameter_without_a_bound_is_mixed_alone_nullable_or_in_a_union() {
                 null
               SHARP_TYPE_ARGS
                 ZVAL "Any?"
-                ZVAL "#0"
+                null
             ZVAL [1] "mixed"
         "##}
     );
@@ -4885,7 +4885,8 @@ fn a_bound_writes_a_type_parameter_of_its_own_class_as_any() {
 /// hidden local, by value. A method whose call needs its type arguments, or whose parameter names a PHP# class with type
 /// arguments or a type parameter, ends its parameter list with its metadata: a `SHARP_TYPE_ARGS` of the bounds of its
 /// own type parameters and a type text list with each parameter's type, `Any?` for one the engine never checks. Plain
-/// PHP's generics are erased, so a parameter of a plain PHP class with type arguments is never checked.
+/// PHP's generics are erased, so a parameter of a plain PHP class with type arguments is never checked, and a call from
+/// plain PHP gives a method's own type parameters none, so a parameter of one is never checked either.
 #[test]
 fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata() {
     let lowered = Lowered::with(
@@ -4930,6 +4931,8 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
             public Pair<TItem, TOther> pairWith<TOther>() => new Pair<TItem, TOther>();
 
             public Pair<TItem, TOther> again<TOther>() => this.pairWith<TOther>();
+
+            public int checks<TOther>(Box<TOther> box, Box<TItem> own, Pair<Box<TOther>, Order> nested) => 1;
         }
     "},
         &[
@@ -5061,12 +5064,22 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
     );
 
     let metadata = |bounds: &str, parameters: &str| format!("  SHARP_TYPE_ARGS\n    {bounds}\n    {parameters}\n");
+    // A call from plain PHP gives a method's own type parameter no type argument, so a parameter of one has no check.
     assert!(
-        lowered.parameters_of("repeat").ends_with(&metadata(r#"ZVAL "Any?""#, r##"ZVAL "#0, Any?""##)),
+        lowered.parameters_of("repeat").ends_with(&metadata(r#"ZVAL "Any?""#, "null")),
         "{}",
         lowered.parameters_of("repeat")
     );
-    assert!(lowered.parameters_of("forward").ends_with(&metadata(r#"ZVAL "App.DatabaseEntity""#, r##"ZVAL "#0""##)));
+    assert!(lowered.parameters_of("forward").ends_with(&metadata(r#"ZVAL "App.DatabaseEntity""#, "null")));
+    // A class all of whose type arguments are the method's own takes any object of it, and one that holds such a class
+    // as its type argument checks the class.
+    assert!(
+        lowered
+            .parameters_of("checks")
+            .ends_with(&metadata(r#"ZVAL "Any?""#, r##"ZVAL "Any?, App.Box<$0>, App.Pair<App.Box<#0>, App.Order>""##)),
+        "{}",
+        lowered.parameters_of("checks")
+    );
     assert!(
         lowered.parameters_of("show").ends_with(&metadata("null", r#"ZVAL "App.PaginatedList<App.Order>, Any?""#)),
         "{}",
@@ -7322,6 +7335,18 @@ fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_argum
                       ZVAL "this"
         "#}
     );
+
+    // Inside a generic method, the value passes the method's own type argument on, so both closures capture the method's
+    // hidden local.
+    let generic = Lowered::with(
+        "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\nclass Report\n{\n    public Box<T> box<T>(T item) => new Box<T>();\n\n    public Function<Box<T>(T)> boxer<T>() => this.box;\n}\n",
+        &[],
+    );
+    let boxer = generic.body_of("boxer");
+
+    assert_eq!(boxer.matches(r#"ZVAL "\0<sharp>\0types""#).count(), 2, "{boxer}");
+    assert!(boxer.contains("SHARP_TYPE_ARGS\n"), "{boxer}");
+    assert!(boxer.contains(r##"ZVAL "#0""##), "{boxer}");
 }
 
 /// ```php
