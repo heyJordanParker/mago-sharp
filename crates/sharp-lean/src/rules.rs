@@ -17,6 +17,7 @@ use crate::issues;
 use crate::lean::VENDOR;
 use crate::lean::proof_file;
 use crate::package;
+use crate::package::Message;
 use crate::package::Package;
 use crate::package::Root;
 use crate::runner;
@@ -184,19 +185,21 @@ pub(crate) fn check(
         if judged.is_empty() {
             continue;
         }
-        let (cause, line, message) = first_error(root, roots, package, files, &failed, file)?;
+        let (cause, errors) = errors(root, roots, package, files, &failed, file)?;
         for translation in judged {
             let anchor = translation.facts.anchor;
-            let issue = match file.role {
-                Role::Rules if cause.path == file.path => {
-                    issues::rejected_rules(anchor, &file.path, &file.namespace, line, &message)
-                }
-                Role::Rules => {
-                    issues::rejected_rules_import(anchor, &file.path, &file.namespace, &cause.path, line, &message)
-                }
-                _ => issues::rejected_lean(anchor, &cause.path, &file.namespace, line, &message),
-            };
-            issues.entry(translation.file).or_default().push(issue);
+            for error in &errors {
+                let issue = match file.role {
+                    Role::Rules if cause.path == file.path => {
+                        issues::rejected_rules(anchor, &file.path, &file.namespace, error)
+                    }
+                    Role::Rules => {
+                        issues::rejected_rules_import(anchor, &file.path, &file.namespace, &cause.path, error)
+                    }
+                    _ => issues::rejected_lean(anchor, &cause.path, &file.namespace, error),
+                };
+                issues.entry(translation.file).or_default().push(issue);
+            }
         }
     }
     if built.is_empty() {
@@ -221,17 +224,17 @@ pub(crate) fn check(
     Ok(())
 }
 
-/// The first error that made `file` fail, with its line and the file that holds it: the import of a workspace Lean
-/// file that does not exist, whose build output an earlier build may have left for Lean to read, else the first error
-/// of the first of `files` it imports that failed, followed down, else Lean's first error in `file`.
-fn first_error<'file>(
+/// The errors that made `file` fail, and the file that holds them: the import of a workspace Lean file that does not
+/// exist, whose build output an earlier build may have left for Lean to read, else the errors of the first of `files`
+/// it imports that failed, followed down, else Lean's errors in `file`.
+fn errors<'file>(
     root: &Path,
     roots: &[Root],
     package: &Package,
     files: &'file [LeanFile],
     failed: &[String],
     file: &'file LeanFile,
-) -> io::Result<(&'file LeanFile, u32, String)> {
+) -> io::Result<(&'file LeanFile, Vec<Message>)> {
     let mut cause = file;
     // Lean refuses an import cycle, so a cycle among failed files is followed at most once around.
     for _ in 0..files.len() {
@@ -240,11 +243,9 @@ fn first_error<'file>(
             if let Some(path) = workspace_file(root, roots, import)
                 && !root.join(String::from_utf8_lossy(&path).as_ref()).is_file()
             {
-                return Ok((
-                    cause,
-                    line,
-                    format!("bad import {import}: {} does not exist", String::from_utf8_lossy(&path)),
-                ));
+                let message = format!("bad import {import}: {} does not exist", String::from_utf8_lossy(&path));
+
+                return Ok((cause, vec![Message::error(line, message)]));
             }
         }
         let Some(imported) = imports(&text)
@@ -254,9 +255,12 @@ fn first_error<'file>(
         };
         cause = imported;
     }
-    let errors = package.errors(&package::source_of(&cause.module))?;
+    let mut errors = package.errors(&package::source_of(&cause.module))?;
+    if errors.is_empty() {
+        errors.push(Message::error(0, "Lake failed".to_owned()));
+    }
 
-    Ok(errors.first().map_or((cause, 0, "Lake failed".to_owned()), |error| (cause, error.pos.line, error.data.clone())))
+    Ok((cause, errors))
 }
 
 fn lean_file(path: String, module: String, role: Role) -> LeanFile {

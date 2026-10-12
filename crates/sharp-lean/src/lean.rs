@@ -65,21 +65,25 @@ impl Lean {
 
     /// Proves the laws of `translations`, which hold every accepted `.sharp` file, checks the structure rules of every
     /// `Module.lean` over their facts, and returns the issues that refuse each file whose law is not proved or that
-    /// breaks a rule.
+    /// breaks a rule. `namespaces` holds the namespace of every `.sharp` file, accepted or not, which a rule names.
     ///
     /// A file whose `.sharpc` is current is proved: the `.sharpc` lists its proof file and every source its laws reach
     /// as inputs, and the build ID it records covers the runtime library. Every rule runs over every file's facts
-    /// whenever one `.sharpc` is not current, so a compile checks every rule exactly, and every Lean file of a PSR-4
-    /// folder that no Lean file imports is built then too, so a `@[rule]` outside a `Module.lean` is an error. A
-    /// `Module.lean` in no PSR-4 folder refuses each file under its folder. No Lean process starts when no file states
-    /// a law or has a proof file and no workspace Lean file is left to build, nor when each `.sharpc` is current. When
-    /// none of those remains, `.sharp/.lean/` is deleted.
+    /// whenever one `.sharpc` is not current or the namespaces changed, so a compile checks every rule exactly, and
+    /// every Lean file of a PSR-4 folder that no Lean file imports is built then too, so a `@[rule]` outside a
+    /// `Module.lean` is an error. A `Module.lean` in no PSR-4 folder refuses each file under its folder. No Lean process
+    /// starts when no file states a law or has a proof file and no workspace Lean file is left to build, nor when each
+    /// `.sharpc` is current and the namespaces did not change. When none of those remains, `.sharp/.lean/` is deleted.
     ///
     /// # Errors
     ///
     /// Returns an error when a file cannot be read or written, when the runtime library does not build, or when the
     /// runner fails.
-    pub fn check(&self, translations: Vec<Translation>) -> io::Result<HashMap<FileId, IssueCollection>> {
+    pub fn check(
+        &self,
+        translations: Vec<Translation>,
+        namespaces: &[String],
+    ) -> io::Result<HashMap<FileId, IssueCollection>> {
         let package = Package::new(&self.root);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
 
@@ -126,7 +130,9 @@ impl Lean {
                 stale.push(candidate);
             }
         }
-        let check_rules = !files.is_empty() && (!stale.is_empty() || self.any_stale(&translations)?);
+        let declared = package::namespaces(namespaces);
+        let check_rules =
+            !files.is_empty() && (!stale.is_empty() || !package.holds(&declared) || self.any_stale(&translations)?);
         if stale.is_empty() && !check_rules {
             return Ok(issues);
         }
@@ -189,10 +195,11 @@ impl Lean {
         }
 
         let library = library::build()?;
-        let modules = program.modules(
+        let mut modules = program.modules(
             &work.iter().map(|item| item.translation.file).collect::<Vec<_>>(),
             &files.iter().map(|file| file.module.as_str()).collect::<Vec<_>>(),
         );
+        modules.push(declared);
         package.write(&library, &roots, &modules)?;
         if !work.is_empty() {
             self.prove(&package, &library, &program, &modules, work, &mut issues)?;
@@ -520,7 +527,7 @@ mod tests {
     #[test]
     fn each_theorem_is_found_with_its_lines_and_type() {
         let proof = "import Code.App.Shared.Money\nopen Sharp\n\ntheorem addKeepsCurrency : App.Shared.Money.addKeepsCurrency := by\n  simp\n";
-        let rules = "import Code.App.Shared.Module\nopen Sharp\n\ntheorem same : App.Shared.Module.same := by\n  simp\n\n@[rule] def neverReachesTenant : Rule := .neverImports \"App.Tenant\"\n";
+        let rules = "import Code.App.Shared.Module\nopen Sharp\n\ntheorem same : App.Shared.Module.same := by\n  simp\n\n@[rule] def neverReachesTenant : Rule := .neverImports App.Tenant\n";
 
         for (text, expected) in
             [(proof, (4..=5, "App.Shared.Money.addKeepsCurrency")), (rules, (4..=6, "App.Shared.Module.same"))]

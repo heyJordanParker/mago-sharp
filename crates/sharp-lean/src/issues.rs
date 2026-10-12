@@ -5,6 +5,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
 
+use crate::package::Message;
 use crate::translate::Law;
 use crate::translate::Unmodeled;
 
@@ -174,47 +175,48 @@ pub(crate) fn broken_rule(span: Span, fact: &str, rule: &str, rules: &str) -> Is
         .with_annotation(Annotation::primary(span))
 }
 
-/// A `Module.lean` Lean rejected, on each file of the namespace its rules constrain, since no rule of it can check them.
-pub(crate) fn rejected_rules(span: Span, rules: &str, namespace: &str, line: u32, message: &str) -> Issue {
-    let first = message.lines().next().unwrap_or(message);
-
-    Issue::error(format!(
-        "This file is in {namespace}, whose structure rules {rules} holds, and Lean rejected {rules} line {line}: {first}."
-    ))
-    .with_code(IssueCode::BrokenRule.as_str())
-    .with_annotation(Annotation::primary(span))
-    .with_note(message.to_owned())
+/// An error of a `Module.lean` Lean rejected, on each file of the namespace its rules constrain, since no rule of it can
+/// check them.
+pub(crate) fn rejected_rules(span: Span, rules: &str, namespace: &str, error: &Message) -> Issue {
+    rejected_lean_error(
+        span,
+        format!("This file is in {namespace}, whose structure rules {rules} holds, and Lean rejected {rules}"),
+        error,
+    )
 }
 
-/// A `Module.lean` that imports a workspace Lean file Lean rejected, on each file of the namespace its rules constrain,
-/// with the first error of the file whose own error it is.
+/// An error of the workspace Lean file `imported` that a `Module.lean` imports, on each file of the namespace its rules
+/// constrain.
 pub(crate) fn rejected_rules_import(
     span: Span,
     rules: &str,
     namespace: &str,
     imported: &str,
-    line: u32,
-    message: &str,
+    error: &Message,
 ) -> Issue {
-    let first = message.lines().next().unwrap_or(message);
-
-    Issue::error(format!(
-        "This file is in {namespace}, whose structure rules {rules} holds, and {rules} imports {imported}, which Lean rejected at line {line}: {first}."
-    ))
-    .with_code(IssueCode::BrokenRule.as_str())
-    .with_annotation(Annotation::primary(span))
-    .with_note(message.to_owned())
+    rejected_lean_error(
+        span,
+        format!(
+            "This file is in {namespace}, whose structure rules {rules} holds, and {rules} imports {imported}, which Lean rejected at"
+        ),
+        error,
+    )
 }
 
-/// A Lean file in a PSR-4 folder that no Lean file imports and Lean rejected, such as one that holds a `@[rule]` but is
-/// no `Module.lean`, on each file of the namespace of its folder.
-pub(crate) fn rejected_lean(span: Span, file: &str, namespace: &str, line: u32, message: &str) -> Issue {
-    let first = message.lines().next().unwrap_or(message);
+/// An error of a Lean file in a PSR-4 folder that no Lean file imports and Lean rejected, such as one that holds a
+/// `@[rule]` but is no `Module.lean`, on each file of the namespace of its folder.
+pub(crate) fn rejected_lean(span: Span, file: &str, namespace: &str, error: &Message) -> Issue {
+    rejected_lean_error(span, format!("This file is in {namespace}, and Lean rejected {file}"), error)
+}
 
-    Issue::error(format!("This file is in {namespace}, and Lean rejected {file} line {line}: {first}."))
+/// `rejection` followed by where Lean reported `error`, with its column counted from 1, and its first line.
+fn rejected_lean_error(span: Span, rejection: String, error: &Message) -> Issue {
+    let first = error.data.lines().next().unwrap_or(&error.data);
+
+    Issue::error(format!("{rejection} line {}, column {}: {first}.", error.pos.line, error.pos.column + 1))
         .with_code(IssueCode::BrokenRule.as_str())
         .with_annotation(Annotation::primary(span))
-        .with_note(message.to_owned())
+        .with_note(error.data.clone())
 }
 
 /// A `Module.lean` in no PSR-4 folder, on each file under its folder, since none of its rules can run.

@@ -205,7 +205,7 @@ def answer (env : Environment) (request : Check) : IO ByteArray := do
 /-- A `Module.lean` that Lake built, and the namespace its rules constrain. -/
 structure RulesModule where
   module : Name
-  namespace_ : String
+  namespace_ : Namespace
 
 /-- A request: the rules modules, then the facts of every `.sharp` file. -/
 structure Rules where
@@ -233,7 +233,7 @@ def file : Decode (Array Fact) := do
   many (fact path)
 
 def rules : Decode Rules := do
-  let modules ← many do return { module := (← string).toName, namespace_ := ← string }
+  let modules ← many do return { module := (← string).toName, namespace_ := ⟨← string⟩ }
   return { modules, files := ← many file }
 
 /-- The namespace whose code holds the fact. -/
