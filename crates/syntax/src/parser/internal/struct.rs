@@ -1,7 +1,10 @@
 use mago_allocator::prelude::*;
+use mago_span::HasSpan;
 
 use crate::T;
 use crate::cst::cst::AttributeList;
+use crate::cst::cst::Hint;
+use crate::cst::cst::Inheritance;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::Struct;
 use crate::cst::sequence::Sequence;
@@ -52,18 +55,37 @@ where
             }
             self.errors.push(ParseError::NotSupportedYetInSharp("A generic struct", open.join(close)));
         }
-        let (backing_type_hint, inheritance) = self.parse_enum_header()?;
+        let inheritance = self.parse_struct_header()?;
 
         Ok(Struct {
             attribute_lists: attributes,
             modifiers,
             r#struct,
             name,
-            backing_type_hint,
             inheritance,
             left_brace: self.stream.eat_span(T!["{"])?,
             members: self.parse_class_like_members("A struct")?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
+    }
+
+    /// A struct's header, `: Interface, Other`. A type that names no interface, such as `string`, is refused where it
+    /// stands, and the interfaces after it still parse.
+    fn parse_struct_header(&mut self) -> Result<Option<Inheritance<'arena>>, ParseError> {
+        if !self.stream.is_at(T![":"])? {
+            return Ok(None);
+        }
+
+        let mut separator = self.stream.eat_span(T![":"])?;
+        loop {
+            match self.parse_type_hint()? {
+                Hint::Identifier(first) => return Ok(Some(self.parse_inheritance_from(separator, first)?)),
+                hint => self.errors.push(ParseError::StructHeaderTypeInSharp(hint.span())),
+            }
+            if !self.stream.is_at(T![","])? {
+                return Ok(None);
+            }
+            separator = self.stream.eat_span(T![","])?;
+        }
     }
 }

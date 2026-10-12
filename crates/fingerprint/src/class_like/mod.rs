@@ -196,7 +196,6 @@ impl Fingerprintable for Struct<'_> {
         }
         crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
-        self.backing_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
         self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);

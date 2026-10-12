@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use mago_bytes::BytesDisplay;
-use mago_names::binding::php_method_name;
 use mago_php_version::feature::Feature;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -850,64 +849,13 @@ pub fn check_trait<'ast, 'arena>(r#trait: &'ast Trait<'arena>, context: &mut Con
     }
 }
 
-/// Checks a PHP# struct, spec section 10, as the final class it runs as: its members as a class's, and a backing type
-/// of `int` or `string`, as an enum's, which the main constructor takes as its one get-only property `value`.
+/// Checks a PHP# struct, spec section 10, as the final class it runs as: its members as a class's.
 #[inline]
 pub fn check_struct<'ast, 'arena>(r#struct: &'ast Struct<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
     let struct_name = r#struct.name.value;
     let struct_fqcn = context.get_name(r#struct.name.span.start);
 
-    if let Some(EnumBackingTypeHint { hint, .. }) = &r#struct.backing_type_hint {
-        let backing = BytesDisplay(context.get_code_snippet(hint));
-        if !matches!(hint, Hint::String(_) | Hint::Integer(_)) {
-            context.report(
-                Issue::error(format!(
-                    "A struct's backing value is an `int` or a `string`, and `{backing}` is not one."
-                ))
-                .with_annotation(Annotation::primary(hint.span()).with_message("Backing type written here."))
-                .with_note("A backing value keys a `Map`, whose keys are `int` or `string`."),
-            );
-        } else if !holds_backing_value(r#struct, hint) {
-            context.report(
-                Issue::error(format!(
-                    "A struct backed by `{backing}` holds its backing value in `public {name}(public {backing} value {{ get; }})`.",
-                    name = BytesDisplay(struct_name)
-                ))
-                .with_annotation(Annotation::primary(r#struct.name.span).with_message("Declared here."))
-                .with_note(
-                    "A `Map` keyed by the struct stores each key's `value`, and creates the struct from it again through its main constructor.",
-                ),
-            );
-        }
-    }
-
     check_members(&r#struct.members, r#struct.span(), "struct", struct_name, struct_fqcn, context);
-}
-
-/// Whether a struct backed by `backing` has a main constructor whose one parameter is the get-only property `value` of
-/// that type, which a `Map` key is stored as and read back through, spec section 10.
-fn holds_backing_value(r#struct: &Struct<'_>, backing: &Hint<'_>) -> bool {
-    r#struct.members.iter().any(|member| {
-        let ClassLikeMember::Method(method) = member else {
-            return false;
-        };
-        let [parameter] = method.parameter_list.parameters.as_slice() else {
-            return false;
-        };
-
-        php_method_name(method) == CONSTRUCTOR_MAGIC_METHOD
-            && parameter.modifiers.contains_public()
-            && parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name) == b"value"
-            && parameter.default_value.is_none()
-            && parameter
-                .hint
-                .as_ref()
-                .is_some_and(|hint| std::mem::discriminant(hint) == std::mem::discriminant(backing))
-            && parameter.hooks.as_ref().is_some_and(|hooks| {
-                matches!(hooks.hooks.as_slice(), [hook] if hook.name.value == b"get"
-                    && matches!(hook.body, PropertyHookBody::Abstract(_)))
-            })
-    })
 }
 
 #[inline]

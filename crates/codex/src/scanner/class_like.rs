@@ -322,8 +322,8 @@ where
     finish_registration(codebase, class_like_metadata)
 }
 
-/// Registers a PHP# struct, spec section 10, as the final class it runs as, with its backing type where an enum keeps
-/// one, the `operator ==` that compares it by value, and its `parse` and `tryParse`.
+/// Registers a PHP# struct, spec section 10, as the final class it runs as, with the `operator ==` that compares it by
+/// value, and its `parse` and `tryParse`.
 #[inline]
 pub fn register_struct<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -349,7 +349,7 @@ where
         None,
         None,
         r#struct.inheritance.as_ref(),
-        r#struct.backing_type_hint.as_ref(),
+        None,
         context,
         scope,
     )?;

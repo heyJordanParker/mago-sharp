@@ -887,10 +887,6 @@ generate_ast_walker! {
         walker.walk_keyword(&r#struct.r#struct, context);
         walker.walk_local_identifier(&r#struct.name, context);
 
-        if let Some(backing_type_hint) = &r#struct.backing_type_hint {
-            walker.walk_enum_backing_type_hint(backing_type_hint, context);
-        }
-
         if let Some(inheritance) = &r#struct.inheritance {
             walker.walk_inheritance(inheritance, context);
         }

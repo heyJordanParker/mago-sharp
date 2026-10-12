@@ -105,7 +105,7 @@ where
             ))
             .with_annotation(Annotation::primary(type_name.span()).with_message("Named here."))
             .with_note(format!(
-                "`{}`'s header names the interfaces it implements, after its backing type if it has one.",
+                "`{}`'s header names the interfaces it implements.",
                 display_class_like_name(context, class_like_metadata.original_name)
             )),
         );

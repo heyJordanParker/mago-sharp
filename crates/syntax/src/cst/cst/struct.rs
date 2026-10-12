@@ -2,7 +2,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::attribute::AttributeList;
-use crate::cst::cst::class_like::EnumBackingTypeHint;
+
 use crate::cst::cst::class_like::inheritance::Inheritance;
 use crate::cst::cst::class_like::member::ClassLikeMember;
 use crate::cst::cst::identifier::LocalIdentifier;
@@ -12,14 +12,14 @@ use crate::cst::sequence::Sequence;
 
 /// Represents a PHP# struct, spec section 10: a value that never changes and compares by value.
 ///
-/// Its header is an enum's: a backing type, then the interfaces it implements.
+/// Its header lists the interfaces it implements, and nothing else: any struct keys a `Map` by its whole value.
 ///
 /// Example:
 ///
 /// ```csharp
-/// public struct Username : string, HasLabel
+/// public struct Username : HasLabel
 /// {
-///     public Username(public string value { get; }) { }
+///     public Username(public string name { get; }) { }
 /// }
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -29,9 +29,7 @@ pub struct Struct<'arena> {
     pub modifiers: Sequence<'arena, Modifier<'arena>>,
     pub r#struct: Keyword<'arena>,
     pub name: LocalIdentifier<'arena>,
-    pub backing_type_hint: Option<EnumBackingTypeHint<'arena>>,
-    /// The interfaces in the `: string, Interface` header. After a backing type, its `colon` is the `,` that opens
-    /// the interfaces.
+    /// The interfaces in the `: Interface` header.
     pub inheritance: Option<Inheritance<'arena>>,
     pub left_brace: Span,
     pub members: Sequence<'arena, ClassLikeMember<'arena>>,

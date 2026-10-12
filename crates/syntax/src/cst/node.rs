@@ -1784,9 +1784,6 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 }
                 f(Node::Keyword(&node.r#struct));
                 f(Node::LocalIdentifier(&node.name));
-                for item in node.backing_type_hint.iter() {
-                    f(Node::EnumBackingTypeHint(item));
-                }
                 for item in node.inheritance.iter() {
                     f(Node::Inheritance(item));
                 }

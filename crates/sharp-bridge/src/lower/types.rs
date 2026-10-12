@@ -252,7 +252,7 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_class_like(class).is_some_and(|metadata| metadata.flags.is_struct())
     }
 
-    /// The backing type of the backed enum or the backed struct `class`, if it has one.
+    /// The backing type of the backed enum `class`, if it has one.
     pub(crate) fn backing_type(&self, class: &[u8]) -> Option<&'analysis TAtomic> {
         self.codebase.get_class_like(class)?.enum_type.as_ref()
     }
@@ -265,11 +265,6 @@ impl<'analysis> Types<'analysis> {
     /// The key type and the element type of a collection.
     pub(crate) fn array_parameters(&self, array: &TArray) -> (TUnion, TUnion) {
         get_array_parameters(array, self.codebase)
-    }
-
-    /// The backing type of the struct `class`, or none when `class` is no struct or declares no backing type.
-    pub(crate) fn struct_backing_type(&self, class: &[u8]) -> Option<&'analysis TAtomic> {
-        self.codebase.get_class_like(class).filter(|metadata| metadata.flags.is_struct())?.enum_type.as_ref()
     }
 
     /// The type of the keys a value of `r#type` holds, or none when part of it is no `Map` or `List`.

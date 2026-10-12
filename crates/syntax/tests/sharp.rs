@@ -582,6 +582,48 @@ fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
     }
 }
 
+/// A struct's header lists interfaces only, spec section 10, so a type such as `string` there is one error at the
+/// type, and the interfaces after it still parse.
+#[test]
+fn a_struct_header_lists_interfaces_only() {
+    for (header, refused, interfaces) in [
+        (" : HasLabel, Sortable", None, &[&b"HasLabel"[..], b"Sortable"][..]),
+        (" : string", Some("string"), &[]),
+        (" : int, HasLabel", Some("int"), &[b"HasLabel"]),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("struct Username{header}\n{{\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Username.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        let expected: Vec<(String, &str)> = refused
+            .map(|refused| {
+                (
+                    "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
+                        .to_owned(),
+                    refused,
+                )
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(errors, expected, "{header}");
+        let Some(Statement::Struct(username)) = program.statements.first() else {
+            panic!("expected a struct for `{header}`, got {:#?}", program.statements);
+        };
+        let named: Vec<&[u8]> = username
+            .inheritance
+            .iter()
+            .flat_map(|inheritance| inheritance.types.iter())
+            .map(|name| name.value())
+            .collect();
+        assert_eq!(named, interfaces, "{header}");
+        assert!(matches!(username.members.as_slice(), [ClassLikeMember::Method(_)]), "{header}");
+    }
+}
+
 /// A PHP#-only parse error is its own message, so `mago analyze` shows the rule as the issue's title.
 #[test]
 fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {

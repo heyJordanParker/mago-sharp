@@ -3203,9 +3203,6 @@ fn refusals(analyzed: (&'static str, &'static str), others: &[(&'static str, &'s
         .collect()
 }
 
-const USERNAME: &str =
-    "namespace Demo;\n\npublic struct Username : string\n{\n    public Username(public string value { get; }) { }\n}\n";
-
 const CART: &str = "<?php\n\nnamespace Demo;\n\nfinal class Cart\n{\n}\n";
 
 /// Spec section 19: numbers compare by value, so `1 == 1.0` is true, a nullable side lifted. The pair narrows nothing,
@@ -7154,24 +7151,22 @@ fn a_loop_over_a_map_keyed_by_a_backed_enum_reads_each_key_as_its_case() {
     );
 }
 
-/// A loop reads a backed key back through one enum's `from` or one struct's main constructor, so a key type that mixes
-/// a backed enum or a backed struct with other types cannot be read back, written on the key or not.
+/// A loop reads a backed enum key back through one enum's `from`, so a key type that mixes a backed enum with other
+/// types cannot be read back, written on the key or not.
 #[test]
-fn a_loop_over_a_map_whose_keys_mix_a_backed_type_with_other_types_is_an_error() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Username|Status, int> people, Map<Username, int> users)\n    {\n        for (const [key, n] of counts) {\n        }\n        for (const [key, n] of totals) {\n        }\n        for (const [key, n] of statuses) {\n        }\n        for (const [key, n] of people) {\n        }\n        for (const [key, n] of users) {\n        }\n    }\n}\n";
-    let others = [("src/Lib/Status.php", STATUS), ("src/Demo/Username.sharp", USERNAME)];
+fn a_loop_over_a_map_whose_keys_mix_a_backed_enum_with_other_types_is_an_error() {
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses)\n    {\n        for (const [key, n] of counts) {\n        }\n        for (const [key, n] of totals) {\n        }\n        for (const [key, n] of statuses) {\n        }\n    }\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Tally.sharp", sharp), &others),
+        messages(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "The keys of `counts` mix a backed type with other types, so the loop cannot read them back.",
-            "The keys of `totals` mix a backed type with other types, so the loop cannot read them back.",
-            "The keys of `people` mix a backed type with other types, so the loop cannot read them back.",
+            "The keys of `counts` mix a backed enum with other types, so the loop cannot read them back.",
+            "The keys of `totals` mix a backed enum with other types, so the loop cannot read them back.",
         ]
     );
     assert_eq!(
-        issues(("src/Demo/Tally.sharp", sharp), &others),
-        ["10:21 invalid-foreach-key", "12:21 invalid-foreach-key", "16:21 invalid-foreach-key"]
+        issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
+        ["10:21 invalid-foreach-key", "12:21 invalid-foreach-key"]
     );
 }
 

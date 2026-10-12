@@ -63,8 +63,7 @@ impl MetadataFlags {
     /// A PHP# property declared with `init`, spec section 6.1: it is set only while the object is created, and runs as
     /// PHP's `set` hook or set visibility.
     pub const INIT: MetadataFlags = MetadataFlags(1 << 47);
-    /// A PHP# struct, spec section 10: a final class whose object never changes and compares by value. Its backing
-    /// type, if any, is the class-like's `enum_type`.
+    /// A PHP# struct, spec section 10: a final class whose object never changes and compares by value.
     pub const STRUCT: MetadataFlags = MetadataFlags(1 << 48);
 }
 
