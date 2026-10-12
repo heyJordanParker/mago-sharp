@@ -377,6 +377,7 @@ where
                     property_selector,
                     object_expression,
                     object,
+                    written_atomic,
                     operator_span,
                     for_assignment,
                     &mut result,
@@ -799,7 +800,8 @@ pub(crate) fn resolve_property_for_external_access<'ctx>(
     }
 }
 
-/// Finds a property in a class, gets its type, and handles template localization.
+/// Finds a property in a class, gets its type, and handles template localization. `written_atomic` is the receiver as
+/// it is typed, which is `object`'s type parameter when `object` is that type parameter's bound.
 fn find_property_in_class<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -809,6 +811,7 @@ fn find_property_in_class<'ctx, 'ast, 'arena, A>(
     selector: &'ast ClassLikeMemberSelector<'arena>,
     object_expr: &'ast Expression<'arena>,
     object: &TObject,
+    written_atomic: &TAtomic,
     access_span: Span,
     for_assignment: bool,
     result: &mut PropertyResolutionResult,
@@ -835,9 +838,21 @@ where
         // A PHP# read of a declared method is its closure, ahead of anything the class serves through `__get`.
         let method_name = word(trim_start_byte(prop_name.as_bytes(), b'$'));
         let read_span = object_expr.span().join(selector.span());
+        let self_parameter = match written_atomic {
+            TAtomic::GenericParameter(parameter) => Some(parameter),
+            _ => None,
+        };
         if !for_assignment
-            && let Some(method_type) =
-                resolve_method_value(context, block_context, artifacts, object, method_name, access_span, read_span)
+            && let Some(method_type) = resolve_method_value(
+                context,
+                block_context,
+                artifacts,
+                object,
+                self_parameter,
+                method_name,
+                access_span,
+                read_span,
+            )
         {
             check_private_method_reach(
                 context,
@@ -1314,7 +1329,8 @@ where
 /// PHP#'s type of a member `declaring_class` declares, called or read as a method value through `receiver`, which finds
 /// the member on `calling_class`, spec section 11. `expand_member` expands the member's declared type with the options
 /// it is given, which bind `Self` to the receiver's class with its own type parameters, as `get_this_type` builds it,
-/// and the intersection parts the receiver carries, and keep a derived type over a type parameter. One replacement then
+/// and the intersection parts the receiver carries, or to `self_parameter`, the type parameter a receiver typed by one
+/// is written as, whose bound `receiver` is, and keep a derived type over a type parameter. One replacement then
 /// gives the receiver's class's type parameters the receiver's type arguments, and the declaring class's the type
 /// arguments of the receiver, or of its intersection part that inherits `declaring_class`, beside a call's
 /// `type_arguments`. The last expansion binds no `Self`, so a `Self` that a receiver's type argument holds stays the
@@ -1323,6 +1339,7 @@ where
 pub(crate) fn specialize_member_type<A>(
     context: &Context<'_, '_, A>,
     receiver: &TObject,
+    self_parameter: Option<&TGenericParameter>,
     declaring_class: &ClassLikeMetadata,
     calling_class: Word,
     type_arguments: &TemplateResult,
@@ -1336,14 +1353,21 @@ where
         .get_name()
         .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
         .unwrap_or(declaring_class);
-    let mut this_type = get_this_type(context, receiver_class, None);
-    for part in intersection_parts {
-        this_type.add_intersection_type(part.clone());
-    }
+    let static_class_type = match self_parameter {
+        Some(parameter) => StaticClassType::Generic(parameter.clone()),
+        None => {
+            let mut this_type = get_this_type(context, receiver_class, None);
+            for part in intersection_parts {
+                this_type.add_intersection_type(part.clone());
+            }
+
+            StaticClassType::Object(this_type)
+        }
+    };
 
     let member_type = expand_member(&TypeExpansionOptions {
         self_class: Some(declaring_class.name),
-        static_class_type: StaticClassType::Object(this_type),
+        static_class_type,
         keep_generic_derived_types: true,
         ..Default::default()
     });
@@ -1687,13 +1711,15 @@ fn report_possibly_non_existent_property<A>(
 /// as PHP's `$x->name(...)` does, and `Class.name` gives its static method, as `Class::name(...)` does. The engine
 /// runs both on the read's missing-member path. Reports a method the read cannot reach, as the call would. Returns
 /// the closure's type, as `specialize_member_type` gives a call of the method on `receiver`, or on the intersection
-/// part of it that has the method. A PHP# generic method's value has the type arguments [`fix_type_arguments`] gives
-/// the read at `read_span`.
+/// part of it that has the method, with `Self` bound to `self_parameter` when the receiver is typed by that type
+/// parameter. A PHP# generic method's value has the type arguments [`fix_type_arguments`] gives the read at
+/// `read_span`.
 pub(crate) fn resolve_method_value<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
     artifacts: &mut AnalysisArtifacts,
     receiver: &TObject,
+    self_parameter: Option<&TGenericParameter>,
     method_name: Word,
     access_span: Span,
     read_span: Span,
@@ -1737,8 +1763,14 @@ where
     let declaring_class = codebase.get_class_like(class_name.as_bytes())?;
     let method_metadata = codebase.get_method_by_id(&method)?;
 
-    let value =
-        specialize_member_type(context, receiver, declaring_class, class_id, &TemplateResult::default(), |options| {
+    let value = specialize_member_type(
+        context,
+        receiver,
+        self_parameter,
+        declaring_class,
+        class_id,
+        &TemplateResult::default(),
+        |options| {
             // The signature's `source` names the class the value is read through, as a call of the method does, so
             // an `extern` lookup starts there.
             let mut signature = get_signature_of_function_like_metadata(
@@ -1750,7 +1782,8 @@ where
             signature.is_closure = true;
 
             TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)))
-        });
+        },
+    );
     if !method_metadata.flags.is_sharp() || method_metadata.template_types.is_empty() {
         return Some(value);
     }

@@ -118,9 +118,17 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     span,
                 }) if is_static_method_value(context, context.resolved_names.get(&class_name.name), name.value) => {
                     let class = TObject::new_named(word(context.resolved_names.get(&class_name.name)));
-                    let method_type =
-                        resolve_method_value(context, block_context, artifacts, &class, word(name.value), span, span)
-                            .unwrap_or_else(get_mixed);
+                    let method_type = resolve_method_value(
+                        context,
+                        block_context,
+                        artifacts,
+                        &class,
+                        None,
+                        word(name.value),
+                        span,
+                        span,
+                    )
+                    .unwrap_or_else(get_mixed);
                     artifacts.set_expression_type(self, method_type);
 
                     Ok(())
@@ -425,7 +433,7 @@ where
             for class in classes {
                 let class = TObject::new_named(class);
                 let value =
-                    resolve_method_value(context, block_context, artifacts, &class, word(name.value), span, span)
+                    resolve_method_value(context, block_context, artifacts, &class, None, word(name.value), span, span)
                         .unwrap_or_else(get_mixed);
                 method_type = Some(add_optional_union_type(value, method_type.as_ref(), context.codebase));
             }

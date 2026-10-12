@@ -36,6 +36,7 @@ use mago_word::empty_word;
 use crate::context::Context;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationTarget;
+use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 use crate::resolver::property::specialize_member_type;
 
@@ -134,9 +135,15 @@ fn specialize_for_receiver<'ctx, A>(
 where
     A: Arena,
 {
+    let self_parameter = match &method_context.class_type {
+        StaticClassType::Generic(parameter) => Some(parameter),
+        _ => None,
+    };
+
     specialize_member_type(
         context,
         receiver,
+        self_parameter,
         get_declaring_class(context, method_context),
         method_context.class_like_metadata.name,
         template_result,
@@ -162,9 +169,9 @@ where
         .unwrap_or(method_context.class_like_metadata)
 }
 
-/// The receiver of a PHP# member, or of a member PHP# calls, with the context of the method that runs on it. A method
-/// found through a `@mixin` has none: its receiver does not inherit the class that declares it, so upstream's
-/// expansion types it.
+/// The receiver of a PHP# member, or of a member PHP# calls, with the context of the method that runs on it: the
+/// object, or the bound of the type parameter a PHP# call's receiver is typed by. A method found through a `@mixin` has
+/// none: its receiver does not inherit the class that declares it, so upstream's expansion types it.
 fn get_sharp_receiver<'target, 'ctx, A>(
     context: &Context<'ctx, '_, A>,
     invocation: &'target Invocation<'ctx, '_, '_>,
@@ -177,8 +184,18 @@ where
     }
 
     let method_context = invocation.target.get_method_context()?;
+    if method_context.declaring_object_type.is_some() {
+        return None;
+    }
+
     match &method_context.class_type {
-        StaticClassType::Object(receiver) if method_context.declaring_object_type.is_none() => {
+        StaticClassType::Object(receiver) => Some((method_context, receiver)),
+        StaticClassType::Generic(parameter) if method_context.invocation_kind == MethodInvocationKind::Instance => {
+            let receiver = parameter.constraint.types.iter().find_map(|bound| match bound {
+                TAtomic::Object(object) => Some(object),
+                _ => None,
+            })?;
+
             Some((method_context, receiver))
         }
         _ => None,

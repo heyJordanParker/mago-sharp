@@ -645,9 +645,9 @@ fn generic_parameter_can_resolve_static(
     codebase: &CodebaseMetadata,
 ) -> bool {
     parameter.constraint.types.iter().any(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(object)) => {
-            codebase.is_instance_of(object.name.as_bytes(), expected_class.as_bytes())
-        }
+        TAtomic::Object(TObject::Named(object)) => std::iter::once(object.name)
+            .chain(object.intersection_types.iter().flatten().filter_map(TAtomic::get_object_or_enum_name))
+            .any(|name| codebase.is_instance_of(name.as_bytes(), expected_class.as_bytes())),
         TAtomic::Object(TObject::Enum(object)) => {
             codebase.is_instance_of(object.name.as_bytes(), expected_class.as_bytes())
         }

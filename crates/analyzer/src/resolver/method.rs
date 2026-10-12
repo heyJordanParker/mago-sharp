@@ -330,7 +330,7 @@ where
                     continue;
                 }
 
-                let resolved_methods = resolve_method_from_object(
+                let mut resolved_methods = resolve_method_from_object(
                     context,
                     block_context,
                     object.span(),
@@ -455,8 +455,16 @@ where
                     }
                 }
 
-                for resolved_method in &resolved_methods {
+                for resolved_method in &mut resolved_methods {
                     check_private_method_reach(context, object, &resolved_method.method_identifier, selector.span());
+
+                    // `Self` on a PHP# receiver typed by a type parameter is that type parameter, spec section 11.
+                    if context.dialect.is_sharp()
+                        && resolved_method.declaring_object.is_none()
+                        && let TAtomic::GenericParameter(parameter) = written_atomic
+                    {
+                        resolved_method.static_class_type = StaticClassType::Generic(parameter.clone());
+                    }
                 }
                 result.resolved_methods.extend(resolved_methods);
             }

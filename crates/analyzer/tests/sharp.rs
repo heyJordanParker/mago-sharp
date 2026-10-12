@@ -9342,10 +9342,10 @@ fn a_call_and_its_method_value_give_one_type_on_every_receiver() {
             gives("Report.boxed", "Box<int>"),
             gives("Report.orders", "OrderBox"),
             gives("Report.pairs", "Pair<int, string>"),
-            gives("Report.bounded", "Box<int>"),
-            gives("Report.named", "Box<int> & Named"),
-            gives("Report.copied", "Order & Copyable"),
-            gives("Report.copiedBox", "Box<int> & Copyable"),
+            gives("Report.bounded", "TBox"),
+            gives("Report.named", "TBox"),
+            gives("Report.copied", "TItem"),
+            gives("Report.copiedBox", "TBox"),
             gives("Report.fluent", "Invoice"),
         ]
         .concat()
@@ -9372,12 +9372,13 @@ fn a_derived_type_nested_in_a_php_return_type_reads_the_type_argument_of_its_cal
     );
 }
 
-/// `Self` is the receiver with every part of its intersection, spec section 11: `box.same()` on a
-/// `TBox : Box<int> & Named` is a `Box<int> & Named`, so `name()` runs on it, and `item.copy()` on a
-/// `TItem : Order & Copyable`, where `Copyable` declares `copy`, is an `Order & Copyable`. The receiver's own class gives
-/// its type arguments too: `box.copy()` on a `TBox : Box<int> & Copyable` is a `Box<int> & Copyable`. The part that
-/// declares a member gives its type arguments: `holder.held()` on a `THolder : Order & Holder<int>` is an `int?`. Each
-/// method value gives the type its call gives. The PHP twin's `static` keeps Mago's issues.
+/// `Self` on a receiver typed by a type parameter is that type parameter, with every part of its bound, spec section
+/// 11: `box.same()` on a `TBox : Box<int> & Named` is a `TBox`, so `name()` runs on it, and `item.copy()` on a
+/// `TItem : Order & Copyable`, where `Copyable` declares `copy`, is a `TItem`, so it passes as an `Order`. The
+/// receiver's own class gives its type arguments too: `box.copy()` on a `TBox : Box<int> & Copyable` passes as a
+/// `Box<int>`. The part that declares a member gives its type arguments: `holder.held()` on a
+/// `THolder : Order & Holder<int>` is an `int?`. Each method value gives the type its call gives. The PHP twin's
+/// `static` keeps Mago's issues.
 #[test]
 fn a_receiver_bounded_by_an_intersection_keeps_the_intersection_as_its_self() {
     let sharp = "namespace Demo;\n\npublic interface Named\n{\n    public string name();\n}\n\npublic interface Copyable\n{\n    public Self copy();\n}\n\npublic interface Holder<TValue>\n{\n    public TValue? held();\n}\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public Self same() => this;\n\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static string label<TBox : Box<int> & Named>(TBox box) => box.same().name();\n\n    public static Function<Named()> labelValue<TBox : Box<int> & Named>(TBox box) => box.same;\n\n    public static Order copied<TItem : Order & Copyable>(TItem item) => item.copy();\n\n    public static Function<Order()> copiedValue<TItem : Order & Copyable>(TItem item) => item.copy;\n\n    public static Box<int> keep<TBox : Box<int> & Copyable>(TBox box) => box.copy();\n\n    public static Function<Box<int>()> keepValue<TBox : Box<int> & Copyable>(TBox box) => box.copy;\n\n    public static int? hold<THolder : Order & Holder<int>>(THolder holder) => holder.held();\n\n    public static Function<int?()> holdValue<THolder : Order & Holder<int>>(THolder holder) => holder.held;\n}\n";
@@ -9394,6 +9395,19 @@ fn a_receiver_bounded_by_an_intersection_keeps_the_intersection_as_its_self() {
         ]
     );
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// The spec's example of section 11: in `TBox refill<TBox : Box<int>>(TBox box)`, `box.withValue(5)` returns a `TBox`,
+/// as a call, as a method value and into a local declared `TBox`, and so does `box.same()`. The bound still gives the
+/// class's type arguments, so `withValue` refuses a `string`.
+#[test]
+fn self_on_a_receiver_typed_by_a_type_parameter_is_that_type_parameter() {
+    let sharp = "namespace Demo;\n\npublic class Box<T>\n{\n    public required Box(public T value { get; }) { }\n\n    public Self withValue(T value) => new Self(value);\n\n    public Self same() => this;\n}\n\npublic class Report\n{\n    public TBox refill<TBox : Box<int>>(TBox box) => box.withValue(5);\n\n    public Function<TBox(int)> refillValue<TBox : Box<int>>(TBox box) => box.withValue;\n\n    public TBox same<TBox : Box<int>>(TBox box) => box.same();\n\n    public TBox local<TBox : Box<int>>(TBox box)\n    {\n        TBox result = box.withValue(5);\n        return result;\n    }\n\n    public TBox wrong<TBox : Box<int>>(TBox box) => box.withValue(\"five\");\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["Invalid argument type for argument #1 of `Box.withValue`: expected `int`, but found `string`."]
+    );
 }
 
 /// A PHP trait's `self` is the class that uses the trait, as PHP runs it: `order.me()` on an `Order` that uses `Fluent`,
