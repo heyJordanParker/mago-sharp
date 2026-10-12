@@ -475,6 +475,30 @@ fn compile_refuses_a_law_a_changed_method_breaks_on_the_law_line_and_writes_no_c
     assert_eq!(read(root, "app/Shared/Money.lean"), MONEY_PROOF, "an existing proof is never rewritten");
 }
 
+/// Spec section 10: a struct states a law as a class does. Mago proves it, and refuses it once a changed method breaks
+/// it.
+#[test]
+fn a_struct_states_a_law() {
+    let money = LAWFUL_MONEY.replace("public class Money", "public struct Money");
+    let directory = lawful_project(&[("app/Shared/Money.sharp", &money)]);
+    let root = directory.path();
+    compile_succeeds(root);
+    assert_eq!(read(root, "app/Shared/Money.lean"), MONEY_PROOF);
+
+    write(
+        root,
+        "app/Shared/Money.sharp",
+        &money.replace("this.amount + other.amount, this.currency", "this.amount + other.amount, other.currency"),
+    );
+    let output = compile_lines(root);
+
+    assert!(
+        printed(&output).contains("app/Shared/Money.sharp:8:5:error - unproven-law: Law addKeepsCurrency is not proven: Lean rejected its proof in app/Shared/Money.lean line 4: unsolved goals"),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// `Money` with a second class `Wallet` of the same shape, each with its law in its own file.
 fn money_and_wallet() -> tempfile::TempDir {
     lawful_project(&[

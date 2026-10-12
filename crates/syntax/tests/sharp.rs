@@ -554,6 +554,34 @@ fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() 
     assert_eq!(run.name.value, b"run");
 }
 
+/// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
+/// ones included, and the struct parses on with its members.
+#[test]
+fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
+    for parameters in ["<T>", "<TKey, TValue>", "<T : Box<int>>", "<T : Map<string, List<int>>>"] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Pair.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{parameters}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), "A generic struct is not supported yet in PHP#.");
+        assert_eq!(source(code, error), parameters);
+        let Some(Statement::Struct(pair)) = program.statements.first() else {
+            panic!("expected a struct for `{parameters}`, got {:#?}", program.statements);
+        };
+        assert!(pair.inheritance.is_some(), "the header after `{parameters}` parses");
+        let [ClassLikeMember::Method(run)] = pair.members.as_slice() else {
+            panic!("expected the method `run` after `{parameters}`, got {:#?}", pair.members);
+        };
+        assert_eq!(run.name.value, b"run");
+    }
+}
+
 /// A PHP#-only parse error is its own message, so `mago analyze` shows the rule as the issue's title.
 #[test]
 fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {

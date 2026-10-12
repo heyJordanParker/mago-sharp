@@ -15,6 +15,7 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::Namespace;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::UseItem;
 use mago_syntax::walker::MutWalker;
 
@@ -170,6 +171,11 @@ impl<'ast, 'input, 'arena> MutWalker<'ast, 'arena, Collector<'input, 'arena>> fo
 
     fn walk_in_class(&mut self, class: &'ast Class<'arena>, collector: &mut Collector<'input, 'arena>) {
         collector.declare(&class.name, DeclarationKind::Class);
+    }
+
+    /// A struct is the `final` class it lowers to, spec section 10.
+    fn walk_in_struct(&mut self, r#struct: &'ast Struct<'arena>, collector: &mut Collector<'input, 'arena>) {
+        collector.declare(&r#struct.name, DeclarationKind::Class);
     }
 
     fn walk_in_interface(&mut self, interface: &'ast Interface<'arena>, collector: &mut Collector<'input, 'arena>) {

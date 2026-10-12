@@ -12,8 +12,9 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    /// Whether a PHP# struct starts here: `struct`, a name, and `:` or `{`. The name may be a reserved word, as a
-    /// class's may, and the checks refuse it there. Everywhere else `struct` is a name, such as a local `struct`.
+    /// Whether a PHP# struct starts here: `struct`, a name, and `:`, `{` or the `<` of type parameters. The name may
+    /// be a reserved word, as a class's may, and the checks refuse it there. Everywhere else `struct` is a name, such
+    /// as a local `struct`.
     pub(crate) fn is_at_struct(&mut self) -> Result<bool, ParseError> {
         let starts_with_struct =
             self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"struct");
@@ -23,7 +24,7 @@ where
         Ok(self.dialect.is_sharp()
             && starts_with_struct
             && names_a_struct
-            && matches!(self.stream.peek_kind(2)?, Some(T![":" | "{"])))
+            && matches!(self.stream.peek_kind(2)?, Some(T![":" | "{" | "<"])))
     }
 
     /// Parses a PHP# struct, spec section 10: `struct`, its name, the header an enum uses and class members.
@@ -34,6 +35,23 @@ where
     ) -> Result<Struct<'arena>, ParseError> {
         let r#struct = self.expect_any_keyword()?;
         let name = self.parse_local_identifier()?;
+        // Question 4: a generic struct waits for generics, whose `parse` reads `T` while the code runs, so its type
+        // parameters are skipped and refused whole.
+        if self.stream.is_at(T!["<"])? {
+            let open = self.stream.eat_span(T!["<"])?;
+            let mut close = open;
+            let mut depth = 1;
+            while depth > 0 && !self.stream.has_reached_eof()? {
+                depth += match self.stream.peek_kind(0)? {
+                    Some(T!["<"]) => 1,
+                    Some(T![">"]) => -1,
+                    Some(T![">>"]) => -2,
+                    _ => 0,
+                };
+                close = self.stream.consume_span()?;
+            }
+            self.errors.push(ParseError::NotSupportedYetInSharp("A generic struct", open.join(close)));
+        }
         let (backing_type_hint, inheritance) = self.parse_enum_header()?;
 
         Ok(Struct {
