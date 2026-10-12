@@ -145,7 +145,7 @@ const ANY: &[u8] = b"Any";
 ///   section 11.1. A bound is a class or an interface, a generic class type, as in `Comparable<TItem>`, or several of
 ///   them joined with `&`, and any other bound is an error. A type parameter is in scope in its class's or interface's
 ///   whole declaration, its header included, and in its method's signature and body, as the binder decides. A static
-///   member uses none of its class's type parameters, because G1 erases them and every `Box<…>` shares the member: not
+///   member uses none of its class's type parameters, because every `Box<…>` shares the member until R4: not
 ///   a static field's or property's type, nor a static method's signature or body. A static method's own type
 ///   parameters are its own. The analyzer checks variance, bounds and inference.
 /// - An enum: attributes, an optional `public`, a name, an optional `: string, Interface` header, constants, cases,
@@ -316,7 +316,7 @@ const ANY: &[u8] = b"Any";
 ///   pattern of `is`. `not` beside `or` is an error that names both readings, as decision 045 decides, and `!x is T`,
 ///   which reads as `(!x) is T`, is an error that writes `x is not T`, as decision 044 decides. The parser reports list
 ///   patterns, and enum case patterns with fields or a name, as not supported yet.
-/// - What needs a type argument while the code runs, which G1 erases, is not supported yet: a type parameter in a
+/// - What reads a type argument while the code runs, which R3 compiles, is not supported yet: a type parameter in a
 ///   pattern, a `match` arm, `as` or a catch clause, `typeof` and `new` of a type parameter, a static member reached
 ///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, and any type with type arguments in a pattern or
 ///   `as`, as in `value is List<int>`, `value as PaginatedList<Order>` and `value is Class<Order>`.
@@ -1011,8 +1011,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::MethodExpressionBody(_), Method) => Some(Body),
         (Node::TryCatchClause(_), Body) => Some(TryCatchClause),
         (Node::Hint(hint), TryCatchClause) if let Some(untested) = untested_catch_name(hint, context) => {
-            let refused = format!("`catch ({})` can't be tested yet", BytesDisplay(context.get_code_snippet(hint)));
-            report_erased(untested.span(), &refused, context);
+            let refused = format!("`catch ({})`", BytesDisplay(context.get_code_snippet(hint)));
+            report_type_argument_read(untested.span(), &refused, context);
 
             None
         }
@@ -1304,15 +1304,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(place),
         (Node::Expression(Expression::ArrayAccess(_)) | Node::ArrayAccess(_), Body) => Some(Body),
         (Node::ConstantAccess(access), Body) if context.names.is_type_parameter(&access.name) => {
-            let refused = format!("A static member of `{}` can't be used yet", BytesDisplay(context.get_code_snippet(access)));
-            report_erased(access.span(), &refused, context);
+            let refused = format!("A static member of `{}`", BytesDisplay(context.get_code_snippet(access)));
+            report_type_argument_read(access.span(), &refused, context);
 
             None
         }
         (Node::ConstantAccess(_), Body) => Some(Body),
         (Node::TypeOf(type_of), Body | Constant) if context.names.is_type_parameter(&type_of.class) => {
-            let refused = format!("`{}` can't run yet", BytesDisplay(context.get_code_snippet(type_of)));
-            report_erased(type_of.span(), &refused, context);
+            let refused = format!("`{}`", BytesDisplay(context.get_code_snippet(type_of)));
+            report_type_argument_read(type_of.span(), &refused, context);
 
             None
         }
@@ -2635,11 +2635,11 @@ fn is_slice_type(hint: &Hint) -> bool {
     }
 }
 
-/// Refuses `refused`, a type test or an expression as the code writes it and what it can't do yet, because the type
-/// arguments it needs while the code runs don't reach it. G1 checks generics and erases them.
-fn report_erased(span: Span, refused: &str, context: &mut Context<'_, '_, '_>) {
+/// Refuses `refused`, a type test or an expression that reads a type argument while the code runs, which R3 compiles,
+/// named as the code writes it.
+fn report_type_argument_read(span: Span, refused: &str, context: &mut Context<'_, '_, '_>) {
     context.report(
-        Issue::error(format!("{refused}, because type arguments don't reach the running program."))
+        Issue::error(format!("{refused} is not supported yet in PHP#."))
             .with_annotation(Annotation::primary(span).with_message("Not supported yet.")),
     );
 }
@@ -2843,6 +2843,15 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
                 context,
             )
         }
+        // A class value carries no type arguments until R5, spec section 25.
+        (b"Class", [class @ Hint::Generic(_)]) => {
+            context.report(
+                Issue::error("A class value with type arguments is not supported yet in PHP#.")
+                    .with_annotation(Annotation::primary(class.span()).with_message("Not supported yet.")),
+            );
+
+            None
+        }
         (b"Class", [class]) if !matches!(class, Hint::Identifier(Identifier::Local(_))) => {
             context.report(
                 Issue::error(
@@ -3038,8 +3047,8 @@ fn report_php_static(keyword: &Keyword, context: &mut Context<'_, '_, '_>) {
 /// the class's constructor marked `required`, spec section 25, because `Self` can be any subclass, and names no type
 /// arguments, spec section 11, because `Self` is the class with its own type parameters, which a static member of a
 /// generic class can't name. PHP's `self` and `static`, and `Self` in such a static member, are reported at the
-/// keyword, so the arguments are still checked. `new` of a type parameter needs its type argument while the code runs,
-/// which G1 erases.
+/// keyword, so the arguments are still checked. `new` of a type parameter reads its type argument while the code runs,
+/// which R3 compiles.
 fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     match instantiation.class {
         Expression::Self_(keyword) if !is_sharp_self(keyword) => {
@@ -3053,8 +3062,8 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
             return Some(Place::Instantiation);
         }
         Expression::Identifier(class) if context.names.is_type_parameter(class) => {
-            let refused = format!("`new {}` can't run yet", BytesDisplay(context.get_code_snippet(class)));
-            report_erased(instantiation.span(), &refused, context);
+            let refused = format!("`new {}`", BytesDisplay(context.get_code_snippet(class)));
+            report_type_argument_read(instantiation.span(), &refused, context);
 
             return None;
         }

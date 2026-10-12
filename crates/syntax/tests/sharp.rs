@@ -298,9 +298,9 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required`, `via`, a named constructor and a static member of a class with type arguments are spec syntax outside
-/// the slice. Each one is a single error where it starts, and the class around it still parses. A `.` after the `>`
-/// makes `Counter<Order>` a class with type arguments, as in C#.
+/// `required`, `via`, a named constructor, a static member of a class with type arguments and `typeof` of one are spec
+/// syntax outside the slice. Each one is a single error where it starts, and the class around it still parses. A `.`
+/// after the `>` makes `Counter<Order>` a class with type arguments, as in C#.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
@@ -330,6 +330,11 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
             "public int made(bool fresh) => fresh ? Counter<Map<string, Order>>.make() : 0;",
             "A static member of a class with type arguments is not supported yet in PHP#.",
             "Counter<Map<string, Order>>",
+        ),
+        (
+            "public string pages() => typeof(PaginatedList<Order>).name;",
+            "A class value with type arguments is not supported yet in PHP#.",
+            "PaginatedList<Order>",
         ),
     ] {
         let arena = LocalArena::new();

@@ -3553,8 +3553,8 @@ fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error(
 }
 
 /// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
-/// interface or a type parameter, a type argument is never `void`, and a type parameter takes no type arguments. The
-/// analyzer checks a generic class's arity and bounds.
+/// interface or a type parameter, a class value with type arguments is not supported yet, a type argument is never
+/// `void`, and a type parameter takes no type arguments. The analyzer checks a generic class's arity and bounds.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
     let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Order?, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
@@ -3564,7 +3564,7 @@ fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_tak
         [
             "6:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
             "7:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "8:31 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
+            "8:31 A class value with type arguments is not supported yet in PHP#.",
             "9:13 This type is not supported yet in PHP#.",
             "17:29 A type parameter takes no type arguments: write `TItem`.",
         ]
@@ -3587,45 +3587,43 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
     );
 }
 
-/// The engine does not read type arguments while the code runs yet, so what needs one is not supported yet: `is`, `as`
-/// and a `match` arm of a type parameter or of a class with type arguments, which PHP has no test of, and `typeof`,
-/// `new` and a catch clause of a type parameter.
+/// The engine does not read type arguments while the code runs until R3, so what reads one is not supported yet: `is`,
+/// `as` and a `match` arm of a type parameter or of a class with type arguments, which PHP has no test of, and
+/// `typeof`, `new` and a catch clause of a type parameter.
 #[test]
 fn what_needs_a_type_argument_while_the_code_runs_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public bool run<TItem>(Any value, List<TItem> items)\n    {\n        const a = value is TItem;\n        const b = value is TItem item;\n        const c = value as TItem;\n        const i = match (value) { TItem => 1, default => 0 };\n        const j = typeof(TItem);\n        const k = new TItem(value);\n        try {\n        } catch (TItem failure) {\n        }\n        const d = value is PaginatedList<Order> page;\n        const e = value as PaginatedList<Order>;\n        const f = match (value) { PaginatedList<Order> page => 1, default => 0 };\n        return a;\n    }\n}\n";
-    let because = "because type arguments don't reach the running program.";
 
     assert_eq!(
         issues(code),
         [
-            "7:28 This type is not supported yet in PHP#.".to_owned(),
-            "8:28 This type is not supported yet in PHP#.".to_owned(),
-            "9:28 This type is not supported yet in PHP#.".to_owned(),
-            "10:35 This type is not supported yet in PHP#.".to_owned(),
-            format!("11:19 `typeof(TItem)` can't run yet, {because}"),
-            format!("12:19 `new TItem` can't run yet, {because}"),
-            format!("14:18 `catch (TItem)` can't be tested yet, {because}"),
-            "16:28 This type is not supported yet in PHP#.".to_owned(),
-            "17:28 This type is not supported yet in PHP#.".to_owned(),
-            "18:35 This type is not supported yet in PHP#.".to_owned(),
+            "7:28 This type is not supported yet in PHP#.",
+            "8:28 This type is not supported yet in PHP#.",
+            "9:28 This type is not supported yet in PHP#.",
+            "10:35 This type is not supported yet in PHP#.",
+            "11:19 `typeof(TItem)` is not supported yet in PHP#.",
+            "12:19 `new TItem` is not supported yet in PHP#.",
+            "14:18 `catch (TItem)` is not supported yet in PHP#.",
+            "16:28 This type is not supported yet in PHP#.",
+            "17:28 This type is not supported yet in PHP#.",
+            "18:35 This type is not supported yet in PHP#.",
         ]
     );
 }
 
-/// A static member reached through a type parameter, as in `TItem.make()`, needs the type argument while the code
-/// runs, which G1 erases, so it is not supported yet.
+/// A static member reached through a type parameter, as in `TItem.make()`, reads the type argument while the code
+/// runs, which R3 compiles, so it is not supported yet.
 #[test]
 fn a_static_member_of_a_type_parameter_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Box<TItem>\n{\n    public int run<TKey>(int extra)\n    {\n        TItem.make(extra);\n        const limit = TItem.LIMIT;\n        TItem.count = limit;\n        return TKey.count(extra);\n    }\n}\n";
-    let because = "because type arguments don't reach the running program.";
 
     assert_eq!(
         issues(code),
         [
-            format!("7:9 A static member of `TItem` can't be used yet, {because}"),
-            format!("8:23 A static member of `TItem` can't be used yet, {because}"),
-            format!("9:9 A static member of `TItem` can't be used yet, {because}"),
-            format!("10:16 A static member of `TKey` can't be used yet, {because}"),
+            "7:9 A static member of `TItem` is not supported yet in PHP#.",
+            "8:23 A static member of `TItem` is not supported yet in PHP#.",
+            "9:9 A static member of `TItem` is not supported yet in PHP#.",
+            "10:16 A static member of `TKey` is not supported yet in PHP#.",
         ]
     );
 }

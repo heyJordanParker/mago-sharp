@@ -274,9 +274,9 @@ where
     }
     // class kind is a regular class; no kind-specific instantiation diagnostic to emit
 
-    // G1 erases type arguments, so `new` on a class value of a generic PHP# class can't give the object its type
-    // arguments, written or not, spec section 25. The call is checked as the code writes it, so the code around it adds
-    // no second issue.
+    // A class value carries no type arguments until R5, so `new` on a class value of a generic PHP# class can't give
+    // the object its type arguments, written or not, spec section 25. The call is checked as the code writes it, so the
+    // code around it adds no second issue.
     let is_new_on_generic_class_value = context.dialect.is_sharp()
         && classname.is_from_class_string()
         && metadata.flags.is_sharp()
@@ -287,10 +287,8 @@ where
         );
         context.collector.report_with_code(
             IssueCode::NotSupportedYet,
-            Issue::error(format!(
-                "`{new_class}(…)` can't run yet, because type arguments don't reach the running program."
-            ))
-            .with_annotation(Annotation::primary(class_expression_span).with_message("Not supported yet.")),
+            Issue::error(format!("`{new_class}()` is not supported yet in PHP#."))
+                .with_annotation(Annotation::primary(class_expression_span).with_message("Not supported yet.")),
         );
     }
 

@@ -5126,7 +5126,7 @@ fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
     );
 }
 
-/// The engine reads no type arguments while the code runs yet, so `is`, `as` and a `match` arm of a type parameter or
+/// The engine reads no type arguments while the code runs until R3, so `is`, `as` and a `match` arm of a type parameter or
 /// of a class with type arguments, and `typeof` of a type parameter, are refused before lowering. None runs as
 /// `instanceof` a class named for the type parameter, which no value is.
 #[test]
@@ -5169,7 +5169,7 @@ fn a_test_and_typeof_of_a_type_with_type_arguments_are_refused_before_lowering()
             "14:48 compile error: This type is not supported yet in PHP#.",
             "16:46 compile error: This type is not supported yet in PHP#.",
             "18:53 compile error: This type is not supported yet in PHP#.",
-            "20:34 compile error: `typeof(T)` can't run yet, because type arguments don't reach the running program.",
+            "20:34 compile error: `typeof(T)` is not supported yet in PHP#.",
         ]
     );
 }

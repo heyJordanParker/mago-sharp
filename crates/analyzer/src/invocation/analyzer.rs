@@ -68,7 +68,6 @@ use crate::invocation::template_result::populate_template_result_from_invocation
 use crate::invocation::template_result::refine_template_result_for_function_like;
 use crate::statement::function_like::is_member_read;
 use crate::utils::expression::get_block_expression_id;
-use crate::utils::names::display_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
 
@@ -1384,25 +1383,21 @@ fn report_unfixed_type_arguments<A>(
     let unfixed_arguments = if unfixed.len() == 1 { "argument" } else { "arguments" };
     let unfixed_names = unfixed.iter().map(|(name, _)| format!("`{name}`")).collect::<Vec<_>>().join(", ");
     let written_arguments = if metadata.template_types.len() == 1 { "argument" } else { "arguments" };
-    let written = metadata.template_types.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>().join(", ");
-    let name = metadata.original_name;
-    let fixing_result_type =
-        metadata.return_type_metadata.as_ref().map(|metadata| &metadata.type_union).filter(|result| {
-            result.get_all_child_nodes().into_iter().any(|node| {
-                matches!(
-                    node,
-                    TypeRef::Atomic(TAtomic::GenericParameter(parameter)) if unfixed.iter().any(|(name, template)| {
-                        **name == parameter.parameter_name && template.defining_entity == parameter.defining_entity
-                    })
-                )
-            })
-        });
-    let help = match fixing_result_type {
-        Some(result_type) => format!(
-            "Write the type {written_arguments} on the call, as in `{name}<{written}>()`, or give the result a declared type, as in `{} result = {name}();`.",
-            display_type(context, result_type)
-        ),
-        None => format!("Write the type {written_arguments} on the call, as in `{name}<{written}>()`."),
+    let result_fixes = metadata.return_type_metadata.as_ref().is_some_and(|result| {
+        result.type_union.get_all_child_nodes().into_iter().any(|node| {
+            matches!(
+                node,
+                TypeRef::Atomic(TAtomic::GenericParameter(parameter)) if unfixed.iter().any(|(name, template)| {
+                    **name == parameter.parameter_name && template.defining_entity == parameter.defining_entity
+                })
+            )
+        })
+    });
+    // C#'s CS0411 quotes no code: the type parameters' names are no types where the call is written.
+    let help = if result_fixes {
+        format!("Write the type {written_arguments} on the call, or give the result a declared type.")
+    } else {
+        format!("Write the type {written_arguments} on the call.")
     };
 
     context.collector.report_with_code(

@@ -8037,7 +8037,7 @@ fn the_type_arguments_written_from_sharp_fix_a_php_template() {
 }
 
 /// `is`, `as` and a `match` arm of a type with type arguments or of a type parameter, and `typeof` of a type parameter,
-/// which `check_slice` refuses because type arguments don't reach the running program yet, add no analyzer issue: not
+/// which `check_slice` refuses as not supported yet until R3, add no analyzer issue: not
 /// the `is` test, the variable it declares nor its use.
 #[test]
 fn a_type_test_with_type_arguments_adds_no_issue() {
@@ -8908,27 +8908,22 @@ fn an_override_of_a_method_returning_self_returns_self() {
     assert_eq!(explained(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// G1 erases type arguments, so `new` on a class value of a generic PHP# class can't give the object its type
-/// arguments: it is refused as `new` and the class value the code writes, with or without type arguments, and its
-/// arguments are `(…)`. `new` on a class value of a class without type parameters, spec section 25, and `new Self(…)`
-/// in an instance method stay legal. The PHP twin's
-/// `new $type()` on a `class-string` of the PHP# class keeps Mago's issues.
+/// A class value carries no type arguments until R5, so `new` on a class value of a generic PHP# class can't give the
+/// object its type arguments: it is refused as `new` and the class value the code writes, with or without type
+/// arguments. `new` on a class value of a class without type parameters, spec section 25, and `new Self(…)` in an
+/// instance method stay legal. The PHP twin's `new $type()` on a `class-string` of the PHP# class keeps Mago's issues.
 #[test]
 fn new_on_a_class_value_of_a_generic_class_is_not_supported_yet() {
     let classes = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public Self copy() => new Self();\n\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n}\n";
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    private Class<Box> kind = typeof(Box);\n\n    private Class<Plain> plain = typeof(Plain);\n\n    public Any? make() => new (this.kind)();\n\n    public Any? typed() => new (this.kind)<string>();\n\n    public Plain made() => new (this.plain)();\n\n    public Any? held()\n    {\n        return new (this.kind)();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param class-string<Box> $type */\n    public static function make(string $type): mixed\n    {\n        return new $type();\n    }\n\n    /** @param class-string<Plain> $type */\n    public static function plain(string $type): Plain\n    {\n        return new $type();\n    }\n}\n";
-    let because = "because type arguments don't reach the running program. | Not supported yet.";
+    let refused = "not-supported-yet `new (this.kind)()` is not supported yet in PHP#. | Not supported yet.";
 
     assert_eq!(explained(("src/Demo/Report.php", php), &[("src/Demo/Classes.sharp", classes)]), Vec::<String>::new());
     assert_eq!(explained(("src/Demo/Classes.sharp", classes), &[]), Vec::<String>::new());
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
-        [
-            format!("9:31 not-supported-yet `new (this.kind)(…)` can't run yet, {because}"),
-            format!("11:32 not-supported-yet `new (this.kind)(…)` can't run yet, {because}"),
-            format!("17:20 not-supported-yet `new (this.kind)(…)` can't run yet, {because}"),
-        ]
+        [format!("9:31 {refused}"), format!("11:32 {refused}"), format!("17:20 {refused}")]
     );
 }
 
@@ -9447,34 +9442,25 @@ fn a_generic_method_value_fixed_outside_its_bound_names_only_the_bound() {
 }
 
 /// A call of a generic method whose type argument no argument, written type argument or declared type fixes is
-/// refused, as C#'s CS0411 refuses it, instead of running with the type parameter's bound. Its help names both fixes.
-/// Plain PHP's generics keep their fallback, so the PHP twin keeps Mago's issues.
+/// refused, as C#'s CS0411 refuses it, instead of running with the type parameter's bound: an instance call, and a
+/// static one, PHP#'s only other generic call. Its help names both fixes and quotes no code, as CS0411's does, and
+/// only the written one when the result holds no type parameter nothing fixes. Each fix compiles. Plain PHP's
+/// generics keep their fallback, so the PHP twin's calls are not refused.
 #[test]
 fn a_generic_call_nothing_fixes_is_refused() {
-    let php = "<?php\n\nnamespace Demo;\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    public function run(): void\n    {\n        $box = $this->make();\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> make<T>() => new Box<T>();\n\n    public void run()\n    {\n        let box = this.make();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public static function made(): Box\n    {\n        return new Box();\n    }\n\n    public function run(): void\n    {\n        $box = $this->make();\n        $made = Report::made();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public TFirst? first() => null;\n\n    public TSecond? second() => null;\n}\n\npublic class Report\n{\n    public Box<T> make<T>() => new Box<T>();\n\n    public static Pair<TFirst, TSecond> pair<TFirst, TSecond>() => new Pair<TFirst, TSecond>();\n\n    public int size<T>(int count) => count;\n\n    public int run()\n    {\n        let box = this.make();\n        let pair = Report.pair();\n        let written = this.make<Order>();\n        Box<Order> declared = this.make();\n        return this.size(1);\n    }\n}\n";
+    let note = "A generic method call takes its type arguments from its arguments, from the ones it writes and from the declared type its result goes into.";
+    let both = |arguments: &str| format!("Write the type {arguments} on the call, or give the result a declared type.");
 
     assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
     assert_eq!(
-        explained(("src/Demo/Report.sharp", sharp), &[]),
+        worded(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "14:19 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.make`. Write the type argument on the call, as in `make<T>()`, or give the result a declared type, as in `Box<T> result = make();`."
-        ]
-    );
-}
-
-/// A static generic method is refused as an instance one is. PHP# has no top-level functions, so a static method is
-/// its only other generic call. The PHP twin keeps Mago's issues.
-#[test]
-fn a_generic_static_call_nothing_fixes_is_refused() {
-    let php = "<?php\n\nnamespace Demo;\n\n/**\n * @template TFirst\n * @template TSecond\n */\nclass Pair\n{\n    /** @return TFirst|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n\n    /** @return TSecond|null */\n    public function second(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template TFirst\n     * @template TSecond\n     * @return Pair<TFirst, TSecond>\n     */\n    public static function pair(): Pair\n    {\n        return new Pair();\n    }\n\n    public static function run(): void\n    {\n        $pair = Report::pair();\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public TFirst? first() => null;\n\n    public TSecond? second() => null;\n}\n\npublic class Report\n{\n    public static Pair<TFirst, TSecond> pair<TFirst, TSecond>() => new Pair<TFirst, TSecond>();\n\n    public static void run()\n    {\n        let pair = Report.pair();\n    }\n}\n";
-
-    assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
-    assert_eq!(
-        explained(("src/Demo/Report.sharp", sharp), &[]),
-        [
-            "16:20 missing-template-parameter Nothing fixes the type arguments `TFirst`, `TSecond` of the call to `Report.pair`. Write the type arguments on the call, as in `pair<TFirst, TSecond>()`, or give the result a declared type, as in `Pair<TFirst, TSecond> result = pair();`."
+            "25:16 unused-template-parameter Type parameter `T` is never used in method `size`. | Type parameter `T` is defined on this method but never referenced | Remove `T` from `size<…>`.".to_owned(),
+            format!("29:19 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.make`. | `Report.make` is called here | {note} | {}", both("argument")),
+            format!("30:20 missing-template-parameter Nothing fixes the type arguments `TFirst`, `TSecond` of the call to `Report.pair`. | `Report.pair` is called here | {note} | {}", both("arguments")),
+            format!("33:16 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.size`. | `Report.size` is called here | {note} | Write the type argument on the call."),
         ]
     );
 }
@@ -9596,28 +9582,6 @@ fn a_declared_type_outside_the_bound_is_reported_once_by_the_assignment() {
         explained(("src/Demo/Report.sharp", sharp), &[]),
         [
             "16:21 invalid-local-assignment-value Invalid assignment to `count`: it is declared as `int`. Assign a `int` value, or change the type `count` is declared with."
-        ]
-    );
-}
-
-/// A call whose result holds no type parameter nothing fixes can't take one from a declared type, so its refusal
-/// names only the written type argument. The PHP twin keeps Mago's issues.
-#[test]
-fn a_refused_call_whose_result_holds_no_unfixed_type_parameter_names_only_the_written_fix() {
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @template T */\n    public function size(): int\n    {\n        return 0;\n    }\n\n    public function run(): int\n    {\n        return $this->size();\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public int size<T>() => 0;\n\n    public int run()\n    {\n        int size = this.size();\n        return size;\n    }\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Report.php", php), &[]),
-        [
-            "8:21 unused-template-parameter Template parameter `T` is never used in method `Demo\\Report::size`. Remove the unused `@template T` from the docblock, or use it in a parameter or return type."
-        ]
-    );
-    assert_eq!(
-        explained(("src/Demo/Report.sharp", sharp), &[]),
-        [
-            "5:16 unused-template-parameter Type parameter `T` is never used in method `size`. Remove `T` from `size<…>`.",
-            "9:20 missing-template-parameter Nothing fixes the type argument `T` of the call to `Report.size`. Write the type argument on the call, as in `size<T>()`.",
         ]
     );
 }
