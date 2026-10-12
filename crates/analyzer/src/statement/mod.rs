@@ -499,7 +499,7 @@ fn report_key_mixing_a_backed_enum<A>(
 }
 
 /// Analyzes a PHP# `emit`, spec section 15: it raises an event, so its value's type is an event. A refused value is
-/// `never`, and its error already reports it.
+/// `never`, and a type that names no class stays a reference: the error where each was written already reports it.
 fn analyze_emit<'ctx, 'arena, A>(
     emit: &Emit<'arena>,
     context: &mut Context<'ctx, 'arena, A>,
@@ -513,7 +513,11 @@ where
 
     let codebase = context.codebase;
     let not_an_event = artifacts.get_expression_type(emit.value).filter(|value_type| {
-        !value_type.is_never() && !value_type.types.iter().all(|atomic| is_event(codebase, atomic))
+        !value_type.is_never()
+            && !value_type
+                .types
+                .iter()
+                .all(|atomic| matches!(atomic, TAtomic::Reference(_)) || is_event(codebase, atomic))
     });
     if let Some(value_type) = not_an_event {
         context.collector.report_with_code(

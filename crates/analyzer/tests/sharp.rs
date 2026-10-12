@@ -10630,7 +10630,8 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
 }
 
 /// Spec section 15: `emit` raises an event, one an `event` declares or a plain PHP class an `extern event` marks. Any
-/// other value is refused, an interface its events share included, and a refused value reports only its own error.
+/// other value is refused, an interface its events share included, and a refused value or a type that names no class
+/// reports only its own error.
 #[test]
 fn emit_takes_an_event() {
     let [order_event, order_paid] = ORDER_EVENTS;
@@ -10639,13 +10640,14 @@ fn emit_takes_an_event() {
     let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
     let raiser = (
         "app/Shop/Raiser.sharp",
-        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count, Missing missing)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n        emit missing;\n    }\n}\n",
     );
     let note = "An event is a class that `event` declares, or a plain PHP class that `extern event` marks.";
 
     assert_eq!(
         worded(raiser, &[order_event, order_paid, failed, money]),
         [
+            "11:116 non-existent-class-like Cannot find type `Missing`. | `Missing` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.".to_owned(),
             format!("16:14 invalid-event `emit` takes an event, and `OrderEvent` is not one. | Emitted here. | {note}"),
             format!("17:14 invalid-event `emit` takes an event, and `Money` is not one. | Emitted here. | {note}"),
             format!("18:14 invalid-event `emit` takes an event, and `Ledger` is not one. | Emitted here. | {note}"),
