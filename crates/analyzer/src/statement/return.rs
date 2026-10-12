@@ -42,6 +42,7 @@ use crate::expression::array::get_set_literal_type;
 use crate::expression::is_refused;
 use crate::statement::function_like::body_return_type;
 use crate::statement::function_like::expect_function_type;
+use crate::statement::function_like::known_type_or_error;
 use crate::utils::docblock::check_docblock_type_incompatibility;
 use crate::utils::docblock::get_type_from_var_docblock;
 use crate::utils::expression::get_direct_variable_id;
@@ -304,7 +305,7 @@ pub fn handle_return_value<'ctx, A>(
             require_return_value = !expected_type.has_nullish();
         }
 
-        expected_type
+        if function_like_metadata.flags.is_sharp() { known_type_or_error(expected_type) } else { expected_type }
     } else {
         require_return_value = false;
 
