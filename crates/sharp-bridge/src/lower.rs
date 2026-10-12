@@ -35,6 +35,7 @@ use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCase;
@@ -65,6 +66,7 @@ use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::NamedArgument;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafePropertyAccess;
@@ -354,6 +356,12 @@ struct Lowering<'lowering, 'arena> {
     property: Vec<u8>,
     /// Each inline form the lowering copied, with its fingerprint, as often as it copied it.
     inlined: Vec<Read>,
+    /// The PHP variable `this` runs as: `$this`, or in a named constructor, which runs as a static method, the hidden
+    /// local `${'this#1'}` that holds the object its `: this(…)` creates.
+    this: &'static [u8],
+    /// Whether a `return;` being lowered returns that hidden local: it is in a named constructor's body, outside any
+    /// lambda.
+    returns_this: bool,
 }
 
 impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
@@ -378,6 +386,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             loop_depth: 0,
             property: Vec::new(),
             inlined: Vec::new(),
+            this: b"this",
+            returns_this: false,
         }
     }
 
@@ -492,6 +502,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 ClassLikeMember::Method(method) => self.method(method, modifier_flags(&method.modifiers), &[]),
                 ClassLikeMember::Operator(operator) => self.operator(operator),
+                ClassLikeMember::NamedConstructor(
+                    constructor @ NamedConstructor { initializer: Some(initializer), .. },
+                ) => self.named_constructor(constructor, initializer),
                 ClassLikeMember::Property(property) => self.property(property, parent_name),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
                 _ => unreachable!("check_slice refuses the class member `{member}`"),
@@ -764,6 +777,48 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             &operator.return_type_hint,
             operator.body.span(),
             name,
+            &[parameters, NULL, body, return_type, attributes],
+        )
+    }
+
+    /// A named constructor is the static method it runs as, spec section 9.1, as php-src's grammar builds
+    /// `public static function fromJson(string $json): \Demo\Artifact { ${'this#1'} = new \Demo\Artifact(…); …;
+    /// return ${'this#1'}; }`: its `: this(…)` creates the object with the main constructor, its body runs on that
+    /// object as `this`, and it returns the object, as each `return;` in its body does.
+    fn named_constructor(&mut self, constructor: &NamedConstructor, initializer: &ConstructorInitializer) -> u32 {
+        self.enter(constructor.name.value);
+        let mut parameters = Vec::new();
+        for parameter in &constructor.parameter_list.parameters {
+            parameters.push(self.parameter(parameter));
+        }
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&constructor.parameter_list), &parameters);
+        let mut statements = self.set_parameters(&constructor.parameter_list);
+        let line = self.line(initializer);
+        let object = self.variable(initializer.keyword.span, b"this#1");
+        let class = self.string(ZEND_NAME_FQ, line, self.class);
+        let arguments = self.arguments(&initializer.argument_list, &[]);
+        let new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+        statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[object, new]));
+
+        let this = std::mem::replace(&mut self.this, b"this#1");
+        let returns_this = std::mem::replace(&mut self.returns_this, true);
+        let body = self.method_body(&constructor.body, false, statements);
+        (self.this, self.returns_this) = (this, returns_this);
+
+        let line = self.lines.line(constructor.body.span().end.offset);
+        let object = self.variable(constructor.body.span(), b"this#1");
+        let r#return = self.node(SHARP_AST_RETURN, 0, line, &[object]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, self.line(&constructor.body), &[body, r#return]);
+        let return_type = self.string(ZEND_NAME_FQ, self.line(constructor.class), self.class);
+        let attributes = self.attributes(&constructor.attribute_lists, None);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            modifier_flags(&constructor.modifiers) | ZEND_ACC_STATIC,
+            constructor.class,
+            constructor.body.span(),
+            constructor.name.value,
             &[parameters, NULL, body, return_type, attributes],
         )
     }
@@ -1160,7 +1215,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Statement::Block(block) => self.block(block),
             Statement::Expression(statement) => self.expression(statement.expression),
             Statement::Return(r#return) => {
-                let value = r#return.value.map_or(NULL, |value| self.expression(value));
+                let value = match r#return.value {
+                    Some(value) => self.expression(value),
+                    None if self.returns_this => self.variable(r#return.span(), self.this),
+                    None => NULL,
+                };
 
                 self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
             }
@@ -1527,8 +1586,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
+            // `new Artifact.fromJson(…)` calls the static method the named constructor runs as, spec section 9.1.
             Expression::Instantiation(Instantiation {
                 class: Expression::Identifier(class),
+                constructor: Some(constructor),
+                argument_list: Some(arguments),
+                ..
+            }) => {
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+                let method = self.string(0, self.line(constructor), constructor.name.value);
+                let arguments = self.arguments(arguments, &[]);
+
+                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+            }
+            Expression::Instantiation(Instantiation {
+                class: Expression::Identifier(class),
+                constructor: None,
                 argument_list: Some(arguments),
                 ..
             }) => {
@@ -2077,7 +2150,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let parameters = self.lambda_parameters(&arrow_function.parameter_list);
-        let uses = self.closure_uses(lambda);
+        let uses = self.closure_uses(Node::ArrowFunction(arrow_function));
         let body = self.lambda_body(|lowering| {
             let line = lowering.line(arrow_function.expression);
             let mut statements = lowering.set_parameters(&arrow_function.parameter_list);
@@ -2095,7 +2168,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn closure(&mut self, closure: &Closure) -> u32 {
         let lambda = closure.span();
         let parameters = self.lambda_parameters(&closure.parameter_list);
-        let uses = self.closure_uses(lambda);
+        let uses = self.closure_uses(Node::Closure(closure));
         let body = self.lambda_body(|lowering| {
             let mut statements = lowering.set_parameters(&closure.parameter_list);
             for statement in &closure.body.statements {
@@ -2120,23 +2193,37 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The `use` list of a `CLOSURE`: each local the lambda captures, in first-use order, by reference with
-    /// `ZEND_BIND_REF` when code writes it and by value otherwise, or null when it captures none.
-    fn closure_uses(&mut self, lambda: Span) -> u32 {
-        let line = self.line(lambda);
+    /// `ZEND_BIND_REF` when code writes it and by value otherwise, or null when it captures none. In a named
+    /// constructor, a lambda that reads `this` captures the hidden local `this` runs as, which a static method's
+    /// closure has no `$this` to bind.
+    fn closure_uses(&mut self, lambda: Node) -> u32 {
+        let line = self.line(lambda.span());
         let mut uses = Vec::new();
-        for &(name, local) in self.names.captures(&lambda) {
+        for &(name, local) in self.names.captures(&lambda.span()) {
             let attr = if self.names.is_written(&local) { ZEND_BIND_REF } else { 0 };
             uses.push(self.string(attr, line, name));
+        }
+        if self.this != b"this"
+            && !lambda
+                .filter_map(|node| match node {
+                    Node::ConstantAccess(name) if self.names.binding(&name.name) == Some(Binding::This) => Some(()),
+                    _ => None,
+                })
+                .is_empty()
+        {
+            uses.push(self.string(0, line, self.this));
         }
 
         if uses.is_empty() { NULL } else { self.node(SHARP_AST_CLOSURE_USES, 0, line, &uses) }
     }
 
-    /// Lowers a lambda's body, which runs in a frame of its own, outside any loop of the method around it.
+    /// Lowers a lambda's body, which runs in a frame of its own, outside any loop of the method around it, and whose
+    /// `return;` returns from the lambda.
     fn lambda_body(&mut self, lower: impl FnOnce(&mut Self) -> u32) -> u32 {
         let loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        let returns_this = std::mem::replace(&mut self.returns_this, false);
         let body = lower(self);
-        self.loop_depth = loop_depth;
+        (self.loop_depth, self.returns_this) = (loop_depth, returns_this);
 
         body
     }
@@ -2714,7 +2801,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(name);
 
         match self.names.binding(&name.name) {
-            Some(Binding::Local(_) | Binding::This) => self.variable(name.span(), name.name.value()),
+            Some(Binding::Local(_)) => self.variable(name.span(), name.name.value()),
+            Some(Binding::This) => self.variable(name.span(), self.this),
             Some(Binding::Field) => self.storage(line),
             Some(Binding::Constant) => {
                 let constant = self.string(ZEND_NAME_NOT_FQ, line, name.name.value());

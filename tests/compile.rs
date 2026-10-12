@@ -1040,3 +1040,11 @@ fn a_law_reaching_an_inherited_class_is_refused() {
         "Law any reaches the class Shape, which extends Base in Shape. Mago does not translate inheritance to Lean.",
     );
 }
+
+#[test]
+fn a_law_reaching_a_named_constructor_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n    public Shape.triangle() : this(3) { }\n\n    law threeSides(int unused) => new Shape.triangle().sides == 3;\n}\n",
+        "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. Mago does not translate constructor bodies to Lean.",
+    );
+}

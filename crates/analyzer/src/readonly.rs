@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_php_version::feature::Feature;
 use mago_reporting::Annotation;
@@ -31,6 +32,8 @@ enum LocalInitializationState {
 enum EntryContext {
     OrdinaryMethod,
     ClassInitializer,
+    /// A PHP# named constructor, spec section 9.1, whose body runs after the main constructor on the object it creates.
+    NamedConstructor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,11 +180,15 @@ pub(crate) fn check_property_write<A>(
             LocalInitializationState::Uninitialized => return,
             LocalInitializationState::Initialized => PendingCertainty::Invalid(InvalidWriteReason::AlreadyInitialized),
             LocalInitializationState::PossiblyInitialized => PendingCertainty::Possible,
-            LocalInitializationState::EntryDependent => PendingCertainty::EntryDependent(if is_class_initializer {
-                EntryContext::ClassInitializer
-            } else {
-                EntryContext::OrdinaryMethod
-            }),
+            LocalInitializationState::EntryDependent => PendingCertainty::EntryDependent(
+                if function_like.is_some_and(|method| method.flags.is_named_constructor()) {
+                    EntryContext::NamedConstructor
+                } else if is_class_initializer {
+                    EntryContext::ClassInitializer
+                } else {
+                    EntryContext::OrdinaryMethod
+                },
+            ),
         },
     };
 
@@ -236,6 +243,13 @@ pub(crate) fn finalize_class_writes<A>(
                 } else {
                     None
                 }
+            }
+            PendingCertainty::EntryDependent(EntryContext::NamedConstructor) => {
+                if constructor_initialized.contains(&pending.property_name) {
+                    report_set_by_main_constructor(context, &pending);
+                }
+
+                None
             }
             PendingCertainty::EntryDependent(EntryContext::OrdinaryMethod) => {
                 if initializer_reachable.contains(&pending.current_method) {
@@ -641,6 +655,23 @@ fn report_invalid_write<A>(
     }
 
     context.collector.report_with_code(IssueCode::InvalidPropertyWrite, issue);
+}
+
+/// Reports a PHP# named constructor's write of a get-only property its `: this(…)` already set, spec section 9.1.
+fn report_set_by_main_constructor<A>(context: &mut Context<'_, '_, A>, pending: &PendingReadonlyPropertyWrite)
+where
+    A: Arena,
+{
+    context.collector.report_with_code(
+        IssueCode::InvalidPropertyWrite,
+        Issue::error(format!(
+            "`{}` is already set by the main constructor, and a get-only property is set once.",
+            BytesDisplay(
+                pending.property_name.as_bytes().strip_prefix(b"$").unwrap_or(pending.property_name.as_bytes())
+            )
+        ))
+        .with_annotation(Annotation::primary(pending.member_span).with_message("Set again here.")),
+    );
 }
 
 fn report_possible_write<A>(context: &mut Context<'_, '_, A>, pending: &PendingReadonlyPropertyWrite)

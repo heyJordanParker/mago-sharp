@@ -282,7 +282,7 @@ impl std::fmt::Display for ParseError {
                 "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
             }
             ParseError::ConstructorInitializerInSharp(_) => {
-                "A constructor passes control to its base class with `: super(…)`.".to_string()
+                "A constructor passes control to its base class with `: super(…)`, and a named constructor to the main one with `: this(…)`.".to_string()
             }
         };
 

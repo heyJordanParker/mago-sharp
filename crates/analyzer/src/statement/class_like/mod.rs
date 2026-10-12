@@ -1269,6 +1269,9 @@ where
             ClassLikeMember::Law(law) => {
                 law.analyze(context, &mut block_context, artifacts)?;
             }
+            ClassLikeMember::NamedConstructor(named_constructor) => {
+                named_constructor.analyze(context, &mut block_context, artifacts)?;
+            }
             _ => {}
         }
     }

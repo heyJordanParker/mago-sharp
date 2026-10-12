@@ -1761,6 +1761,116 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 }
 
 /// ```php
+/// public static function sized(int $size): \App\Report
+/// {
+///     ${'this#1'} = new \App\Report($size);
+///     {
+///         if ($size === 0) { return ${'this#1'}; }
+///         ${'this#1'}->label = 'sized';
+///         $describe = function () use (${'this#1'}) { return ${'this#1'}->label; };
+///     }
+///     return ${'this#1'};
+/// }
+/// ```
+///
+/// Spec section 9.1: a named constructor is the static method it runs as. `: this(…)` creates the object with the
+/// main constructor into the hidden local `this` runs as, `return;` returns that local, a lambda that reads `this`
+/// captures it, and the method returns it after its body.
+#[test]
+fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Report\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) { }\n\n    public Report.sized(int size) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = \"sized\";\n        let describe = () => { return this.label; };\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.method_named("sized")),
+        indoc! {r#"
+            METHOD [17] "sized" @9-17
+              PARAM_LIST
+                PARAM
+                  ZVAL [1] "int"
+                  ZVAL "size"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "this#1"
+                    NEW
+                      ZVAL "App\\Report"
+                      ARG_LIST
+                        VAR
+                          ZVAL "size"
+                  IF
+                    IF_ELEM
+                      BINARY_OP [16]
+                        VAR
+                          ZVAL "size"
+                        ZVAL 0
+                      STMT_LIST
+                        RETURN
+                          VAR
+                            ZVAL "this#1"
+                  ASSIGN
+                    PROP
+                      VAR
+                        ZVAL "this#1"
+                      ZVAL "label"
+                    ZVAL "sized"
+                  ASSIGN
+                    VAR
+                      ZVAL "describe"
+                    CLOSURE "" @16-16
+                      PARAM_LIST
+                      CLOSURE_USES
+                        ZVAL "this#1"
+                      STMT_LIST
+                        RETURN
+                          PROP
+                            VAR
+                              ZVAL "this#1"
+                            ZVAL "label"
+                      null
+                      null
+                RETURN
+                  VAR
+                    ZVAL "this#1"
+              ZVAL "App\\Report"
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// public static function make(): \App\Report { return \App\Report::sized(3); }
+/// ```
+///
+/// Spec section 9.1: `new Report.sized(…)` calls the static method the named constructor runs as.
+#[test]
+fn new_with_a_named_constructor_is_a_static_call_of_it() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Report\n{\n    public Report(public int size { get; }) { }\n\n    public Report.sized(int size) : this(size) { }\n\n    public static Report make() => new Report.sized(3);\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("make"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Report"
+                  ZVAL "sized"
+                  ARG_LIST
+                    ZVAL 3
+        "#}
+    );
+}
+
+/// ```php
 /// public readonly string $code;
 /// public function __construct()
 /// {

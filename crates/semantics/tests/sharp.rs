@@ -832,6 +832,68 @@ fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_t
     );
 }
 
+/// Spec section 9.1: a named constructor passes control to the main constructor with `: this(…)`, never `: super(…)`,
+/// and the arguments of `: this(…)` cannot use `this`, which does not exist before the main constructor runs.
+#[test]
+fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_this() {
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Order.single() : this(1) { }\n    public Order.none() { }\n    public Order.base() : super() { }\n    public Order.early() : this(this.count) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "8:18 A named constructor passes control to the main constructor with `: this(…)`.",
+            "9:27 A named constructor passes control to the main constructor with `: this(…)`.",
+            "10:33 `this` is not available before the constructor runs: pass a parameter instead.",
+        ]
+    );
+}
+
+/// Spec section 9.1: a named constructor is declared on its own class's name with an access modifier and nothing else,
+/// a name that is neither its class's nor one PHP reserves, parameters that declare no property, and a body.
+#[test]
+fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:12 A named constructor is declared on its own class, as in `Order.copy`.",
+            "8:18 A named constructor cannot have its class's name: `new Order(…)` calls the main constructor.",
+            "9:18 A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods.",
+            "10:12 A named constructor takes only `public`, `protected` or `private`: remove `static`.",
+            "11:11 A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.",
+            "12:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
+            "13:35 A named constructor needs a body, even an empty `{ }`.",
+        ]
+    );
+}
+
+/// Spec section 9.1: a named constructor runs as the static method of its name, so it shares no name with another
+/// member, as PHP's duplicate-method check reports.
+#[test]
+fn a_named_constructor_shares_no_name_with_a_method() {
+    let after = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Order.copy() : this(1) { }\n    public int copy() => 1;\n}\n";
+    let before = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public int Copy() => 1;\n    public Order.copy() : this(1) { }\n}\n";
+
+    assert_eq!(issues(after), ["8:16 class method `Order.copy` has already been defined"]);
+    assert_eq!(issues(before), ["8:18 class method `Order.copy` has already been defined"]);
+}
+
+/// Spec section 9.1: only a class has constructors, so an interface, an enum and a static class declare no named one.
+#[test]
+fn only_a_class_with_instances_declares_a_named_constructor() {
+    let interface = "namespace App.Tenant;\n\npublic interface Priced\n{\n    public Priced.free() : this() { }\n}\n";
+    let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit.red() : this() { }\n}\n";
+    let r#static = "namespace App.Tenant;\n\npublic static class Text\n{\n    public Text.empty() : this() { }\n}\n";
+
+    assert_eq!(
+        issues(interface),
+        ["5:19 An interface has no constructor: a named constructor creates an object of its own class."]
+    );
+    assert_eq!(issues(r#enum), ["7:17 An enum has no constructor: its cases are its only values."]);
+    assert_eq!(issues(r#static), ["5:17 A static class has no constructor."]);
+}
+
 /// Spec section 9.1: a constructor runs once, when `new` creates the object, so no code calls a member named
 /// `__construct`. The base class's arguments go in `: super(…)`.
 #[test]
@@ -2003,15 +2065,35 @@ fn lazy_off_a_parameter_is_not_supported_yet() {
     );
 }
 
-/// Spec section 9.1: a class has one unnamed main constructor, and no overloading by argument types.
+/// Spec section 9.1: a class has one unnamed main constructor, and no overloading by argument types. The help's named
+/// constructor compiles. A method named after its class has only its own error, before the constructor or after it.
 #[test]
 fn a_class_has_one_main_constructor() {
     let second = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report(string name) {}\n}\n";
-    let after_a_method =
-        "namespace App.Tenant;\n\nclass Report\n{\n    public int Report() => 1;\n    public Report(int id) {}\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report.fromName(string name) : this(strlen(name)) { }\n}\n";
 
-    assert_eq!(issues(second), ["6:12 A class has one main constructor: PHP# has no overloading by argument types."]);
-    assert_eq!(issues(after_a_method), ["5:16 A method named after its class is not supported yet in PHP#."]);
+    let issue = check("src/Report.sharp", second).remove(0);
+    assert_eq!(issue.message, "A class has one main constructor: PHP# has no overloading by argument types.");
+    assert_eq!(
+        issue.help.as_deref(),
+        Some(
+            "Give it a name that passes control to the main constructor, as in `public Report.fromName(…) : this(…) { }`."
+        )
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+
+    for (code, expected) in [
+        (
+            "namespace App.Tenant;\n\nclass Report\n{\n    public int Report() => 1;\n    public Report(int id) {}\n}\n",
+            "5:16 A method named after its class is not supported yet in PHP#.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public int Report() => 1;\n}\n",
+            "6:16 A method named after its class is not supported yet in PHP#.",
+        ),
+    ] {
+        assert_eq!(issues(code), [expected], "{code}");
+    }
 }
 
 #[test]

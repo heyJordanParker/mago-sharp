@@ -65,6 +65,7 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
@@ -126,8 +127,11 @@ const ANY: &[u8] = b"Any";
 /// - At file level: `namespace`, `import`, `class`, `interface` and `enum`. A file has at most one namespace, named
 ///   and written without braces.
 /// - A class: attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header,
-///   constants, fields, properties, methods, operators and laws, with no other modifiers, `extends` or `implements`.
-///   The engine tells the base class from the interfaces when it links the class.
+///   constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends`
+///   or `implements`. The engine tells the base class from the interfaces when it links the class.
+/// - A named constructor, spec section 9.1: an access modifier, its class's name, a `.` and its own name, parameters
+///   that declare no property, `: this(…)` without `this` in its arguments, and a body. `check_named_constructor`
+///   decides each part, and an interface, an enum and a static class declare none.
 /// - A law, spec section 28, in a class or an enum: `law`, a name, parameters checked as a method's and an expression
 ///   body. `check_members` refuses a default and a variadic parameter, because a law's parameters range over every
 ///   value.
@@ -259,8 +263,8 @@ const ANY: &[u8] = b"Any";
 ///   static field or property there is an error when this file declares it, and the analyzer reports it otherwise.
 /// - In expressions: literals, list literals `[a, b]` and `[...a, b]`, map literals `["key": value]` and `[:]`, index reads
 ///   `value[key]`, templates, parentheses, bare names, assignment, the operators below, and method calls and property
-///   reads written with `.` or `?.` and a member name, `new Class(...)` on a class written by its short name,
-///   `new Self(...)` in a class whose constructor is `required`, calls of a function by its bare name,
+///   reads written with `.` or `?.` and a member name, `new Class(...)` and `new Class.name(...)` on a class written by
+///   its short name, `new Self(...)` in a class whose constructor is `required`, calls of a function by its bare name,
 ///   `super.method(...)`, which calls the parent's method, and `Self.method(...)`, which calls a static method of the
 ///   class a static method is called on, each with positional, named and spread arguments, as in
 ///   `Money.sum(...prices)` and `max(...prices)`, `throw`, which is an expression as in PHP, `exit(code)` and
@@ -624,7 +628,31 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Law(_)), Class | Enum) => Some(place),
         // A law's parameters and body are checked as a method's. `check_members` refuses a default and a variadic one.
         (Node::Law(_), Class | Enum | Place::Module) => Some(Method),
-        (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Class) => Some(Class),
+        (Node::ClassLikeMember(ClassLikeMember::Operator(_) | ClassLikeMember::NamedConstructor(_)), Class) => {
+            Some(Class)
+        }
+        // A named constructor's parts are a method's, and `check_named_constructor` decides its class, name, modifiers
+        // and `: this(…)`.
+        (Node::NamedConstructor(constructor), Class) => {
+            if let Some(class) = enclosing_class(context.program, constructor.span()) {
+                check_named_constructor(constructor, class.name.value, context);
+            }
+
+            Some(Method)
+        }
+        (Node::ClassLikeMember(ClassLikeMember::NamedConstructor(constructor)), Interface | Enum) => {
+            let message = if place == Interface {
+                "An interface has no constructor: a named constructor creates an object of its own class."
+            } else {
+                "An enum has no constructor: its cases are its only values."
+            };
+            context.report(
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(constructor.name.span).with_message("Declared here.")),
+            );
+
+            None
+        }
         // An operator's parts are a method's, and `check_operator` decides its modifiers and its symbol, the one binary
         // operator a method's parts hold.
         (Node::Operator(operator), Class) => {
@@ -832,17 +860,22 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::MethodAbstractBody(_),
             Method,
         ) => Some(Method),
-        (Node::ConstructorInitializer(initializer), Method) if !initializer.is_super() => {
+        (Node::ConstructorInitializer(initializer), Method)
+            if initializer.is_super() == is_named_constructor_initializer(initializer, context.program) =>
+        {
+            let message = if initializer.is_super() {
+                "A named constructor passes control to the main constructor with `: this(…)`."
+            } else {
+                "The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`."
+            };
             context.report(
-                Issue::error(
-                    "The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.",
-                )
-                .with_annotation(Annotation::primary(initializer.keyword.span).with_message("Written here.")),
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(initializer.keyword.span).with_message("Written here.")),
             );
 
             None
         }
-        // `: super(…)`'s arguments are a method body's expressions, without `this`.
+        // The arguments of `: super(…)` and `: this(…)` are a method body's expressions, without `this`.
         (Node::ConstructorInitializer(initializer), Method) => {
             report_this_in_initializer(initializer, context);
 
@@ -1351,6 +1384,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // `check_instantiation` reported PHP's `self` and `static`.
         (
             Node::Instantiation(_)
+            | Node::ConstructorName(_)
             | Node::Expression(
                 Expression::Identifier(Identifier::Local(_)) | Expression::Self_(_) | Expression::Static(_),
             ),
@@ -1645,6 +1679,9 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
                 if method.return_type_hint.is_none() && method.name.value == class.name.value =>
             {
                 report("A static class has no constructor.".to_owned(), method.name.span, "Declared here.");
+            }
+            ClassLikeMember::NamedConstructor(constructor) => {
+                report("A static class has no constructor.".to_owned(), constructor.name.span, "Declared here.");
             }
             ClassLikeMember::Method(method) if !method.is_static() && !is_extern(method) => {
                 report(non_static(method.name.value), method.name.span, "Declared without `static` here.");
@@ -2759,6 +2796,95 @@ fn has_required_constructor(class: &ClassLike) -> bool {
     })
 }
 
+/// Checks a named constructor of `class`, spec section 9.1: it is declared on its own class's name, as in
+/// `Artifact.fromJson`, takes only an access modifier, has a name that is neither its class's nor one PHP reserves, and
+/// passes control to the main constructor with `: this(…)`. `check_members` reports a name another member of the class
+/// has, as PHP's duplicate-method check, since the named constructor runs as the static method of its name.
+fn check_named_constructor(constructor: &NamedConstructor, class: &[u8], context: &mut Context<'_, '_, '_>) {
+    let class_name = BytesDisplay(class);
+    let name = BytesDisplay(constructor.name.value);
+    let mut report = |message: String, span: Span, written: &str| {
+        context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
+    };
+
+    if constructor.class.value != class {
+        report(
+            format!("A named constructor is declared on its own class, as in `{class_name}.{name}`."),
+            constructor.class.span,
+            "Written here.",
+        );
+    }
+
+    if constructor.name.value.eq_ignore_ascii_case(class) {
+        report(
+            format!(
+                "A named constructor cannot have its class's name: `new {class_name}(…)` calls the main constructor."
+            ),
+            constructor.name.span,
+            "Declared here.",
+        );
+    } else if constructor.name.value.starts_with(b"__") {
+        report(
+            "A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods."
+                .to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    for modifier in &constructor.modifiers {
+        if !modifier.is_read_visibility() {
+            report(
+                format!(
+                    "A named constructor takes only `public`, `protected` or `private`: remove `{}`.",
+                    BytesDisplay(modifier.get_keyword().value)
+                ),
+                modifier.span(),
+                "Written here.",
+            );
+        }
+    }
+
+    if !constructor.modifiers.iter().any(Modifier::is_read_visibility) {
+        report(
+            "A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    if constructor.initializer.is_none() {
+        report(
+            "A named constructor passes control to the main constructor with `: this(…)`.".to_owned(),
+            constructor.name.span,
+            "Declared without `: this(…)` here.",
+        );
+    }
+
+    for modifier in constructor.parameter_list.parameters.iter().flat_map(|parameter| parameter.modifiers.iter()) {
+        report(
+            "A named constructor's parameter declares no property: only the main constructor's parameters do."
+                .to_owned(),
+            modifier.span(),
+            "Written here.",
+        );
+    }
+
+    if let MethodBody::Abstract(body) = &constructor.body {
+        report("A named constructor needs a body, even an empty `{ }`.".to_owned(), body.span(), "Written here.");
+    }
+}
+
+/// Whether `: this(…)` or `: super(…)` belongs to a named constructor rather than to the main one.
+fn is_named_constructor_initializer(initializer: &ConstructorInitializer, program: &Program) -> bool {
+    enclosing_class(program, initializer.span()).is_some_and(|class| {
+        class.members.iter().any(|member| {
+            matches!(member, ClassLikeMember::NamedConstructor(constructor)
+                if constructor.initializer.as_ref().is_some_and(|written| written.span() == initializer.span()))
+        })
+    })
+}
+
 /// Whether a parameter belongs to a class's constructor, the one method where an access modifier declares a property.
 fn is_constructor_parameter(parameter: &FunctionLikeParameter, program: &Program) -> bool {
     enclosing_class(program, parameter.span()).is_some_and(|class| {
@@ -3080,7 +3206,7 @@ const fn supported(place: Place) -> &'static str {
     match place {
         Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface` and `enum`.",
         Place::Class => {
-            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, operators and laws, with no other modifiers, `extends` or `implements`."
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
             "A PHP# interface has an optional `public`, a name, an optional `: Interface` header and methods, with no attributes, other modifiers, `extends`, constants or properties."
@@ -3114,7 +3240,7 @@ const fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."

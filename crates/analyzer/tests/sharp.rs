@@ -1657,11 +1657,12 @@ fn an_override_of_a_plain_php_method_takes_no_assertion_from_the_parent() {
 /// A parse error reports its spot once, so returning what failed to parse adds no `never-return`, in PHP# and PHP.
 #[test]
 fn returning_a_value_that_failed_to_parse_adds_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public Report make(string json)\n    {\n        return new Report.fromJson(json);\n    }\n}\n";
+    let sharp =
+        "namespace Demo;\n\nclass Report\n{\n    public int make()\n    {\n        return fn() => 1;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfunction make(): int\n{\n    return );\n}\n";
 
     assert_eq!(issues(("src/Demo/make.php", php), &[]), ["7:12 parse"]);
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:20 parse"]);
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:16 parse"]);
 }
 
 /// `super` names the base class, so a class whose header names only interfaces has none, as `parent::` in a PHP
@@ -4639,6 +4640,111 @@ fn initial_values_in_the_constructor_under_a_base_class_constructor_with_paramet
             "8:7 not-supported-yet: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Labeled`'s initial values run in its constructor.",
             "13:7 not-supported-yet: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Pinned`'s initial values run in its constructor.",
         ],
+    );
+}
+
+/// Spec section 9.1: `new Artifact.sized(…)` calls the named constructor `sized`, so its arguments are checked against
+/// its parameters with PHP's codes, and it creates an `Artifact`.
+#[test]
+fn new_with_a_named_constructor_checks_its_arguments_and_creates_its_class() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static int make()\n    {\n        const made = new Artifact.sized(2);\n        return made.size + new Artifact.sized(\"two\").size + new Artifact.sized().size;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Artifact.sharp", sharp), &[]), ["12:47 invalid-argument", "12:79 too-few-arguments"]);
+}
+
+/// Spec section 9.1: a named constructor is its own class's, so `new` on a subclass finds none, and `new` names only a
+/// named constructor the class declares.
+#[test]
+fn a_named_constructor_is_not_inherited() {
+    let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "14:47 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
+            "15:46 non-existent-method: `Base` has no constructor `missing`.",
+        ],
+    );
+}
+
+/// Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`, and the fix compiles.
+#[test]
+fn a_named_constructor_called_without_new_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static int make() => Artifact.sized(2).size;\n}\n";
+    let fixed = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n\n    public static int make() => new Artifact.sized(2).size;\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &["9:33 named-constructor-without-new: `Artifact.sized` is a constructor: write `new Artifact.sized(2)`."],
+    );
+    assert_messages(fixed, &[], &[]);
+}
+
+/// PHP calls a named constructor as the static method it runs as, which returns its class.
+#[test]
+fn php_calls_a_named_constructor_as_the_static_method_it_runs_as() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n}\n";
+    let caller = "<?php\n\nnamespace App;\n\nfunction run(): string\n{\n    return \\Demo\\Artifact::sized(2)->size . \\Demo\\Artifact::sized('two')->size;\n}\n";
+
+    assert_eq!(issues(("src/App/run.php", caller), &[("src/Demo/Artifact.sharp", sharp)]), ["7:67 invalid-argument"]);
+}
+
+/// Spec section 9.1: a named constructor's `: this(…)` creates its object with the main constructor, so its arguments
+/// are checked against that constructor with PHP's codes. A class without a constructor takes `: this()` and no
+/// arguments.
+#[test]
+fn this_arguments_are_checked_against_the_main_constructor() {
+    let sharp = "namespace Demo;\n\nclass Entity\n{\n    public Entity(int count, string label) { }\n\n    public Entity.one() : this(1, \"one\") { }\n    public Entity.few() : this(1) { }\n    public Entity.wrong() : this(\"one\", \"one\") { }\n    public Entity.many() : this(1, \"one\", 2) { }\n}\n\nclass Plain\n{\n    public Plain.empty() : this() { }\n    public Plain.full(int count) : this(count) { }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Entity.sharp", sharp), &[]),
+        ["8:31 too-few-arguments", "9:34 invalid-argument", "10:43 too-many-arguments", "16:40 too-many-arguments"]
+    );
+    assert_messages(
+        "namespace Demo;\n\nclass Plain\n{\n    public Plain.full(int count) : this(count) { }\n}\n",
+        &[],
+        &["5:40 too-many-arguments: `Plain` has no constructor to call: remove the arguments."],
+    );
+}
+
+/// Spec section 9.1: a named constructor's body runs on the object its `: this(…)` creates, as `this`, so it reads
+/// and writes the object's members with their types, and `return;` ends it.
+#[test]
+fn a_named_constructor_body_runs_on_this() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public string label { get; set; } = \"\";\n\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.labeled(string label) : this(strlen(label))\n    {\n        if (label == \"\") {\n            return;\n        }\n        this.label = label;\n        this.label = this.size;\n        const read = () => this.label;\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Artifact.sharp", sharp), &[]), ["15:22 invalid-property-assignment-value"]);
+}
+
+/// Spec section 9.1: the main constructor sets a get-only property once, so a named constructor that sets it again is
+/// an error. One the main constructor leaves unset is the named constructor's to set, once.
+#[test]
+fn a_named_constructor_that_overwrites_a_get_only_property_the_main_constructor_set_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public string code { get; } = \"none\";\n    public int count { get; }\n    public string label { get; }\n\n    public Artifact(public int size { get; }, int count)\n    {\n        this.count = count;\n    }\n\n    public Artifact.rebuilt() : this(1, 2)\n    {\n        this.size = 3;\n        this.count = 4;\n        this.code = \"x\";\n        this.label = \"set\";\n        this.label = \"again\";\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "16:14 invalid-property-write: `size` is already set by the main constructor, and a get-only property is set once.",
+            "17:14 invalid-property-write: `count` is already set by the main constructor, and a get-only property is set once.",
+            "18:14 invalid-property-write: `code` is already set by the main constructor, and a get-only property is set once.",
+            "20:14 invalid-property-write: Cannot modify a readonly property after initialization.",
+        ],
+    );
+}
+
+/// An abstract class has no instances, so `new` refuses its named constructor as it refuses its main one, and a
+/// private named constructor is its class's own to call.
+#[test]
+fn new_with_a_named_constructor_keeps_the_abstract_and_visibility_refusals() {
+    let sharp = "namespace Demo;\n\nabstract class Shape\n{\n    public Shape() { }\n\n    public Shape.unit() : this() { }\n}\n\nclass Secret\n{\n    public Secret() { }\n\n    private Secret.hidden() : this() { }\n\n    public static Secret make() => new Secret.hidden();\n}\n\nclass Use\n{\n    public static Shape shape() => new Shape.unit();\n\n    public static Secret secret() => new Secret.hidden();\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Shape.sharp", sharp), &[]),
+        ["21:40 abstract-instantiation", "23:38 invalid-method-access"]
     );
 }
 
@@ -9871,6 +9977,23 @@ fn a_getter_creating_an_object_whose_super_call_has_an_effect_is_refused() {
         [
             "app/Shop/Stamp.sharp:25:24 impure-getter: Getter `late` reaches `Late.Late`, which calls `now` with the effect `Clock`. Getters must be pure.",
             "app/Shop/Stamp.sharp:27:26 impure-getter: Getter `child` reaches `Timed.Timed`, which calls `now` with the effect `Clock`. Getters must be pure.",
+        ]
+    );
+}
+
+/// `new Stamp.now()` runs the named constructor's body, so a getter reaches its effects, and those of its `: this(…)`.
+#[test]
+fn a_getter_creating_an_object_whose_named_constructor_has_an_effect_is_refused() {
+    let stamps = (
+        "app/Shop/Stamp.sharp",
+        "namespace App.Shop;\n\npublic class Stamp\n{\n    public Stamp(public int at { get; }) { }\n\n    public Stamp.zero() : this(0) { }\n    public Stamp.current() : this(now()) { }\n    public Stamp.logged() : this(0) { now(); }\n}\n\npublic class Card\n{\n    public int zero => new Stamp.zero().at;\n\n    public int current => new Stamp.current().at;\n\n    public int logged => new Stamp.logged().at;\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[stamps, CLOCK_STUB, NOW]),
+        [
+            "app/Shop/Stamp.sharp:16:27 impure-getter: Getter `current` reaches `Stamp.current`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:18:26 impure-getter: Getter `logged` reaches `Stamp.logged`, which calls `now` with the effect `Clock`. Getters must be pure.",
         ]
     );
 }
