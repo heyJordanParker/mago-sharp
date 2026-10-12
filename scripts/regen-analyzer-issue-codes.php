@@ -367,6 +367,7 @@ final class AnalyzerCodeModuleGenerator
         'unmodeled-construct',
         'broken-rule',
         'missing-super-call',
+        'invalid-event',
     ];
 
     /**
