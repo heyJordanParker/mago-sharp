@@ -28,6 +28,7 @@ use mago_server::Server;
 use mago_sharp_bridge::unit;
 use mago_sharp_lean::Lean;
 use mago_sharp_lean::PACKAGE_FOLDER;
+use mago_sharp_lean::rules_files;
 use mago_syntax::dialect::Dialect;
 
 use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
@@ -90,7 +91,11 @@ impl CompileCommand {
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
         server.analyze()?;
         let lean = Lean::new(&root);
-        let compilations = server.compile(|path| unit::stamp(&root, path), |translations| lean.prove(translations))?;
+        let compilations = server.compile(
+            |path| unit::stamp(&root, path),
+            |name| rules_files(&root, name),
+            |translations| lean.check(translations),
+        )?;
         let database = server.database();
 
         let mut written = BTreeSet::new();
