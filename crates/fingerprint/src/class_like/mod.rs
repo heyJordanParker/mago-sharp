@@ -25,6 +25,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::PlainProperty;
@@ -150,6 +151,9 @@ impl Fingerprintable for ClassLikeMember<'_> {
             }
             ClassLikeMember::Law(law) => {
                 law.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            ClassLikeMember::NamedConstructor(named_constructor) => {
+                named_constructor.fingerprint_with_hasher(hasher, resolved_names, options);
             }
         }
     }
@@ -639,6 +643,38 @@ impl Fingerprintable for ConstructorInitializer<'_> {
     {
         self.keyword.fingerprint_with_hasher(hasher, resolved_names, options);
         self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for NamedConstructor<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        if let Some(trivia) = options.trivia_context {
+            for t in PrecedingDocblocks::new(trivia, self.span().start.offset)
+                .important_only(options.important_comment_patterns)
+            {
+                t.value.hash(hasher);
+            }
+        }
+        "named_constructor".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+
+        if !options.signature_only {
+            self.initializer.fingerprint_with_hasher(hasher, resolved_names, options);
+            self.body.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
     }
 }
 

@@ -53,6 +53,7 @@ use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::ConstantItem;
 use crate::cst::cst::Construct;
 use crate::cst::cst::ConstructorInitializer;
+use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Continue;
 use crate::cst::cst::Declare;
 use crate::cst::cst::DeclareBody;
@@ -161,6 +162,7 @@ use crate::cst::cst::Modifier;
 use crate::cst::cst::Module;
 use crate::cst::cst::ModuleMember;
 use crate::cst::cst::NamedArgument;
+use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
 use crate::cst::cst::Namespace;
 use crate::cst::cst::NamespaceBody;
@@ -335,6 +337,8 @@ pub enum NodeKind {
     Operator,
     Law,
     ConstructorInitializer,
+    NamedConstructor,
+    ConstructorName,
     Event,
     ComputedProperty,
     HookedProperty,
@@ -611,6 +615,8 @@ pub enum Node<'ast, 'arena> {
     Operator(&'ast Operator<'arena>),
     Law(&'ast Law<'arena>),
     ConstructorInitializer(&'ast ConstructorInitializer<'arena>),
+    NamedConstructor(&'ast NamedConstructor<'arena>),
+    ConstructorName(&'ast ConstructorName<'arena>),
     Event(&'ast Event<'arena>),
     ComputedProperty(&'ast ComputedProperty<'arena>),
     HookedProperty(&'ast HookedProperty<'arena>),
@@ -856,6 +862,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Function(_)
                 | Self::Method(_)
                 | Self::Operator(_)
+                | Self::NamedConstructor(_)
         )
     }
 
@@ -971,6 +978,8 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Operator(_) => NodeKind::Operator,
             Self::Law(_) => NodeKind::Law,
             Self::ConstructorInitializer(_) => NodeKind::ConstructorInitializer,
+            Self::NamedConstructor(_) => NodeKind::NamedConstructor,
+            Self::ConstructorName(_) => NodeKind::ConstructorName,
             Self::Event(_) => NodeKind::Event,
             Self::ComputedProperty(_) => NodeKind::ComputedProperty,
             Self::HookedProperty(_) => NodeKind::HookedProperty,
@@ -1412,6 +1421,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 ClassLikeMember::Method(node) => f(Node::Method(node)),
                 ClassLikeMember::Operator(node) => f(Node::Operator(node)),
                 ClassLikeMember::Law(node) => f(Node::Law(node)),
+                ClassLikeMember::NamedConstructor(node) => f(Node::NamedConstructor(node)),
             },
             Node::ClassLikeMemberExpressionSelector(node) => f(Node::Expression(node.expression)),
             Node::ClassLikeMemberSelector(node) => match node {
@@ -1461,6 +1471,22 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Keyword(&node.keyword));
                 f(Node::ArgumentList(&node.argument_list));
             }
+            Node::NamedConstructor(node) => {
+                for item in node.attribute_lists.iter() {
+                    f(Node::AttributeList(item));
+                }
+                for item in node.modifiers.iter() {
+                    f(Node::Modifier(item));
+                }
+                f(Node::LocalIdentifier(&node.class));
+                f(Node::LocalIdentifier(&node.name));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+                for item in node.initializer.iter() {
+                    f(Node::ConstructorInitializer(item));
+                }
+                f(Node::MethodBody(&node.body));
+            }
+            Node::ConstructorName(node) => f(Node::LocalIdentifier(&node.name)),
             Node::MethodAbstractBody(node) => {
                 f(Node::Terminator(&node.terminator));
             }
@@ -2298,6 +2324,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::Instantiation(node) => {
                 f(Node::Keyword(&node.new));
                 f(Node::Expression(node.class));
+                if let Some(constructor) = &node.constructor {
+                    f(Node::ConstructorName(constructor));
+                }
 
                 if let Some(argument_list) = &node.argument_list {
                     f(Node::ArgumentList(argument_list));
@@ -2925,6 +2954,8 @@ impl HasSpan for Node<'_, '_> {
             Self::Operator(node) => node.span(),
             Self::Law(node) => node.span(),
             Self::ConstructorInitializer(node) => node.span(),
+            Self::NamedConstructor(node) => node.span(),
+            Self::ConstructorName(node) => node.span(),
             Self::Event(node) => node.span(),
             Self::ComputedProperty(node) => node.span(),
             Self::HookedProperty(node) => node.span(),

@@ -1765,6 +1765,166 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 }
 
 /// ```php
+/// public static function sized(int $size, string ...$notes): \App\Report
+/// {
+///     ${'this#1'} = new \App\Report($size);
+///     (function ($size, ...$notes) {
+///         if ($size === 0) { return; }
+///         $this->label = parent::describe();
+///         $read = function () { return $this->label; };
+///         $skip = function () { return; };
+///     })->call(${'this#1'}, $size, ...$notes);
+///     return ${'this#1'};
+/// }
+/// ```
+///
+/// Spec section 9.1: a named constructor is the static method it runs as. `: this(…)` creates the object with the
+/// main constructor, and the body is a closure bound to it, so it runs as a method body on a real `$this`: `super.m()`
+/// is `parent::m()`, `return;` and a lambda's `return;` return nothing, and a lambda reads `$this` as in a method. The
+/// closure takes each parameter, a variadic one spread back out. The method returns the object after its body.
+#[test]
+fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.method_named("sized")),
+        indoc! {r#"
+            METHOD [17] "sized" @15-24
+              PARAM_LIST
+                PARAM
+                  ZVAL [1] "int"
+                  ZVAL "size"
+                  null
+                  null
+                  null
+                  null
+                PARAM [16]
+                  ZVAL [1] "string"
+                  ZVAL "notes"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "this#1"
+                  NEW
+                    ZVAL "App\\Report"
+                    ARG_LIST
+                      VAR
+                        ZVAL "size"
+                METHOD_CALL
+                  CLOSURE "" @16-24
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "size"
+                        null
+                        null
+                        null
+                        null
+                      PARAM [16]
+                        null
+                        ZVAL "notes"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "size"
+                            ZVAL 0
+                          STMT_LIST
+                            RETURN
+                              null
+                      ASSIGN
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "label"
+                        STATIC_CALL
+                          ZVAL [1] "parent"
+                          ZVAL "describe"
+                          ARG_LIST
+                      ASSIGN
+                        VAR
+                          ZVAL "read"
+                        CLOSURE "" @22-22
+                          PARAM_LIST
+                          null
+                          STMT_LIST
+                            RETURN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "label"
+                          null
+                          null
+                      ASSIGN
+                        VAR
+                          ZVAL "skip"
+                        CLOSURE "" @23-23
+                          PARAM_LIST
+                          null
+                          STMT_LIST
+                            RETURN
+                              null
+                          null
+                          null
+                    null
+                    null
+                  ZVAL "call"
+                  ARG_LIST
+                    VAR
+                      ZVAL "this#1"
+                    VAR
+                      ZVAL "size"
+                    UNPACK
+                      VAR
+                        ZVAL "notes"
+                RETURN
+                  VAR
+                    ZVAL "this#1"
+              ZVAL "App\\Report"
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// public static function make(): \App\Report { return \App\Report::sized(3); }
+/// ```
+///
+/// Spec section 9.1: `new Report.sized(…)` calls the static method the named constructor runs as.
+#[test]
+fn new_with_a_named_constructor_is_a_static_call_of_it() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Report\n{\n    public Report(public int size { get; }) { }\n\n    public Report.sized(int size) : this(size) { }\n\n    public static Report make() => new Report.sized(3);\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("make"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Report"
+                  ZVAL "sized"
+                  ARG_LIST
+                    ZVAL 3
+        "#}
+    );
+}
+
+/// ```php
 /// public readonly string $code;
 /// public function __construct()
 /// {

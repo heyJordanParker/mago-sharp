@@ -448,7 +448,7 @@ where
 
     if let Some(function_metadata) = block_context.scope.get_function_like()
         && !block_context.flags.has_returned()
-        && let Some(return_type) = &function_metadata.return_type_metadata
+        && let Some(return_type) = body_return_type(function_metadata)
         && !return_type.type_union.is_void()
         && !function_like_metadata.flags.has_yield()
     {
@@ -752,6 +752,12 @@ where
     }
 
     Ok(())
+}
+
+/// The type a function-like's body returns. A PHP# named constructor runs as a static method that returns the object
+/// its `: this(…)` creates, spec section 9.1, but its body returns nothing, as the main constructor's does.
+pub(crate) fn body_return_type(function_like: &FunctionLikeMetadata) -> Option<&TypeMetadata> {
+    function_like.return_type_metadata.as_ref().filter(|_| !function_like.flags.is_named_constructor())
 }
 
 /// Reports a body that can end without returning a value, though the `kind` named `name`, declared at `declaration`,
@@ -1136,7 +1142,7 @@ fn check_return_type_width<'ctx, A>(
         return;
     }
 
-    let Some(return_type_metadata) = function_like_metadata.return_type_metadata.as_ref() else {
+    let Some(return_type_metadata) = body_return_type(function_like_metadata) else {
         return;
     };
 
