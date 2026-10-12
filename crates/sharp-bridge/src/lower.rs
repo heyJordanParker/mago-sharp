@@ -188,6 +188,7 @@ use crate::sharp_kind::SHARP_AST_UNARY_PLUS;
 use crate::sharp_kind::SHARP_AST_UNPACK;
 use crate::sharp_kind::SHARP_AST_UNSET;
 use crate::sharp_kind::SHARP_AST_VAR;
+use crate::sharp_kind::SHARP_AST_VERIFY_TYPE_ARGS;
 use crate::sharp_kind::SHARP_AST_WHILE;
 use crate::sharp_kind::SHARP_AST_ZVAL;
 use crate::sharp_node;
@@ -920,13 +921,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The flags and the hooks of the property a constructor parameter promotes, or none for any other parameter.
     fn member_flags_and_hooks(&mut self, parameter: &FunctionLikeParameter) -> (u32, u32) {
-        let (accessor_flags, hooks) = match &parameter.hooks {
-            Some(accessors) => (
-                accessor_flags(&parameter.modifiers, accessors, self.names),
-                self.hooks(parameter.variable.name, accessors),
-            ),
-            None => (0, NULL),
-        };
+        if !parameter.is_promoted_property() {
+            return (0, NULL);
+        }
+
+        let accessor_flags =
+            parameter.hooks.as_ref().map_or(0, |accessors| accessor_flags(&parameter.modifiers, accessors, self.names));
+        let hooks = self.hooks(&parameter.variable, parameter.hooks.as_ref());
 
         (modifier_flags(&parameter.modifiers) | accessor_flags, hooks)
     }
@@ -959,11 +960,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// a property of `parent` whose root declaration has no type has none either, down the whole chain (decision 028).
     fn property(&mut self, property: &Property, parent: Option<&[u8]>) -> u32 {
         let (accessor_flags, attribute_lists, hooks) = match property {
-            Property::Plain(field) => (0, &field.attribute_lists, NULL),
+            Property::Plain(field) => (0, &field.attribute_lists, self.hooks(property.first_variable(), None)),
             Property::Hooked(hooked) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
                 &hooked.attribute_lists,
-                self.hooks(hooked.item.variable().name, &hooked.hook_list),
+                self.hooks(hooked.item.variable(), Some(&hooked.hook_list)),
             ),
             Property::Computed(computed) => {
                 let hook = self.accessor_bodies(computed.variable.name, |lowering| {
@@ -1009,31 +1010,75 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
     }
 
-    /// A property's hook list, or null when no accessor has a body: an auto-property is plain storage. Each body is a
-    /// hook. An auto accessor beside a body that uses `field` is PHP's backing store, so it is no hook, and beside
-    /// bodies that never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does.
-    fn hooks(&mut self, property: &[u8], accessors: &PropertyHookList) -> u32 {
-        if !accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_))) {
+    /// A property's hook list, or null when it needs none: an auto-property is plain storage. Each body is a hook. An
+    /// auto accessor beside a body that uses `field` is PHP's backing store, so it is no hook, and beside bodies that
+    /// never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. A property
+    /// plain PHP can write whose type [`Types::property_check`] checks has a `set` hook that checks the value first, as
+    /// a parameter checks an argument from plain PHP: its own `set` body, or one over the storage.
+    fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>) -> u32 {
+        let check = self.types.property_check(self.class, variable.name);
+        let has_body = accessors.is_some_and(|accessors| {
+            accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
+        });
+        if !has_body && check.is_none() {
             return NULL;
         }
 
-        let uses_field = self.names.uses_field(accessors);
-        self.accessor_bodies(property, |lowering| {
+        let uses_field = accessors.is_some_and(|accessors| self.names.uses_field(accessors));
+        self.accessor_bodies(variable.name, |lowering| {
             let mut hooks = Vec::new();
-            for accessor in &accessors.hooks {
+            let mut checked = false;
+            for accessor in accessors.into_iter().flat_map(|accessors| accessors.hooks.iter()) {
                 let body = match &accessor.body {
                     PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)) => lowering.block(block),
                     PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)) => {
                         lowering.short_body(accessor.name.value, body)
                     }
-                    PropertyHookBody::Abstract(_) if uses_field => continue,
+                    PropertyHookBody::Abstract(_) if uses_field || !has_body => continue,
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
+                };
+                let body = match &check {
+                    Some(text) if accessor.name.value == b"set" => {
+                        checked = true;
+                        lowering.checked_set(accessor.name.span, text, body)
+                    }
+                    _ => body,
                 };
                 hooks.push(lowering.hook(accessor.name.value, accessor.name, accessor, body));
             }
+            if let Some(text) = &check
+                && !checked
+            {
+                let body = lowering.storage_set(variable.span);
+                let body = lowering.checked_set(variable.span, text, body);
+                hooks.push(lowering.hook(b"set", variable, variable, body));
+            }
 
-            lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
+            let line = accessors.map_or_else(|| lowering.line(variable), |accessors| lowering.line(accessors));
+            lowering.node(SHARP_AST_STMT_LIST, 0, line, &hooks)
         })
+    }
+
+    /// The `set` hook body `body`, after `value = SHARP_VERIFY_TYPE_ARGS(value)`, which checks the value against `text`.
+    /// `span` is the accessor's name, or the property's when the hook is the check's own.
+    fn checked_set(&mut self, span: Span, text: &str, body: u32) -> u32 {
+        let line = self.line(span);
+        let target = [b"property ", self.class, b"::$", self.property.as_slice()].concat();
+        let value = self.variable(span, b"value");
+        let checked = self.verified(line, value, text, &target, true);
+        let value = self.variable(span, b"value");
+        let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[value, checked]);
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &[assignment, body])
+    }
+
+    /// `lowered`, the lowered value, checked against the type text `text` once it enters PHP# from plain PHP, with
+    /// `target` naming what takes it, as `local counter`, for the engine's TypeError. `hook` marks a set hook's value.
+    fn verified(&mut self, line: u32, lowered: u32, text: &str, target: &[u8], hook: bool) -> u32 {
+        let text = self.string(0, line, text.as_bytes());
+        let target = self.string(0, line, target);
+
+        self.node(SHARP_AST_VERIFY_TYPE_ARGS, u32::from(hook), line, &[lowered, text, target])
     }
 
     /// Lowers a property's accessor bodies, in which `field` is the property's storage and `Position.current()` names
@@ -1064,18 +1109,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(kind, 0, line, &[expression])
     }
 
-    /// An auto accessor's body over the storage: `get => $this->name;` or `set { $this->name = $value; }`.
+    /// An auto accessor's body over the storage: `get => $this->name;` or [`Self::storage_set`].
     fn storage_body(&mut self, accessor: &PropertyHook) -> u32 {
-        let line = self.line(accessor);
-        let storage = self.storage(line);
         if accessor.name.value == b"get" {
+            let line = self.line(accessor);
+            let storage = self.storage(line);
             self.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[storage])
         } else {
-            let value = self.variable(accessor.name.span, b"value");
-            let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[storage, value]);
-
-            self.node(SHARP_AST_STMT_LIST, 0, line, &[assignment])
+            self.storage_set(accessor.name.span)
         }
+    }
+
+    /// `set { $this->name = $value; }`, a `set` body over the storage, on the line of `span`.
+    fn storage_set(&mut self, span: Span) -> u32 {
+        let line = self.line(span);
+        let storage = self.storage(line);
+        let value = self.variable(span, b"value");
+        let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[storage, value]);
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &[assignment])
     }
 
     /// `field`: `$this->name` of the property whose accessor body is being lowered, which PHP reads and writes as the
@@ -1359,7 +1411,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn local(&mut self, local: &LocalDeclaration) -> u32 {
         let line = self.line(local);
         let variable = self.variable(local.name.span, local.name.value);
-        let value = self.expression(local.value);
+        let value = self.local_value(local.name.value, local.value);
         let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
         if self.loop_depth == 0 || !self.by_reference.contains(&local.name.span.start.offset) {
             return assignment;
@@ -1370,6 +1422,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let unset = self.node(SHARP_AST_STMT_LIST, 0, line, &[unset]);
 
         self.node(SHARP_AST_STMT_LIST, 0, line, &[unset, assignment])
+    }
+
+    /// The value `value` that an assignment gives the local `name`, checked as [`Types::local_check`] says.
+    fn local_value(&mut self, name: &[u8], value: &Expression) -> u32 {
+        let lowered = self.expression(value);
+        match self.types.local_check(value) {
+            Some(text) => self.verified(self.line(value), lowered, &text, &[b"local ", name].concat(), false),
+            None => lowered,
+        }
     }
 
     /// Each part of the header is an `EXPR_LIST`, or null when it is empty. A `let` or `const` counter is the
@@ -1630,7 +1691,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     (operator, _) => {
                         let (kind, attr) = assignment_kind(operator);
                         let lhs = self.target(assignment.lhs);
-                        let rhs = self.expression(assignment.rhs);
+                        let rhs = match (operator, assignment.lhs) {
+                            (AssignmentOperator::Assign(_), Expression::ConstantAccess(local)) => {
+                                self.local_value(local.name.value(), assignment.rhs)
+                            }
+                            _ => self.expression(assignment.rhs),
+                        };
 
                         self.node(kind, attr, line, &[lhs, rhs])
                     }

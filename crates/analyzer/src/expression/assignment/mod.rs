@@ -833,11 +833,16 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
             context.collector.report_with_code(code, issue);
         }
 
-        // The local keeps its written type, as the engine never checks it.
+        // The local keeps its written type.
         assigned_type = local_type;
     }
 
     if let Some((local_type, _)) = block_context.local_types.get(&variable_id) {
+        if let Some(value) = source_expression.filter(|_| context.dialect.is_sharp() && !destructuring) {
+            let span = value.span();
+            artifacts.local_value_types.insert((span.start.offset, span.end.offset), local_type.as_ref().clone());
+        }
+
         record_function_values(
             context,
             artifacts,

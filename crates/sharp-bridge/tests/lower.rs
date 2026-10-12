@@ -5656,6 +5656,161 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
     assert!(!lowered.parameters_of("keep").contains("SHARP_TYPE_ARGS"), "{}", lowered.parameters_of("keep"));
 }
 
+/// A value that enters PHP# from plain PHP is checked where a typed local or a property takes it, as a parameter checks
+/// an argument from plain PHP: a typed local checks a plain PHP call's return, at its declaration and at a later
+/// assignment, in a `VERIFY_TYPE_ARGS` that names the local. A property plain PHP can write checks the value in its `set`
+/// hook first, a `VERIFY_TYPE_ARGS` marked `1` that a write from PHP# skips: its own `set` body, or one over the storage.
+/// A PHP# call's return, a call of a function a property holds, a private, static or read-only property and a type with
+/// nothing to check need none.
+#[test]
+fn a_value_from_plain_php_is_checked_where_a_typed_local_or_property_takes_it() {
+    let lowered = Lowered::with(
+        indoc! {"
+        namespace App;
+
+        import Lib.Pager;
+
+        public class Box<TValue>
+        {
+            public Box() { }
+        }
+
+        public class Shelf<TItem>
+        {
+            public Box<Order>? auto { get; set; }
+
+            public Box<TItem>? own { get; set; }
+
+            public Box<Order>? logged
+            {
+                get;
+                set { field = value; }
+            }
+
+            protected Box<Order>? inherited;
+
+            private Box<Order>? hidden;
+
+            public Box<Order>? fixed { get; private set; }
+
+            public int count { get; set; }
+
+            private Function<Box<Order>()> maker = () => new Box<Order>();
+
+            public Shelf(public Box<Order>? promoted { get; set; }, public Box<Order>? frozen { get; }) { }
+
+            public void run()
+            {
+                Box<Order> box = Pager.orders();
+                box = Pager.orders();
+                Box<Order> made = Shelf.make();
+                Box<Order> held = this.maker();
+                int count = Pager.count();
+            }
+
+            public static Box<Order> make() => new Box<Order>();
+        }
+
+        public class Order
+        {
+            protected static Box<Order>? latest;
+        }
+        "},
+        &[(
+            "src/Lib/Pager.php",
+            "<?php\n\nnamespace Lib;\n\nuse App\\Box;\n\nfinal class Pager\n{\n    /** @return Box<\\App\\Order> */\n    public static function orders(): Box\n    {\n        return new Box();\n    }\n\n    public static function count(): int\n    {\n        return 1;\n    }\n}\n",
+        )],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+        STMT_LIST
+          ASSIGN
+            VAR
+              ZVAL "box"
+            VERIFY_TYPE_ARGS
+              STATIC_CALL
+                ZVAL "Lib\\Pager"
+                ZVAL "orders"
+                ARG_LIST
+              ZVAL "App.Box<App.Order>"
+              ZVAL "local box"
+          ASSIGN
+            VAR
+              ZVAL "box"
+            VERIFY_TYPE_ARGS
+              STATIC_CALL
+                ZVAL "Lib\\Pager"
+                ZVAL "orders"
+                ARG_LIST
+              ZVAL "App.Box<App.Order>"
+              ZVAL "local box"
+          ASSIGN
+            VAR
+              ZVAL "made"
+            STATIC_CALL
+              ZVAL "App\\Shelf"
+              ZVAL "make"
+              ARG_LIST
+          ASSIGN
+            VAR
+              ZVAL "held"
+            CALL
+              PROP
+                VAR
+                  ZVAL "this"
+                ZVAL "maker"
+              ARG_LIST
+          ASSIGN
+            VAR
+              ZVAL "count"
+            STATIC_CALL
+              ZVAL "Lib\\Pager"
+              ZVAL "count"
+              ARG_LIST
+        "#}
+    );
+
+    let tree = lowered.tree();
+    let check = |property: &str, text: &str| {
+        let indent = |depth: usize, line: &str| format!("{}{line}\n", "  ".repeat(depth));
+        [
+            indent(8, "STMT_LIST"),
+            indent(9, "ASSIGN"),
+            indent(10, "VAR"),
+            indent(11, "ZVAL \"value\""),
+            indent(10, "VERIFY_TYPE_ARGS [1]"),
+            indent(11, "VAR"),
+            indent(12, "ZVAL \"value\""),
+            indent(11, &format!("ZVAL \"{text}\"")),
+            indent(11, &format!("ZVAL \"property App\\\\Shelf::${property}\"")),
+        ]
+        .concat()
+    };
+    // An auto-property's check stands before a `set` body over the storage, and a written `set` body keeps its own.
+    for (property, text) in [
+        ("auto", "App.Box<App.Order>?"),
+        ("own", "App.Box<$0>?"),
+        ("logged", "App.Box<App.Order>?"),
+        ("inherited", "App.Box<App.Order>?"),
+    ] {
+        assert!(tree.contains(&check(property, text)), "{property}: {tree}");
+    }
+    assert!(tree.contains("ZVAL \"property App\\\\Shelf::$promoted\""), "{tree}");
+    assert_eq!(tree.matches("VERIFY_TYPE_ARGS [1]").count(), 5, "{tree}");
+    // Each check is a `set` hook, and an auto `get` beside it stays PHP's read of the storage.
+    assert_eq!(tree.matches("PROPERTY_HOOK \"set\"").count(), 5, "{tree}");
+    assert_eq!(tree.matches("PROPERTY_HOOK \"get\"").count(), 0, "{tree}");
+    // The element's last child is its hook list.
+    for (property, default) in
+        [("hidden", "ZVAL null"), ("fixed", "ZVAL null"), ("count", "null"), ("latest", "ZVAL null")]
+    {
+        let element = format!("ZVAL \"{property}\"\n            {default}\n            null\n            null\n");
+        assert!(tree.contains(&element), "{property}: {tree}");
+    }
+}
+
 /// A value of a type parameter is a value of its bound, so a generic method called on it carries its type arguments as
 /// a call on the bound does.
 #[test]

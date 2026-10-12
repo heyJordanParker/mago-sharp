@@ -208,11 +208,8 @@ impl<'analysis> Types<'analysis> {
 
     /// The metadata of the method `method` of the fully qualified class name `class` that the engine reads on a call:
     /// the bounds of its own type parameters, which a call from plain PHP gives it, and a type text list with one entry
-    /// per parameter that a call from plain PHP checks its argument against. An entry is the parameter's type when part
-    /// of it is a PHP# class with a type argument the check can test, or a type parameter of the class, and `Any?`
-    /// otherwise: plain PHP's generics are erased, since an object of a plain PHP generic class carries no type
-    /// arguments, and a call from plain PHP gives the method's own type parameters none, so they match any value. Each
-    /// half is None when the method declares no type parameter, or no parameter needs a check.
+    /// per parameter that a call from plain PHP checks its argument against, [`Self::checked_text`] or `Any?`. Each half
+    /// is None when the method declares no type parameter, or no parameter needs a check.
     pub(crate) fn method_metadata(&self, class: &[u8], method: &[u8]) -> (Option<String>, Option<String>) {
         let Some(metadata) = self.codebase.get_method(class, method) else {
             return (None, None);
@@ -223,43 +220,10 @@ impl<'analysis> Types<'analysis> {
             .values()
             .map(|template| text(&template.constraint, self.codebase, Parameter::Bound))
             .collect();
-        let is_method_parameter = |r#type: &TUnion| {
-            r#type.types.iter().filter(|atomic| !atomic.is_null()).all(|atomic| {
-                matches!(
-                    atomic,
-                    TAtomic::GenericParameter(parameter)
-                        if matches!(parameter.defining_entity, GenericParent::FunctionLike(_))
-                )
-            })
-        };
-        let checked = |r#type: &TUnion| {
-            r#type.types.iter().any(|atomic| match atomic {
-                TAtomic::Object(TObject::Named(object)) => {
-                    object
-                        .get_type_parameters()
-                        .is_some_and(|arguments| arguments.iter().any(|argument| !is_method_parameter(argument)))
-                        && self
-                            .codebase
-                            .get_class_like(object.name.as_bytes())
-                            .is_some_and(|class| class.flags.is_sharp())
-                }
-                TAtomic::GenericParameter(parameter) => {
-                    matches!(parameter.defining_entity, GenericParent::ClassLike(_))
-                }
-                _ => false,
-            })
-        };
         let parameters: Vec<Option<String>> = metadata
             .parameters
             .iter()
-            .map(|parameter| {
-                parameter
-                    .type_metadata
-                    .as_ref()
-                    .map(|r#type| &r#type.type_union)
-                    .filter(|r#type| checked(r#type))
-                    .map(|r#type| text(r#type, self.codebase, Parameter::Index))
-            })
+            .map(|parameter| parameter.type_metadata.as_ref().and_then(|r#type| self.checked_text(&r#type.type_union)))
             .collect();
 
         (
@@ -272,6 +236,64 @@ impl<'analysis> Types<'analysis> {
                     .join(", ")
             }),
         )
+    }
+
+    /// The type text a typed local checks `value` against when it takes it, as a parameter checks an argument from plain
+    /// PHP: [`Self::checked_text`] of the local's type, when `value` is a call the checker resolved to a plain PHP
+    /// function or method. The checker reads a plain PHP return type that names a PHP# generic class from a docblock it
+    /// can't prove, so the engine tests the value spec section 12 lets in.
+    pub(crate) fn local_check(&self, value: &Expression) -> Option<String> {
+        let span = value.span();
+        let declared = self.artifacts.local_value_types.get(&(span.start.offset, span.end.offset))?;
+        let calls_plain_php = self.artifacts.get_callees(value).any(|target| match target {
+            CallTarget::FunctionLike { callee, .. } | CallTarget::MagicMethod { callee, .. } => {
+                self.codebase.get_function_like(callee).is_some_and(|callee| !callee.flags.is_sharp())
+            }
+            CallTarget::Property { .. } => false,
+        });
+
+        calls_plain_php.then(|| self.checked_text(declared)).flatten()
+    }
+
+    /// The type text the `set` hook of the property `property` of the fully qualified class name `class` checks a value
+    /// against, as a parameter checks an argument from plain PHP: [`Self::checked_text`] of its type, when plain PHP can
+    /// write it. That is a property PHP# writes as public or protected, which PHP lets a hook check: neither static nor
+    /// read-only.
+    pub(crate) fn property_check(&self, class: &[u8], property: &[u8]) -> Option<String> {
+        let metadata = self.codebase.get_property(class, &[b"$", property].concat())?;
+        if metadata.write_visibility.is_private() || metadata.flags.is_static() || metadata.flags.is_readonly() {
+            return None;
+        }
+
+        self.checked_text(&metadata.type_metadata.as_ref()?.type_union)
+    }
+
+    /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is a PHP# class
+    /// with a type argument the check can test, or a type parameter of the class. None otherwise: plain PHP's generics
+    /// are erased, since an object of a plain PHP generic class carries no type arguments, and a call from plain PHP
+    /// gives a method's own type parameters none, so they match any value.
+    fn checked_text(&self, r#type: &TUnion) -> Option<String> {
+        let is_method_parameter = |r#type: &TUnion| {
+            r#type.types.iter().filter(|atomic| !atomic.is_null()).all(|atomic| {
+                matches!(
+                    atomic,
+                    TAtomic::GenericParameter(parameter)
+                        if matches!(parameter.defining_entity, GenericParent::FunctionLike(_))
+                )
+            })
+        };
+        let checked = r#type.types.iter().any(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(object)) => {
+                object
+                    .get_type_parameters()
+                    .is_some_and(|arguments| arguments.iter().any(|argument| !is_method_parameter(argument)))
+                    && self.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| class.flags.is_sharp())
+            }
+            TAtomic::GenericParameter(parameter) => matches!(parameter.defining_entity, GenericParent::ClassLike(_)),
+            _ => false,
+        });
+
+        checked.then(|| text(r#type, self.codebase, Parameter::Index))
     }
 
     /// The fully qualified name of the one backed enum every value of `r#type` but `null` is a case of, as
