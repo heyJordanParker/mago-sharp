@@ -237,6 +237,20 @@ impl<'analysis> Types<'analysis> {
         key_type
     }
 
+    /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
+    /// only about a value the checker typed as a collection.
+    pub(crate) fn element_type(&self, r#type: &TUnion) -> TUnion {
+        let mut element_type = None;
+        for atomic in r#type.types.iter() {
+            if let TAtomic::Array(array) = atomic {
+                let (_, value) = get_array_parameters(array, self.codebase);
+                element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
+            }
+        }
+
+        element_type.unwrap_or_else(|| unreachable!("a collection method's receiver is a collection"))
+    }
+
     /// The positions of the arguments of the method call `call`, null-safe or not, that go in as its receiver's key.
     /// The analyzer checks a call on a `Map` against `Sharp\MapMethods<K, V>`, whose `K` the `Map`'s key type fills
     /// (spec section 12), so an argument goes in as a key when the call runs a `MapMethods` method and its parameter
@@ -341,12 +355,12 @@ impl<'analysis> Types<'analysis> {
             .unwrap_or_else(|| unreachable!("`{root}` declares the property"))
     }
 
-    /// The class declaring the static method `name` a PHP# operator on `operands` runs as, as the checker chose it: the
-    /// one the left operand's class declares or inherits, else the right one's, as `App\Money` for `op_Addition` on
-    /// two `Order`s that inherit it. Operands with no instance of one class, enums aside, run none.
-    pub(crate) fn operator_class(&self, name: &[u8], operands: &[&Expression]) -> Option<Word> {
+    /// The class declaring the static method `name` a PHP# operator on operands of the types `operands` runs as, as the
+    /// checker chose it: the one the left operand's class declares or inherits, else the right one's, as `App\Money`
+    /// for `op_Addition` on two `Order`s that inherit it. Operands with no instance of one class, enums aside, run none.
+    pub(crate) fn operator_class(&self, name: &[u8], operands: &[&TUnion]) -> Option<Word> {
         operands.iter().find_map(|operand| {
-            let classes = receiver_classes(self.expression_type(operand))?;
+            let classes = receiver_classes(operand)?;
             let [class] = classes.as_slice() else {
                 return None;
             };
