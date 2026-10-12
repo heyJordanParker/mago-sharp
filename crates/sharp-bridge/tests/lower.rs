@@ -3112,6 +3112,126 @@ fn last_is_the_last_element_and_throws_on_an_empty_list() {
 }
 
 /// ```php
+/// $tags->insert(0, 'a');
+/// $removed = ((${'index#1'} = \array_search('a', $tags, true)) !== false) && $tags->removeAt(${'index#1'}) === null;
+/// $tags = [];
+/// return $removed && ((${'index#1'} = \array_find_key($prices, (fn (${'value#2'}) => fn (${'element#3'}) =>
+///     \App\Money::op_Equality(${'element#3'}, ${'value#2'}))($price))) !== null) && $prices->removeAt(${'index#1'}) === null;
+/// ```
+///
+/// Spec section 12's changes to a `List` write it back where it lives. `insert` is the `Sharp\Collection` method of
+/// its name. `remove(value)` finds the index of the first element `==` the value, as `indexOf` does, and gives true
+/// when `Sharp\Collection::removeAt` removed it, which renumbers the list. `clear` assigns `[]`.
+#[test]
+fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
+    assert_eq!(
+        ledger_body(
+            "bool run(List<string> tags, List<Money> prices, Money price)",
+            "        tags.insert(0, \"a\");\n        const removed = tags.remove(\"a\");\n        tags.clear();\n        return removed && prices.remove(price);\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                VAR
+                  ZVAL "tags"
+                ZVAL "insert"
+                ARG_LIST
+                  ZVAL 0
+                  ZVAL "a"
+              ASSIGN
+                VAR
+                  ZVAL "removed"
+                AND
+                  BINARY_OP [17]
+                    ASSIGN
+                      VAR
+                        ZVAL "index#1"
+                      CALL
+                        ZVAL "array_search"
+                        ARG_LIST
+                          ZVAL "a"
+                          VAR
+                            ZVAL "tags"
+                          ZVAL true
+                    ZVAL false
+                  BINARY_OP [16]
+                    METHOD_CALL
+                      VAR
+                        ZVAL "tags"
+                      ZVAL "removeAt"
+                      ARG_LIST
+                        VAR
+                          ZVAL "index#1"
+                    ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                ARRAY [3]
+              RETURN
+                AND
+                  VAR
+                    ZVAL "removed"
+                  AND
+                    BINARY_OP [17]
+                      ASSIGN
+                        VAR
+                          ZVAL "index#1"
+                        CALL
+                          ZVAL "array_find_key"
+                          ARG_LIST
+                            VAR
+                              ZVAL "prices"
+                            CALL
+                              ARROW_FUNC "" @19-19
+                                PARAM_LIST
+                                  PARAM
+                                    null
+                                    ZVAL "value#2"
+                                    null
+                                    null
+                                    null
+                                    null
+                                null
+                                ARROW_FUNC "" @19-19
+                                  PARAM_LIST
+                                    PARAM
+                                      null
+                                      ZVAL "element#3"
+                                      null
+                                      null
+                                      null
+                                      null
+                                  null
+                                  STATIC_CALL
+                                    ZVAL "App\\Money"
+                                    ZVAL "op_Equality"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "element#3"
+                                      VAR
+                                        ZVAL "value#2"
+                                  null
+                                  null
+                                null
+                                null
+                              ARG_LIST
+                                VAR
+                                  ZVAL "price"
+                      ZVAL null
+                    BINARY_OP [16]
+                      METHOD_CALL
+                        VAR
+                          ZVAL "prices"
+                        ZVAL "removeAt"
+                        ARG_LIST
+                          VAR
+                            ZVAL "index#1"
+                      ZVAL null
+        "#}
+    );
+}
+
+/// ```php
 /// $lines = ($holder === null) ? null : \count($holder->lines);
 /// $next = (($nullsafe#1 = $other->next) === null) ? null : \count($nullsafe#1->lines);
 /// $made = ($holder === null) ? null : \count($holder->make());

@@ -350,7 +350,9 @@ where
             let name = method.method_identifier.get_method_name();
 
             sharp_collection_name(&TObject::new_named(method.classname)) == Some("List")
-                && ["contains", "indexOf"].iter().any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+                && ["contains", "indexOf", "remove"]
+                    .iter()
+                    .any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
         });
 
     let undocumented_template_result =
