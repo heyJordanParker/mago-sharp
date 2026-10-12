@@ -640,17 +640,16 @@ where
     }
 
     let class_name = short_name(class.original_name);
-    let template_names: Vec<String> = class.template_types.keys().map(ToString::to_string).collect();
-    let arguments = if template_names.len() == 1 { "argument" } else { "arguments" };
+    let arguments = match class.template_types.len() {
+        1 => "type argument".to_owned(),
+        count => format!("{count} type arguments"),
+    };
 
     context.collector.report_with_code(
         IssueCode::MissingTemplateParameter,
-        Issue::error(format!(
-            "`{class_name}` needs its type {arguments}, as in `{class_name}<{}>`.",
-            template_names.join(", ")
-        ))
-        .with_annotation(Annotation::primary(span).with_message(format!("`{class_name}` has type parameters")))
-        .with_note("A type and `new` name the type arguments of a generic class."),
+        Issue::error(format!("`{class_name}` needs its {arguments}."))
+            .with_annotation(Annotation::primary(span).with_message(format!("`{class_name}` has type parameters")))
+            .with_note("A type and `new` name the type arguments of a generic class."),
     );
 }
 

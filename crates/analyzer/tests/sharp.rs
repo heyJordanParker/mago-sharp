@@ -7821,26 +7821,6 @@ fn the_type_arguments_of_new_fix_the_type_parameters_of_the_class() {
     );
 }
 
-/// `new` of a PHP# generic class without type arguments names the ones to write, spec section 11, as a type without
-/// them does.
-#[test]
-fn new_of_a_generic_class_without_type_arguments_names_them() {
-    let sharp = "namespace Demo;\n\npublic class Pair<TKey, TValue>\n{\n    public TKey? key { get; set; }\n    public TValue? value { get; set; }\n}\n\npublic class Report\n{\n    public static Any listed(List<Order> orders) => new PaginatedList(orders);\n\n    public static Any paired() => new Pair();\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "11:57 missing-template-parameter `PaginatedList` needs its type argument, as in `PaginatedList<TItem>`.",
-            "13:39 missing-template-parameter `Pair` needs its type arguments, as in `Pair<TKey, TValue>`.",
-        ]
-    );
-    assert!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)])
-            .iter()
-            .all(|issue| issue.notes == ["A type and `new` name the type arguments of a generic class."]),
-    );
-}
-
 /// `OrderPage : PaginatedList<Order>` inherits the constructor that takes `List<TItem>`, and its header fixes `TItem` to
 /// `Order`, so `new OrderPage(…)` takes a `List<Order>`. `OrderList<TItem> : PaginatedList<TItem>` passes its own type
 /// parameter on, so `new OrderList<Order>(…)` takes one too.
@@ -8089,24 +8069,45 @@ fn an_override_that_changes_a_bound_names_the_bound() {
     );
 }
 
-/// A generic type written without type arguments names them, as C# refuses it (CS0305): a property's, a parameter's, a
-/// return type and a typed local's, with every type parameter in the example. `Self` names its class's own type
-/// parameters, and a class without type parameters takes none. The plain PHP twin keeps Mago's issues.
+/// A type, `new` and a type test name the type arguments of a generic PHP# class, spec section 11, as C# refuses a
+/// generic type without them (CS0305): a property's, a parameter's, a return type and a typed local's, `new` of a class
+/// with one or two type parameters, and `is`, `as`, a `match` arm and `catch` of a class declared in another file. `Self`
+/// names its class's own type parameters, and a class without type parameters takes none. The plain PHP twins keep
+/// Mago's issues.
 #[test]
-fn a_generic_type_without_type_arguments_names_them() {
-    let sharp = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Self same(TFirst first, TSecond second) => this;\n}\n\npublic class Report\n{\n    public PaginatedList? shelf { get; set; }\n\n    public static void f(PaginatedList page)\n    {\n    }\n\n    public static Pair paired(Order order) => new Pair<Order, Order>();\n\n    public static Any local(PaginatedList<Order> given)\n    {\n        PaginatedList page = given;\n        return page;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass PaginatedList\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    public ?PaginatedList $shelf = null;\n\n    public static function f(PaginatedList $page): void\n    {\n    }\n}\n";
-    let one = "`PaginatedList` needs its type argument, as in `PaginatedList<TItem>`.";
+fn a_type_new_and_a_type_test_name_the_type_arguments_of_a_generic_class() {
+    let types = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Self same(TFirst first, TSecond second) => this;\n}\n\npublic class Report\n{\n    public PaginatedList? shelf { get; set; }\n\n    public static void f(PaginatedList page)\n    {\n    }\n\n    public static Pair paired(Order order) => new Pair<Order, Order>();\n\n    public static Any local(PaginatedList<Order> given)\n    {\n        PaginatedList page = given;\n        return page;\n    }\n\n    public static Any listed(List<Order> orders) => new PaginatedList(orders);\n\n    public static Any pair() => new Pair();\n}\n";
+    let php_types = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass PaginatedList\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    public ?PaginatedList $shelf = null;\n\n    public static function f(PaginatedList $page): void\n    {\n    }\n}\n";
+    let classes = "namespace Demo;\n\nimport RuntimeException;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n}\n\npublic class Failure<TItem> : RuntimeException\n{\n    public TItem? first() => null;\n}\n";
+    let tests = "namespace Demo;\n\npublic class Report\n{\n    public static bool held(Any? value) => value is Box;\n\n    public static Any? kept(Any? value) => value as Box;\n\n    public static int matched(Any? value) => match (value) { Box => 1, default => 0 };\n\n    public static bool plain(Any? value) => value is Plain;\n\n    public static int run()\n    {\n        try {\n            return 1;\n        } catch (Failure failure) {\n            return 0;\n        }\n    }\n}\n";
+    let php_tests = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function held(mixed $value): bool\n    {\n        return $value instanceof Box;\n    }\n\n    public static function run(): int\n    {\n        try {\n            return 1;\n        } catch (Failure $failure) {\n            return 0;\n        }\n    }\n}\n";
+    let note = "A type and `new` name the type arguments of a generic class.";
+    let one = |class: &str| format!("`{class}` needs its type argument. | `{class}` has type parameters | {note}");
+    let two = |class: &str| format!("`{class}` needs its 2 type arguments. | `{class}` has type parameters | {note}");
 
-    assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
+    assert_eq!(explained(("src/Demo/Report.php", php_types), &[]), Vec::<String>::new());
     assert_eq!(
-        explained(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        worded(("src/Demo/Report.sharp", types), &[("src/Demo/Paging.sharp", PAGING)]),
         [
-            format!("10:12 missing-template-parameter {one}"),
-            format!("12:26 missing-template-parameter {one}"),
-            "16:19 missing-template-parameter `Pair` needs its type arguments, as in `Pair<TFirst, TSecond>`."
-                .to_string(),
-            format!("20:9 missing-template-parameter {one}"),
+            format!("10:12 missing-template-parameter {}", one("PaginatedList")),
+            format!("12:26 missing-template-parameter {}", one("PaginatedList")),
+            format!("16:19 missing-template-parameter {}", two("Pair")),
+            format!("20:9 missing-template-parameter {}", one("PaginatedList")),
+            format!("24:57 missing-template-parameter {}", one("PaginatedList")),
+            format!("26:37 missing-template-parameter {}", two("Pair")),
+        ]
+    );
+    assert_eq!(
+        explained(("src/Demo/Report.php", php_tests), &[("src/Demo/Classes.sharp", classes)]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", tests), &[("src/Demo/Classes.sharp", classes)]),
+        [
+            format!("5:53 missing-template-parameter {}", one("Box")),
+            format!("7:53 missing-template-parameter {}", one("Box")),
+            format!("9:62 missing-template-parameter {}", one("Box")),
+            format!("17:18 missing-template-parameter {}", one("Failure")),
         ]
     );
 }
@@ -8826,28 +8827,6 @@ fn a_php_template_key_bounded_by_a_backed_enum_keeps_upstreams_key_type() {
         [
             "14:34 docblock-type-mismatch Docblock type `array<('T.demo\\tally::named() extends enum(Lib\\Status)), int>` for parameter `$counts` is incompatible with native type `array<array-key, mixed>`. Either change the docblock type to match `array<array-key, mixed>`, or update the native type to be compatible with `array<('T.demo\\tally::named() extends enum(Lib\\Status)), int>`.",
             "16:16 invalid-return-statement Invalid return type for function `Demo\\Tally::named`: expected `array<string, int>`, but found `array<('T.demo\\tally::named() extends enum(Lib\\Status)), int>`. Change the return value to match `array<string, int>`, or update the function's return type declaration.",
-        ]
-    );
-}
-
-/// `Box` names a generic class, so `is Box`, `as Box`, a `match` arm `Box` and `catch (Failure)` would test none of
-/// its type arguments, which G1 erases: each is refused as the test the code writes, wherever the class is declared.
-/// A class without type parameters is tested as before. The plain PHP twin keeps Mago's issues.
-#[test]
-fn a_type_test_of_a_generic_class_without_type_arguments_is_not_supported_yet() {
-    let classes = "namespace Demo;\n\nimport RuntimeException;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n}\n\npublic class Failure<TItem> : RuntimeException\n{\n    public TItem? first() => null;\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static bool held(Any? value) => value is Box;\n\n    public static Any? kept(Any? value) => value as Box;\n\n    public static int matched(Any? value) => match (value) { Box => 1, default => 0 };\n\n    public static bool plain(Any? value) => value is Plain;\n\n    public static int run()\n    {\n        try {\n            return 1;\n        } catch (Failure failure) {\n            return 0;\n        }\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function held(mixed $value): bool\n    {\n        return $value instanceof Box;\n    }\n\n    public static function run(): int\n    {\n        try {\n            return 1;\n        } catch (Failure $failure) {\n            return 0;\n        }\n    }\n}\n";
-    let because = "because type arguments don't reach the running program. | Not supported yet.";
-
-    assert_eq!(explained(("src/Demo/Report.php", php), &[("src/Demo/Classes.sharp", classes)]), Vec::<String>::new());
-    assert_eq!(
-        worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
-        [
-            format!("5:53 not-supported-yet `is Box` can't be tested yet, {because}"),
-            format!("7:53 not-supported-yet `as Box` can't be tested yet, {because}"),
-            format!("9:62 not-supported-yet `Box` can't be tested yet, {because}"),
-            format!("17:18 not-supported-yet `catch (Failure)` can't be tested yet, {because}"),
         ]
     );
 }

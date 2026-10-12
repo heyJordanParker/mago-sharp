@@ -64,7 +64,6 @@ use crate::error::AnalysisError;
 use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
 use crate::expression::is_refused_match;
-use crate::expression::report_untested_match_arms;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::statement::function_like::report_invalid_template_arguments;
@@ -246,11 +245,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Foreach(foreach) => foreach.analyze(context, block_context, artifacts),
                 Statement::For(r#for) => r#for.analyze(context, block_context, artifacts),
                 Statement::ForOf(for_of) => analyze_for_of(for_of, context, block_context, artifacts),
-                Statement::PatternMatch(pattern_match) if is_refused_match(pattern_match, context) => {
-                    report_untested_match_arms(pattern_match, context);
-
-                    Ok(())
-                }
+                Statement::PatternMatch(pattern_match) if is_refused_match(pattern_match, context) => Ok(()),
                 Statement::PatternMatch(_) => {
                     analyze_php_shape(Node::Statement(self), context, block_context, artifacts)
                 }
@@ -375,13 +370,26 @@ where
         return None;
     };
 
-    let written_type = get_written_type_from_hint(context, block_context, artifacts, hint);
-    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()));
+    report_hint_type_arguments(context, block_context, artifacts, hint);
 
     let local_type = (Rc::new(get_type_from_hint(context, block_context, artifacts, hint)), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
     Some(local_type)
+}
+
+/// Reports the type arguments a PHP# `hint` in a body leaves out or gets wrong, as a local's type, a type test or a
+/// `catch` writes it, spec section 11: a type names the type arguments of a generic class.
+pub(crate) fn report_hint_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    hint: &Hint<'_>,
+) where
+    A: Arena,
+{
+    let written_type = get_written_type_from_hint(context, block_context, artifacts, hint);
+    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()));
 }
 
 /// The type a PHP# `hint` writes inside the scope of `block_context`, where it may name the type parameters of the

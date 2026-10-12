@@ -31,8 +31,8 @@ use crate::context::scope::control_action::ControlAction;
 use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
-use crate::expression::report_untested_generic_class;
 use crate::statement::analyze_statements;
+use crate::statement::report_hint_type_arguments;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
     fn analyze<'ctx, A>(
@@ -197,7 +197,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
             let mut catch_block_context = original_block_context.clone();
             catch_block_context.flags.set_has_returned(false);
             let caught_classes = get_caught_classes(context, &catch_clause.hint);
-            report_untested_generic_class(&catch_clause.hint, |code| format!("catch ({code})"), context);
+            if context.dialect.is_sharp() {
+                report_hint_type_arguments(context, &catch_block_context, artifacts, &catch_clause.hint);
+            }
 
             for (variable_id, variable_type) in &mut catch_block_context.locals {
                 if let Some(old_type) = old_block_context_locals.get(variable_id) {

@@ -27,7 +27,6 @@ use mago_syntax::cst::As;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Hint;
-use mago_syntax::cst::Identifier;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Parenthesized;
@@ -64,6 +63,7 @@ use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
 use crate::statement::get_type_from_hint;
+use crate::statement::report_hint_type_arguments;
 use crate::utils::misc::check_for_paradox;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
@@ -219,7 +219,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 | Expression::PatternMatch(_)
                     if is_refused(self, context) =>
                 {
-                    report_untested_generic_classes(self, context);
                     if let Expression::Is(is) = self {
                         for (hint, variable) in Node::Pattern(is.pattern).filter_map(|node| match node {
                             Node::TypePattern(TypePattern { hint, variable: Some(variable) }) => Some((hint, variable)),
@@ -354,6 +353,10 @@ pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    for hint in type_test_hints(node) {
+        report_hint_type_arguments(context, block_context, artifacts, hint);
+    }
+
     let Some(PhpShape { php, temporaries, tests }) =
         context.get_assertion_context_from_block(block_context).php_shape(node)
     else {
@@ -675,9 +678,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Parenthesized<'arena> {
 /// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, it is `!x is T`, it
 /// is `typeof` or `new` of a type parameter, it tests or converts a value to a type with no
 /// [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as` or a `match` arm, or it reads or calls a
-/// member of a type parameter or of `typeof` of one through any chain of property reads. [`report_untested_generic_classes`]
-/// refuses a test of a generic PHP# class written without its type arguments. Its type is the error type in PHP# and
-/// `never` in PHP, a variable its `is` pattern names holds the type written beside it, and it adds no other issue.
+/// member of a type parameter or of `typeof` of one through any chain of property reads. Its type is the error type in
+/// PHP# and `never` in PHP, a variable its `is` pattern names holds the type written beside it, and it adds no other
+/// issue.
 pub(crate) fn is_refused<A>(expression: &Expression<'_>, context: &Context<'_, '_, A>) -> bool
 where
     A: Arena,
@@ -727,63 +730,7 @@ where
     match_arm_hints(pattern_match).into_iter().any(|hint| is_untestable(hint, context))
 }
 
-/// Refuses each type test of `expression`, an `is`, an `as` or a `match`, that names a generic class without its type
-/// arguments, in the words the checker refuses a test of a type parameter with.
-pub(crate) fn report_untested_generic_classes<A>(expression: &Expression<'_>, context: &mut Context<'_, '_, A>)
-where
-    A: Arena,
-{
-    match expression {
-        Expression::Is(is) => {
-            let keyword = if matches!(is.pattern, Pattern::Type(_)) { "is " } else { "" };
-            for hint in type_pattern_hints(is.pattern) {
-                report_untested_generic_class(hint, |code| format!("{keyword}{code}"), context);
-            }
-        }
-        Expression::As(r#as) => report_untested_generic_class(r#as.hint, |code| format!("as {code}"), context),
-        Expression::PatternMatch(pattern_match) => report_untested_match_arms(pattern_match, context),
-        _ => {}
-    }
-}
-
-/// Refuses each arm of `pattern_match`, an expression or a statement, whose type names a generic class without its type
-/// arguments.
-pub(crate) fn report_untested_match_arms<A>(pattern_match: &PatternMatch<'_>, context: &mut Context<'_, '_, A>)
-where
-    A: Arena,
-{
-    for hint in match_arm_hints(pattern_match) {
-        report_untested_generic_class(hint, str::to_owned, context);
-    }
-}
-
-/// Refuses a type test of `hint` that names a generic class without its type arguments, as `is Box` for `Box<TItem>`,
-/// worded as `test` writes the code of `hint`: G1 erases type arguments, so the running program can't test them. The
-/// checker can't see a class another file declares, so the analyzer refuses it.
-pub(crate) fn report_untested_generic_class<A>(
-    hint: &Hint<'_>,
-    test: impl FnOnce(&str) -> String,
-    context: &mut Context<'_, '_, A>,
-) where
-    A: Arena,
-{
-    let Some(class) = untested_generic_class(hint, context) else {
-        return;
-    };
-    let code = String::from_utf8_lossy(&context.source_file.contents[hint.span().to_range_usize()]);
-
-    context.collector.report_with_code(
-        IssueCode::NotSupportedYet,
-        Issue::error(format!(
-            "`{}` can't be tested yet, because type arguments don't reach the running program.",
-            test(&code)
-        ))
-        .with_annotation(Annotation::primary(class.span()).with_message("Not supported yet.")),
-    );
-}
-
-/// Whether no type test of `hint` can run yet: PHP has [no test](has_type_test) of it, or it names a generic class
-/// without its type arguments.
+/// Whether PHP has [no test](has_type_test) of `hint`, so no type test of it can run yet.
 fn is_untestable<A>(hint: &Hint<'_>, context: &Context<'_, '_, A>) -> bool
 where
     A: Arena,
@@ -791,33 +738,16 @@ where
     let resolved_names = context.resolved_names;
 
     !has_type_test(hint, &|span| resolved_names.is_type_parameter(&span))
-        || untested_generic_class(hint, context).is_some()
 }
 
-/// The name in a PHP# type test's `hint` of a generic PHP# class written without its type arguments, alone or inside a
-/// nullable type or a union. A PHP class whose docblock
-/// declares templates, as `Traversable` does, is no generic class to PHP#, so a test of it runs. `None` in a PHP file.
-fn untested_generic_class<'ast, A>(
-    hint: &'ast Hint<'ast>,
-    context: &Context<'_, '_, A>,
-) -> Option<&'ast Identifier<'ast>>
-where
-    A: Arena,
-{
-    match hint {
-        Hint::Identifier(name) if context.dialect.is_sharp() && !context.resolved_names.is_type_parameter(name) => {
-            context
-                .codebase
-                .get_class_like(context.resolved_names.get(name))
-                .is_some_and(|class| class.flags.is_sharp() && !class.template_types.is_empty())
-                .then_some(name)
-        }
-        Hint::Nullable(nullable) => untested_generic_class(nullable.hint, context),
-        Hint::Parenthesized(parenthesized) => untested_generic_class(parenthesized.hint, context),
-        Hint::Union(union) => {
-            untested_generic_class(union.left, context).or_else(|| untested_generic_class(union.right, context))
-        }
-        _ => None,
+/// The type of each type test of `node`: the types of an `is` pattern, of an `as`, or of a `match`'s arms.
+fn type_test_hints<'ast>(node: Node<'ast, '_>) -> Vec<&'ast Hint<'ast>> {
+    match node {
+        Node::Expression(Expression::Is(is)) => type_pattern_hints(is.pattern),
+        Node::Expression(Expression::As(r#as)) => vec![r#as.hint],
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => match_arm_hints(pattern_match),
+        _ => Vec::new(),
     }
 }
 
