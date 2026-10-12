@@ -47,7 +47,6 @@ use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::ConstantItem;
 use crate::cst::cst::Construct;
 use crate::cst::cst::ConstructorInitializer;
-use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Continue;
 use crate::cst::cst::Declare;
 use crate::cst::cst::DeclareBody;
@@ -1292,10 +1291,6 @@ generate_ast_walker! {
         }
 
         walker.walk_method_body(&named_constructor.body, context);
-    }
-
-    'arena ConstructorName as constructor_name => {
-        walker.walk_local_identifier(&constructor_name.name, context);
     }
 
     'arena MethodBody as method_body => {
@@ -2697,9 +2692,6 @@ generate_ast_walker! {
     'arena Instantiation as instantiation => {
         walker.walk_keyword(&instantiation.new, context);
         walker.walk_expression(instantiation.class, context);
-        if let Some(constructor) = &instantiation.constructor {
-            walker.walk_constructor_name(constructor, context);
-        }
         if let Some(argument_list) = &instantiation.argument_list {
             walker.walk_argument_list(argument_list, context);
         }

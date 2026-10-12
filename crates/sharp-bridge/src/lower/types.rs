@@ -19,6 +19,7 @@ use mago_syntax::cst::Argument;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Instantiation;
 use mago_word::Word;
 use mago_word::word;
 
@@ -171,6 +172,18 @@ impl<'analysis> Types<'analysis> {
         agreed_kind(declarations.iter().map(|declaration| declaration.kind));
 
         declaration
+    }
+
+    /// The named constructor `instantiation` runs, spec section 9.1, as the analysis resolved it when it checked the
+    /// `new`: the static method `new Report.fromJson(…)` calls, of the class as its declaration writes it, or none when
+    /// `new` runs the class's main constructor.
+    #[must_use]
+    pub fn named_constructor(&self, instantiation: &Instantiation) -> Option<Declaration> {
+        self.artifacts.get_callees(instantiation).next().map(|target| {
+            let constructor = self.target_declaration(target);
+
+            Declaration { class: self.class_declaration(constructor.class.as_bytes()).name, ..constructor }
+        })
     }
 
     /// The full name of the constant the read `constant` reaches, as the analysis found it: the constant of that name

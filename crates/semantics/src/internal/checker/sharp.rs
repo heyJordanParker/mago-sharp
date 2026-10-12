@@ -500,7 +500,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(File)
         }
-        (Node::Keyword(_) | Node::LocalIdentifier(_) | Node::Identifier(Identifier::Local(_)), _) => Some(place),
+        // A dotted name is a namespace or an import at file level, and the name after `new` in a body.
+        (
+            Node::Keyword(_)
+            | Node::LocalIdentifier(_)
+            | Node::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
+            | Node::DottedIdentifier(_),
+            _,
+        ) => Some(place),
         (Node::Terminator(Terminator::Semicolon(_)), _) => Some(place),
 
         (
@@ -519,8 +526,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::NamespaceImplicitBody(_)
             // A braced namespace's body, after its namespace was refused.
             | Node::Block(_)
-            | Node::Identifier(Identifier::Dotted(_))
-            | Node::DottedIdentifier(_)
             | Node::Use(_)
             | Node::Extern(_)
             | Node::UseItems(UseItems::Sequence(_))
@@ -1372,10 +1377,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::NamedArgument(_),
             Body,
         ) => Some(Body),
+        // `new Report.fromJson(…)` calls a named constructor, spec section 9.1.
         (Node::Expression(Expression::Instantiation(instantiation)), Body)
             if matches!(
                 instantiation.class,
-                Expression::Identifier(Identifier::Local(_)) | Expression::Self_(_) | Expression::Static(_)
+                Expression::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
+                    | Expression::Self_(_)
+                    | Expression::Static(_)
             ) =>
         {
             check_instantiation(instantiation, context)
@@ -1383,9 +1391,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // `check_instantiation` reported PHP's `self` and `static`.
         (
             Node::Instantiation(_)
-            | Node::ConstructorName(_)
             | Node::Expression(
-                Expression::Identifier(Identifier::Local(_)) | Expression::Self_(_) | Expression::Static(_),
+                Expression::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
+                | Expression::Self_(_)
+                | Expression::Static(_),
             ),
             Instantiation,
         ) => Some(Instantiation),

@@ -19,11 +19,9 @@ use crate::cst::cst::ClassLikeMemberSelector;
 use crate::cst::cst::Clone;
 use crate::cst::cst::Conditional;
 use crate::cst::cst::ConstantAccess;
-use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FunctionCall;
 use crate::cst::cst::FunctionPartialApplication;
-use crate::cst::cst::Identifier;
 use crate::cst::cst::Instantiation;
 use crate::cst::cst::MethodCall;
 use crate::cst::cst::MethodPartialApplication;
@@ -263,24 +261,18 @@ where
             return self.parse_arrow_function_or_closure();
         }
 
-        // `new Report.fromJson(…)` calls a named constructor, spec section 9.1: in PHP# a name after `new` is a class,
-        // so a `.` after it names the constructor.
+        // In PHP# a name after `new` is a class, so a `.` after it names either a type nested in the class,
+        // `new Order.Paid(…)` in spec section 15, or a named constructor, `new Report.fromJson(…)` in section 9.1.
+        // Only the class's declaration tells them apart, so the name parses as one dotted name.
         if self.dialect.is_sharp()
             && token.kind == T!["new"]
             && next == Some(T![Identifier])
             && self.stream.peek_kind(2)? == Some(T!["."])
             && self.stream.peek_kind(3)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
         {
-            let new = self.expect_keyword(T!["new"])?;
-            let class = Expression::Identifier(Identifier::Local(self.parse_local_identifier()?));
-
             return Ok(self.arena.alloc(Expression::Instantiation(Instantiation {
-                new,
-                class: self.arena.alloc(class),
-                constructor: Some(ConstructorName {
-                    dot: self.stream.eat_span(T!["."])?,
-                    name: self.parse_local_identifier()?,
-                }),
+                new: self.expect_any_keyword()?,
+                class: self.arena.alloc(Expression::Identifier(self.parse_dotted_identifier()?)),
                 argument_list: self.parse_optional_argument_list()?,
             })));
         }

@@ -27,15 +27,18 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
-use mago_syntax::cst::ConstructorName;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::PartialArgumentList;
+use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -106,6 +109,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
             );
         }
 
+        let named_constructor = named_constructor(context, self);
         let mut resulting_type = None;
         for classname in classnames {
             let instantiation_span = self.span();
@@ -120,7 +124,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
                 &classname,
                 instantiation_span,
                 class_expression_span,
-                self.constructor.as_ref(),
+                named_constructor,
                 argument_list,
             )?;
 
@@ -137,7 +141,32 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     }
 }
 
-/// Analyzes `new` of `classname` with its main constructor, or with the PHP# named `constructor` it declares, spec
+/// The class and the name of the named constructor `new Report.fromJson(…)` calls, spec section 9.1. A dotted name
+/// after `new` names the type nested in the class, `App\Report\fromJson`, when one exists, spec section 15, and the
+/// class's named constructor otherwise.
+fn named_constructor<'arena, A>(
+    context: &Context<'_, 'arena, A>,
+    instantiation: &Instantiation<'arena>,
+) -> Option<(Word, &'arena [u8])>
+where
+    A: Arena,
+{
+    let Expression::Identifier(name @ Identifier::Dotted(_)) = instantiation.class else {
+        return None;
+    };
+
+    // A dotted name resolves to a name with a namespace separator before its last part.
+    let full_name = context.resolved_names.get(name);
+    let separator = full_name.iter().rposition(|&byte| byte == b'\\').unwrap_or_default();
+
+    context
+        .codebase
+        .get_class_like(full_name)
+        .is_none()
+        .then(|| (word(&full_name[..separator]), &full_name[separator + 1..]))
+}
+
+/// Analyzes `new` of `classname` with its main constructor, or with the PHP# `named_constructor` of a class, spec
 /// section 9.1.
 #[allow(clippy::too_many_arguments)]
 fn analyze_class_instantiation<'ctx, 'arena, A>(
@@ -147,7 +176,7 @@ fn analyze_class_instantiation<'ctx, 'arena, A>(
     classname: &ResolvedClassname,
     instantiation_span: Span,
     class_expression_span: Span,
-    constructor: Option<&ConstructorName<'arena>>,
+    named_constructor: Option<(Word, &[u8])>,
     argument_list: Option<&ArgumentList<'arena>>,
 ) -> Result<TUnion, AnalysisError>
 where
@@ -173,6 +202,7 @@ where
 
         return Ok(wrap_atomic(classname.get_object_type(context.codebase)));
     };
+    let fq_classname = named_constructor.map_or(fq_classname, |(class, _)| class);
 
     let Some(metadata) = context.codebase.get_class_like(fq_classname.as_bytes()) else {
         let missing_class = display_class_like_name(context, fq_classname);
@@ -334,20 +364,20 @@ where
 
     let mut type_parameters = None;
 
-    let (constructor_id, invocation_kind) = match constructor {
+    let (constructor_id, invocation_kind) = match named_constructor {
         // A named constructor is the class's own: a subclass inherits none, so `new Sub.fromJson(…)` creates no `Sub`.
-        Some(constructor) => {
-            let constructor_id = MethodIdentifier::new(metadata.name, ascii_lowercase_word(constructor.name.value));
+        Some((_, name)) => {
+            let constructor_id = MethodIdentifier::new(metadata.name, ascii_lowercase_word(name));
             if !context
                 .codebase
                 .get_method_by_id(&constructor_id)
                 .is_some_and(|method| method.flags.is_named_constructor())
             {
-                let name = BytesDisplay(constructor.name.value);
                 let inherited = context
                     .codebase
-                    .get_declaring_method(metadata.name.as_bytes(), constructor.name.value)
+                    .get_declaring_method(metadata.name.as_bytes(), name)
                     .is_some_and(|method| method.flags.is_named_constructor());
+                let name = BytesDisplay(name);
                 let message = if inherited {
                     format!("`{classname_str}` has no constructor `{name}`: named constructors are not inherited.")
                 } else {
@@ -357,13 +387,22 @@ where
                 context.collector.report_with_code(
                     IssueCode::NonExistentMethod,
                     Issue::error(message)
-                        .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
+                        .with_annotation(Annotation::primary(class_expression_span).with_message("Called here.")),
                 );
 
                 argument_list.analyze(context, block_context, artifacts)?;
 
                 return Ok(get_never());
             }
+
+            // The bridge lowers `new` to the static method this records, and the effects check reaches its body.
+            artifacts.record_call_target(
+                instantiation_span,
+                CallTarget::FunctionLike {
+                    callee: FunctionLikeIdentifier::Method(metadata.original_name, word(name)),
+                    class: Some(metadata.original_name),
+                },
+            );
 
             (constructor_id, MethodInvocationKind::Static)
         }

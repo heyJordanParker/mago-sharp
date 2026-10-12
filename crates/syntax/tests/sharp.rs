@@ -309,8 +309,9 @@ fn a_named_constructor_is_its_class_a_dot_its_name_parameters_this_and_a_body() 
     }
 }
 
-/// Spec section 9.1: `new Report.fromJson(…)` creates an object with the named constructor `fromJson`. PHP reads
-/// `new Report . fromJson(…)` as the new object joined to a function's result.
+/// Spec section 9.1: `new Report.fromJson(…)` names its class with a dot, which the analysis reads as the named
+/// constructor `fromJson` unless `Report` nests a type of that name. PHP reads `new Report . fromJson(…)` as the new
+/// object joined to a function's result.
 #[test]
 fn new_with_a_dot_names_a_named_constructor_and_php_keeps_its_concatenation() {
     const SHARP: &str = "class Use\n{\n    public Report make() => new Report.fromJson(\"{}\");\n}\n";
@@ -324,12 +325,13 @@ fn new_with_a_dot_names_a_named_constructor_and_php_keeps_its_concatenation() {
     let MethodBody::Expression(body) = &method.body else {
         panic!("expected an expression body, got {:#?}", method.body);
     };
-    let Expression::Instantiation(instantiation) = body.expression else {
-        panic!("expected `new`, got {:#?}", body.expression);
+    let Expression::Instantiation(Instantiation { class: Expression::Identifier(Identifier::Dotted(class)), .. }) =
+        body.expression
+    else {
+        panic!("expected `new` of a dotted name, got {:#?}", body.expression);
     };
-    assert_eq!(source(SHARP, instantiation), "new Report.fromJson(\"{}\")");
-    assert_eq!(source(SHARP, instantiation.class), "Report");
-    assert_eq!(instantiation.constructor.as_ref().map(|constructor| source(SHARP, constructor)), Some(".fromJson"));
+    assert_eq!(source(SHARP, body.expression), "new Report.fromJson(\"{}\")");
+    assert_eq!(class.value, b"Report.fromJson");
 
     const PHP: &str = "<?php $made = new Report.fromJson('{}');";
     let program = parse(&arena, "src/use.php", PHP);

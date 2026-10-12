@@ -4662,9 +4662,23 @@ fn a_named_constructor_is_not_inherited() {
         sharp,
         &[],
         &[
-            "14:47 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
-            "15:46 non-existent-method: `Base` has no constructor `missing`.",
+            "14:43 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
+            "15:41 non-existent-method: `Base` has no constructor `missing`.",
         ],
+    );
+}
+
+/// Spec sections 9.1 and 15: `new Report.Draft()` creates the type `Report.Draft` when one exists, and calls the
+/// named constructor `Draft` of the class `Report` otherwise, so a missing class before the dot is the class reported.
+#[test]
+fn new_with_a_dotted_name_creates_the_type_it_names_before_it_calls_a_named_constructor() {
+    let sharp = "namespace Demo;\n\nimport Demo.Report.Draft;\n\nclass Report\n{\n    public static Draft draft() => new Report.Draft();\n    public static Report missing() => new Missing.make(1);\n}\n";
+    let draft = "<?php\n\nnamespace Demo\\Report;\n\nclass Draft { }\n";
+
+    assert_messages(
+        sharp,
+        &[("src/Demo/Report/Draft.php", draft)],
+        &["8:43 non-existent-class: Class `Missing` not found."],
     );
 }
 

@@ -763,9 +763,15 @@ where
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
     /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
-    /// the class `new` names decides when no class declares one. A named constructor is the class's own, spec section
-    /// 9.1, and its body runs on the object its `: this(…)` creates.
+    /// the class `new` names decides when no class declares one. A named constructor, spec section 9.1, is the static
+    /// method the analysis resolved `new` to.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
+        if let Some(arguments) = &instantiation.argument_list
+            && self.artifacts.get_callees(instantiation).next().is_some()
+        {
+            return self.call_targets(instantiation.span(), None, arguments);
+        }
+
         let resolved_names = self.context.resolved_names;
         let class_name = match instantiation.class.unparenthesized() {
             Expression::Identifier(identifier) => resolved_names.resolve(identifier),
@@ -778,18 +784,11 @@ where
         };
 
         let span = instantiation.span();
-        let (declaring, constructor) = match &instantiation.constructor {
-            Some(constructor) => (class, ascii_lowercase_word(constructor.name.value)),
-            None => {
-                let constructor = word(b"__construct");
-                let declaring = codebase
-                    .get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
-                    .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
-                    .unwrap_or(class);
-
-                (declaring, constructor)
-            }
-        };
+        let constructor = word(b"__construct");
+        let declaring = codebase
+            .get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
+            .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
+            .unwrap_or(class);
         if declaring.flags.is_sharp() {
             let Some(metadata) = codebase.get_method(declaring.name.as_bytes(), constructor.as_bytes()) else {
                 return;

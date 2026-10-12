@@ -49,16 +49,6 @@ pub struct NamedConstructor<'arena> {
     pub body: MethodBody<'arena>,
 }
 
-/// The named constructor `new` calls, spec section 9.1.
-///
-/// It is the `.fromJson` of `new Artifact.fromJson(json)`. Dart's analyzer calls it `ConstructorName`.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct ConstructorName<'arena> {
-    pub dot: Span,
-    pub name: LocalIdentifier<'arena>,
-}
-
 impl ConstructorInitializer<'_> {
     /// Whether it is `: super(…)`, which calls the base class's constructor.
     #[must_use]
@@ -82,11 +72,5 @@ impl HasSpan for NamedConstructor<'_> {
         };
 
         Span::between(start, self.body.span())
-    }
-}
-
-impl HasSpan for ConstructorName<'_> {
-    fn span(&self) -> Span {
-        Span::between(self.dot, self.name.span())
     }
 }

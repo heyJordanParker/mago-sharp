@@ -725,6 +725,18 @@ impl<'body, 'program> Body<'body, 'program> {
     /// `new Class(…)`, which runs the class's constructor. A named constructor runs a body, which Mago does not
     /// translate.
     fn instantiation(&mut self, instantiation: &Instantiation) -> String {
+        if let Some(constructor) = self.checked.types().named_constructor(instantiation) {
+            return self.unmodeled(
+                instantiation.span(),
+                format!(
+                    "the named constructor {}.{}",
+                    names::short_name(constructor.class.as_bytes()),
+                    constructor.name
+                ),
+                issues::CONSTRUCTOR_BODY,
+            );
+        }
+
         let class = match instantiation.class {
             Expression::Identifier(identifier) => self.checked.names().get(identifier),
             Expression::Self_(_) => self.class,
@@ -732,17 +744,6 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         if !self.is_translated_class(instantiation.class.span(), class) {
             return "default".to_owned();
-        }
-        if let Some(constructor) = &instantiation.constructor {
-            return self.unmodeled(
-                instantiation.span(),
-                format!(
-                    "the named constructor {}.{}",
-                    names::short_name(class),
-                    String::from_utf8_lossy(constructor.name.value)
-                ),
-                issues::CONSTRUCTOR_BODY,
-            );
         }
 
         let class_name = self.reached_name(class);
