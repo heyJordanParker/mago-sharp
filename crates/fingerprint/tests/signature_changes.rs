@@ -510,3 +510,15 @@ fn a_super_argument_change_changes_the_fingerprint() {
 
     assert_ne!(row, other, "Changing a `: super(…)` argument should change the fingerprint");
 }
+
+#[test]
+fn an_on_clause_change_changes_the_fingerprint() {
+    let listener = |code| fingerprint_of(b"src/Notices.sharp", code);
+    let plain = listener(b"class Notices\n{\n    public void send(OrderEvent e) { }\n}\n");
+    let paid = listener(b"class Notices\n{\n    public void send(OrderEvent e) on OrderPaid { }\n}\n");
+    let refunded =
+        listener(b"class Notices\n{\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded { }\n}\n");
+
+    assert_ne!(plain, paid, "Adding an `on` clause should change the fingerprint");
+    assert_ne!(paid, refunded, "Listing another event should change the fingerprint");
+}

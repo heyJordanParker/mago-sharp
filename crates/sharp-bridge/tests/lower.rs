@@ -5302,6 +5302,18 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
     );
 }
 
+/// Spec section 15: an `on` clause adds nothing to its class, because `mago compile` lists each listener in
+/// `.sharp/listeners.php`, so a listener lowers to its method alone.
+#[test]
+fn a_listener_lowers_to_its_method_alone() {
+    let code = "namespace App;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n\npublic event OrderPaid(int orderId) : OrderEvent;\n\npublic class Notices\n{\n    public void send(OrderEvent e) on OrderPaid { }\n\n    public void refresh() on OrderPaid, OrderEvent => this.send(new OrderPaid(1));\n}\n";
+
+    assert_eq!(
+        Lowered::new(code).tree(),
+        Lowered::new(&code.replace(" on OrderPaid, OrderEvent", "").replace(" on OrderPaid", "")).tree()
+    );
+}
+
 /// ```php
 /// interface OrderEvent
 /// {

@@ -87,6 +87,7 @@ use crate::utils::names::display_type;
 pub mod constant;
 pub mod enum_case;
 pub mod initialization;
+pub mod listener;
 pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
@@ -504,6 +505,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
         }
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         let should_check_unused = 'check_unused: {
             if !context.settings.find_unused_definitions {
@@ -626,6 +628,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
         }
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         // Call plugin on_leave_interface hooks
         if context.plugin_registry.has_interface_hooks() {
@@ -909,6 +912,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
         check_duplicate_enum_case_values(context, artifacts, name, self);
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         if context.settings.find_unused_definitions
             && !class_like_metadata.flags.is_unchecked()

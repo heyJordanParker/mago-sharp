@@ -9506,6 +9506,143 @@ fn an_extern_event_gives_its_class_the_effects_it_lists() {
     );
 }
 
+/// The files the listener tests listen to: `OrderEvent` and its events `OrderPaid` and `OrderRefunded`, `Shipped` of no
+/// family, the plain PHP `JobFailed` an `extern event` marks, and the plain class `Logger`.
+fn listened() -> [(&'static str, &'static str); 7] {
+    let [order_event, order_paid] = ORDER_EVENTS;
+
+    [
+        order_event,
+        order_paid,
+        (
+            "app/Shop/OrderRefunded.sharp",
+            "namespace App.Shop;\n\npublic event OrderRefunded(int orderId) : OrderEvent;\n",
+        ),
+        ("app/Shop/Shipped.sharp", "namespace App.Shop;\n\npublic event Shipped(int shipmentId);\n"),
+        (
+            "src/Queue/Events.php",
+            "<?php\n\nnamespace Illuminate\\Queue\\Events;\n\nfinal class JobFailed\n{\n    public function __construct(public int $id) {}\n}\n",
+        ),
+        (
+            "app/Stubs/Queue.sharp",
+            "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed;\n",
+        ),
+        ("app/Shop/Logger.sharp", "namespace App.Shop;\n\npublic class Logger\n{\n}\n"),
+    ]
+}
+
+/// Spec section 15: a trailing `on` clause makes a method listen to the events it lists. The method takes no parameter,
+/// or one that every listed event is, and nothing else. A `private` listener counts as used, because the engine runs it.
+#[test]
+fn a_listener_takes_no_parameter_or_one_that_every_listed_event_is() {
+    let notices = (
+        "app/Shop/OrderNotices.sharp",
+        "namespace App.Shop;\n\nimport Illuminate.Queue.Events.JobFailed;\n\npublic class OrderNotices\n{\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded { }\n\n    public void refresh() on OrderPaid { }\n\n    public void audit(OrderEvent e) on OrderEvent { }\n\n    public void alert(JobFailed e) on JobFailed { }\n\n    private void deliver(OrderPaid e) on OrderPaid { }\n}\n",
+    );
+    let errors = (
+        "app/Shop/Errors.sharp",
+        "namespace App.Shop;\n\npublic class Errors\n{\n    public void send(OrderPaid e) on OrderPaid, OrderRefunded { }\n\n    public void ship(OrderPaid e) on OrderPaid, Shipped { }\n\n    public void log(OrderPaid e, Logger logger) on OrderPaid { }\n}\n",
+    );
+
+    assert_eq!(worded(notices, &listened()), Vec::<String>::new());
+    assert_eq!(
+        worded(errors, &listened()),
+        [
+            "5:49 invalid-event `send` takes an `OrderPaid`, and it listens to `OrderRefunded`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `OrderEvent`, or take no parameter.",
+            "7:49 invalid-event `ship` takes an `OrderPaid`, and it listens to `Shipped`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, or take no parameter.",
+            "9:34 invalid-event A listener takes only its event, and `log` also takes `logger`. | Not the event. | A listener gets everything else through its class's constructor.",
+        ]
+    );
+}
+
+/// Spec section 15: an `on` clause lists events, which `event` or `extern event` declares, or interfaces an event
+/// implements, so every listener can run. A name of no type is the error any unknown type is.
+#[test]
+fn an_on_clause_lists_events_or_interfaces_an_event_implements() {
+    let watch = (
+        "app/Shop/Watch.sharp",
+        "namespace App.Shop;\n\npublic class Watch\n{\n    public void log(Logger logger) on Logger { }\n\n    public void track() on Tracked, OrderSettled { }\n}\n",
+    );
+    let tracked = ("app/Shop/Tracked.sharp", "namespace App.Shop;\n\npublic interface Tracked\n{\n}\n");
+    let [order_event, order_paid, refunded, shipped, events, queue, logger] = listened();
+
+    assert_eq!(
+        worded(watch, &[order_event, order_paid, refunded, shipped, events, queue, logger, tracked]),
+        [
+            "5:39 invalid-event `Logger` is not an event. | Listed here. | An `on` clause lists events, which `event` or `extern event` declares, or interfaces an event implements.",
+            "7:28 invalid-event No event implements `Tracked`, so `track` never runs. | Listed here. | An `on` clause lists events, which `event` or `extern event` declares, or interfaces an event implements.",
+            "7:37 non-existent-class-like Cannot find type `OrderSettled`. | `OrderSettled` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+        ]
+    );
+}
+
+/// Spec section 15: a listener runs on an object the container creates, so it is not `static`, and its class-like is a
+/// class that is not abstract. It returns nothing. Until spec section 32's container exists, the object is created with
+/// no arguments, so a class whose constructor takes parameters is not supported yet.
+#[test]
+fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_creates() {
+    let fixed = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let r#static = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public static void tick() on OrderPaid { }\n}\n",
+    );
+    let returning = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public int tick() on OrderPaid\n    {\n        return 1;\n    }\n}\n",
+    );
+    let r#abstract = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic abstract class Tick\n{\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let r#enum = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic enum Tick\n{\n    case Open;\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let interface =
+        ("app/Shop/Tick.sharp", "namespace App.Shop;\n\npublic interface Tick\n{\n    void tick() on OrderPaid;\n}\n");
+    let constructed = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick(public Logger logger { get; }) { }\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+
+    assert_eq!(worded(fixed, &listened()), Vec::<String>::new());
+    assert_eq!(
+        worded(r#static, &listened()),
+        ["5:12 invalid-event A listener runs on an object, so `tick` cannot be `static`. | Declared `static` here."]
+    );
+    assert_eq!(
+        worded(returning, &listened()),
+        ["5:12 invalid-event A listener returns nothing, and `tick` returns `int`. | Returned type. | Return `void`."]
+    );
+    assert_eq!(
+        worded(r#abstract, &listened()),
+        [
+            "5:24 invalid-event `Tick` is abstract, so the container cannot create it to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(r#enum, &listened()),
+        [
+            "7:24 invalid-event `Tick` is an enum, so the container cannot create it to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(interface, &listened()),
+        [
+            "5:17 invalid-event `Tick` is an interface, so the container cannot create it to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(constructed, &listened()),
+        [
+            "7:24 invalid-event A listener whose class takes constructor parameters is not supported yet in PHP#. | `tick` listens to events. | PHP# creates `Tick` with no arguments to run its listeners."
+        ]
+    );
+}
+
 const LABEL: (&str, &str) = (
     "app/Shop/Label.sharp",
     "namespace App.Shop;\n\npublic class Label\n{\n    public Label(private string name) { }\n\n    public string text => trim(this.name);\n}\n",

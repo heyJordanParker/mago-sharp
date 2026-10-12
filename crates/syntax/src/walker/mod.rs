@@ -164,6 +164,7 @@ use crate::cst::cst::NotPattern;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
+use crate::cst::cst::On;
 use crate::cst::cst::OpeningTag;
 use crate::cst::cst::Operator;
 use crate::cst::cst::Parenthesized;
@@ -1284,11 +1285,22 @@ generate_ast_walker! {
             walker.walk_function_like_parameter_list(&method.parameter_list, context);
         }
 
+        if let Some(on) = &method.on {
+            walker.walk_on(on, context);
+        }
+
         if let Some(initializer) = &method.initializer {
             walker.walk_constructor_initializer(initializer, context);
         }
 
         walker.walk_method_body(&method.body, context);
+    }
+
+    'arena On as on => {
+        walker.walk_keyword(&on.on, context);
+        for event in &on.events {
+            walker.walk_local_identifier(event, context);
+        }
     }
 
     'arena ConstructorInitializer as constructor_initializer => {

@@ -3833,6 +3833,62 @@ fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
     assert_eq!(order.name.value, b"Order");
 }
 
+/// Spec section 15: a trailing `on` clause after a method's parameters lists the events the method listens to, before
+/// its block, its `=>` body or its `;`.
+#[test]
+fn an_on_clause_lists_events_after_the_parameters() {
+    const CODE: &str = "class Notices\n{\n    public void refresh() on OrderPaid { }\n\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded => this.log(e);\n\n    abstract void heard(OrderEvent e) on OrderEvent;\n\n    public void run() { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Notices.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let methods: Vec<(&str, Option<(&str, Vec<&str>)>)> = class_members(program)
+        .iter()
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            let on = method.on.as_ref().map(|on| {
+                assert_eq!(on.on.value, b"on");
+
+                (source(CODE, on), on.events.iter().map(|event| source(CODE, event)).collect())
+            });
+
+            (source(CODE, &method.name), on)
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("refresh", Some(("on OrderPaid", vec!["OrderPaid"]))),
+            ("send", Some(("on OrderPaid, OrderRefunded", vec!["OrderPaid", "OrderRefunded"]))),
+            ("heard", Some(("on OrderEvent", vec!["OrderEvent"]))),
+            ("run", None),
+        ]
+    );
+}
+
+/// `on` starts a clause only after a method's parameters, so a method, a parameter and a local named `on` keep it as a
+/// name.
+#[test]
+fn on_stays_a_name_outside_the_clause() {
+    const CODE: &str =
+        "class Switch\n{\n    public bool on(bool on)\n    {\n        const was = on;\n        return was;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Switch.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(method)] = class_members(program).as_slice() else {
+        panic!("expected one method, got {:#?}", class_members(program));
+    };
+    assert_eq!(source(CODE, &method.name), "on");
+    assert!(method.on.is_none(), "{:#?}", method.on);
+    let [Statement::LocalDeclaration(was), _] = method_body(program) else {
+        panic!("expected a local and a return, got {:#?}", method_body(program));
+    };
+    assert_eq!(source(CODE, was.value), "on");
+}
+
 /// `event` declares an event only before a name and `(`, so a parameter, a field, a local, a call such as Laravel's
 /// `event(…)` and an operand of a word operator keep it as a name.
 #[test]

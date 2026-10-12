@@ -438,3 +438,10 @@ public class Order
 }
 
 public event Shipped(int shipmentId);
+
+public class Receipts
+{
+    private void deliver(OrderEvent e) on OrderPaid { }
+
+    public void count() on OrderPaid, Shipped { }
+}

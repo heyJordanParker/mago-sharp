@@ -170,6 +170,7 @@ use crate::cst::cst::NotPattern;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
+use crate::cst::cst::On;
 use crate::cst::cst::OpeningTag;
 use crate::cst::cst::Operator;
 use crate::cst::cst::Parenthesized;
@@ -330,6 +331,7 @@ pub enum NodeKind {
     MethodAbstractBody,
     MethodBody,
     MethodExpressionBody,
+    On,
     Operator,
     Law,
     ConstructorInitializer,
@@ -605,6 +607,7 @@ pub enum Node<'ast, 'arena> {
     MethodAbstractBody(&'ast MethodAbstractBody<'arena>),
     MethodBody(&'ast MethodBody<'arena>),
     MethodExpressionBody(&'ast MethodExpressionBody<'arena>),
+    On(&'ast On<'arena>),
     Operator(&'ast Operator<'arena>),
     Law(&'ast Law<'arena>),
     ConstructorInitializer(&'ast ConstructorInitializer<'arena>),
@@ -964,6 +967,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::MethodAbstractBody(_) => NodeKind::MethodAbstractBody,
             Self::MethodBody(_) => NodeKind::MethodBody,
             Self::MethodExpressionBody(_) => NodeKind::MethodExpressionBody,
+            Self::On(_) => NodeKind::On,
             Self::Operator(_) => NodeKind::Operator,
             Self::Law(_) => NodeKind::Law,
             Self::ConstructorInitializer(_) => NodeKind::ConstructorInitializer,
@@ -1439,10 +1443,19 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     f(Node::LocalIdentifier(&node.name));
                     f(Node::FunctionLikeParameterList(&node.parameter_list));
                 }
+                for item in node.on.iter() {
+                    f(Node::On(item));
+                }
                 for item in node.initializer.iter() {
                     f(Node::ConstructorInitializer(item));
                 }
                 f(Node::MethodBody(&node.body));
+            }
+            Node::On(node) => {
+                f(Node::Keyword(&node.on));
+                for item in node.events.iter() {
+                    f(Node::LocalIdentifier(item));
+                }
             }
             Node::ConstructorInitializer(node) => {
                 f(Node::Keyword(&node.keyword));
@@ -2908,6 +2921,7 @@ impl HasSpan for Node<'_, '_> {
             Self::MethodAbstractBody(node) => node.span(),
             Self::MethodBody(node) => node.span(),
             Self::MethodExpressionBody(node) => node.span(),
+            Self::On(node) => node.span(),
             Self::Operator(node) => node.span(),
             Self::Law(node) => node.span(),
             Self::ConstructorInitializer(node) => node.span(),

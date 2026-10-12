@@ -7,6 +7,7 @@ use mago_syntax::cst::FunctionLikeReturnTypeHint;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Sequence;
 use mago_word::Word;
@@ -62,6 +63,8 @@ pub struct MethodParts<'ast, 'arena> {
     pub modifiers: &'ast Sequence<'arena, Modifier<'arena>>,
     pub parameter_list: &'ast FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<&'ast FunctionLikeReturnTypeHint<'arena>>,
+    /// The events a method listens to. An operator listens to none.
+    pub on: Option<&'ast On<'arena>>,
     pub body: &'ast MethodBody<'arena>,
     pub returns_value: bool,
     pub returns_by_reference: bool,
@@ -78,6 +81,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             modifiers: &method.modifiers,
             parameter_list: &method.parameter_list,
             return_type_hint: method.return_type_hint.as_ref(),
+            on: method.on.as_ref(),
             body: &method.body,
             returns_value: method.returns_value(),
             returns_by_reference: method.ampersand.is_some(),
@@ -96,6 +100,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             modifiers: &operator.modifiers,
             parameter_list: &operator.parameter_list,
             return_type_hint: Some(&operator.return_type_hint),
+            on: None,
             body: &operator.body,
             returns_value: true,
             returns_by_reference: false,
