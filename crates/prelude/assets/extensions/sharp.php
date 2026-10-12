@@ -136,6 +136,29 @@ final class ListMethods
     public function last(): mixed {}
 
     /**
+     * Puts `$value` at `$index`, after the elements before it, and renumbers the ones after it.
+     *
+     * @param T $value
+     *
+     * @throws \OutOfRangeException when `$index` is below 0 or above the number of elements.
+     */
+    public function insert(int $index, mixed $value): void {}
+
+    /**
+     * Removes the first element that equals `$value` by `==`, and renumbers the elements after it.
+     *
+     * @param T $value
+     *
+     * @return bool whether an element equalled `$value`.
+     */
+    public function remove(mixed $value): bool {}
+
+    /**
+     * Removes every element.
+     */
+    public function clear(): void {}
+
+    /**
      * @param \Closure(T): bool $predicate
      *
      * @return list<T> the elements `$predicate` keeps, in order.

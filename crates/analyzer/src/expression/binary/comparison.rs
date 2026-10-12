@@ -48,6 +48,7 @@ use crate::expression::binary::utils::is_always_greater_than_or_equal;
 use crate::expression::binary::utils::is_always_identical_to;
 use crate::expression::binary::utils::is_always_less_than;
 use crate::expression::binary::utils::is_always_less_than_or_equal;
+use crate::expression::binary::utils::takes_operands;
 use crate::utils::expression::get_literal_array_key;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_bool;
@@ -917,18 +918,11 @@ pub(crate) fn report_sharp_refusal<A>(
 ) where
     A: Arena,
 {
-    let codebase = context.codebase;
     let operator = &binary.operator;
     let (lhs_name, rhs_name) = (display_operand(context, lhs_type), display_operand(context, rhs_type));
     let op = BytesDisplay(operator.as_bytes());
     let pair = format!("`{op}` cannot compare `{lhs_name}` with `{rhs_name}`");
-    // The part of an operand that holds a refused comparand, the left one first.
-    let part = |refused: fn(Comparand) -> bool| {
-        let side =
-            if lhs_type.types.iter().any(|atomic| holds(atomic, refused, codebase)) { lhs_type } else { rhs_type };
-
-        display_refused_part(context, side, refused)
-    };
+    let part = |refused: fn(Comparand) -> bool| display_refused_side(context, lhs_type, rhs_type, refused);
 
     let (code, issue) = match refusal {
         Refusal::Identity => {
@@ -1030,36 +1024,51 @@ where
     );
 }
 
-/// Reports `value`, the value a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare two elements
-/// of `element_type`, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and `Set<T>` need `==` on
-/// the element type." A class that declares no `operator ==` is refused with the reason `==` gives, and a collection
-/// element is not supported yet, as `==` on a collection is, and an `Any` element is refused as `==` refuses an `Any`
-/// operand. `==` lifts `null`, so only the other elements must compare. A `null_safe` call's help keeps its `?.`.
+/// Reports `value`, of `value_type`, which a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare
+/// an element of `element_type` with it, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and
+/// `Set<T>` need `==` on the element type." A search refuses what `element == value` refuses, so it agrees with
+/// `any(element => element == value)`: a class that declares no `operator ==` is refused with the reason `==` gives, as
+/// is an element the operator's call does not always take, a collection is not supported yet, as `==` on a collection
+/// is, and an `Any` element is refused unless the value is a string, a number or an enum case. A `null_safe` call's help
+/// keeps its `?.`.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
     method: &str,
     receiver: &Expression<'_>,
     value: &Expression<'_>,
     element_type: &TUnion,
+    value_type: &TUnion,
     null_safe: bool,
 ) where
     A: Arena,
 {
     // The operator's span only marks it as written in the source, which `sharp_refusal` checks.
     let equality = BinaryOperator::Equal(value.span());
-    if element_type.is_mixed() {
-        let subject = format!("Each element of `List<{}>`", display_operand(context, element_type));
-        check_comparison_operand(context, value, element_type, element_type, &subject, &equality);
+    let (element_name, value_name) = (
+        display_operand(context, &element_type.to_non_nullable()),
+        display_operand(context, &value_type.to_non_nullable()),
+    );
+    // `==` checks the operands of a declared operator as the arguments of its call, so `Money::op_Equality` refuses a
+    // `Money|Line` element as `element == money` does. An `Any` element keeps its own report.
+    let refusal = sharp_refusal(&equality, element_type, value_type, context.codebase).or_else(|| {
+        let method = get_comparison_method(&equality, element_type, value_type, context.codebase)?;
+        let operands = [&element_type.to_non_nullable(), &value_type.to_non_nullable()];
 
-        return;
-    }
+        (!element_type.is_mixed() && !takes_operands(context.codebase, method, &operands))
+            .then_some(Refusal::DifferentTypes)
+    });
+    let (code, issue) = match refusal {
+        None => {
+            if element_type.is_mixed() {
+                let subject = format!("Each element of `List<{}>`", display_operand(context, element_type));
+                check_comparison_operand(context, value, element_type, value_type, &subject, &equality);
+            }
 
-    let element_type = element_type.to_non_nullable();
-    let element_name = display_operand(context, &element_type);
-    let (code, issue) = match sharp_refusal(&equality, &element_type, &element_type, context.codebase) {
-        None => return,
+            return;
+        }
         Some(Refusal::Instance) => {
-            let class = display_refused_part(context, &element_type, |comparand| comparand == Comparand::Instance);
+            let class =
+                display_refused_side(context, element_type, value_type, |comparand| comparand == Comparand::Instance);
             let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
             // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses it.
             let initial = class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
@@ -1087,21 +1096,21 @@ pub(crate) fn check_element_equality<A>(
             .with_help("Compare the elements one by one."),
         ),
         Some(Refusal::DifferentTypes) => {
-            let class = display_refused_part(context, &element_type, |comparand| comparand == Comparand::Instance);
+            // The value is an element, so its class is the one whose operator runs.
+            let class =
+                display_refused_side(context, value_type, element_type, |comparand| comparand == Comparand::Instance);
 
             (
                 IssueCode::InvalidArgument,
                 Issue::error(format!(
-                    "`{method}` compares elements with `==`, and the `operator ==` of `{class}` does not take two `{class}`."
+                    "`{method}` compares elements with `==`, and the `operator ==` of `{class}` does not take `{element_name}` and `{value_name}`."
                 ))
-                .with_note("A search compares two elements, both of the element type.")
-                .with_help(format!("Make the `operator ==` of `{class}` take two `{class}`.")),
+                .with_note("A search compares each element with the value by `==`.")
+                .with_help(format!("Make the `operator ==` of `{class}` take `{element_name}` and `{value_name}`.")),
             )
         }
         Some(Refusal::Identity | Refusal::NullableOperand | Refusal::UnorderedOperand) => {
-            unreachable!(
-                "`==` on two elements of one type is refused only for an instance, a collection or its operator"
-            )
+            unreachable!("`==` is refused only for a collection, an instance, or the operands of its operator")
         }
     };
 
@@ -1151,6 +1160,22 @@ where
     let part = union.types.iter().filter(|atomic| holds(atomic, refused, context.codebase)).cloned().collect();
 
     display_operand(context, &TUnion::from_vec(part))
+}
+
+/// The part of the operand of `lhs_type`, or else of `rhs_type`, that holds a comparand `refused` accepts.
+fn display_refused_side<A>(
+    context: &Context<'_, '_, A>,
+    lhs_type: &TUnion,
+    rhs_type: &TUnion,
+    refused: fn(Comparand) -> bool,
+) -> String
+where
+    A: Arena,
+{
+    let side =
+        if lhs_type.types.iter().any(|atomic| holds(atomic, refused, context.codebase)) { lhs_type } else { rhs_type };
+
+    display_refused_part(context, side, refused)
 }
 
 /// The operand that `==`, `!=`, `===` or `!==` compares with `null` when its type cannot be `null`, as in
