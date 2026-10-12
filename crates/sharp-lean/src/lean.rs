@@ -1,8 +1,10 @@
-//! The Lean step of `mago compile`: proves each law, and refuses each `.sharp` file whose law is not proved.
+//! The Lean step of `mago compile`: proves each law, checks each structure rule, and refuses each `.sharp` file whose
+//! law is not proved or that breaks a rule.
 
 use std::fmt::Write;
 use std::fs;
 use std::io;
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -23,6 +25,7 @@ use crate::package::Package;
 use crate::package::Program;
 use crate::package::Root;
 use crate::package::Toolchain;
+use crate::rules;
 use crate::runner;
 use crate::runner::Answer;
 use crate::runner::Question;
@@ -32,7 +35,7 @@ use crate::translate::Translation;
 use crate::translate::names;
 
 /// The folder Composer installs packages into. Mago never writes a proof there.
-const VENDOR: &[u8] = b"vendor/";
+pub(crate) const VENDOR: &[u8] = b"vendor/";
 
 /// The comment above a proof Lean's steps did not find.
 const NO_PROOF_FOUND: &str = "-- PHP#: no automatic proof found";
@@ -60,19 +63,23 @@ impl Lean {
         Lean { root: root.to_path_buf() }
     }
 
-    /// Proves the laws of `translations`, which hold every accepted `.sharp` file, and returns the issues that refuse
-    /// each file whose law is not proved.
+    /// Proves the laws of `translations`, which hold every accepted `.sharp` file, checks the structure rules of every
+    /// `Module.lean` over their facts, and returns the issues that refuse each file whose law is not proved or that
+    /// breaks a rule.
     ///
     /// A file whose `.sharpc` is current is proved: the `.sharpc` lists its proof file and every source its laws reach
-    /// as inputs, and the build ID it records covers the runtime library. No Lean process starts when no file states a
-    /// law or has a proof file, nor when each such file's `.sharpc` is current. When no law and no proof file remain,
-    /// `.sharp/.lean/` is deleted.
+    /// as inputs, and the build ID it records covers the runtime library. Every rule runs over every file's facts
+    /// whenever one `.sharpc` is not current, so a compile checks every rule exactly, and every Lean file of a PSR-4
+    /// folder that no Lean file imports is built then too, so a `@[rule]` outside a `Module.lean` is an error. A
+    /// `Module.lean` in no PSR-4 folder refuses each file under its folder. No Lean process starts when no file states
+    /// a law or has a proof file and no workspace Lean file is left to build, nor when each `.sharpc` is current. When
+    /// none of those remains, `.sharp/.lean/` is deleted.
     ///
     /// # Errors
     ///
     /// Returns an error when a file cannot be read or written, when the runtime library does not build, or when the
     /// runner fails.
-    pub fn prove(&self, translations: Vec<Translation>) -> io::Result<HashMap<FileId, IssueCollection>> {
+    pub fn check(&self, translations: Vec<Translation>) -> io::Result<HashMap<FileId, IssueCollection>> {
         let package = Package::new(&self.root);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
 
@@ -86,15 +93,27 @@ impl Lean {
                 let text = fs::read_to_string(self.path(&proof))?;
                 let file = String::from_utf8_lossy(&proof);
                 let start = Span::new(translation.file, Position::new(0), Position::new(0));
-                for (line, statement) in theorems(&text) {
-                    let issue = issues::deleted_law(start, &file, line, &statement, &source_name(translation));
+                for (lines, statement) in theorems(&text) {
+                    let issue =
+                        issues::deleted_law(start, &file, *lines.start(), &statement, &source_name(translation));
                     report(&mut issues, translation, issue);
                 }
             } else if !translation.laws.is_empty() || exists {
                 candidates.push((translation, proof, exists));
             }
         }
-        if candidates.is_empty() {
+        let roots = self.roots(translations.iter())?;
+        let (files, unnamed) = rules::find(&self.root, &roots, &translations)?;
+        for path in &unnamed {
+            let folder = path.strip_suffix("Module.lean").unwrap_or(path).as_bytes();
+            for translation in translations
+                .iter()
+                .filter(|translation| translation.name.starts_with(folder) && !translation.name.starts_with(VENDOR))
+            {
+                report(&mut issues, translation, issues::no_rules_module(translation.facts.anchor, path));
+            }
+        }
+        if candidates.is_empty() && files.is_empty() {
             match fs::remove_dir_all(&package.directory) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
                 _ => return Ok(issues),
@@ -107,13 +126,13 @@ impl Lean {
                 stale.push(candidate);
             }
         }
-        if stale.is_empty() {
+        let check_rules = !files.is_empty() && (!stale.is_empty() || self.any_stale(&translations)?);
+        if stale.is_empty() && !check_rules {
             return Ok(issues);
         }
 
         let program = Program::new(&translations);
         let translated: Vec<FileId> = translations.iter().map(|translation| translation.file).collect();
-        let roots = self.roots(stale.iter().map(|(translation, ..)| *translation))?;
         let mut work = Vec::new();
         for (translation, proof, exists) in stale {
             let mut sound = true;
@@ -145,28 +164,56 @@ impl Lean {
             };
             work.push(Work { translation, proof, exists, module });
         }
-        if work.is_empty() {
+        if work.is_empty() && !check_rules {
             return Ok(issues);
         }
 
         let toolchain = package.toolchain()?;
         if !matches!(toolchain, Toolchain::Ready) {
-            for item in &work {
-                if let Some(span) = anchor(item.translation) {
-                    let issue = match &toolchain {
-                        Toolchain::Failed(message) => issues::elan_failed(span, message),
-                        _ => issues::lake_not_found(span),
-                    };
-                    report(&mut issues, item.translation, issue);
+            let mut waiting: Vec<(&Translation, Span)> =
+                work.iter().filter_map(|item| Some((item.translation, anchor(item.translation)?))).collect();
+            for translation in &translations {
+                let judged = check_rules && files.iter().any(|file| rules::judges(file, translation));
+                if judged && !waiting.iter().any(|(waiting, _)| waiting.file == translation.file) {
+                    waiting.push((translation, translation.facts.anchor));
                 }
+            }
+            for (translation, span) in waiting {
+                let issue = match &toolchain {
+                    Toolchain::Failed(message) => issues::elan_failed(span, message),
+                    _ => issues::lake_not_found(span),
+                };
+                report(&mut issues, translation, issue);
             }
             return Ok(issues);
         }
 
         let library = library::build()?;
-        let modules = program.modules(&work.iter().map(|item| item.translation.file).collect::<Vec<_>>());
+        let modules = program.modules(
+            &work.iter().map(|item| item.translation.file).collect::<Vec<_>>(),
+            &files.iter().map(|file| file.module.as_str()).collect::<Vec<_>>(),
+        );
         package.write(&library, &roots, &modules)?;
+        if !work.is_empty() {
+            self.prove(&package, &library, &program, &modules, work, &mut issues)?;
+        }
+        if check_rules {
+            rules::check(&self.root, &roots, &library, &package, &files, &translations, &mut issues)?;
+        }
 
+        Ok(issues)
+    }
+
+    /// Proves the laws of `work`, whose generated `modules` `package` holds, and reports each law not proved.
+    fn prove(
+        &self,
+        package: &Package,
+        library: &Path,
+        program: &Program<'_>,
+        modules: &[Module],
+        mut work: Vec<Work<'_>>,
+        issues: &mut HashMap<FileId, IssueCollection>,
+    ) -> io::Result<()> {
         let mut hosts: Vec<&Module> = Vec::new();
         for item in &work {
             let name = package::module_name(item.translation);
@@ -192,7 +239,7 @@ impl Lean {
             let (line, message) =
                 errors.first().map_or((0, "Lake failed"), |error| (error.pos.line, error.data.as_str()));
             for law in &item.translation.laws {
-                report(&mut issues, item.translation, issues::generated_module_refused(law, &host, line, message));
+                report(issues, item.translation, issues::generated_module_refused(law, &host, line, message));
             }
 
             false
@@ -205,20 +252,20 @@ impl Lean {
             if !item.exists && item.translation.name.starts_with(VENDOR) {
                 let file = String::from_utf8_lossy(&item.proof);
                 for law in &item.translation.laws {
-                    report(&mut issues, item.translation, issues::no_proof(law, &file));
+                    report(issues, item.translation, issues::no_proof(law, &file));
                 }
             } else if failed.contains(&item.module) {
                 let errors = package.errors(&package::source_of(&item.module))?;
                 let text = fs::read_to_string(self.path(&item.proof))?;
                 for issue in proof_errors(item.translation, &item.proof, &text, &errors) {
-                    report(&mut issues, item.translation, issue);
+                    report(issues, item.translation, issue);
                 }
             } else {
                 checked.push(item);
             }
         }
         if checked.is_empty() {
-            return Ok(issues);
+            return Ok(());
         }
 
         // One runner per file, run on Mago's thread pool, so `threads` caps how many run at once, each near 465 MB.
@@ -242,7 +289,7 @@ impl Lean {
                     (package::module_name(item.translation), String::new())
                 };
 
-                runner::check(&library, &package.directory, &module, &proof_module, &questions)
+                runner::check(library, &package.directory, &module, &proof_module, &questions)
             })
             .collect();
 
@@ -267,11 +314,11 @@ impl Lean {
                         Verdict::Axiom(axiom) => issues::axiom(law, &file, axiom),
                         Verdict::Proved => continue,
                     };
-                    report(&mut issues, item.translation, issue);
+                    report(issues, item.translation, issue);
                     continue;
                 }
                 if vendor {
-                    report(&mut issues, item.translation, issues::no_proof(law, &file));
+                    report(issues, item.translation, issues::no_proof(law, &file));
                     continue;
                 }
 
@@ -289,7 +336,7 @@ impl Lean {
                         let _ = write!(text, "{NO_PROOF_FOUND}\n{theorem}\n");
                         let line = u32::try_from(text.lines().count() + 1).unwrap_or(u32::MAX);
                         text.push_str("  sorry\n");
-                        report(&mut issues, item.translation, issues::gap(law, &file, line));
+                        report(issues, item.translation, issues::gap(law, &file, line));
                     }
                 }
             }
@@ -298,7 +345,18 @@ impl Lean {
             }
         }
 
-        Ok(issues)
+        Ok(())
+    }
+
+    /// Whether the `.sharpc` of one of `translations` is not current.
+    fn any_stale(&self, translations: &[Translation]) -> io::Result<bool> {
+        for translation in translations {
+            if self.is_stale(translation)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Whether `translation`'s `.sharpc` is missing, or one of its inputs changed since it was written.
@@ -374,10 +432,11 @@ fn proof_errors(translation: &Translation, proof: &[u8], text: &str, errors: &[p
     let mut found = Vec::new();
     let mut reported: Vec<u32> = Vec::new();
     for error in errors {
-        let Some((line, r#type)) = theorems.iter().rev().find(|(line, _)| *line <= error.pos.line) else {
+        let Some((lines, r#type)) = theorems.iter().find(|(lines, _)| lines.contains(&error.pos.line)) else {
             found.push(issues::rejected_file(anchor, &file, error.pos.line, &error.data));
             continue;
         };
+        let line = lines.start();
         if reported.contains(line) {
             continue;
         }
@@ -407,10 +466,13 @@ fn source_name(translation: &Translation) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
-/// Each `theorem` of a proof file, with the line it starts on and its type as written.
-fn theorems(text: &str) -> Vec<(u32, String)> {
+/// Each `theorem` of a proof file, with the lines it spans and its type as written. A theorem ends before the next line
+/// that starts at the margin, such as the next `theorem` or a `Module.lean`'s `@[rule]`.
+fn theorems(text: &str) -> Vec<(RangeInclusive<u32>, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let number = |index: usize| u32::try_from(index + 1).unwrap_or(u32::MAX);
     let mut theorems = Vec::new();
-    for (index, line) in text.lines().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         let Some(rest) = line.strip_prefix("theorem ") else {
             continue;
         };
@@ -418,7 +480,11 @@ fn theorems(text: &str) -> Vec<(u32, String)> {
             continue;
         };
         let r#type = r#type.split_once(":=").map_or(r#type, |(r#type, _)| r#type).trim();
-        theorems.push((u32::try_from(index + 1).unwrap_or(u32::MAX), r#type.to_owned()));
+        let end = lines[index + 1..]
+            .iter()
+            .position(|line| !line.is_empty() && !line.starts_with(char::is_whitespace))
+            .map_or(lines.len() - 1, |next| index + next);
+        theorems.push((number(index)..=number(end), r#type.to_owned()));
     }
 
     theorems
@@ -452,10 +518,15 @@ mod tests {
     }
 
     #[test]
-    fn each_theorem_is_found_with_its_line_and_type() {
-        let text = "import Code.App.Shared.Money\nopen Sharp\n\ntheorem addKeepsCurrency : App.Shared.Money.addKeepsCurrency := by\n  simp\n";
+    fn each_theorem_is_found_with_its_lines_and_type() {
+        let proof = "import Code.App.Shared.Money\nopen Sharp\n\ntheorem addKeepsCurrency : App.Shared.Money.addKeepsCurrency := by\n  simp\n";
+        let rules = "import Code.App.Shared.Module\nopen Sharp\n\ntheorem same : App.Shared.Module.same := by\n  simp\n\n@[rule] def neverReachesTenant : Rule := .neverImports \"App.Tenant\"\n";
 
-        assert_eq!(theorems(text), [(4, "App.Shared.Money.addKeepsCurrency".to_owned())]);
+        for (text, expected) in
+            [(proof, (4..=5, "App.Shared.Money.addKeepsCurrency")), (rules, (4..=6, "App.Shared.Module.same"))]
+        {
+            assert_eq!(theorems(text), [(expected.0, expected.1.to_owned())], "{text}");
+        }
     }
 
     #[test]

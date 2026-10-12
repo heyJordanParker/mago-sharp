@@ -52,6 +52,7 @@ use crate::cst::cst::Constant;
 use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::ConstantItem;
 use crate::cst::cst::Construct;
+use crate::cst::cst::ConstructorInitializer;
 use crate::cst::cst::Continue;
 use crate::cst::cst::Declare;
 use crate::cst::cst::DeclareBody;
@@ -330,6 +331,7 @@ pub enum NodeKind {
     MethodExpressionBody,
     Operator,
     Law,
+    ConstructorInitializer,
     ComputedProperty,
     HookedProperty,
     PlainProperty,
@@ -603,6 +605,7 @@ pub enum Node<'ast, 'arena> {
     MethodExpressionBody(&'ast MethodExpressionBody<'arena>),
     Operator(&'ast Operator<'arena>),
     Law(&'ast Law<'arena>),
+    ConstructorInitializer(&'ast ConstructorInitializer<'arena>),
     ComputedProperty(&'ast ComputedProperty<'arena>),
     HookedProperty(&'ast HookedProperty<'arena>),
     PlainProperty(&'ast PlainProperty<'arena>),
@@ -958,6 +961,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::MethodExpressionBody(_) => NodeKind::MethodExpressionBody,
             Self::Operator(_) => NodeKind::Operator,
             Self::Law(_) => NodeKind::Law,
+            Self::ConstructorInitializer(_) => NodeKind::ConstructorInitializer,
             Self::ComputedProperty(_) => NodeKind::ComputedProperty,
             Self::HookedProperty(_) => NodeKind::HookedProperty,
             Self::PlainProperty(_) => NodeKind::PlainProperty,
@@ -1429,7 +1433,14 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     f(Node::LocalIdentifier(&node.name));
                     f(Node::FunctionLikeParameterList(&node.parameter_list));
                 }
+                for item in node.initializer.iter() {
+                    f(Node::ConstructorInitializer(item));
+                }
                 f(Node::MethodBody(&node.body));
+            }
+            Node::ConstructorInitializer(node) => {
+                f(Node::Keyword(&node.keyword));
+                f(Node::ArgumentList(&node.argument_list));
             }
             Node::MethodAbstractBody(node) => {
                 f(Node::Terminator(&node.terminator));
@@ -2874,6 +2885,7 @@ impl HasSpan for Node<'_, '_> {
             Self::MethodExpressionBody(node) => node.span(),
             Self::Operator(node) => node.span(),
             Self::Law(node) => node.span(),
+            Self::ConstructorInitializer(node) => node.span(),
             Self::ComputedProperty(node) => node.span(),
             Self::HookedProperty(node) => node.span(),
             Self::PlainProperty(node) => node.span(),

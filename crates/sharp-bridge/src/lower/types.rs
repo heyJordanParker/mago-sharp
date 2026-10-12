@@ -3,6 +3,7 @@ use mago_analyzer::artifacts::CallTarget;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::add_optional_union_type;
@@ -112,6 +113,13 @@ impl<'analysis> Types<'analysis> {
         };
 
         Declaration { kind, class: metadata.original_name, name: metadata.original_name, public: true }
+    }
+
+    /// The constructor `parent::__construct` reaches from the fully qualified class name `class`, as
+    /// [`CodebaseMetadata::get_parent_constructor`] finds it.
+    #[must_use]
+    pub fn parent_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+        self.codebase.get_parent_constructor(class)
     }
 
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,
@@ -233,12 +241,11 @@ impl<'analysis> Types<'analysis> {
     /// only about a value the checker typed as a collection.
     pub(crate) fn element_type(&self, r#type: &TUnion) -> TUnion {
         let mut element_type = None;
-        for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
-            let TAtomic::Array(array) = atomic else {
-                unreachable!("the checker runs a collection method only on a collection, not on {atomic:?}");
-            };
-            let (_, value) = get_array_parameters(array, self.codebase);
-            element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
+        for atomic in r#type.types.iter() {
+            if let TAtomic::Array(array) = atomic {
+                let (_, value) = get_array_parameters(array, self.codebase);
+                element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
+            }
         }
 
         element_type.unwrap_or_else(|| unreachable!("a collection method's receiver is a collection"))

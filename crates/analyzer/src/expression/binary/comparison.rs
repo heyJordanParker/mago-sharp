@@ -1033,28 +1033,41 @@ where
 /// Reports `value`, the value a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare two elements
 /// of `element_type`, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and `Set<T>` need `==` on
 /// the element type." A class that declares no `operator ==` is refused with the reason `==` gives, and a collection
-/// element is not supported yet, as `==` on a collection is. `==` lifts `null`, so only the other elements must compare.
+/// element is not supported yet, as `==` on a collection is, and an `Any` element is refused as `==` refuses an `Any`
+/// operand. `==` lifts `null`, so only the other elements must compare. A `null_safe` call's help keeps its `?.`.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
     method: &str,
     receiver: &Expression<'_>,
     value: &Expression<'_>,
     element_type: &TUnion,
+    null_safe: bool,
 ) where
     A: Arena,
 {
-    let element_type = element_type.to_non_nullable();
-    let element_name = display_operand(context, &element_type);
     // The operator's span only marks it as written in the source, which `sharp_refusal` checks.
     let equality = BinaryOperator::Equal(value.span());
+    if element_type.is_mixed() {
+        let subject = format!("Each element of `List<{}>`", display_operand(context, element_type));
+        check_comparison_operand(context, value, element_type, element_type, &subject, &equality);
+
+        return;
+    }
+
+    let element_type = element_type.to_non_nullable();
+    let element_name = display_operand(context, &element_type);
     let (code, issue) = match sharp_refusal(&equality, &element_type, &element_type, context.codebase) {
         None => return,
-        Some(Refusal::Instance) => {
+        Some(
+            refusal @ (Refusal::Instance | Refusal::Identity | Refusal::NullableOperand | Refusal::UnorderedOperand),
+        ) => {
+            debug_assert!(matches!(refusal, Refusal::Instance), "`==` on two elements of one type refuses an instance");
             let class = display_refused_part(context, &element_type, |comparand| comparand == Comparand::Instance);
             let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
             // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses it.
             let initial = class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
             let element = if initial == receiver || initial == value { "element".to_owned() } else { initial };
+            let access = if null_safe { "?." } else { "." };
 
             (
                 IssueCode::InvalidArgument,
@@ -1064,7 +1077,7 @@ pub(crate) fn check_element_equality<A>(
                 .with_note("`==` on a class instance exists only where its class declares `operator ==`.")
                 .with_help(format!(
                     "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
-                         `{receiver}.any({element} => {element} === {value})`."
+                         `{receiver}{access}any({element} => {element} === {value})`."
                 )),
             )
         }
@@ -1086,11 +1099,6 @@ pub(crate) fn check_element_equality<A>(
                 ))
                 .with_note("A search compares two elements, both of the element type.")
                 .with_help(format!("Make the `operator ==` of `{class}` take two `{class}`.")),
-            )
-        }
-        Some(Refusal::Identity | Refusal::NullableOperand | Refusal::UnorderedOperand) => {
-            unreachable!(
-                "`==` on two elements of one type is refused only for an instance, a collection or its operator"
             )
         }
     };
