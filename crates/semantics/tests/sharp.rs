@@ -126,7 +126,7 @@ fn an_extern_event_names_a_class() {
 /// cannot run as a class.
 #[test]
 fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
-    let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\npublic event Empty();\npublic event Print(int id);\npublic event Exit(int code);\n";
+    let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\npublic event Empty();\npublic event Print(int id);\npublic event Exit(int code);\npublic event Frozen(readonly int id);\npublic event Scoped(internal int id);\n";
     let fixed = "namespace App.Shop;\n\npublic event Moved(int id);\n\nevent Emptied();\n";
 
     assert_eq!(
@@ -142,7 +142,9 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
             "9:28 A `Set` parameter of an event is not supported yet in PHP#.",
             "13:14 Event `Empty` name cannot be a reserved keyword.",
             "14:14 Event `Print` name cannot be a reserved keyword.",
-            "15:14 Event `Exit` name cannot be a reserved keyword."
+            "15:14 Event `Exit` name cannot be a reserved keyword.",
+            "16:21 An event's parameter takes no modifier: it is a public get-only property of the event.",
+            "17:21 An event's parameter takes no modifier: it is a public get-only property of the event."
         ]
     );
     assert_eq!(issues(fixed), Vec::<String>::new());

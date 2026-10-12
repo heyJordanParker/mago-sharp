@@ -1791,10 +1791,14 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
         Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
     };
     let issue = if let Some(modifier) = parameter.modifiers.first() {
-        remove(
+        // The issue covers the modifier, not the parameter, so the walk stops here: it would refuse `readonly` and
+        // `internal` again as not supported yet.
+        context.report(remove(
             modifier.span(),
             "An event's parameter takes no modifier: it is a public get-only property of the event.",
-        )
+        ));
+
+        return None;
     } else if let Some(accessors) = &parameter.hooks {
         remove(accessors.span(), "An event's parameter takes no accessors: it is a get-only property of the event.")
     } else if let Some(ellipsis) = parameter.ellipsis {
