@@ -1519,4 +1519,69 @@ mod tests {
 
         assert_eq!(error.to_string(), "The Lean step failed: lake crashed.");
     }
+
+    /// A project whose `Report` reads what the headers of `Invoice`, `Taxable` and `Status` say they inherit, and whose
+    /// `Notice` reads the effects the `extern` declaration of `Mailer` gives it.
+    fn headers() -> Vec<(&'static str, String)> {
+        vec![
+            ("app/Shop/Document.sharp", "namespace App.Shop;\n\npublic class Document\n{\n    public int pages()\n    {\n        return 1;\n    }\n}\n".to_string()),
+            ("app/Shop/Record.sharp", "namespace App.Shop;\n\npublic class Record\n{\n    public int rows()\n    {\n        return 2;\n    }\n}\n".to_string()),
+            ("app/Shop/Payable.sharp", "namespace App.Shop;\n\npublic interface Payable\n{\n    int amount();\n}\n".to_string()),
+            ("app/Shop/Taxable.sharp", "namespace App.Shop;\n\npublic interface Taxable : Payable\n{\n}\n".to_string()),
+            ("app/Shop/Invoice.sharp", "namespace App.Shop;\n\npublic class Invoice : Document, Payable\n{\n    public int amount()\n    {\n        return 5;\n    }\n}\n".to_string()),
+            ("app/Shop/Status.sharp", "namespace App.Shop;\n\npublic enum Status : Payable\n{\n    case Open;\n\n    public int amount() => 1;\n}\n".to_string()),
+            ("app/Shop/Report.sharp", "namespace App.Shop;\n\npublic class Report\n{\n    public int pages(Invoice invoice)\n    {\n        return invoice.pages();\n    }\n\n    public int settle(Invoice invoice)\n    {\n        return this.pay(invoice);\n    }\n\n    public int tax(Taxable taxable)\n    {\n        return taxable.amount();\n    }\n\n    public int due()\n    {\n        return this.pay(Status.Open);\n    }\n\n    private int pay(Payable payable)\n    {\n        return payable.amount();\n    }\n}\n".to_string()),
+            ("app/Lib/Mailer.php", "<?php\n\nnamespace Mail;\n\nfinal class Mailer\n{\n    public static function subject(string $text): string\n    {\n        return $text;\n    }\n}\n".to_string()),
+            ("app/Stubs/Mail.sharp", "namespace App.Stubs;\n\nimport Mail.Mailer;\n\nextern Mailer;\n".to_string()),
+            ("app/Shop/Notice.sharp", "namespace App.Shop;\n\nimport Mail.Mailer;\n\npublic class Notice\n{\n    public Notice(private string name) { }\n\n    public string text => Mailer.subject(this.name);\n}\n".to_string()),
+        ]
+    }
+
+    /// The key of each accepted file's compiled file, and the messages of each refused file.
+    fn outcomes(compiled: &BTreeMap<String, Compilation>) -> BTreeMap<&str, Result<[u8; 16], Vec<String>>> {
+        compiled
+            .iter()
+            .map(|(name, compilation)| {
+                let outcome = match compilation {
+                    Compilation::Accepted(bytes) => Ok(compiled_key(bytes)),
+                    Compilation::Refused(issues) => Err(messages(issues)),
+                };
+                (name.as_str(), outcome)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_compile_after_an_edit_to_a_header_or_an_extern_matches_a_clean_compile() {
+        let base = shop_project(&headers());
+
+        for (edited_file, from, to) in [
+            ("app/Shop/Invoice.sharp", "Invoice : Document,", "Invoice : Record,"),
+            ("app/Shop/Invoice.sharp", "Document, Payable", "Document"),
+            ("app/Shop/Taxable.sharp", "Taxable : Payable", "Taxable"),
+            ("app/Shop/Status.sharp", "Status : Payable", "Status"),
+            ("app/Stubs/Mail.sharp", "extern Mailer;", "extern Mailer uses Http;"),
+        ] {
+            let mut files = headers();
+            let (_, contents) =
+                files.iter_mut().find(|(name, _)| *name == edited_file).expect("the edited file exists");
+            assert!(contents.contains(from), "{edited_file} holds `{from}`");
+            *contents = contents.replace(from, to);
+            let edited = shop_project(&files);
+
+            let mut warm = analyzed(&base);
+            compile(&mut warm, empty_stamp);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm = compile(&mut warm, empty_stamp);
+            let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+            assert!(
+                outcomes(&clean).iter().any(|(name, outcome)| *name != edited_file && outcome.is_err()),
+                "`{to}` refuses a file that reads {edited_file}: {:#?}",
+                outcomes(&clean)
+            );
+            assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
 }
