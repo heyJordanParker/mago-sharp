@@ -2534,7 +2534,7 @@ fn a_literal_keyed_by_a_value_that_cannot_key_a_map_names_the_map_key_rule() {
     assert_eq!(
         keys(("src/Demo/Report.sharp", sharp)),
         [
-            "7:44 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Object` has none. | `Object` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "7:44 invalid-array-element-key A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Object` is none of them. | `Object` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
         ]
     );
 }
@@ -2550,9 +2550,9 @@ fn a_literal_keyed_by_a_float_a_bool_or_null_names_the_map_key_rule() {
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "5:46 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `float` has none. | `float` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "7:45 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `bool` has none. | `bool` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "9:48 invalid-array-element-key A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `null` has none. | `null` keys this `Map`. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "5:46 invalid-array-element-key A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `float` is none of them. | `float` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "7:45 invalid-array-element-key A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `bool` is none of them. | `bool` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "9:48 invalid-array-element-key A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `null` is none of them. | `null` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
         ]
     );
 }
@@ -7117,19 +7117,67 @@ fn a_php_docblock_array_keyed_by_a_backed_enum_agrees_with_the_native_array() {
     assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
-/// Spec section 12 keys a `Map` by an `int`, a `string` or a type with an `int` or `string` backing value, so a
-/// class or a pure enum is refused where a `Map` type is written.
+/// Spec section 10: any struct keys a `Map` and joins a `Set` by its whole value, unless it holds a class instance at
+/// any depth, through a class, an interface, a function or `Any`, also inside a collection or another struct. The
+/// refusal is where a `Map` or `Set` type is written and where a literal's key infers one. An enum case is a value.
 #[test]
-fn a_map_key_type_without_a_backing_value_is_an_error() {
+fn a_struct_keys_a_map_unless_it_holds_a_class_instance() {
+    let sharp = "namespace Demo;\n\ninterface Labeled\n{\n    string label();\n}\n\nclass Plan\n{\n    public Plan() { }\n}\n\nenum Size\n{\n    case Small;\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public Size size { get; }) { }\n}\n\nstruct Route\n{\n    public Route(public List<Spot> stops { get; }, public Map<string, Spot?> named { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public int id { get; }, public Plan plan { get; }) { }\n}\n\nstruct Leg\n{\n    public Leg(public List<Order> orders { get; }) { }\n}\n\nstruct Tagged\n{\n    public Tagged(public Labeled label { get; }) { }\n}\n\nstruct Bag\n{\n    public Bag(public Any data { get; }) { }\n}\n\nstruct Hook\n{\n    public Hook(public Function<int(int)> run { get; }) { }\n}\n\nclass Shop\n{\n    public Map<Spot, int> spots = [:];\n    public Map<Route, int> routes = [:];\n    public Set<Spot> seen = [];\n    public Map<Order, int> orders = [:];\n    public Map<Leg, int> legs = [:];\n    public Map<Tagged, int> tags = [:];\n    public Map<Bag, int> bags = [:];\n    public Map<Hook, int> hooks = [:];\n    public Set<Order> pending = [];\n\n    public int count(Spot spot)\n    {\n        this.spots[spot] = 1;\n        const placed = [new Spot(1, Size.Small): 2];\n        const ordered = [new Order(1, new Plan()): 3];\n\n        return (this.spots[spot] ?? 0) + (placed[spot] ?? 0);\n    }\n}\n";
+
+    let note = "A struct key is stored as text built from its values, and a class instance compares through its own `==`, which no text matches.";
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shop.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {} | {}", located(sharp, issue), issue.message, issue.notes.join(" ")))
+            .collect::<Vec<_>>(),
+        [
+            format!(
+                "58:12 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
+            ),
+            format!(
+                "59:12 template-constraint-violation `Leg` can't key a `Map`: `orders` holds a `Plan`, a class, and a key holds only values. | {note}"
+            ),
+            format!(
+                "60:12 template-constraint-violation `Tagged` can't key a `Map`: `label` is a `Labeled`, an interface, and a key holds only values. | {note}"
+            ),
+            format!(
+                "61:12 template-constraint-violation `Bag` can't key a `Map`: `data` is `Any`, which can be a class instance, and a key holds only values. | {note}"
+            ),
+            format!(
+                "62:12 template-constraint-violation `Hook` can't key a `Map`: `run` is a `Function<int(int)>`, a function, and a key holds only values. | {note}"
+            ),
+            format!(
+                "63:12 template-constraint-violation `Order` can't be in a `Set`: `plan` is a `Plan`, a class, and a `Set` holds only values. | {note}"
+            ),
+            format!(
+                "69:26 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
+            ),
+        ]
+    );
+}
+
+/// `\Sharp\Struct` is the engine interface the bridge gives each struct, spec section 10, and no PHP# type, so a
+/// `.sharp` class can't implement it: such a class could hold a class instance and key a `Map`.
+#[test]
+fn a_sharp_class_cannot_implement_the_struct_marker() {
+    let sharp = "namespace Demo;\n\nimport Sharp.Struct;\n\nclass Fake : Struct\n{\n    public Fake() { }\n}\n";
+
+    assert_eq!(messages(("src/Demo/Fake.sharp", sharp), &[]), ["Class `Fake` cannot implement unknown type `Struct`"]);
+}
+
+/// Spec section 12 keys a `Map` by an `int`, a `string` or a backed enum, and section 10 by a struct, so a class or a
+/// pure enum is refused where a `Map` type is written.
+#[test]
+fn a_map_key_type_that_is_no_value_is_an_error() {
     let sharp = "namespace Demo;\n\nimport Lib.Line;\nimport Lib.Pure;\n\nclass Tally\n{\n    public Map<Line, int> lines = [:];\n\n    public Map<Pure, int> count(Map<Line, int> counts)\n    {\n        Map<Pure, int> local = [:];\n        return local;\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "8:12 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Line` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "10:12 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Pure` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "10:33 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Line` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
-            "12:9 template-constraint-violation A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `Pure` has none. | Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.",
+            "8:12 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Line` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "10:12 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Pure` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "10:33 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Line` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "12:9 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Pure` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
         ]
     );
 }
@@ -7189,22 +7237,23 @@ fn a_loop_over_a_map_keyed_by_a_backed_enum_reads_each_key_as_its_case() {
     );
 }
 
-/// A loop reads a backed enum key back through one enum's `from`, so a key type that mixes a backed enum with other
-/// types cannot be read back, written on the key or not.
+/// A loop reads a backed enum key back through one enum's `from`, and a struct key through one struct's key text, so a
+/// key type that mixes either with other types cannot be read back, written on the key or not.
 #[test]
-fn a_loop_over_a_map_whose_keys_mix_a_backed_enum_with_other_types_is_an_error() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses)\n    {\n        for (const [key, n] of counts) {\n        }\n        for (const [key, n] of totals) {\n        }\n        for (const [key, n] of statuses) {\n        }\n    }\n}\n";
+fn a_loop_over_a_map_whose_keys_mix_a_backed_enum_or_a_struct_with_other_types_is_an_error() {
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Spot|string, int> spots, Map<Spot, int> placed)\n    {\n        for (const [key, n] of counts) {\n        }\n        for (const [key, n] of totals) {\n        }\n        for (const [key, n] of statuses) {\n        }\n        for (const [key, n] of spots) {\n        }\n        for (const [key, n] of placed) {\n        }\n    }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "The keys of `counts` mix a backed enum with other types, so the loop cannot read them back.",
-            "The keys of `totals` mix a backed enum with other types, so the loop cannot read them back.",
+            "The keys of `counts` mix a backed enum or a struct with other types, so the loop cannot read them back.",
+            "The keys of `totals` mix a backed enum or a struct with other types, so the loop cannot read them back.",
+            "The keys of `spots` mix a backed enum or a struct with other types, so the loop cannot read them back.",
         ]
     );
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
-        ["10:21 invalid-foreach-key", "12:21 invalid-foreach-key"]
+        ["10:21 invalid-foreach-key", "12:21 invalid-foreach-key", "16:21 invalid-foreach-key"]
     );
 }
 

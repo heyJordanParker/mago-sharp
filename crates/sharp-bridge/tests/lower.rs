@@ -13917,10 +13917,121 @@ fn parse_reads_each_field_as_its_type() {
     );
 }
 
+/// ```php
+/// $counts[\Sharp\Map::key($spot)] = 1;
+/// $listed = [\Sharp\Map::key($spot) => 2];
+/// $seen = [\Sharp\Map::key($spot) => $spot];
+/// foreach ($counts as $key => $n) {
+///     $key = \Sharp\Map::readKey($key);
+///     {
+///         $total += $key->x + $n;
+///     }
+/// }
+/// ```
+///
+/// Spec section 10: a `Map` holds a struct key, and a `Set` a struct element, as its key text, which the engine's
+/// `\Sharp\Map::key` writes, in an index, a literal and a `Set` literal. A loop reads each key back as its struct
+/// through `\Sharp\Map::readKey`.
+#[test]
+fn a_struct_key_goes_in_as_its_key_text_and_a_loop_reads_it_back() {
+    assert_eq!(
+        body_in(
+            "int run(int total, Spot spot, Map<Spot, int> counts)",
+            "        counts[spot] = 1;\n        Map<Spot, int> listed = [spot: 2];\n        Set<Spot> seen = [spot];\n        for (const [key, n] of counts) {\n            total += key.x + n;\n        }\n        return total + listed.count() + seen.count();\n",
+            &[(
+                "src/App/Tenant/Spot.sharp",
+                "namespace App.Tenant;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n"
+            )]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                DIM
+                  VAR
+                    ZVAL "counts"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Map"
+                    ZVAL "key"
+                    ARG_LIST
+                      VAR
+                        ZVAL "spot"
+                ZVAL 1
+              ASSIGN
+                VAR
+                  ZVAL "listed"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL 2
+                    STATIC_CALL
+                      ZVAL "Sharp\\Map"
+                      ZVAL "key"
+                      ARG_LIST
+                        VAR
+                          ZVAL "spot"
+              ASSIGN
+                VAR
+                  ZVAL "seen"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    VAR
+                      ZVAL "spot"
+                    STATIC_CALL
+                      ZVAL "Sharp\\Map"
+                      ZVAL "key"
+                      ARG_LIST
+                        VAR
+                          ZVAL "spot"
+              FOREACH
+                VAR
+                  ZVAL "counts"
+                VAR
+                  ZVAL "n"
+                VAR
+                  ZVAL "key"
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "key"
+                    STATIC_CALL
+                      ZVAL "Sharp\\Map"
+                      ZVAL "readKey"
+                      ARG_LIST
+                        VAR
+                          ZVAL "key"
+                  STMT_LIST
+                    ASSIGN_OP [1]
+                      VAR
+                        ZVAL "total"
+                      BINARY_OP [1]
+                        PROP
+                          VAR
+                            ZVAL "key"
+                          ZVAL "x"
+                        VAR
+                          ZVAL "n"
+              RETURN
+                BINARY_OP [1]
+                  BINARY_OP [1]
+                    VAR
+                      ZVAL "total"
+                    CALL
+                      ZVAL "count"
+                      ARG_LIST
+                        VAR
+                          ZVAL "listed"
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      VAR
+                        ZVAL "seen"
+        "#}
+    );
+}
+
 const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(public int x { get; }, public float y { get; }, public Money? total { get; }) { }\n\n    public Point moved(int dx) => new Point(this.x + dx, this.y, this.total);\n}\n";
 
 /// ```php
-/// final class Point
+/// final class Point implements \Sharp\Struct
 /// {
 ///     public function __construct(public readonly int $x, public readonly float $y, public readonly ?\App\Money $total) {}
 ///
@@ -13934,7 +14045,8 @@ const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(
 /// }
 /// ```
 ///
-/// A struct is a final class, `ZEND_ACC_FINAL` being 32, whose get-only properties are `readonly`, 128. Its `==` is the
+/// A struct is a final class, `ZEND_ACC_FINAL` being 32, that implements `\Sharp\Struct`, which the engine lets only a
+/// `.sharp` class implement, and whose get-only properties are `readonly`, 128. Its `==` is the
 /// `op_Equality` the bridge writes: two instances of the struct are equal when each property equals its pair by the
 /// property's own `==`, and any other pair, `null` included, is equal only when identical. The parameters take `mixed`,
 /// so an `Any?` compares with a struct.
@@ -13956,7 +14068,8 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                 null
               CLASS [32] "Point" @3-8
                 null
-                null
+                NAME_LIST
+                  ZVAL "Sharp\\Struct"
                 STMT_LIST
                   METHOD [1] "__construct" @5-5
                     PARAM_LIST

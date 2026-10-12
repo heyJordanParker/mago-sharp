@@ -78,6 +78,7 @@ use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::class_like::method::analyze_constructor_initializer;
 use crate::statement::class_like::property::analyze_property_hook;
+use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::r#return::handle_return_value;
 use crate::statement::r#static::infer_static_local_types;
 use crate::utils::expression::get_variable_id;
@@ -1888,9 +1889,9 @@ where
     }
 }
 
-/// Reports each PHP# `Map` written in `type_union` whose key type is a class or an enum without a backing value.
-/// Spec section 12 keys a `Map` by an `int`, a `string` or a type with an `int` or `string` backing value, which
-/// runs as its backing value.
+/// Reports each PHP# `Map` written in `type_union` whose key type is a class, an enum without a backing value, or a
+/// struct that holds a class instance. Spec section 12 keys a `Map` by an `int`, a `string` or a backed enum, which
+/// runs as its backing value, and section 10 by a struct, which runs as its key text.
 pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -1907,6 +1908,7 @@ where
             continue;
         };
         if get_backing_key_type(key_type, context.codebase).is_always_array_key(true) {
+            report_class_held_by_key(context, key_type, false, span);
             continue;
         }
 
@@ -1915,9 +1917,9 @@ where
     }
 }
 
-/// Reports each PHP# `Set` written in `type_union` whose element type is a class or an enum without a backing value.
-/// A `Set` runs keyed by each element, so the first `Set` slice holds `int`, `string` and backed enums, and the
-/// semantic checks refuse every other element a type can name without the codebase.
+/// Reports each PHP# `Set` written in `type_union` whose element type is a class, an enum without a backing value, or a
+/// struct that holds a class instance. A `Set` runs keyed by each element, so it holds `int`, `string`, backed enums
+/// and structs, and the semantic checks refuse every other element a type can name without the codebase.
 pub(crate) fn report_unsupported_set_elements<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -1931,6 +1933,7 @@ where
             continue;
         };
         if get_backing_key_type(element_type, context.codebase).is_always_array_key(true) {
+            report_class_held_by_key(context, element_type, true, span);
             continue;
         }
 
@@ -1941,12 +1944,12 @@ where
     }
 }
 
-/// The error for a PHP# `Map` keyed by `key_id`, a type that is not `int`, not `string` and has no `int` or `string`
-/// backing value, written at `span`. A `Map` type and a `Map` literal state the rule in these words.
+/// The error for a PHP# `Map` keyed by `key_id`, a type that is not `int`, not `string`, not a backed enum and not a
+/// struct, written at `span`. A `Map` type and a `Map` literal state the rule in these words.
 pub(crate) fn map_key_error(key_id: &str, span: Span) -> Issue {
     Issue::error(format!(
-        "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` has none."
+        "A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `{key_id}` is none of them."
     ))
     .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
-    .with_help("Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.")
+    .with_help("Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.")
 }

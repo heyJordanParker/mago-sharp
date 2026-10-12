@@ -11,7 +11,6 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
-use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -443,15 +442,16 @@ where
     foreach.analyze(context, block_context, artifacts)?;
 
     if let ForOfTarget::KeyValue(pair) = &for_of.target {
-        report_key_mixing_a_backed_enum(context, artifacts, for_of, pair);
+        report_key_mixing_a_stored_key(context, artifacts, for_of, pair);
     }
 
     Ok(())
 }
 
-/// Reports a loop over a `Map` whose key type mixes a backed enum with other types. The engine holds each key as its
-/// backing value, and the lowering reads it back as a case only through one enum's `from`.
-fn report_key_mixing_a_backed_enum<A>(
+/// Reports a loop over a `Map` whose key type mixes a backed enum or a struct with other types. The engine holds each
+/// such key as its backing value or its key text, and the lowering reads it back only through one enum's `from` or
+/// one struct's key text.
+fn report_key_mixing_a_stored_key<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
     for_of: &ForOf<'_>,
@@ -462,22 +462,25 @@ fn report_key_mixing_a_backed_enum<A>(
     let Some(collection_type) = artifacts.get_expression_type(for_of.expression) else {
         return;
     };
-    let is_one_enum = |key_type: &TUnion| match key_type.types.first() {
-        Some(TAtomic::Object(TObject::Enum(first))) => key_type
-            .types
-            .iter()
-            .all(|atomic| matches!(atomic, TAtomic::Object(TObject::Enum(other)) if other.name == first.name)),
-        _ => false,
+    let class_name = |atomic: &TAtomic| match atomic {
+        TAtomic::Object(object) => object.get_name(),
+        _ => None,
     };
-    let mixes_a_backed_enum = collection_type.types.iter().any(|atomic| match atomic {
+    let is_one_class = |key_type: &TUnion| match key_type.types.first().and_then(class_name) {
+        Some(first) => key_type.types.iter().all(|atomic| {
+            class_name(atomic).is_some_and(|other| other.as_bytes().eq_ignore_ascii_case(first.as_bytes()))
+        }),
+        None => false,
+    };
+    let mixes_a_stored_key = collection_type.types.iter().any(|atomic| match atomic {
         TAtomic::Array(TArray::Keyed(keyed_array)) => {
             keyed_array.get_generic_parameters().is_some_and(|(key_type, _)| {
-                matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_enum(key_type)
+                matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(_)) && !is_one_class(key_type)
             })
         }
         _ => false,
     });
-    if !mixes_a_backed_enum {
+    if !mixes_a_stored_key {
         return;
     }
 
@@ -491,13 +494,13 @@ fn report_key_mixing_a_backed_enum<A>(
     context.collector.report_with_code(
         IssueCode::InvalidForeachKey,
         Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so the loop cannot read them back."
+            "The keys of `{collection}` mix a backed enum or a struct with other types, so the loop cannot read them back."
         ))
         .with_annotation(Annotation::primary(pair.key.span()).with_message("Its key is read here."))
         .with_note(
-            "The engine holds each key as its backing value, and reads it back as a case through one enum's `from`.",
+            "The engine holds each such key as its backing value or its key text, and reads it back through one enum's `from` or one struct's key text.",
         )
-        .with_help("Key the `Map` by one backed enum alone."),
+        .with_help("Key the `Map` by one backed enum or one struct alone."),
     );
 }
 

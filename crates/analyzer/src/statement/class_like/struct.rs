@@ -171,6 +171,138 @@ pub(crate) fn check_struct_parse<A>(
     }
 }
 
+/// Reports each struct in `key_type` that holds a class instance at any depth, spec section 10: a `Map` holds a struct
+/// key, and a `Set` a struct element, as its key text, built from its values, while a class instance compares through
+/// its own `==`, which no text matches. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's
+/// `Dictionary` needs `Hashable`. `in_set` names a `Set` element. Returns whether it reported one.
+pub(crate) fn report_class_held_by_key<A>(
+    context: &mut Context<'_, '_, A>,
+    key_type: &TUnion,
+    in_set: bool,
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    let mut reported = false;
+    for atomic in key_type.types.iter() {
+        let TAtomic::Object(TObject::Named(object)) = atomic else {
+            continue;
+        };
+        let Some(r#struct) =
+            context.codebase.get_class_like(object.name.as_bytes()).filter(|r#struct| r#struct.flags.is_struct())
+        else {
+            continue;
+        };
+        let Some((property, held, is_direct)) = held_class(context.codebase, r#struct, &mut vec![r#struct.name]) else {
+            continue;
+        };
+
+        let class = display_class_like_name(context, r#struct.original_name);
+        let held_name = display_sharp_type(context, &TUnion::from_atomic(held.clone()));
+        let article = if held_name.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
+        let what = match &held {
+            TAtomic::Object(TObject::Named(named)) => {
+                match context.codebase.get_class_like(named.name.as_bytes()).map(|class_like| class_like.kind) {
+                    Some(kind) if kind.is_interface() => format!("{article} `{held_name}`, an interface"),
+                    _ if named.name.as_bytes().eq_ignore_ascii_case(b"Closure") => {
+                        format!("{article} `{held_name}`, a function")
+                    }
+                    _ => format!("{article} `{held_name}`, a class"),
+                }
+            }
+            TAtomic::Callable(_) => format!("a `{held_name}`, a function"),
+            _ => format!("`{held_name}`, which can be a class instance"),
+        };
+        let verb = if is_direct { "is" } else { "holds" };
+        let message = if in_set {
+            format!(
+                "`{class}` can't be in a `Set`: `{}` {verb} {what}, and a `Set` holds only values.",
+                BytesDisplay(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes()))
+            )
+        } else {
+            format!(
+                "`{class}` can't key a `Map`: `{}` {verb} {what}, and a key holds only values.",
+                BytesDisplay(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes()))
+            )
+        };
+
+        context.collector.report_with_code(
+            IssueCode::TemplateConstraintViolation,
+            Issue::error(message)
+                .with_annotation(Annotation::primary(span).with_message(if in_set {
+                    format!("`{class}` is this `Set`'s element.")
+                } else {
+                    format!("`{class}` keys this `Map`.")
+                }))
+                .with_note(
+                    "A struct key is stored as text built from its values, and a class instance compares through its own `==`, which no text matches.",
+                ),
+        );
+        reported = true;
+    }
+
+    reported
+}
+
+/// The first property of `r#struct`, in declaration order, whose type holds a class instance at any depth, with the
+/// part that holds it and whether it is the property's own type: a class, an interface, a function or `Any`, also
+/// inside a collection or a struct, which `visiting` holds while it is read. An enum case is a value.
+fn held_class(
+    codebase: &CodebaseMetadata,
+    r#struct: &ClassLikeMetadata,
+    visiting: &mut Vec<Word>,
+) -> Option<(Word, TAtomic, bool)> {
+    let mut properties: Vec<_> = r#struct
+        .properties
+        .iter()
+        .filter(|(_, property)| !property.flags.is_static() && !property.flags.is_virtual_property())
+        .collect();
+    properties.sort_by_key(|(_, property)| property.name_span.map(|span| span.start.offset));
+
+    properties.into_iter().find_map(|(name, property)| {
+        let r#type = &property.type_metadata.as_ref()?.type_union;
+        let held = class_part(codebase, r#type, visiting)?;
+        let is_direct = r#type.types.contains(&held);
+
+        Some((*name, held, is_direct))
+    })
+}
+
+/// The part of `r#type` that can be a class instance, or none when every value of it is a value.
+fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {
+    r#type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Object(TObject::Named(object)) => {
+            let Some(class_like) = codebase.get_class_like(object.name.as_bytes()) else {
+                return Some(atomic.clone());
+            };
+            if class_like.kind.is_enum() {
+                return None;
+            }
+            if !class_like.flags.is_struct() {
+                return Some(atomic.clone());
+            }
+            if visiting.contains(&class_like.name) {
+                return None;
+            }
+
+            visiting.push(class_like.name);
+            let found = held_class(codebase, class_like, visiting).map(|(_, held, _)| held);
+            visiting.pop();
+
+            found
+        }
+        TAtomic::Object(TObject::Enum(_)) => None,
+        TAtomic::Object(_) | TAtomic::Callable(_) | TAtomic::Mixed(_) => Some(atomic.clone()),
+        TAtomic::Array(array) => {
+            let (key, value) = get_array_parameters(array, codebase);
+
+            class_part(codebase, &key, visiting).or_else(|| class_part(codebase, &value, visiting))
+        }
+        _ => None,
+    })
+}
+
 /// The part of `r#type` `parse` can't read from a value: an enum with no backing value or a function, also inside a
 /// collection or a struct `parse` reads through, which `visiting` holds while it is read.
 fn unreadable_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {

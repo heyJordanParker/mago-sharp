@@ -56,6 +56,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::function_like::map_key_error;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::misc::unwrap_expression;
@@ -235,9 +236,14 @@ where
                         let key_type = if context.dialect.is_sharp() {
                             // PHP# casts only between numbers, so a key PHP would cast, such as `1.5`, `true` or
                             // `null`, names the rule a `Map` type keeps, and its error is its only report. A backed
-                            // enum key runs as its backing value.
+                            // enum key runs as its backing value, and a struct key as its key text.
                             if get_backing_key_type(item_key_type, context.codebase).is_always_array_key(true) {
-                                item_key_type.clone()
+                                let span = key_value_array_element.key.span();
+                                if report_class_held_by_key(context, item_key_type, false, span) {
+                                    get_never()
+                                } else {
+                                    item_key_type.clone()
+                                }
                             } else {
                                 let item_key_type_id = display_value_type(context, item_key_type, &get_arraykey());
                                 context.collector.report_with_code(

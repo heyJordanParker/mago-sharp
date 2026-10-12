@@ -551,9 +551,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// A struct is a final class, spec section 10, whose members are a class's, with its header as its interface list
-    /// and the `op_Equality` that compares it by value, as php-src's grammar builds
-    /// `final class Username implements \App\HasLabel`.
+    /// A struct is a final class, spec section 10, whose members are a class's, with its header and `\Sharp\Struct`
+    /// as its interface list and the `op_Equality` that compares it by value, as php-src's grammar builds
+    /// `final class Username implements \App\HasLabel, \Sharp\Struct`. The engine lets only a `.sharp` class implement
+    /// `\Sharp\Struct`, and writes a key text only for one that does.
     fn r#struct(&mut self, r#struct: &Struct) -> u32 {
         self.class = self.names.get(&r#struct.name);
         self.enter(r#struct.name.value);
@@ -569,7 +570,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.push(self.struct_try_parse(r#struct.name.span));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None);
-        let header = r#struct.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+        let mut interfaces = Vec::new();
+        for name in r#struct.inheritance.iter().flat_map(|inheritance| inheritance.types.iter()) {
+            interfaces.push(self.string(ZEND_NAME_FQ, self.line(name), self.names.get(name)));
+        }
+        let line = self.line(r#struct.name.span);
+        interfaces.push(self.string(ZEND_NAME_FQ, line, b"Sharp\\Struct"));
+        let header = self.node(SHARP_AST_NAME_LIST, 0, line, &interfaces);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -3361,22 +3368,47 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `lowered`, a read of `key`, as the key a `Map` or a `Set` holds. One keyed by a backed enum holds each case as its
-    /// backing value, so a case goes in as its `->value`.
+    /// backing value, so a case goes in as its `->value`, and one keyed by a struct holds each struct as its key text,
+    /// spec section 10, so a struct goes in as `\Sharp\Map::key($struct)`.
     fn stored_key(&mut self, key: &Expression, lowered: u32) -> u32 {
-        if self.backed_enum(self.types.expression_type(key)).is_none() {
+        let key_type = self.types.expression_type(key);
+        let line = self.line(key);
+        if self.struct_key(key_type) {
+            return self.map_call(line, b"key", lowered);
+        }
+        if self.backed_enum(key_type).is_none() {
             return lowered;
         }
 
-        let line = self.line(key);
         let value = self.string(0, line, b"value");
 
         self.node(SHARP_AST_PROP, 0, line, &[lowered, value])
     }
 
+    /// `\Sharp\Map::method(argument)`, the engine's struct key text and its read back.
+    fn map_call(&mut self, line: u32, method: &[u8], argument: u32) -> u32 {
+        let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Map");
+        let method = self.string(0, line, method);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[argument]);
+
+        self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+    }
+
+    /// Whether every value of `r#type` is a struct, which a `Map` holds as its key text.
+    fn struct_key(&self, r#type: &TUnion) -> bool {
+        receiver_classes(r#type).is_some_and(|classes| classes.iter().all(|class| self.types.is_struct(class)))
+    }
+
     /// The loop key `key` of a `Map` keyed by `key_type`, read back as the value the `Map` was given: the case of a
-    /// backed enum through its `from`, or a `string` through `(string)`. None when the stored key is that value.
+    /// backed enum through its `from`, a struct through `\Sharp\Map::readKey`, or a `string` through `(string)`. None
+    /// when the stored key is that value.
     fn key_read_back(&mut self, key: &ForOfVariable, key_type: &TUnion) -> Option<u32> {
         let line = self.line(key);
+        if self.struct_key(key_type) {
+            let stored_key = self.variable(key.name.span, key.name.value);
+
+            return Some(self.map_call(line, b"readKey", stored_key));
+        }
         if let Some(class) = self.backed_enum(key_type) {
             let stored_key = self.variable(key.name.span, key.name.value);
             let class = self.string(ZEND_NAME_FQ, line, class);
