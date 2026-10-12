@@ -107,6 +107,7 @@ use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::token::GetPrecedence;
 use mago_syntax::token::Precedence;
+use mago_syntax::token::SHARP_KEYWORDS;
 use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
@@ -469,12 +470,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             && !is_slice_target(target, context)
             && superglobal_span(target, context).is_none()
         {
-            report_not_supported(
-                target.span(),
-                "write target",
-                "PHP# writes to a local, a parameter or a member written `object.name`.",
-                context,
-            );
+            if let Expression::List(list) = target {
+                report_removed_construct(list.list.value, target.span(), context);
+            } else {
+                report_not_supported(
+                    target.span(),
+                    "write target",
+                    "PHP# writes to a local, a parameter or a member written `object.name`.",
+                    context,
+                );
+            }
 
             return Some(Place::RefusedPart(target.span()));
         }
@@ -1098,18 +1103,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // function. The analyzer refuses an `exit` argument that is not an `int`.
         (Node::Statement(Statement::Echo(_)) | Node::Expression(Expression::Construct(Construct::Print(_))), Body) => {
             let form: &[u8] = if matches!(node, Node::Statement(_)) { b"echo" } else { b"print" };
-            report_removed(
-                node.span(),
-                form,
-                "write `printf` or `fwrite`.",
-                "Output is a function call in PHP#.",
-                context,
-            );
+            report_removed_construct(form, node.span(), context);
 
             None
         }
         (Node::Expression(Expression::Construct(Construct::Die(_))), Body) => {
-            report_die(node.span(), context);
+            report_removed_construct(b"die", node.span(), context);
 
             None
         }
@@ -1134,7 +1133,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 matches!(value, Expression::Literal(Literal::String(_)) | Expression::CompositeString(_))
             }) =>
         {
-            report_die(node.span(), context);
+            report_removed_construct(b"die", node.span(), context);
 
             None
         }
@@ -3264,15 +3263,39 @@ fn report_removed(span: Span, form: &[u8], instead: &str, note: &str, context: &
     );
 }
 
-/// Reports `die`, and `exit` with a string literal or a template, which spec section 8 removes.
-fn report_die(span: Span, context: &mut Context<'_, '_, '_>) {
-    report_removed(
-        span,
+/// The PHP constructs spec sections 2, 8 and 29 remove that start with a word: the word, what PHP# writes instead,
+/// and why. A `.sharp` file reads the word as a plain name, so the construct written as a call, or a bare `die`,
+/// reaches the checker as a call of a function, or a read of a constant, that no code declares.
+const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
+    (b"echo", "write `printf` or `fwrite`.", "Output is a function call in PHP#."),
+    (b"print", "write `printf` or `fwrite`.", "Output is a function call in PHP#."),
+    (
         b"die",
         "write the message to STDERR, then `exit(1)`.",
         "`die(\"…\")` and `exit(\"…\")` print the message and exit with status 0, which reports success.",
-        context,
-    );
+    ),
+    (b"isset", "test it against null, as in `value != null`.", "A PHP# value is never undefined."),
+    (
+        b"empty",
+        "compare the value itself, as in `items.count() == 0`.",
+        "PHP's `empty` is true for `0`, `\"0\"`, `\"\"`, `[]` and null alike.",
+    ),
+    (b"unset", "a local ends at the `}` that closes its block.", "A PHP# local never becomes undefined."),
+    (b"array", "write a list literal, as in `[1, 2]`.", "PHP# writes a list or a map literal in square brackets."),
+    (
+        b"list",
+        "read each element into its own local, as in `const first = pair[0];`.",
+        "PHP# reads a list's elements by index.",
+    ),
+];
+
+/// Reports the PHP construct `word` starts, when spec sections 2, 8 and 29 remove it.
+fn report_removed_construct(word: &[u8], span: Span, context: &mut Context<'_, '_, '_>) {
+    if let Some((_, instead, note)) =
+        REMOVED_CONSTRUCTS.iter().find(|(construct, ..)| construct.eq_ignore_ascii_case(word))
+    {
+        report_removed(span, word, instead, note, context);
+    }
 }
 
 /// The span of the PHP superglobal an expression names, written bare as `_SERVER` or with `$`, through any index of
@@ -3846,8 +3869,13 @@ fn imported_name<'arena>(import: &UseItem<'arena>) -> &'arena [u8] {
 
 #[inline]
 pub fn check_constant_access(constant_access: &ConstantAccess, context: &mut Context<'_, '_, '_>) {
-    if context.names.binding(&constant_access.name) == Some(Binding::Member) {
-        report_bare_member(constant_access.span(), constant_access.name.value(), context);
+    match context.names.binding(&constant_access.name) {
+        Some(Binding::Member) => report_bare_member(constant_access.span(), constant_access.name.value(), context),
+        // A bare `die`, which no local names, is PHP's construct.
+        Some(Binding::Constant) => {
+            report_removed_construct(constant_access.name.value(), constant_access.span(), context);
+        }
+        _ => {}
     }
 }
 
@@ -3858,6 +3886,10 @@ pub fn check_function_call(function_call: &FunctionCall, context: &mut Context<'
     };
 
     let function = identifier.last_segment();
+    if context.names.binding(identifier).is_none() {
+        report_removed_construct(function, function_call.span(), context);
+    }
+
     if is_compact_or_extract(function) {
         let function = BytesDisplay(function);
 
@@ -4010,6 +4042,15 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
             Issue::error(format!("`{name}` is the name of a PHP superglobal: rename this {kind}."))
                 .with_annotation(Annotation::primary(span).with_message("Declared here."))
                 .with_note(format!("A PHP# {kind} runs as a PHP variable of the same name, which would be `${name}`.")),
+        );
+    } else if SHARP_KEYWORDS.iter().any(|keyword| keyword.as_bytes().eq_ignore_ascii_case(name)) {
+        let renamed = format!("{}Value", name.to_ascii_lowercase().escape_ascii());
+        let name = BytesDisplay(name);
+
+        context.report(
+            Issue::error(format!("`{name}` is a PHP# keyword, so it can't name a {kind}."))
+                .with_annotation(Annotation::primary(span).with_message("Declared here."))
+                .with_help(format!("Rename it, as in `{renamed}`.")),
         );
     } else {
         check_declared_name(name, span, context);

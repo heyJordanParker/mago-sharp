@@ -17,6 +17,7 @@ where
     A: Arena,
 {
     pub(crate) fn parse_classlike_member(&mut self) -> Result<ClassLikeMember<'arena>, ParseError> {
+        self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
             T!["#["] | T!["["] if token.kind == T!["#["] || self.dialect.is_sharp() => {
@@ -32,7 +33,7 @@ where
             T!["const"] => ClassLikeMember::Constant(
                 self.parse_class_like_constant_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?,
             ),
-            T!["function"] if !self.is_at_function_hint()? => ClassLikeMember::Method(
+            T!["function"] => ClassLikeMember::Method(
                 self.parse_method_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?,
             ),
             T!["case"] => ClassLikeMember::EnumCase(self.parse_enum_case_with_attributes(Sequence::empty())?),
@@ -51,6 +52,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
     ) -> Result<ClassLikeMember<'arena>, ParseError> {
+        self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
             k if k.is_modifier() => {
@@ -62,7 +64,7 @@ where
             T!["const"] => ClassLikeMember::Constant(
                 self.parse_class_like_constant_with_attributes_and_modifiers(attributes, Sequence::empty())?,
             ),
-            T!["function"] if !self.is_at_function_hint()? => {
+            T!["function"] => {
                 ClassLikeMember::Method(self.parse_method_with_attributes_and_modifiers(attributes, Sequence::empty())?)
             }
             _ if self.dialect.is_sharp() => {
@@ -79,13 +81,13 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
     ) -> Result<ClassLikeMember<'arena>, ParseError> {
+        self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
             T!["const"] => ClassLikeMember::Constant(
                 self.parse_class_like_constant_with_attributes_and_modifiers(attributes, modifiers)?,
             ),
-            // PHP#'s `Function<…>` starts a member's type, not PHP's `function` keyword.
-            T!["function"] if !self.is_at_function_hint()? => {
+            T!["function"] => {
                 ClassLikeMember::Method(self.parse_method_with_attributes_and_modifiers(attributes, modifiers)?)
             }
             _ if self.dialect.is_sharp() => {

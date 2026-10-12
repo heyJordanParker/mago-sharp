@@ -206,6 +206,14 @@ where
         }
     }
 
+    /// Reads the nth (0-indexed) significant token ahead as `kind` from now on. The token is one a `lookahead(n)`
+    /// already buffered.
+    pub(crate) fn read_as(&mut self, n: usize, kind: TokenKind) {
+        if let Some(token) = self.buffer.get_mut(n) {
+            token.kind = kind;
+        }
+    }
+
     /// Peeks at the kind of the nth (0-indexed) significant token ahead.
     ///
     /// More efficient than `lookahead(n)?.map(|t| t.kind)` as it avoids

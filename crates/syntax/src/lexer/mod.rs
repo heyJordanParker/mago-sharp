@@ -62,10 +62,13 @@ use crate::lexer::internal::mode::LexerMode;
 use crate::lexer::internal::utils::NumberKind;
 use crate::settings::LexerSettings;
 use crate::token::DocumentKind;
+use crate::token::SHARP_KEYWORDS;
 use crate::token::Token;
 use crate::token::TokenKind;
 
 mod internal;
+
+pub(crate) use internal::keyword::lookup_keyword;
 
 /// The `Lexer` struct is responsible for tokenizing input source code into discrete tokens
 /// based on PHP language syntax. It is designed to work with PHP code from version 7.0 up to 8.4.
@@ -1167,7 +1170,11 @@ impl<'input> Lexer<'input> {
         }
 
         if !ended_with_slash {
-            if let Some(kind) = internal::keyword::lookup_keyword(self.input.read(length)) {
+            let word = self.input.read(length);
+            // Spec section 2: a PHP keyword that PHP# doesn't use is a plain name in a `.sharp` file.
+            if let Some(kind) = internal::keyword::lookup_keyword(word)
+                && (!self.sharp || SHARP_KEYWORDS.iter().any(|keyword| keyword.as_bytes().eq_ignore_ascii_case(word)))
+            {
                 return (kind, length);
             }
 

@@ -63,7 +63,7 @@ where
     fn parse_switch_cases(&mut self) -> Result<Sequence<'arena, SwitchCase<'arena>>, ParseError> {
         let mut cases = self.new_vec();
         loop {
-            if matches!(self.stream.peek_kind(0)?, Some(T!["endswitch" | "}"])) {
+            if self.stream.is_at(T!["}"])? || self.is_at_php_keyword(T!["endswitch"])? {
                 break;
             }
 
@@ -74,9 +74,10 @@ where
     }
 
     fn parse_switch_case(&mut self) -> Result<SwitchCase<'arena>, ParseError> {
-        Ok(match self.stream.peek_kind(0)? {
-            Some(T!["default"]) => SwitchCase::Default(self.parse_switch_default_case()?),
-            _ => SwitchCase::Expression(self.parse_switch_expression_case()?),
+        Ok(if self.is_at_php_keyword(T!["default"])? {
+            SwitchCase::Default(self.parse_switch_default_case()?)
+        } else {
+            SwitchCase::Expression(self.parse_switch_expression_case()?)
         })
     }
 
@@ -100,7 +101,10 @@ where
     fn parse_switch_statements(&mut self) -> Result<Sequence<'arena, Statement<'arena>>, ParseError> {
         let mut statements = self.new_vec();
         loop {
-            if matches!(self.stream.peek_kind(0)?, None | Some(T!["case" | "default" | "endswitch" | "}"])) {
+            if matches!(self.stream.peek_kind(0)?, None | Some(T!["case" | "}"]))
+                || self.is_at_php_keyword(T!["default"])?
+                || self.is_at_php_keyword(T!["endswitch"])?
+            {
                 break;
             }
             let position_before = self.stream.current_position();

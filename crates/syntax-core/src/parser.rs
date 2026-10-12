@@ -126,6 +126,18 @@ impl<T: Copy, const CAP: usize> LookaheadBuf<T, CAP> {
         Some(unsafe { self.slots[idx].assume_init() })
     }
 
+    /// Borrow the `n`th-ahead token mutably without consuming it (0 = next).
+    #[inline(always)]
+    pub fn get_mut(&mut self, n: usize) -> Option<&mut T> {
+        if n >= self.len {
+            return None;
+        }
+        let idx = (self.head + n) & (CAP - 1);
+        // SAFETY: `n < self.len` and all slots in [head, head+len) are
+        // initialised by construction.
+        Some(unsafe { self.slots[idx].assume_init_mut() })
+    }
+
     /// Discard every buffered token. Leaves the ring ready for reuse.
     #[inline(always)]
     pub fn clear(&mut self) {

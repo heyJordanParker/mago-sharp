@@ -42,6 +42,7 @@ use crate::cst::cst::UnaryPrefix;
 use crate::cst::cst::UnaryPrefixOperator;
 use crate::dialect::Dialect;
 use crate::error::ParseError;
+use crate::lexer::lookup_keyword;
 use crate::parser::MAX_RECURSION_DEPTH;
 use crate::parser::Parser;
 use crate::token::Associativity;
@@ -207,6 +208,8 @@ where
                     break;
                 }
 
+                self.stream.read_as(0, kind);
+
                 if let Expression::Binary(binary) = left
                     && matches!(binary.rhs, Expression::Assignment(_))
                     && infix_precedence > binary.operator.precedence().in_dialect(self.dialect)
@@ -229,6 +232,7 @@ where
 
     #[inline]
     fn parse_lhs_expression(&mut self, precedence: Precedence) -> Result<&'arena Expression<'arena>, ParseError> {
+        self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let next = self.stream.peek_kind(1)?;
 
@@ -409,7 +413,8 @@ where
     /// Returns the operator the next token stands for in the current dialect.
     ///
     /// In PHP#, `.` is member access, which PHP writes `->`, and `?` written right before `.` is null-safe member
-    /// access, which PHP writes `?->`.
+    /// access, which PHP writes `?->`. A name that spells one of PHP's word operators, such as `xor`, stands for that
+    /// operator after an operand, where no name can follow.
     fn operator_kind(&mut self, token: Token<'_>) -> Result<TokenKind, ParseError> {
         Ok(match (self.dialect, token.kind) {
             (Dialect::Sharp, T!["."]) => T!["->"],
@@ -420,6 +425,9 @@ where
                     .is_some_and(|next| next.kind == T!["."] && next.start.offset == token.start.offset + 1) =>
             {
                 T!["?->"]
+            }
+            (Dialect::Sharp, T![Identifier]) => {
+                lookup_keyword(token.value).filter(TokenKind::is_infix).unwrap_or(token.kind)
             }
             _ => token.kind,
         })

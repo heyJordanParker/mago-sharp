@@ -246,6 +246,52 @@ fn a_construct_outside_the_slice_returns_its_not_supported_error() {
     assert_eq!(lowered.diagnostics(), ["9:9 compile error: This statement is not supported yet in PHP#."]);
 }
 
+/// Spec section 2: a PHP keyword PHP# doesn't use is a plain name, and so is a word that means something only inside
+/// its own PHP# construct, as C#'s contextual keywords are. Each names a property, a local and a parameter, and each
+/// reads as the variable or property of its name.
+///
+/// ```php
+/// $list = $extra + $this->list; return $list;
+/// ```
+#[test]
+fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() {
+    let words = [
+        "isset", "empty", "unset", "array", "list", "echo", "print", "die", "foreach", "global", "get", "set", "init",
+        "field", "value", "of", "via", "uses", "and", "or", "not", "default",
+    ];
+
+    for word in words {
+        let lowered = Lowered::new(&format!(
+            "namespace App.Tenant;\n\nclass Report\n{{\n    private int {word} = 1;\n\n    public int run(int extra)\n    {{\n        const {word} = extra + this.{word};\n        return {word};\n    }}\n\n    public int read(int {word}) => {word};\n}}\n"
+        ));
+
+        assert_eq!(
+            lowered.body(),
+            format!(
+                "STMT_LIST\n  ASSIGN\n    VAR\n      ZVAL \"{word}\"\n    BINARY_OP [1]\n      VAR\n        ZVAL \"extra\"\n      PROP\n        VAR\n          ZVAL \"this\"\n        ZVAL \"{word}\"\n  RETURN\n    VAR\n      ZVAL \"{word}\"\n"
+            ),
+            "{word}"
+        );
+        assert_eq!(
+            lowered.declared("read"),
+            format!(
+                "METHOD [1] \"read\" @13-13\n  PARAM_LIST\n    PARAM\n      ZVAL [1] \"int\"\n      ZVAL \"{word}\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    RETURN\n      VAR\n        ZVAL \"{word}\"\n  ZVAL [1] \"int\"\n  null\n"
+            ),
+            "{word}"
+        );
+    }
+}
+
+/// The PHP# form each refusal of `isset`, `empty`, `array` and `list` quotes compiles.
+#[test]
+fn the_php_sharp_form_a_refused_php_construct_names_compiles() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(int? value, List<int> items, List<int> pair)\n    {\n        const listed = [1, 2];\n        const first = pair[0];\n        return value != null && items.count() == 0 && listed.count() == first;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+}
+
 /// The lowering takes only a checked program, so an enum the slice refuses lowers no node of the enum.
 #[test]
 fn an_enum_the_slice_refuses_returns_its_error_and_no_nodes() {

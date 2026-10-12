@@ -1280,7 +1280,7 @@ pub fn check_members<'ast, 'arena>(
     context: &mut Context<'_, 'ast, 'arena>,
 ) {
     let class_like_fqcn = context.display_class_like_name(class_like_fqcn);
-    let mut method_names: HashMap<Vec<u8>, Span> = HashMap::new();
+    let mut method_names: HashMap<Vec<u8>, (Span, &ClassLikeMember<'arena>)> = HashMap::new();
     let mut main_constructor: Option<Span> = None;
     let mut constant_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
     let mut property_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
@@ -1314,19 +1314,45 @@ pub fn check_members<'ast, 'arena>(
                 // The constructor is PHP's `__construct`, so it shares no name with a method, and a method named after
                 // its class has only its own error.
                 main_constructor = Some(name.span());
-            } else if let Some(previous) = method_names.get(&lowercase_name) {
+            } else if let Some(&(previous, previous_member)) = method_names.get(&lowercase_name) {
                 let method_display = context.display_member(class_like_name, BytesDisplay(name.value));
-                context.report(
-                    Issue::error(format!("{class_like_kind} method `{method_display}` has already been defined"))
-                        .with_annotation(Annotation::primary(name.span()))
-                        .with_annotations([
-                            Annotation::secondary(*previous).with_message("previous definition"),
-                            Annotation::secondary(class_like_span.span())
-                                .with_message(format!("{class_like_kind} `{class_like_fqcn}` defined here.")),
-                        ]),
-                );
+                // Spec section 9.1: a named constructor and a method of one name clash, as they do across a class and
+                // its parent, which the analyzer reports in the same words.
+                let clash = match (member, previous_member) {
+                    (ClassLikeMember::NamedConstructor(_), ClassLikeMember::Method(method)) => Some(format!(
+                        "The named constructor `{method_display}` cannot share its name with the method `{}`.",
+                        context.display_member(class_like_name, BytesDisplay(method.name.value))
+                    )),
+                    (ClassLikeMember::Method(_), ClassLikeMember::NamedConstructor(named_constructor)) => {
+                        Some(format!(
+                            "`{method_display}` cannot share its name with `{}`'s named constructor `{}`.",
+                            BytesDisplay(class_like_name),
+                            BytesDisplay(named_constructor.name.value)
+                        ))
+                    }
+                    _ => None,
+                };
+
+                if let Some(message) = clash {
+                    context.report(
+                        Issue::error(message)
+                            .with_code("named-constructor-clash")
+                            .with_annotation(Annotation::primary(name.span()).with_message("Declared here."))
+                            .with_annotation(Annotation::secondary(previous).with_message("Declared first here.")),
+                    );
+                } else {
+                    context.report(
+                        Issue::error(format!("{class_like_kind} method `{method_display}` has already been defined"))
+                            .with_annotation(Annotation::primary(name.span()))
+                            .with_annotations([
+                                Annotation::secondary(previous).with_message("previous definition"),
+                                Annotation::secondary(class_like_span.span())
+                                    .with_message(format!("{class_like_kind} `{class_like_fqcn}` defined here.")),
+                            ]),
+                    );
+                }
             } else {
-                method_names.insert(lowercase_name, name.span());
+                method_names.insert(lowercase_name, (name.span(), member));
             }
         }
 

@@ -36,6 +36,7 @@ where
     }
 
     fn parse_statement_inner(&mut self) -> Result<Statement<'arena>, ParseError> {
+        self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
             T![InlineText | InlineShebang] => Statement::Inline(self.parse_inline()?),
@@ -65,12 +66,13 @@ where
             T![Identifier] if !self.state.within_block && self.is_at_event()? => {
                 Statement::Event(self.parse_event_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?)
             }
-            T!["const" | Identifier | "list" | "function" | "("] if self.is_at_local_declaration()? => {
+            T!["const" | Identifier | "("] if self.is_at_local_declaration()? => {
                 Statement::LocalDeclaration(self.parse_local_declaration()?)
             }
             T!["return"] => Statement::Return(self.parse_return()?),
             T!["#["] | T!["["] if token.kind == T!["#["] || self.is_at_sharp_attribute_list() => {
                 let attributes = self.parse_attribute_list_sequence()?;
+                self.read_php_construct()?;
                 let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
                 let maybe_after = self.stream.peek_kind(1)?;
 

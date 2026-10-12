@@ -51,6 +51,7 @@ where
     fn parse_optional_if_statement_body_else_if_clause(
         &mut self,
     ) -> Result<Option<IfStatementBodyElseIfClause<'arena>>, ParseError> {
+        self.read_php_construct()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["elseif"]) => Some(self.parse_if_statement_body_else_if_clause()?),
             _ => None,
@@ -89,7 +90,7 @@ where
             statements: {
                 let mut statements = self.new_vec();
                 loop {
-                    if matches!(self.stream.peek_kind(0)?, None | Some(T!["elseif" | "else" | "endif"])) {
+                    if self.is_at_end_of_if_colon_body()? {
                         break;
                     }
                     let position_before = self.stream.current_position();
@@ -120,6 +121,14 @@ where
         })
     }
 
+    /// Whether the statements of a colon-delimited `if` or `elseif` end here, at `elseif`, `else`, `endif` or the end
+    /// of the file.
+    fn is_at_end_of_if_colon_body(&mut self) -> Result<bool, ParseError> {
+        Ok(matches!(self.stream.peek_kind(0)?, None | Some(T!["else"]))
+            || self.is_at_php_keyword(T!["elseif"])?
+            || self.is_at_php_keyword(T!["endif"])?)
+    }
+
     fn parse_optional_if_colon_delimited_body_else_if_clause(
         &mut self,
     ) -> Result<Option<IfColonDelimitedBodyElseIfClause<'arena>>, ParseError> {
@@ -141,7 +150,7 @@ where
             statements: {
                 let mut statements = self.new_vec();
                 loop {
-                    if matches!(self.stream.peek_kind(0)?, None | Some(T!["elseif" | "else" | "endif"])) {
+                    if self.is_at_end_of_if_colon_body()? {
                         break;
                     }
                     let position_before = self.stream.current_position();
@@ -179,7 +188,7 @@ where
             statements: {
                 let mut statements = self.new_vec();
                 loop {
-                    if matches!(self.stream.peek_kind(0)?, None | Some(T!["endif"])) {
+                    if self.stream.peek_kind(0)?.is_none() || self.is_at_php_keyword(T!["endif"])? {
                         break;
                     }
                     let position_before = self.stream.current_position();

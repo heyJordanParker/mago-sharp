@@ -5514,25 +5514,17 @@ fn a_list_read_takes_any_int_index_under_strict_list_index_checks() {
 /// `array<string, int>` keeps reading a handled key of any array key type, as PHP does.
 #[test]
 fn a_map_read_with_a_key_outside_its_key_type_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, string? name, int id, int|string either)\n    {\n        const a = counts[name] ?? 0;\n        const b = counts[id] ?? 0;\n        const c = counts[either] ?? 0;\n        const d = isset(counts[name]) ? 1 : 0;\n        return a + b + c + d;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Tally\n{\n    /**\n     * @param array<string, int> $counts\n     */\n    public function read(array $counts, ?string $name, int $id, int|string $either): int\n    {\n        $a = $counts[$name] ?? 0;\n        $b = $counts[$id] ?? 0;\n        $c = $counts[$either] ?? 0;\n        $d = isset($counts[$name]) ? 1 : 0;\n        return $a + $b + $c + $d;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, string? name, int id, int|string either)\n    {\n        const a = counts[name] ?? 0;\n        const b = counts[id] ?? 0;\n        const c = counts[either] ?? 0;\n        return a + b + c;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Tally\n{\n    /**\n     * @param array<string, int> $counts\n     */\n    public function read(array $counts, ?string $name, int $id, int|string $either): int\n    {\n        $a = $counts[$name] ?? 0;\n        $b = $counts[$id] ?? 0;\n        $c = $counts[$either] ?? 0;\n        return $a + $b + $c;\n    }\n}\n";
 
-    assert_eq!(
-        issues(("src/Demo/Tally.php", php), &[]),
-        ["12:22 possibly-null-array-index", "15:28 possibly-null-array-index"]
-    );
+    assert_eq!(issues(("src/Demo/Tally.php", php), &[]), ["12:22 possibly-null-array-index"]);
 
     let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[]);
     let located_issues: Vec<String> = sharp_issues.iter().map(|issue| located(sharp, issue)).collect();
 
     assert_eq!(
         located_issues,
-        [
-            "7:26 mismatched-array-index",
-            "8:26 mismatched-array-index",
-            "9:26 mismatched-array-index",
-            "10:32 mismatched-array-index",
-        ]
+        ["7:26 mismatched-array-index", "8:26 mismatched-array-index", "9:26 mismatched-array-index"]
     );
     assert_eq!(
         sharp_issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>()[..3],
@@ -5563,8 +5555,8 @@ fn a_map_read_with_a_key_outside_its_key_type_is_an_error() {
 /// and a `Status` reads a `Map<Status, int>`, which runs as its backing value.
 #[test]
 fn a_map_read_with_a_key_of_its_key_type_is_accepted() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, Map<Status, int> states, string name, Status status)\n    {\n        const named = [\"a\": 1];\n        const a = counts[name] ?? 0;\n        const b = states[status] ?? 0;\n        const c = isset(counts[name]) ? 1 : 0;\n        const d = named[name] ?? 0;\n        return a + b + c + d;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Status;\n\nclass Tally\n{\n    /**\n     * @param array<string, int> $counts\n     * @param array<string, int> $states\n     */\n    public function read(array $counts, array $states, string $name, Status $status): int\n    {\n        $named = ['a' => 1];\n        $a = $counts[$name] ?? 0;\n        $b = $states[$status->value] ?? 0;\n        $c = isset($counts[$name]) ? 1 : 0;\n        $d = $named[$name] ?? 0;\n        return $a + $b + $c + $d;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, Map<Status, int> states, string name, Status status)\n    {\n        const named = [\"a\": 1];\n        const a = counts[name] ?? 0;\n        const b = states[status] ?? 0;\n        const c = named[name] ?? 0;\n        return a + b + c;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Status;\n\nclass Tally\n{\n    /**\n     * @param array<string, int> $counts\n     * @param array<string, int> $states\n     */\n    public function read(array $counts, array $states, string $name, Status $status): int\n    {\n        $named = ['a' => 1];\n        $a = $counts[$name] ?? 0;\n        $b = $states[$status->value] ?? 0;\n        $c = $named[$name] ?? 0;\n        return $a + $b + $c;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());

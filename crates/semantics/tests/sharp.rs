@@ -739,19 +739,146 @@ fn compact_extract_and_global_are_errors() {
     );
 }
 
-/// Spec section 8 removes `echo` and `print`: output goes through `printf` or `fwrite`.
+/// Spec section 8 removes `echo` and `print`: output goes through `printf` or `fwrite`. Spec section 2 makes `echo` a
+/// plain name, so `echo` written as a call is a call of a function no code declares, refused the same way.
 #[test]
 fn echo_is_an_error_that_names_printf_and_fwrite() {
-    let code = leak(method("        echo \"total\", extra;\n        return extra;\n"));
+    let code = leak(method("        echo \"total\", extra;\n        echo(\"total\");\n        return extra;\n"));
+    let message = "PHP# has no `echo`: write `printf` or `fwrite`.";
 
-    assert_eq!(issues(code), ["7:9 PHP# has no `echo`: write `printf` or `fwrite`."]);
+    assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}")]);
 }
 
 #[test]
 fn print_is_an_error_that_names_printf_and_fwrite() {
-    let code = leak(method("        const shown = print \"total\";\n        return extra;\n"));
+    let code =
+        leak(method("        const shown = print \"total\";\n        print(\"total\");\n        return extra;\n"));
+    let message = "PHP# has no `print`: write `printf` or `fwrite`.";
 
-    assert_eq!(issues(code), ["7:23 PHP# has no `print`: write `printf` or `fwrite`."]);
+    assert_eq!(issues(code), [format!("7:23 {message}"), format!("8:9 {message}")]);
+}
+
+/// Spec section 2 makes `isset`, `empty`, `unset`, `array` and `list` plain names, so each written as PHP calls it is a
+/// call of a function no code declares, refused with the PHP# form. A local of the name is called as any local that
+/// holds a lambda is.
+#[test]
+fn isset_empty_unset_array_and_list_written_as_calls_name_the_php_sharp_form() {
+    let code = leak(method(
+        "        const set = isset(extra);\n        const blank = empty(extra);\n        unset(extra);\n        const items = array(1, 2);\n        list(first) = items;\n        return extra;\n",
+    ));
+    let local = leak(method("        const isset = (int value) => value > 0;\n        return isset(extra) ? 1 : 0;\n"));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:21 PHP# has no `isset`: test it against null, as in `value != null`.",
+            "8:23 PHP# has no `empty`: compare the value itself, as in `items.count() == 0`.",
+            "9:9 PHP# has no `unset`: a local ends at the `}` that closes its block.",
+            "10:23 PHP# has no `array`: write a list literal, as in `[1, 2]`.",
+            "11:9 PHP# has no `list`: read each element into its own local, as in `const first = pair[0];`.",
+        ]
+    );
+    assert_eq!(issues(local), Vec::<String>::new());
+}
+
+/// Spec section 2: a PHP keyword PHP# doesn't use is a plain name, and a keyword PHP# uses stays reserved, as the
+/// spec's `keyword-names` example writes them.
+#[test]
+fn the_keyword_names_example_reserves_only_the_keywords_php_sharp_uses() {
+    let code = leak(method(
+        "        const list = [1, 2, 3];\n        let empty = true;\n        const print = \"draft\";\n        const match = 1;\n        return extra;\n",
+    ));
+
+    assert_eq!(issues(code), ["10:15 `match` is a PHP# keyword, so it can't name a local."]);
+}
+
+/// Spec section 2, after C#'s keywords: every word that starts or structures PHP# syntax is reserved, so it can't name
+/// a `const` or `let` local or a parameter. `this` keeps its own message. The name the help suggests compiles.
+#[test]
+fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
+    const RESERVED: [&str; 49] = [
+        "let",
+        "const",
+        "emit",
+        "match",
+        "new",
+        "return",
+        "throw",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "break",
+        "continue",
+        "try",
+        "catch",
+        "finally",
+        "yield",
+        "exit",
+        "typeof",
+        "is",
+        "as",
+        "import",
+        "namespace",
+        "class",
+        "interface",
+        "enum",
+        "case",
+        "event",
+        "extern",
+        "module",
+        "struct",
+        "static",
+        "public",
+        "protected",
+        "private",
+        "abstract",
+        "final",
+        "override",
+        "virtual",
+        "required",
+        "readonly",
+        "lazy",
+        "true",
+        "false",
+        "null",
+        "this",
+        "super",
+        "Self",
+    ];
+
+    for word in RESERVED {
+        let renamed = format!("{}Value", word.to_lowercase());
+        let rows = [
+            (leak(method(&format!("        const {word} = 1;\n        return extra;\n"))), "7:15", "local"),
+            (leak(method(&format!("        let {word} = 1;\n        return extra;\n"))), "7:13", "local"),
+            (
+                leak(format!("namespace App.Tenant;\n\nclass Report\n{{\n    public int run(int {word}) => 1;\n}}\n")),
+                "5:24",
+                "parameter",
+            ),
+        ];
+
+        for (code, at, kind) in rows {
+            let (message, help) = if word == "this" {
+                (format!("Cannot name a {kind} `this`: `this` is the object the method runs on."), None)
+            } else {
+                (
+                    format!("`{word}` is a PHP# keyword, so it can't name a {kind}."),
+                    Some(format!("Rename it, as in `{renamed}`.")),
+                )
+            };
+            let refused: Vec<(String, Option<String>)> =
+                check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.help)).collect();
+
+            assert_eq!(refused, [(message, help)], "{code}");
+            assert_eq!(issues(code)[0].split_once(' ').map(|(location, _)| location), Some(at), "{code}");
+        }
+
+        let fixed = leak(method(&format!("        const {renamed} = 1;\n        return {renamed};\n")));
+        assert_eq!(issues(fixed), Vec::<String>::new(), "{fixed}");
+    }
 }
 
 /// `die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes `die`.
@@ -917,15 +1044,32 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
     );
 }
 
-/// Spec section 9.1: a named constructor runs as the static method of its name, so it shares no name with another
-/// member, as PHP's duplicate-method check reports.
+/// Spec section 9.1: a named constructor runs as the static method of its name, so it shares no name with a method of
+/// its class, static or not. The clash has the code and the words the analyzer reports it with across a class and its
+/// parent. A law and a named constructor of one name are a duplicate member, as a law and a method are.
 #[test]
 fn a_named_constructor_shares_no_name_with_a_method() {
     let after = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Order.copy() : this(1) { }\n    public int copy() => 1;\n}\n";
     let before = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public int Copy() => 1;\n    public Order.copy() : this(1) { }\n}\n";
+    let static_method = "namespace App.Tenant;\n\npublic class Clash\n{\n    public Clash() { }\n\n    public Clash.of() : this() { }\n    public static Clash of() => new Clash();\n}\n";
+    let law = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    law copy(int a) => a == a;\n    public Order.copy() : this(1) { }\n}\n";
+    let coded = |code: &'static str| -> Vec<(String, Option<String>)> {
+        check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.code)).collect()
+    };
+    let clash = |message: &str| vec![(message.to_owned(), Some("named-constructor-clash".to_owned()))];
 
-    assert_eq!(issues(after), ["8:16 class method `Order.copy` has already been defined"]);
-    assert_eq!(issues(before), ["8:18 class method `Order.copy` has already been defined"]);
+    assert_eq!(coded(after), clash("`Order.copy` cannot share its name with `Order`'s named constructor `copy`."));
+    assert_eq!(
+        coded(before),
+        clash("The named constructor `Order.copy` cannot share its name with the method `Order.Copy`.")
+    );
+    assert_eq!(coded(static_method), clash("`Clash.of` cannot share its name with `Clash`'s named constructor `of`."));
+    assert_eq!(issues(after), ["8:16 `Order.copy` cannot share its name with `Order`'s named constructor `copy`."]);
+    assert_eq!(
+        issues(before),
+        ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`."]
+    );
+    assert_eq!(issues(law), ["8:18 class method `Order.copy` has already been defined"]);
 }
 
 /// Spec section 9.1: only a class has constructors, so an interface, an enum and a static class declare no named one.

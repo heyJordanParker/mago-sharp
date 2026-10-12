@@ -3904,7 +3904,7 @@ fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
 /// `event(…)` and an operand of a word operator keep it as a name.
 #[test]
 fn event_stays_a_name_where_no_declaration_follows() {
-    const CODE: &str = "class Order\n{\n    public void run(int event)\n    {\n        event(new Paid(event));\n        const total = event + 1;\n        event and (event);\n    }\n\n    private int event = 0;\n}\n";
+    const CODE: &str = "class Order\n{\n    public void run(int event)\n    {\n        event(new Paid(event));\n        const total = event + 1;\n        event is (Paid);\n    }\n\n    private int event = 0;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Order.sharp", CODE);
 
@@ -3917,7 +3917,7 @@ fn event_stays_a_name_where_no_declaration_follows() {
     };
     assert_eq!(source(CODE, call.function), "event");
     assert_eq!(source(CODE, total.value), "event + 1");
-    assert!(matches!(expression(both), Expression::Binary(_)), "{both:#?}");
+    assert!(matches!(expression(both), Expression::Is(_)), "{both:#?}");
     let [ClassLikeMember::Method(_), ClassLikeMember::Property(field)] = class_members(program).as_slice() else {
         panic!("expected a method and a field, got {:#?}", class_members(program));
     };

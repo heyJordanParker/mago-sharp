@@ -8,6 +8,63 @@ use mago_span::Span;
 use crate::T;
 use crate::dialect::Dialect;
 
+/// The keywords of PHP#, spec section 2.
+///
+/// Each word starts or structures PHP# syntax, so no PHP# name can be one, as C# reserves its keywords. A `.sharp` file
+/// reads any other PHP keyword as a plain name, and so are the words that mean something only inside their own
+/// construct, such as `get`, `of` and `default`, as C#'s contextual keywords are.
+pub const SHARP_KEYWORDS: [&str; 49] = [
+    "let",
+    "const",
+    "emit",
+    "match",
+    "new",
+    "return",
+    "throw",
+    "if",
+    "else",
+    "for",
+    "while",
+    "do",
+    "break",
+    "continue",
+    "try",
+    "catch",
+    "finally",
+    "yield",
+    "exit",
+    "typeof",
+    "is",
+    "as",
+    "import",
+    "namespace",
+    "class",
+    "interface",
+    "enum",
+    "case",
+    "event",
+    "extern",
+    "module",
+    "struct",
+    "static",
+    "public",
+    "protected",
+    "private",
+    "abstract",
+    "final",
+    "override",
+    "virtual",
+    "required",
+    "readonly",
+    "lazy",
+    "true",
+    "false",
+    "null",
+    "this",
+    "super",
+    "Self",
+];
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
