@@ -43,6 +43,17 @@ mod inheritance;
 mod method;
 mod property;
 
+/// Whether PHP refuses `name` for a class-like as a keyword. A `.sharp` file reads a PHP keyword that PHP# doesn't
+/// use as a plain name, spec section 2, so a PHP# type may take it, and `check_class_name` refuses the type names the
+/// engine reserves.
+fn is_php_keyword_name(name: &[u8], context: &Context<'_, '_, '_>) -> bool {
+    !context.program.dialect.is_sharp()
+        && RESERVED_KEYWORDS
+            .iter()
+            .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
+            .any(|keyword| keyword.eq_ignore_ascii_case(name))
+}
+
 #[inline]
 pub fn check_trait_use_alias_adaptation<'ast, 'arena>(
     adaptation: &'ast TraitUseAliasAdaptation<'arena>,
@@ -81,11 +92,7 @@ pub fn check_class<'ast, 'arena>(class: &'ast Class<'arena>, context: &mut Conte
     let class_name = BytesDisplay(class_name_bytes);
     let class_fqcn = context.display_class_like_name(class_fqcn_bytes);
 
-    if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(class_name_bytes))
-        || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-            .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case(class_name_bytes))
-    {
+    if is_php_keyword_name(class_name_bytes, context) {
         context.report(
             Issue::error(format!("Class `{class_name}` name cannot be a reserved keyword."))
                 .with_annotation(
@@ -362,11 +369,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
     let interface_name = BytesDisplay(interface_name_bytes);
     let interface_fqcn = context.display_class_like_name(interface_fqcn_bytes);
 
-    if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(interface_name_bytes))
-        || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-            .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case(interface_name_bytes))
-    {
+    if is_php_keyword_name(interface_name_bytes, context) {
         context.report(
             Issue::error(format!("Interface `{interface_name}` name cannot be a reserved keyword."))
                 .with_annotation(
@@ -760,11 +763,7 @@ pub fn check_trait<'ast, 'arena>(r#trait: &'ast Trait<'arena>, context: &mut Con
     let class_like_name = BytesDisplay(class_like_name_bytes);
     let class_like_fqcn = context.display_class_like_name(class_like_fqcn_bytes);
 
-    if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(class_like_name_bytes))
-        || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-            .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case(class_like_name_bytes))
-    {
+    if is_php_keyword_name(class_like_name_bytes, context) {
         context.report(
             Issue::error(format!("Trait `{class_like_name}` name cannot be a reserved keyword."))
                 .with_annotation(
@@ -865,11 +864,7 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
     let enum_fqcn = context.display_class_like_name(enum_fqcn_bytes);
     let enum_is_backed = r#enum.backing_type_hint.is_some();
 
-    if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(enum_name_bytes))
-        || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-            .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case(enum_name_bytes))
-    {
+    if is_php_keyword_name(enum_name_bytes, context) {
         context.report(
             Issue::error(format!("Enum `{enum_name}` name cannot be a reserved keyword."))
                 .with_annotation(

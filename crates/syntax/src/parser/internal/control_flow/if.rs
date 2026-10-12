@@ -51,7 +51,7 @@ where
     fn parse_optional_if_statement_body_else_if_clause(
         &mut self,
     ) -> Result<Option<IfStatementBodyElseIfClause<'arena>>, ParseError> {
-        self.read_php_construct()?;
+        self.read_php_statement()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["elseif"]) => Some(self.parse_if_statement_body_else_if_clause()?),
             _ => None,

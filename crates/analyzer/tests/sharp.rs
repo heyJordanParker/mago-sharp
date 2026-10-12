@@ -4632,29 +4632,46 @@ fn a_constructor_without_super_under_a_base_class_constructor_is_missing_super_c
 
 /// Spec section 9.1: PHP# has no implicit `super()`. A class without a constructor gets one for its initial values that
 /// run in the constructor, and that one calls the base class's constructor without arguments. So when the base class's
-/// constructor takes any, the class declares its own, and the help writes it with every parameter the base one takes.
+/// constructor takes any, the class declares its own, and the help writes it with every parameter the base one takes:
+/// `Any?` for one PHP declares without a type, each default PHP# writes alike, and the imports its types need. PHP
+/// passes a default the help can't write, and every one after it, so the help leaves them out.
 #[test]
 fn initial_values_in_the_constructor_under_a_base_class_constructor_with_parameters_need_a_constructor() {
-    let ledger = "<?php\n\nnamespace Lib;\n\nclass Ledger\n{\n    public function __construct(string $name, int ...$counts)\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Ledger;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n}\n\nclass Totals : Ledger\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Constant : Entity\n{\n    protected string label = \"x\";\n}\n\nclass Blank\n{\n    public Blank() { }\n}\n\nclass Filled : Blank\n{\n    protected string label = strtoupper(\"x\");\n}\n";
-    let fixed = "namespace Demo;\n\nimport Lib.Ledger;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n\n    public Labeled(int id) : super(id) { }\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n\n    public Pinned(int id) : super(id) { }\n}\n\nclass Totals : Ledger\n{\n    protected string label = strtoupper(\"x\");\n\n    public Totals(string name, int ...counts) : super(name, ...counts) { }\n}\n";
+    let library = [
+        (
+            "src/Lib/Ledger.php",
+            "<?php\n\nnamespace Lib;\n\nclass Ledger\n{\n    public function __construct(string $name, int ...$counts)\n    {\n    }\n}\n",
+        ),
+        (
+            "src/Lib/Legacy.php",
+            "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    const MODE = 'm';\n\n    /**\n     * @param list<int> $ids\n     */\n    public function __construct($x, array $items = [], array $ids = [], ?\\DateTimeImmutable $at = null, string $mode = self::MODE)\n    {\n    }\n}\n",
+        ),
+        ("src/Billing/Money.php", "<?php\n\nnamespace Billing;\n\nclass Money\n{\n}\n"),
+        (
+            "src/Lib/Priced.php",
+            "<?php\n\nnamespace Lib;\n\nclass Priced\n{\n    public function __construct(\\Billing\\Money $money, int $count = 0, string $label = 'each', bool $taxed = true, bool $fixed = false, float $rate = 1.5, int $after = 2)\n    {\n    }\n}\n",
+        ),
+    ];
+    let sharp = "namespace Demo;\n\nimport Lib.Ledger;\nimport Lib.Legacy;\nimport Lib.Priced;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n}\n\nclass Totals : Ledger\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Constant : Entity\n{\n    protected string label = \"x\";\n}\n\nclass Blank\n{\n    public Blank() { }\n}\n\nclass Filled : Blank\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass FromLegacy : Legacy\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Bill : Priced\n{\n    protected string label = strtoupper(\"x\");\n}\n";
+    let fixed = "namespace Demo;\n\nimport Billing.Money;\nimport DateTimeImmutable;\nimport Lib.Ledger;\nimport Lib.Legacy;\nimport Lib.Priced;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n\n    public Labeled(int id) : super(id) { }\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n\n    public Pinned(int id) : super(id) { }\n}\n\nclass Totals : Ledger\n{\n    protected string label = strtoupper(\"x\");\n\n    public Totals(string name, int ...counts) : super(name, ...counts) { }\n}\n\nclass FromLegacy : Legacy\n{\n    protected string label = strtoupper(\"x\");\n\n    public FromLegacy(Any? x, Map<int|string, Any?> items = [:], List<int> ids = [], DateTimeImmutable? at = null) : super(x, items, ids, at) { }\n\n    public static FromLegacy make() => new FromLegacy(1);\n}\n\nclass Bill : Priced\n{\n    protected string label = strtoupper(\"x\");\n\n    public Bill(Money money, int count = 0, string label = \"each\", bool taxed = true, bool fixed = false) : super(money, count, label, taxed, fixed) { }\n\n    public static Bill make() => new Bill(new Money());\n}\n";
 
-    let found: Vec<String> =
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", sharp), &[("src/Lib/Ledger.php", ledger)])
-            .iter()
-            .map(|issue| {
-                format!("{}: {} {}", located(sharp, issue), issue.message, issue.help.as_deref().unwrap_or_default())
-            })
-            .collect();
+    let found: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", sharp), &library)
+        .iter()
+        .map(|issue| {
+            format!("{}: {} {}", located(sharp, issue), issue.message, issue.help.as_deref().unwrap_or_default())
+        })
+        .collect();
     assert_eq!(
         found,
         [
-            "10:7 missing-super-call: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Labeled(int id) : super(id) { }`.",
-            "15:7 missing-super-call: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Pinned(int id) : super(id) { }`.",
-            "20:7 missing-super-call: `Totals` must declare a constructor that calls `Ledger`'s with `: super(…)`. Write `public Totals(string name, int ...counts) : super(name, ...counts) { }`.",
+            "12:7 missing-super-call: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Labeled(int id) : super(id) { }`.",
+            "17:7 missing-super-call: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Pinned(int id) : super(id) { }`.",
+            "22:7 missing-super-call: `Totals` must declare a constructor that calls `Ledger`'s with `: super(…)`. Write `public Totals(string name, int ...counts) : super(name, ...counts) { }`.",
+            "42:7 missing-super-call: `FromLegacy` must declare a constructor that calls `Legacy`'s with `: super(…)`. Write `public FromLegacy(Any? x, Map<int|string, Any?> items = [:], List<int> ids = [], DateTimeImmutable? at = null) : super(x, items, ids, at) { }`. Add `import DateTimeImmutable;` to the file.",
+            "47:7 missing-super-call: `Bill` must declare a constructor that calls `Priced`'s with `: super(…)`. Write `public Bill(Money money, int count = 0, string label = \"each\", bool taxed = true, bool fixed = false) : super(money, count, label, taxed, fixed) { }`. Add `import Billing.Money;` to the file.",
         ]
     );
-    assert_messages(fixed, &[("src/Lib/Ledger.php", ledger)], &[]);
+    assert_messages(fixed, &library, &[]);
 }
 
 /// Spec section 9.1: `new Artifact.sized(…)` calls the named constructor `sized`, so its arguments are checked against
@@ -4667,11 +4684,12 @@ fn new_with_a_named_constructor_checks_its_arguments_and_creates_its_class() {
 }
 
 /// Spec section 9.1: a named constructor is its own class's, so `new` on a subclass finds none, and `new` names only a
-/// named constructor the class declares. A subclass may declare its own of the same name, which keeps a signature PHP
-/// accepts for the static method it runs as.
+/// named constructor the class declares. `new Self.sized(…)` in the subclass names the class that declares it, as
+/// `own` writes it. A subclass may declare its own of the same name, which keeps a signature PHP accepts for the
+/// static method it runs as.
 #[test]
 fn a_named_constructor_is_not_inherited() {
-    let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n}\n\nclass Resized : Base\n{\n    public Resized(int size) : super(size) { }\n\n    public Resized.sized(int size) : this(size * 2) { }\n}\n\nclass Restrung : Base\n{\n    public Restrung(int size) : super(size) { }\n\n    public Restrung.sized(string size) : this(strlen(size)) { }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n    public static Base itself() => new Self.sized(1);\n}\n\nclass Resized : Base\n{\n    public Resized(int size) : super(size) { }\n\n    public Resized.sized(int size) : this(size * 2) { }\n}\n\nclass Restrung : Base\n{\n    public Restrung(int size) : super(size) { }\n\n    public Restrung.sized(string size) : this(strlen(size)) { }\n}\n";
 
     assert_messages(
         sharp,
@@ -4679,9 +4697,15 @@ fn a_named_constructor_is_not_inherited() {
         &[
             "14:47 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
             "15:46 non-existent-method: `Base` has no constructor `missing`.",
-            "30:21 incompatible-parameter-type: Parameter `size` of `Restrung.sized` expects type `string` but parent `Base.sized` expects type `int`",
+            "17:36 non-existent-method: `Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.",
+            "31:21 incompatible-parameter-type: Parameter `size` of `Restrung.sized` expects type `string` but parent `Base.sized` expects type `int`",
         ],
     );
+    let helps: Vec<Option<String>> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", sharp), &[])
+        .into_iter()
+        .map(|issue| issue.help)
+        .collect();
+    assert_eq!(helps[2].as_deref(), Some("Name its class: write `new Base.sized(1)`."));
 }
 
 /// Spec section 9.1: a named constructor runs as a static method, and PHP refuses a static and an instance method of

@@ -36,7 +36,7 @@ where
     }
 
     fn parse_statement_inner(&mut self) -> Result<Statement<'arena>, ParseError> {
-        self.read_php_construct()?;
+        self.read_php_statement()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
             T![InlineText | InlineShebang] => Statement::Inline(self.parse_inline()?),

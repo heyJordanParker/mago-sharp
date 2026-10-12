@@ -10,6 +10,7 @@ use mago_php_version::PHPVersion;
 use mago_reporting::Issue;
 use mago_semantics::SemanticsChecker;
 use mago_syntax::parser::parse_file;
+use mago_syntax::token::SHARP_KEYWORDS;
 
 #[path = "../../../tests/support/sharp_words.rs"]
 mod sharp_words;
@@ -122,11 +123,10 @@ fn an_extern_event_names_a_class() {
 }
 
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
-/// `public`, and each parameter is a type, a name and an optional default. An event named with a word PHP reserves
-/// cannot run as a class.
+/// `public`, and each parameter is a type, a name and an optional default.
 #[test]
 fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
-    let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\npublic event Empty();\npublic event Print(int id);\npublic event Exit(int code);\n";
+    let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\n";
     let fixed = "namespace App.Shop;\n\npublic event Moved(int id);\n\nevent Emptied();\n";
 
     assert_eq!(
@@ -139,10 +139,7 @@ fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
             "6:21 A `Set` parameter of an event is not supported yet in PHP#.",
             "7:1 This construct is not supported yet in PHP#.",
             "8:29 An event's parameter takes no accessors: it is a get-only property of the event.",
-            "9:28 A `Set` parameter of an event is not supported yet in PHP#.",
-            "13:14 Event `Empty` name cannot be a reserved keyword.",
-            "14:14 Event `Print` name cannot be a reserved keyword.",
-            "15:14 Event `Exit` name cannot be a reserved keyword."
+            "9:28 A `Set` parameter of an event is not supported yet in PHP#."
         ]
     );
     assert_eq!(issues(fixed), Vec::<String>::new());
@@ -431,6 +428,7 @@ fn every_body_is_written_in_braces() {
         ),
         ("        if (extra > 1) extra = 1;\n", "7:24", "{ extra = 1; }"),
         ("        if (extra > 1) this.run(extra);\n", "7:24", "{ this.run(extra); }"),
+        ("        if (extra > 10);\n", "7:24", "{ }"),
         ("        while (extra > 1) return 1;\n", "7:27", "{ return 1; }"),
         ("        while (extra > 1) {\n            if (extra > 2) break;\n        }\n", "8:28", "{ break; }"),
         ("        while (extra > 1) {\n            if (extra > 2) continue;\n        }\n", "8:28", "{ continue; }"),
@@ -600,13 +598,6 @@ fn null_coalescing_assignment_to_a_const_local_is_an_error() {
 }
 
 #[test]
-fn reassigning_a_const_local_spelled_in_capitals_is_an_error() {
-    let code = leak(method("        CONST base = 2;\n        base = 3;\n        return base;\n"));
-
-    assert_eq!(issues(code), ["8:9 Cannot assign to `base`: it is declared with `const`."]);
-}
-
-#[test]
 fn incrementing_or_decrementing_a_const_local_is_an_error() {
     let code = leak(method(
         "        const base = 2;\n        base++;\n        ++base;\n        base--;\n        --base;\n        return base;\n",
@@ -666,17 +657,52 @@ fn a_statement_at_file_level_is_an_error() {
     for statement in [
         "let total = 1;",
         "strlen(\"x\");",
+        "unset(here);",
+        "isset(here);",
         "if (true) { }",
         "while (false) { }",
+        "do { } while (false);",
         "for (const n of [1]) { }",
+        "for (;;) { }",
+        "try { } catch (Exception e) { }",
+        "match (1) { _ => { } }",
+        "break;",
+        "continue;",
+        "switch (1) { }",
+        "global $g;",
+        "static $s = 1;",
         "return;",
         "{ }",
         "echo 1;",
+        ";",
     ] {
         let code = leak(format!("namespace App.Tenant;\n\n{statement}\n\nclass Report\n{{\n}}\n"));
 
         assert_eq!(issues(code), ["3:1 A statement cannot sit at file level in PHP#."], "{statement}");
     }
+
+    let jump = "namespace App.Tenant;\n\ngoto end;\nend:\n\nclass Report\n{\n}\n";
+
+    assert_eq!(
+        issues(jump),
+        ["3:1 A statement cannot sit at file level in PHP#.", "4:1 A statement cannot sit at file level in PHP#."]
+    );
+}
+
+/// Every `.sharp` file runs with `strict_types=1`, so PHP's `declare` line is one error wherever it is written, and the
+/// file compiles without it.
+#[test]
+fn declare_strict_types_is_one_error_wherever_it_is_written() {
+    let message = "PHP# is always strict: remove `declare(strict_types=1);`.";
+    let before = "declare(strict_types=1);\n\nnamespace App.Tenant;\n\nclass Report\n{\n}\n";
+    let after = "namespace App.Tenant;\n\ndeclare(strict_types=1);\n\nclass Report\n{\n}\n";
+    let inside = leak(method("        declare(strict_types=1);\n        return extra;\n"));
+    let removed = leak(method("        return extra;\n"));
+
+    assert_eq!(issues(before), [format!("1:1 {message}")]);
+    assert_eq!(issues(after), [format!("3:1 {message}")]);
+    assert_eq!(issues(inside), [format!("7:9 {message}")]);
+    assert_eq!(issues(removed), Vec::<String>::new());
 }
 
 #[test]
@@ -793,10 +819,11 @@ fn the_keyword_names_example_reserves_only_the_keywords_php_sharp_uses() {
 }
 
 /// Spec section 2, after C#'s keywords: every word that starts or structures PHP# syntax is reserved, so it can't name
-/// a `const` or `let` local or a parameter. `this` keeps its own message. The name the help suggests compiles.
+/// a `const` or `let` local, a parameter, a catch variable or a pattern variable. `this` keeps its own message. The
+/// name the help suggests compiles.
 #[test]
 fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
-    const RESERVED: [&str; 50] = [
+    const RESERVED: [&str; 52] = [
         "let",
         "const",
         "emit",
@@ -827,6 +854,7 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
         "case",
         "event",
         "extern",
+        "foreign",
         "module",
         "struct",
         "static",
@@ -836,6 +864,7 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
         "internal",
         "abstract",
         "final",
+        "sealed",
         "override",
         "virtual",
         "required",
@@ -858,6 +887,18 @@ fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
                 leak(format!("namespace App.Tenant;\n\nclass Report\n{{\n    public int run(int {word}) => 1;\n}}\n")),
                 "5:24",
                 "parameter",
+            ),
+            (
+                leak(method(&format!(
+                    "        try {{ return 1; }} catch (Exception {word}) {{ return 2; }}\n        return extra;\n"
+                ))),
+                "7:44",
+                "catch variable",
+            ),
+            (
+                leak(method(&format!("        if (extra is int {word}) {{ return 1; }}\n        return extra;\n"))),
+                "7:26",
+                "pattern variable",
             ),
         ];
 
@@ -1387,21 +1428,87 @@ fn a_reserved_class_name_is_an_error() {
     assert_eq!(issues(code), ["3:7 Cannot use `Mixed` as a class name: it is reserved."]);
 }
 
-/// Spec section 2: a keyword PHP# uses can't name a class. A PHP# keyword PHP doesn't reserve, such as `internal`, is
-/// lowercase, and spec section 24 capitalizes every type, so the capitalized name compiles, as C#'s keywords are
-/// lowercase and `Internal` names a class there.
+/// Spec sections 2 and 24: a type takes any capitalized word but the type names the engine reserves. PHP#'s keywords
+/// are lowercase and case-sensitive, as C#'s are, so `Match` and `Internal` name a class, as every PHP keyword PHP#
+/// doesn't use does, capitalized. `Self` is the one capitalized keyword, and the engine reserves it with `True`,
+/// `False`, `Null`, `Static`, `Parent`, `Array` and `Callable`. A lowercase keyword gets spec section 24's error.
 #[test]
-fn a_php_sharp_keyword_is_not_a_class_name() {
-    let code = "namespace App.Tenant;\n\nclass internal\n{\n}\n";
-    let fixed = "namespace App.Tenant;\n\nclass Internal\n{\n}\n";
+fn a_type_takes_any_capitalized_word_but_a_reserved_type_name() {
+    const PHP_ONLY: [&str; 42] = [
+        "fn",
+        "or",
+        "and",
+        "die",
+        "use",
+        "var",
+        "xor",
+        "echo",
+        "eval",
+        "from",
+        "goto",
+        "list",
+        "array",
+        "clone",
+        "empty",
+        "endif",
+        "isset",
+        "print",
+        "trait",
+        "unset",
+        "elseif",
+        "endfor",
+        "global",
+        "parent",
+        "switch",
+        "declare",
+        "default",
+        "extends",
+        "foreach",
+        "include",
+        "require",
+        "callable",
+        "endwhile",
+        "function",
+        "endswitch",
+        "insteadof",
+        "enddeclare",
+        "endforeach",
+        "implements",
+        "instanceof",
+        "include_once",
+        "require_once",
+    ];
+    const RESERVED: [&str; 8] = ["Self", "True", "False", "Null", "Static", "Parent", "Array", "Callable"];
+
+    for word in PHP_ONLY.iter().chain(&SHARP_KEYWORDS) {
+        let name = format!("{}{}", word[..1].to_uppercase(), &word[1..]);
+        let declarations = [
+            (format!("class {name}\n{{\n}}\n"), "3:7"),
+            (format!("interface {name}\n{{\n}}\n"), "3:11"),
+            (format!("enum {name}\n{{\n    case One;\n}}\n"), "3:6"),
+            (format!("event {name}(int id);\n"), "3:7"),
+        ];
+
+        for (declaration, at) in declarations {
+            let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
+            let expected = if RESERVED.contains(&name.as_str()) {
+                vec![format!("{at} Cannot use `{name}` as a class name: it is reserved.")]
+            } else {
+                vec![]
+            };
+
+            assert_eq!(issues(code), expected, "{code}");
+        }
+    }
+
+    let lowercase = "namespace App.Tenant;\n\nclass internal\n{\n}\n";
 
     assert_eq!(
-        issues(code),
+        issues(lowercase),
         [
             "3:7 `internal` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
         ]
     );
-    assert_eq!(issues(fixed), Vec::<String>::new());
 }
 
 #[test]

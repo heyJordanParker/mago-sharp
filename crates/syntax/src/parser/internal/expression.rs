@@ -42,7 +42,6 @@ use crate::cst::cst::UnaryPrefix;
 use crate::cst::cst::UnaryPrefixOperator;
 use crate::dialect::Dialect;
 use crate::error::ParseError;
-use crate::lexer::lookup_keyword;
 use crate::parser::MAX_RECURSION_DEPTH;
 use crate::parser::Parser;
 use crate::token::Associativity;
@@ -427,7 +426,7 @@ where
                 T!["?->"]
             }
             (Dialect::Sharp, T![Identifier]) => {
-                lookup_keyword(token.value).filter(TokenKind::is_infix).unwrap_or(token.kind)
+                self.php_keyword(token).filter(TokenKind::is_infix).unwrap_or(token.kind)
             }
             _ => token.kind,
         })

@@ -12,8 +12,8 @@ use crate::dialect::Dialect;
 ///
 /// Each word starts or structures PHP# syntax, so no PHP# name can be one, as C# reserves its keywords. A `.sharp` file
 /// reads any other PHP keyword as a plain name, and so are the words that mean something only inside their own
-/// construct, such as `get`, `of` and `default`, as C#'s contextual keywords are.
-pub const SHARP_KEYWORDS: [&str; 50] = [
+/// construct, such as `get`, `of` and `default`, as C#'s contextual keywords are. [`is_sharp_keyword`] reads them.
+pub const SHARP_KEYWORDS: [&str; 52] = [
     "let",
     "const",
     "emit",
@@ -44,6 +44,7 @@ pub const SHARP_KEYWORDS: [&str; 50] = [
     "case",
     "event",
     "extern",
+    "foreign",
     "module",
     "struct",
     "static",
@@ -53,6 +54,7 @@ pub const SHARP_KEYWORDS: [&str; 50] = [
     "internal",
     "abstract",
     "final",
+    "sealed",
     "override",
     "virtual",
     "required",
@@ -65,6 +67,15 @@ pub const SHARP_KEYWORDS: [&str; 50] = [
     "super",
     "Self",
 ];
+
+/// Whether `word` is one of the [`SHARP_KEYWORDS`], or PHP's `self`.
+///
+/// They are case-sensitive, as C#'s are, so `Match` and `Return` are names, a class's included. PHP's `self` stays a
+/// keyword, so its error names the PHP# form `Self`.
+#[must_use]
+pub fn is_sharp_keyword(word: &[u8]) -> bool {
+    word == b"self" || SHARP_KEYWORDS.iter().any(|keyword| keyword.as_bytes() == word)
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, Display)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

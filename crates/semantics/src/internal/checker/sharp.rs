@@ -38,7 +38,6 @@ use mago_syntax::cst::Construct;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DirectVariable;
-use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
@@ -107,14 +106,12 @@ use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::token::GetPrecedence;
 use mago_syntax::token::Precedence;
-use mago_syntax::token::SHARP_KEYWORDS;
+use mago_syntax::token::is_sharp_keyword;
 use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::internal::checker::class_like::check_law_parameters;
 use crate::internal::consts::RESERVED_CLASS_NAMES;
-use crate::internal::consts::RESERVED_KEYWORDS;
-use crate::internal::consts::SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED;
 use crate::internal::context::Context;
 
 /// The PHP superglobals, which spec section 29 removes. A PHP# local or parameter of one of these names would read or
@@ -509,13 +506,24 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(File)
         }
+        (Node::Statement(Statement::Declare(declare)), _) => {
+            let head = BytesDisplay(context.get_code_snippet(declare.declare.span.join(declare.right_parenthesis)));
+            context.report(
+                Issue::error(format!("PHP# is always strict: remove `{head};`."))
+                    .with_annotation(Annotation::primary(declare.span()).with_message("Written here."))
+                    .with_note("Every `.sharp` file runs with `strict_types=1`."),
+            );
+
+            None
+        }
         // Spec section 27: a `.sharp` file declares one type, so code at file level is never valid.
         (Node::Statement(statement), File) if runs_code(statement) => {
+            let help = if matches!(statement, Statement::Noop(_)) { "Delete it." } else { "Move it into a method." };
             context.report(
                 Issue::error("A statement cannot sit at file level in PHP#.")
                     .with_annotation(Annotation::primary(statement.span()).with_message("Written at file level."))
                     .with_note("A `.sharp` file holds its namespace, its imports and one type, and code runs in that type's methods.")
-                    .with_help("Move it into a method."),
+                    .with_help(help),
             );
 
             None
@@ -2578,7 +2586,8 @@ fn write_target<'ast, 'arena>(node: Node<'ast, 'arena>) -> Option<&'ast Expressi
     }
 }
 
-/// Whether a statement runs code, as a method body's statements do, rather than declaring something.
+/// Whether a statement runs code, as a method body's statements do, rather than declaring something. PHP's `foreach`
+/// is a parse error in a `.sharp` file, and `unset(…)` is a call there.
 const fn runs_code(statement: &Statement) -> bool {
     matches!(
         statement,
@@ -2586,7 +2595,6 @@ const fn runs_code(statement: &Statement) -> bool {
             | Statement::Goto(_)
             | Statement::Label(_)
             | Statement::Try(_)
-            | Statement::Foreach(_)
             | Statement::For(_)
             | Statement::ForOf(_)
             | Statement::While(_)
@@ -2600,19 +2608,35 @@ const fn runs_code(statement: &Statement) -> bool {
             | Statement::Echo(_)
             | Statement::Global(_)
             | Statement::Static(_)
-            | Statement::Unset(_)
             | Statement::LocalDeclaration(_)
             | Statement::PatternMatch(_)
+            | Statement::Noop(_)
     )
+}
+
+/// Whether the walk is inside a statement at file level that runs code, which the file-level rule refuses whole, so
+/// a refusal of a part of it would report the statement twice.
+fn is_in_file_level_code(context: &Context<'_, '_, '_>) -> bool {
+    context
+        .ancestors
+        .iter()
+        .find_map(|node| match node {
+            Node::Statement(Statement::Namespace(_)) => None,
+            Node::Statement(statement) => Some(runs_code(statement)),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// The first body of an `if`, `else` or loop that is not a block in braces, with the block to write in its place. An
 /// `else` may also hold the next `if`, whose body is a block too. A colon-delimited body, from its `:` to its `endif;`,
-/// `endwhile;` or `endfor;`, is written as blocks whole, its `elseif` clauses as `else if`.
+/// `endwhile;` or `endfor;`, is written as blocks whole, its `elseif` clauses as `else if`. A lone `;` body is the
+/// empty block.
 fn body_without_braces(statement: &Statement, context: &Context<'_, '_, '_>) -> Option<(Span, String)> {
-    let unbraced = |body: &Statement| {
-        (!matches!(body, Statement::Block(_)))
-            .then(|| (body.span(), format!("{{ {} }}", BytesDisplay(context.get_code_snippet(body)))))
+    let unbraced = |body: &Statement| match body {
+        Statement::Block(_) => None,
+        Statement::Noop(_) => Some((body.span(), "{ }".to_owned())),
+        _ => Some((body.span(), format!("{{ {} }}", BytesDisplay(context.get_code_snippet(body))))),
     };
     let block = |statements: &Sequence<Statement>| {
         let written: Vec<String> =
@@ -2934,11 +2958,19 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
         return None;
     }
 
-    // A named constructor belongs to the class that declares it, spec section 9.1, and `Self` can be any subclass.
+    // A named constructor belongs to the class that declares it, spec section 9.1, and `Self` can be any subclass. The
+    // file shows the class only when it declares the named constructor, and the analyzer names any other.
     if let (Expression::Self_(_), Some(constructor), Some(arguments)) =
         (instantiation.class, &instantiation.constructor, &instantiation.argument_list)
-        && let Some(class) = enclosing_class(context.program, instantiation.span())
     {
+        let Some(class) = enclosing_class(context.program, instantiation.span()).filter(|class| {
+            class.members.iter().any(|member| {
+                matches!(member, ClassLikeMember::NamedConstructor(declared)
+                    if declared.name.value.eq_ignore_ascii_case(constructor.name.value))
+            })
+        }) else {
+            return Some(Place::Instantiation);
+        };
         let fix = format!(
             "new {}.{}{}",
             BytesDisplay(class.name.value),
@@ -3643,22 +3675,15 @@ pub fn check_binding_errors(context: &mut Context<'_, '_, '_>) {
     }
 }
 
-/// Checks the name of a PHP# class, interface or enum against the names the engine reserves, beyond the keywords the
-/// PHP checks reject, against the `__Something__` names spec section 27 removes, and against spec section 24's
-/// capital letter. A name gets the first of these errors only. The standard library's `Sharp.Int`, `Sharp.Float` and
-/// `Sharp.Bool` are the engine's one exception, and the analyzer refuses them in any file that is not the standard
-/// library's.
+/// Checks the name of a PHP# class, interface, enum or event against the type names the engine reserves, against the
+/// `__Something__` names spec section 27 removes, and against spec section 24's capital letter. A name gets the first
+/// of these errors only. Any other word names a type, a PHP keyword PHP# doesn't use included, and so does a
+/// capitalized PHP# keyword, since PHP#'s keywords are lowercase but `Self`, which the engine reserves. The standard
+/// library's `Sharp.Int`, `Sharp.Float` and `Sharp.Bool` are the engine's one exception, and the analyzer refuses
+/// them in any file that is not the standard library's.
 #[inline]
 pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, '_, '_>) {
-    let is_keyword = RESERVED_KEYWORDS
-        .iter()
-        .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
-        .any(|keyword| keyword.eq_ignore_ascii_case(class_name.value));
-
-    if is_reserved_class_name(class_name.value)
-        && !is_keyword
-        && !is_sharp_type_class(context.get_name(class_name.span.start))
-    {
+    if is_reserved_class_name(class_name.value) && !is_sharp_type_class(context.get_name(class_name.span.start)) {
         let name = BytesDisplay(class_name.value);
 
         context.report(
@@ -3666,32 +3691,11 @@ pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, 
                 .with_annotation(Annotation::primary(class_name.span).with_message("Class declared here."))
                 .with_note("PHP# reserves this name for a type."),
         );
-    } else if is_keyword || is_magic_name(class_name.value) {
+    } else if is_magic_name(class_name.value) {
         check_declared_name(class_name.value, class_name.span, context);
     } else {
         check_capitalized(class_name.value, class_name.span, context);
     }
-}
-
-/// Checks an event's name as a class's: PHP refuses a class named with a reserved keyword, as `Empty`, and an event
-/// runs as a class, spec section 15.
-#[inline]
-pub fn check_event_name(event: &Event, context: &mut Context<'_, '_, '_>) {
-    let name = event.name.value;
-    if RESERVED_KEYWORDS
-        .iter()
-        .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
-        .any(|keyword| keyword.eq_ignore_ascii_case(name))
-    {
-        context.report(
-            Issue::error(format!("Event `{}` name cannot be a reserved keyword.", BytesDisplay(name)))
-                .with_annotation(Annotation::primary(event.name.span).with_message("A reserved keyword."))
-                .with_note("An event runs as a class, and PHP reserves this name.")
-                .with_help("Rename the event."),
-        );
-    }
-
-    check_class_name(&event.name, context);
 }
 
 /// Reports a type name or a namespace part a PHP# file gives that does not start with a capital letter, A to Z, as
@@ -3867,7 +3871,7 @@ pub fn check_constant_access(constant_access: &ConstantAccess, context: &mut Con
     match context.names.binding(&constant_access.name) {
         Some(Binding::Member) => report_bare_member(constant_access.span(), constant_access.name.value(), context),
         // A bare `die`, which no local names, is PHP's construct.
-        Some(Binding::Constant) => {
+        Some(Binding::Constant) if !is_in_file_level_code(context) => {
             report_removed_construct(constant_access.name.value(), constant_access.span(), context);
         }
         _ => {}
@@ -3881,7 +3885,7 @@ pub fn check_function_call(function_call: &FunctionCall, context: &mut Context<'
     };
 
     let function = identifier.last_segment();
-    if context.names.binding(identifier).is_none() {
+    if context.names.binding(identifier).is_none() && !is_in_file_level_code(context) {
         report_removed_construct(function, function_call.span(), context);
     }
 
@@ -3924,6 +3928,10 @@ pub fn check_function(function: &Function, context: &mut Context<'_, '_, '_>) {
 
 #[inline]
 pub fn check_global(global: &Global, context: &mut Context<'_, '_, '_>) {
+    if is_in_file_level_code(context) {
+        return;
+    }
+
     context.report(
         Issue::error("`global` is not part of PHP#.")
             .with_annotation(Annotation::primary(global.global.span).with_message("Used here."))
@@ -4038,7 +4046,7 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
                 .with_annotation(Annotation::primary(span).with_message("Declared here."))
                 .with_note(format!("A PHP# {kind} runs as a PHP variable of the same name, which would be `${name}`.")),
         );
-    } else if SHARP_KEYWORDS.iter().any(|keyword| keyword.as_bytes().eq_ignore_ascii_case(name)) {
+    } else if is_sharp_keyword(name) {
         let renamed = format!("{}Value", name.to_ascii_lowercase().escape_ascii());
         let name = BytesDisplay(name);
 

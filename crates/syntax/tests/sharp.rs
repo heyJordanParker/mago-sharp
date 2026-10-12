@@ -1967,6 +1967,136 @@ fn the_use_keyword_is_a_parse_error_in_every_form() {
     }
 }
 
+/// The places the program reads `word` as a name, each once. PHP's construct holds the word it starts as a keyword.
+fn name_count(program: &Program<'_>, word: &str) -> usize {
+    let mut spans: Vec<mago_span::Span> = Node::Program(program).filter_map(|node| match node {
+        Node::LocalIdentifier(name) if name.value == word.as_bytes() => Some(name.span),
+        Node::Identifier(Identifier::Local(name)) if name.value == word.as_bytes() => Some(name.span),
+        _ => None,
+    });
+    spans.sort();
+    spans.dedup();
+
+    spans.len()
+}
+
+/// Spec section 2: a `.sharp` file reads a PHP keyword PHP# doesn't use as a plain name, and as PHP's construct only
+/// where the construct can follow it. A PHP# infix word never starts an operand, and `(…)` followed by `:` or a name
+/// is the construct only after `fn` and `function`, or after `foreach`, `switch` and `elseif` at a statement's start.
+#[test]
+fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
+    const PHP_ONLY: [&str; 43] = [
+        "fn",
+        "or",
+        "and",
+        "die",
+        "use",
+        "var",
+        "xor",
+        "echo",
+        "eval",
+        "from",
+        "goto",
+        "list",
+        "array",
+        "clone",
+        "empty",
+        "endif",
+        "isset",
+        "print",
+        "trait",
+        "unset",
+        "elseif",
+        "endfor",
+        "global",
+        "parent",
+        "switch",
+        "declare",
+        "default",
+        "extends",
+        "foreach",
+        "include",
+        "require",
+        "callable",
+        "endwhile",
+        "function",
+        "endswitch",
+        "insteadof",
+        "enddeclare",
+        "endforeach",
+        "implements",
+        "instanceof",
+        "include_once",
+        "require_once",
+        "__halt_compiler",
+    ];
+    let method = |body: &str| -> &'static str {
+        Box::leak(
+            format!("class Report\n{{\n    public Any run(Any value, bool flag)\n    {{\n{body}    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    let mut names = vec![
+        ("empty", method("        const empty = value;\n        return empty is bool;\n")),
+        (
+            "print",
+            method(
+                "        const print = value;\n        if (print is string text) { return text; }\n        return 1;\n",
+            ),
+        ),
+        ("isset", method("        const isset = value;\n        return isset is null;\n")),
+        ("default", method("        const default = value;\n        return default is int;\n")),
+        ("clone", method("        const clone = value;\n        return clone is int;\n")),
+        ("print", method("        const print = (int a) => a;\n        return flag ? print(1) : 0;\n")),
+        ("echo", method("        const echo = (int a) => a;\n        return flag ? echo(1) : 0;\n")),
+        ("empty", method("        const empty = (int a) => a;\n        return empty(1) is int;\n")),
+    ];
+    for word in PHP_ONLY {
+        for row in [
+            format!("        return {word} is int;\n"),
+            format!("        return {word} as int;\n"),
+            format!("        return {word} ? 1 : 0;\n"),
+            format!("        return {word} * 2;\n"),
+            format!("        return {word}.member;\n"),
+            format!("        return {word}(1);\n"),
+            format!("        {word}(1);\n        return 1;\n"),
+            format!("        {word}.member = 1;\n        return 1;\n"),
+        ] {
+            // `declare(` at a statement's start is PHP's construct, which the checker refuses whole.
+            if word != "declare" || !row.starts_with("        declare(") {
+                names.push((word, method(&format!("        const {word} = value;\n{row}"))));
+            }
+        }
+    }
+
+    for (word, code) in names {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        assert_eq!(name_count(program, word), 2, "{code}");
+    }
+
+    for (word, code) in [
+        ("print", method("        print \"y\";\n        return 1;\n")),
+        ("echo", method("        echo value;\n        return 1;\n")),
+        ("foreach", method("        foreach (value as item) { }\n        return 1;\n")),
+        ("foreach", method("        foreach (value as item):\n        endforeach;\n        return 1;\n")),
+        ("switch", method("        switch (value):\n        endswitch;\n        return 1;\n")),
+        ("declare", method("        declare(strict_types=1);\n        return 1;\n")),
+        ("list", method("        list(first) = value;\n        return first;\n")),
+        ("fn", method("        return fn(int x): int => x;\n")),
+        ("function", method("        return function (x) use (flag) { return x; };\n")),
+        ("elseif", method("        if (flag) { return 1; } elseif (value) return 2;\n        return 3;\n")),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert_eq!(name_count(program, word), 0, "{code}");
+    }
+}
+
 #[test]
 fn a_php_closure_reports_its_function_and_its_use_clause() {
     let arena = LocalArena::new();

@@ -34,7 +34,9 @@ where
                 let left_parenthesis = self.stream.eat_span(T!["("])?;
                 let hint = self.parse_type_hint()?;
                 let var = match self.stream.peek_kind(0)? {
-                    Some(T![Identifier]) if self.dialect.is_sharp() => Some(self.parse_bare_variable()?),
+                    Some(kind) if self.dialect.is_sharp() && kind.is_identifier_maybe_reserved() => {
+                        Some(self.parse_bare_variable()?)
+                    }
                     Some(T!["$variable"]) => {
                         let variable = self.parse_direct_variable()?;
                         if self.dialect.is_sharp() {

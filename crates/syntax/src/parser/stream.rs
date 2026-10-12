@@ -235,19 +235,19 @@ where
         }
     }
 
-    /// Peeks past the `(` at the head of the stream to the `)` that closes it, and returns the kind of the token after
-    /// that `)`, or `None` at the end of the file. It reads ahead with a copy of the lexer, so it consumes nothing.
+    /// Peeks past the first `(` ahead to the `)` that closes it, and returns the token after that `)`, or `None` at the
+    /// end of the file. It reads ahead with a copy of the lexer, so it consumes nothing.
     ///
     /// # Errors
     ///
     /// Returns a [`ParseError`] if the lexer fails to produce a token.
-    pub fn peek_kind_after_parentheses(&mut self) -> Result<Option<TokenKind>, ParseError> {
+    pub fn peek_after_parentheses(&mut self) -> Result<Option<Token<'input>>, ParseError> {
         let mut tokens = self.peek_tokens();
         let mut depth = 0usize;
         while let Some(token) = tokens.next() {
             match token?.kind {
                 T!["("] => depth += 1,
-                T![")"] if depth == 1 => return Ok(tokens.next().transpose()?.map(|token| token.kind)),
+                T![")"] if depth == 1 => return Ok(tokens.next().transpose()?),
                 T![")"] => depth -= 1,
                 _ => {}
             }

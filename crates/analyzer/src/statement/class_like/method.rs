@@ -9,7 +9,10 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::union::TUnion;
 
 use mago_names::binding::MethodParts;
@@ -54,6 +57,7 @@ use crate::statement::function_like::unused_parameter;
 use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
 use crate::utils::missing_type_hints;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
@@ -426,13 +430,34 @@ pub(super) fn check_super_call<A>(
         {
             let mut parameters = Vec::new();
             let mut arguments = Vec::new();
+            let mut classes = Vec::new();
             for parameter in &constructor_of_base.parameters {
+                let hint = parameter.get_type_metadata().map(|hint| &hint.type_union);
+                let default = match parameter.get_default_type() {
+                    Some(default) => match written_default(&default.type_union, hint) {
+                        Some(default) => format!(" = {default}"),
+                        // PHP passes this default and every one after it, so the constructor leaves them out.
+                        None => break,
+                    },
+                    None => String::new(),
+                };
                 let name = String::from_utf8_lossy(mago_bytes::trim_start_byte(parameter.get_name().0.as_bytes(), b'$'));
                 let spread = if parameter.flags.is_variadic() { "..." } else { "" };
-                let hint = parameter.get_type_metadata().map(|hint| display_type(context, &hint.type_union));
-                parameters.push(format!("{} {spread}{name}", hint.unwrap_or_default()));
+                let written_hint = match hint {
+                    Some(hint) => {
+                        classes.extend(hint.get_all_child_nodes().into_iter().filter_map(|node| match node {
+                            TypeRef::Atomic(TAtomic::Object(object)) => object.get_name(),
+                            _ => None,
+                        }));
+
+                        display_type(context, hint)
+                    }
+                    None => "Any?".to_owned(),
+                };
+                parameters.push(format!("{written_hint} {spread}{name}{default}"));
                 arguments.push(format!("{spread}{name}"));
             }
+            let imports = display_missing_imports(context, classes).map(|imports| format!(" {imports}")).unwrap_or_default();
 
             context.collector.report_with_code(
                 IssueCode::MissingSuperCall,
@@ -444,13 +469,37 @@ pub(super) fn check_super_call<A>(
                     "`{base_name}`'s constructor takes arguments, and `{class_name}`'s initial values run in its constructor."
                 ))
                 .with_help(format!(
-                    "Write `public {class_name}({}) : super({}) {{ }}`.",
+                    "Write `public {class_name}({}) : super({}) {{ }}`.{imports}",
                     parameters.join(", "),
                     arguments.join(", ")
                 )),
             );
         }
         _ => {}
+    }
+}
+
+/// The default value of a parameter of type `hint` as PHP# code writes it, when the default is a literal PHP# writes
+/// alike. An empty PHP array is `[:]` where the parameter is a map.
+fn written_default(default: &TUnion, hint: Option<&TUnion>) -> Option<String> {
+    if default.is_null() {
+        Some("null".to_owned())
+    } else if default.is_true() {
+        Some("true".to_owned())
+    } else if default.is_false() {
+        Some("false".to_owned())
+    } else if default.is_empty_array() {
+        let is_map = hint.and_then(TUnion::get_single_array).is_some_and(|array| !array.is_list());
+
+        Some(if is_map { "[:]" } else { "[]" }.to_owned())
+    } else if let Some(int) = default.get_single_literal_int_value() {
+        Some(int.to_string())
+    } else {
+        default
+            .get_single_literal_string_value()
+            .and_then(|string| std::str::from_utf8(string).ok())
+            .filter(|string| !string.contains(['\\', '"', '$', '{']))
+            .map(|string| format!("\"{string}\""))
     }
 }
 

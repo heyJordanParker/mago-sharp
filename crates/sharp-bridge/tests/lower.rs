@@ -246,9 +246,9 @@ fn a_construct_outside_the_slice_returns_its_not_supported_error() {
     assert_eq!(lowered.diagnostics(), ["9:9 compile error: This statement is not supported yet in PHP#."]);
 }
 
-/// Spec section 2: a PHP keyword PHP# doesn't use is a plain name, and so is a word that means something only inside
-/// its own PHP# construct, as C#'s contextual keywords are. Each names a property, a local and a parameter, and each
-/// reads as the variable or property of its name.
+/// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something
+/// only inside its own PHP# construct, as C#'s contextual keywords are. Each names a property, a local and a
+/// parameter, and each reads as the variable or property of its name.
 ///
 /// ```php
 /// $list = $extra + $this->list; return $list;
@@ -256,8 +256,58 @@ fn a_construct_outside_the_slice_returns_its_not_supported_error() {
 #[test]
 fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() {
     let words = [
-        "isset", "empty", "unset", "array", "list", "echo", "print", "die", "foreach", "global", "trait", "get", "set",
-        "init", "field", "value", "of", "via", "uses", "and", "or", "not", "default",
+        "fn",
+        "or",
+        "and",
+        "die",
+        "use",
+        "var",
+        "xor",
+        "echo",
+        "eval",
+        "from",
+        "goto",
+        "list",
+        "array",
+        "clone",
+        "empty",
+        "endif",
+        "isset",
+        "print",
+        "trait",
+        "unset",
+        "elseif",
+        "endfor",
+        "global",
+        "parent",
+        "switch",
+        "declare",
+        "default",
+        "extends",
+        "foreach",
+        "include",
+        "require",
+        "callable",
+        "endwhile",
+        "function",
+        "endswitch",
+        "insteadof",
+        "enddeclare",
+        "endforeach",
+        "implements",
+        "instanceof",
+        "include_once",
+        "require_once",
+        "__halt_compiler",
+        "get",
+        "set",
+        "init",
+        "field",
+        "value",
+        "of",
+        "via",
+        "uses",
+        "not",
     ];
 
     for word in words {
@@ -280,6 +330,49 @@ fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() 
             "{word}"
         );
     }
+}
+
+/// Any word names a method, a property or a field, a keyword PHP# uses included, as in TypeScript and PHP: a member's
+/// name is written only where it is declared and after `.`, so it never reads as the keyword. A PHP# class can then
+/// override a plain PHP method named `is` or `lazy`, as Eloquent's `Model::is` and `Collection::lazy` are.
+///
+/// ```php
+/// return $this->is($this) ? $this->lazy()->match() : $this->default;
+/// ```
+#[test]
+fn any_word_names_a_member() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    private int return = 2;\n\n    public int default { get; } = 3;\n\n    public bool is(Report other) => other.default == this.default;\n\n    public int match() => this.return;\n\n    public Report lazy() => this;\n\n    public int run(int extra)\n    {\n        return this.is(this) ? this.lazy().match() : this.default;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(
+        lowered.body(),
+        "STMT_LIST\n  RETURN\n    CONDITIONAL\n      METHOD_CALL\n        VAR\n          ZVAL \"this\"\n        ZVAL \"is\"\n        ARG_LIST\n          VAR\n            ZVAL \"this\"\n      METHOD_CALL\n        METHOD_CALL\n          VAR\n            ZVAL \"this\"\n          ZVAL \"lazy\"\n          ARG_LIST\n        ZVAL \"match\"\n        ARG_LIST\n      PROP\n        VAR\n          ZVAL \"this\"\n        ZVAL \"default\"\n"
+    );
+}
+
+/// A PHP keyword PHP# doesn't use names a class, and so does a capitalized PHP# keyword, since PHP#'s keywords are
+/// lowercase. Code reads each one as a type and creates it. PHP reaches the class by its full name, as the engine
+/// takes any class name but the reserved type names.
+///
+/// ```php
+/// $print = new \App\Shop\Print(); $refund = new \App\Shop\Return(); return $print->n() + $refund->n();
+/// ```
+#[test]
+fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_a_class() {
+    let print = ("src/Shop/Print.sharp", "namespace App.Shop;\n\npublic class Print\n{\n    public int n() => 1;\n}\n");
+    let r#return =
+        ("src/Shop/Return.sharp", "namespace App.Shop;\n\npublic class Return\n{\n    public int n() => 2;\n}\n");
+    let lowered = Lowered::with(
+        "namespace App.Shop;\n\npublic class Match\n{\n    public int run(int extra)\n    {\n        Print print = new Print();\n        Return refund = new Return();\n        return print.n() + refund.n();\n    }\n}\n",
+        &[print, r#return],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        "STMT_LIST\n  ASSIGN\n    VAR\n      ZVAL \"print\"\n    NEW\n      ZVAL \"App\\\\Shop\\\\Print\"\n      ARG_LIST\n  ASSIGN\n    VAR\n      ZVAL \"refund\"\n    NEW\n      ZVAL \"App\\\\Shop\\\\Return\"\n      ARG_LIST\n  RETURN\n    BINARY_OP [1]\n      METHOD_CALL\n        VAR\n          ZVAL \"print\"\n        ZVAL \"n\"\n        ARG_LIST\n      METHOD_CALL\n        VAR\n          ZVAL \"refund\"\n        ZVAL \"n\"\n        ARG_LIST\n"
+    );
 }
 
 /// The PHP# form each refusal of `isset`, `empty`, `array` and `list` quotes compiles.

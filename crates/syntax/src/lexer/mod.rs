@@ -62,9 +62,9 @@ use crate::lexer::internal::mode::LexerMode;
 use crate::lexer::internal::utils::NumberKind;
 use crate::settings::LexerSettings;
 use crate::token::DocumentKind;
-use crate::token::SHARP_KEYWORDS;
 use crate::token::Token;
 use crate::token::TokenKind;
+use crate::token::is_sharp_keyword;
 
 mod internal;
 
@@ -1173,7 +1173,7 @@ impl<'input> Lexer<'input> {
             let word = self.input.read(length);
             // Spec section 2: a PHP keyword that PHP# doesn't use is a plain name in a `.sharp` file.
             if let Some(kind) = internal::keyword::lookup_keyword(word)
-                && (!self.sharp || SHARP_KEYWORDS.iter().any(|keyword| keyword.as_bytes().eq_ignore_ascii_case(word)))
+                && (!self.sharp || is_sharp_keyword(word))
             {
                 return (kind, length);
             }

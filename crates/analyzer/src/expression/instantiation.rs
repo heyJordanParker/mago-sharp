@@ -53,6 +53,7 @@ use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
+use crate::utils::names::sharp_code_class_name;
 use crate::utils::template::get_generic_parameter_for_offset;
 use crate::visibility::check_method_visibility;
 
@@ -348,17 +349,34 @@ where
                     .codebase
                     .get_declaring_method(metadata.name.as_bytes(), constructor.name.value)
                     .is_some_and(|method| method.flags.is_named_constructor());
-                let message = if inherited {
-                    format!("`{classname_str}` has no constructor `{name}`: named constructors are not inherited.")
-                } else {
-                    format!("`{classname_str}` has no constructor `{name}`.")
+                let issue = match (inherited, &classname.origin, argument_list) {
+                    // `new Self.of(…)` in a class that inherits `of`: semantics shows a class only in its own file.
+                    (true, ResolutionOrigin::Static { .. }, Some(arguments)) if context.dialect.is_sharp() => {
+                        let declaring = context.codebase.get_declaring_method_identifier(&constructor_id);
+                        let fix = format!(
+                            "new {}.{name}{}",
+                            sharp_code_class_name(
+                                context.codebase,
+                                &context.imported_names,
+                                &context.scope,
+                                declaring.get_class_name()
+                            ),
+                            BytesDisplay(&context.source_file.contents[arguments.span().to_range_usize()])
+                        );
+
+                        Issue::error("`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.")
+                            .with_annotation(Annotation::primary(instantiation_span).with_message("Created here."))
+                            .with_help(format!("Name its class: write `{fix}`."))
+                    }
+                    (true, ..) => Issue::error(format!(
+                        "`{classname_str}` has no constructor `{name}`: named constructors are not inherited."
+                    ))
+                    .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
+                    _ => Issue::error(format!("`{classname_str}` has no constructor `{name}`."))
+                        .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
                 };
 
-                context.collector.report_with_code(
-                    IssueCode::NonExistentMethod,
-                    Issue::error(message)
-                        .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
-                );
+                context.collector.report_with_code(IssueCode::NonExistentMethod, issue);
 
                 argument_list.analyze(context, block_context, artifacts)?;
 

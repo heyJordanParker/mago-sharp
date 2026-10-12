@@ -160,15 +160,20 @@ where
         Ok(self.arena.alloc(pattern))
     }
 
-    /// The name a type pattern declares, as in `int count`. `when`, which starts an arm's condition, `is`, which
-    /// starts another test, and `and` and `or`, which join patterns, are no names.
+    /// The name a type pattern declares, as in `int count`. `when`, which starts an arm's condition, and `and` and
+    /// `or`, which join patterns, are no names, and neither is `is` where it starts another test. A keyword parses as
+    /// the name, so the checker names a keyword a local can't take.
     fn parse_pattern_variable(&mut self) -> Result<Option<LocalIdentifier<'arena>>, ParseError> {
-        match self.stream.lookahead(0)? {
-            Some(token) if token.kind == T![Identifier] && !matches!(token.value, b"when" | b"is" | b"and" | b"or") => {
-                Ok(Some(self.parse_local_identifier()?))
-            }
-            _ => Ok(None),
-        }
+        let Some(token) = self.stream.lookahead(0)? else {
+            return Ok(None);
+        };
+        let is_name = match token.value {
+            b"when" | b"and" | b"or" => false,
+            b"is" => matches!(self.stream.peek_kind(1)?, Some(T![")" | "=>" | ";" | ","])),
+            _ => token.kind.is_identifier_maybe_reserved(),
+        };
+
+        if is_name { Ok(Some(self.parse_local_identifier()?)) } else { Ok(None) }
     }
 
     /// Whether `Case.Name` is followed by its fields in parentheses or a name, as an enum with data writes it.
