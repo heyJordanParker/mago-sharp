@@ -906,6 +906,8 @@ where
             method_metadata.is_static = true;
             method_metadata.is_final = false;
             method_metadata.is_abstract = false;
+            method_metadata.assigned_properties =
+                function_like::definitely_assigned_properties(&named_constructor.body, context);
             method.flags |= MetadataFlags::NAMED_CONSTRUCTOR;
             method.set_return_type_declaration_metadata(Some(TypeMetadata::new(
                 get_named_object(class.original_name, None),

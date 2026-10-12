@@ -4758,6 +4758,44 @@ fn a_named_constructor_body_runs_on_this() {
     );
 }
 
+/// Spec sections 6.1 and 10: a property written `required`, and a struct's property with no initial value, is set
+/// where its object is created. The constructor that runs sets the properties it assigns on every path: both arms of an
+/// `if`, every arm of a `match`, or a path that throws. A named constructor runs the main constructor first, and a
+/// helper method it calls counts for nothing. The object initializer sets the rest.
+#[test]
+fn every_required_property_is_set_where_its_object_is_created() {
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Label\n{\n    public required string text { get; init; }\n    public required string tone { get; init; }\n    public required int size { get; set; }\n\n    public Label() { }\n\n    public Label.titled(string title) : this()\n    {\n        this.text = title;\n        this.tone = \"plain\";\n        this.size = 1;\n    }\n}\n\nclass Ticket\n{\n    public required string kind { get; init; }\n    public required int price { get; init; }\n    public required int seats { get; init; }\n    public required string note { get; set; }\n\n    public Ticket(int code)\n    {\n        match (code) {\n            1 => { this.kind = \"adult\"; },\n            default => { this.kind = \"child\"; },\n        }\n        match (code) {\n            1 => { this.price = 10; },\n            default => {},\n        }\n        if (code < 0) {\n            throw new RuntimeException(\"negative\");\n        } else {\n            this.seats = code;\n        }\n        this.annotate();\n    }\n\n    public void annotate()\n    {\n        this.note = \"\";\n    }\n}\n\nstruct Point\n{\n    public int x { get; init; }\n    public int? y { get; init; }\n    public string? label { get; init; }\n    public int z { get; init; } = 0;\n}\n\nclass Shop\n{\n    public Label bare() => new Label();\n\n    public Label part() => new Label { text: \"a\" };\n\n    public Label whole() => new Label { text: \"a\", tone: \"b\", size: 1 };\n\n    public Label titled() => new Label.titled(\"t\");\n\n    public Ticket ticket() => new Ticket(1);\n\n    public Ticket priced() => new Ticket(1) { price: 5, note: \"n\" };\n\n    public Point point() => new Point { x: 1 };\n\n    public Point placed() => new Point { x: 1, y: null, label: null };\n}\n";
+
+    let note = "A property written `required`, and a struct's property with no initial value, is set where its object is created: by the constructor that runs, or by the object initializer.";
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shop.sharp", sharp), &[])
+            .iter()
+            .map(|issue| format!("{} {} | {}", located(sharp, issue), issue.message, issue.notes.join(" ")))
+            .collect::<Vec<_>>(),
+        [
+            format!("62:28 missing-required-property `new Label` must set `text`, `tone` and `size`. | {note}"),
+            format!("64:28 missing-required-property `new Label` must set `tone` and `size`. | {note}"),
+            format!("70:31 missing-required-property `new Ticket` must set `price` and `note`. | {note}"),
+            format!("74:29 missing-required-property `new Point` must set `y` and `label`. | {note}"),
+        ]
+    );
+}
+
+/// Spec section 6.1: a get-only property is set only while its object is created, so one without an initial value
+/// that no constructor sets on every path is an error. A main constructor parameter that declares it sets it.
+#[test]
+fn a_get_only_property_no_constructor_sets_is_an_error() {
+    let sharp = "namespace Demo;\n\nclass Total\n{\n    public int amount { get; }\n    public int count { get; }\n    public int size { get; }\n    public int rows { get; } = 0;\n\n    public Total(bool big, public int pages { get; })\n    {\n        if (big) {\n            this.amount = 10;\n        } else {\n            this.amount = 1;\n        }\n        if (big) {\n            this.count = 1;\n        }\n    }\n\n    public Total.sized() : this(true, 1)\n    {\n        this.size = 4;\n    }\n}\n\nstruct Point\n{\n    public int x { get; }\n    public int y { get; }\n\n    public Point(int x)\n    {\n        this.x = x;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Total.sharp", sharp), &[]),
+        [
+            "6:16 uninitialized-property `count` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
+            "31:16 uninitialized-property `y` is get-only and never set: set it in the main constructor, or give it an initial value. | ",
+        ]
+    );
+}
+
 /// Spec section 9.1: the main constructor sets a get-only property once, so a named constructor that sets it again is
 /// an error. One the main constructor leaves unset is the named constructor's to set, once.
 #[test]

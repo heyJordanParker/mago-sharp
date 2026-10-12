@@ -735,7 +735,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
 #[test]
 fn an_auto_property_is_a_property_with_its_set_visibility() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n}\n",
+        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    public int total { get; protected set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.id = 1;\n        this.hidden = 2;\n    }\n}\n",
     );
     let groups: Vec<(u32, String)> = lowered
         .nodes()
@@ -935,7 +935,7 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 #[test]
 fn accessor_bodies_are_property_hooks() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public void resize(int to)\n    {\n    }\n}\n",
+        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public Report()\n    {\n        this.guarded = 1;\n    }\n\n    public void resize(int to)\n    {\n    }\n}\n",
     );
 
     assert_eq!(
@@ -1141,7 +1141,7 @@ fn accessor_bodies_are_property_hooks() {
 #[test]
 fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is_refused() {
     let nested = Lowered::new(
-        "class Report\n{\n    public int a { get { if (this.ready()) { return field; } return 0; } }\n\n    public bool ready()\n    {\n        return true;\n    }\n}\n",
+        "class Report\n{\n    public int a { get { if (this.ready()) { return field; } return 0; } }\n\n    public Report()\n    {\n        this.a = 1;\n    }\n\n    public bool ready()\n    {\n        return true;\n    }\n}\n",
     );
     let lambda =
         Lowered::new("class Report\n{\n    public int b { get { const read = () => field; return read(); } }\n}\n");
@@ -12706,6 +12706,15 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                                           VAR
                                             ZVAL "input#1"
                                           ZVAL "owner"
+                  IF_ELEM
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        DIM
+                          VAR
+                            ZVAL "properties#4"
+                          ZVAL "owner"
+                        ZVAL null
                 IF
                   IF_ELEM
                     BINARY_OP [17]

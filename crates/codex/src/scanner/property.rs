@@ -201,12 +201,17 @@ where
                 .map(|item| {
                     let (name, name_span, mut has_default, mut default_type) =
                         scan_property_item(item, classname, context, scope);
-                    if is_sharp && !has_default {
+                    let is_required = is_sharp && is_required(&plain_property.modifiers);
+                    if is_sharp && !has_default && !is_required {
                         default_type = sharp_null_default(plain_property.hint.as_ref(), name_span);
                         has_default = default_type.is_some();
                     }
 
                     let mut item_flags = flags;
+
+                    if is_required {
+                        item_flags |= MetadataFlags::REQUIRED;
+                    }
 
                     if has_default {
                         item_flags |= MetadataFlags::HAS_DEFAULT;
@@ -300,7 +305,9 @@ where
                     type_metadata
                 });
             }
-            if is_sharp && !has_default && !hooked_property.hook_list.is_get_only() {
+            if is_sharp && is_required(&hooked_property.modifiers) {
+                flags |= MetadataFlags::REQUIRED;
+            } else if is_sharp && !has_default && !hooked_property.hook_list.is_get_only() {
                 default_type = sharp_null_default(hooked_property.hint.as_ref(), name_span);
                 has_default = default_type.is_some();
             }
@@ -500,6 +507,12 @@ where
     A: Arena,
 {
     accessors.is_get_only() && context.resolved_names.has_storage(accessors)
+}
+
+/// Whether a PHP# property is written `required`, spec section 6.1: each creation of its object sets it, so it takes
+/// no `null` default.
+fn is_required(modifiers: &Sequence<Modifier>) -> bool {
+    modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)))
 }
 
 /// The default of a PHP# field or auto-property with `set` of a nullable type written without an initial value: it

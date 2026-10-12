@@ -1070,6 +1070,21 @@ fn required_is_a_modifier_of_the_constructor_only() {
     assert_eq!(issues(code), ["5:12 This modifier is not supported yet in PHP#."]);
 }
 
+/// Spec section 6.1: a `required` property is set where its object is created, so it has an `init` or a `set` for the
+/// object initializer to call.
+#[test]
+fn a_required_property_has_init_or_set() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public required int count { get; }\n    public required int total { get; init; }\n    public required int size { get; set; }\n    private required int pages;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:12 `count` is required, so it is set when its object is created: give it `init` or `set`.",
+            "8:13 `pages` is required, so it is set when its object is created: give it `init` or `set`.",
+        ]
+    );
+}
+
 #[test]
 fn an_optional_parameter_before_a_required_one_is_an_error() {
     let code = leak(method("        return extra;\n").replace("int extra", "int first = 1, int extra, int last = 2"));

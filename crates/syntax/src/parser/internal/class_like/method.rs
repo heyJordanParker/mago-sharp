@@ -49,8 +49,9 @@ where
     /// The type is parsed once, and the name after it decides: a name followed by `(` makes a method, anything else
     /// a field. A type has no length limit, so no fixed lookahead can decide before it. A PHP property, which starts
     /// with `var` or a `$` variable, still parses so the rest of the class does, and its PHP syntax is an error. So do
-    /// `required` on any member but the constructor, which is one "not supported yet" error, and a type declared inside
-    /// the class-like. A class name, a `.` and a name followed by `(` is a named constructor.
+    /// `required` on a method or an operator, which is one "not supported yet" error, and a type declared inside the
+    /// class-like. `required` goes on the constructor, spec section 25, and on a property, section 6.1. A class name, a
+    /// `.` and a name followed by `(` is a named constructor.
     pub(crate) fn parse_sharp_member_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -112,11 +113,8 @@ where
                 body: self.parse_method_body()?,
             }));
         }
-        // Spec section 25 marks a constructor `required`, and section 6.1 a property, which is not supported yet.
-        if let Some(required) = modifiers.iter().find(|modifier| matches!(modifier, Modifier::Required(_))) {
-            self.errors.push(ParseError::NotSupportedYetInSharp("`required`", required.span()));
-        }
         if self.is_at_operator_keyword()? {
+            self.refuse_required(&modifiers);
             return Ok(ClassLikeMember::Operator(Operator {
                 attribute_lists: attributes,
                 modifiers,
@@ -144,6 +142,7 @@ where
             )?));
         }
 
+        self.refuse_required(&modifiers);
         Ok(ClassLikeMember::Method(Method {
             attribute_lists: attributes,
             modifiers,
@@ -155,6 +154,13 @@ where
             initializer: None,
             body: self.parse_method_body()?,
         }))
+    }
+
+    /// Refuses `required` on a member that is neither the constructor nor a property.
+    fn refuse_required(&mut self, modifiers: &Sequence<'arena, Modifier<'arena>>) {
+        if let Some(required) = modifiers.iter().find(|modifier| matches!(modifier, Modifier::Required(_))) {
+            self.errors.push(ParseError::NotSupportedYetInSharp("`required`", required.span()));
+        }
     }
 
     /// Parses a type declared inside a PHP# class-like whole, so the class-like parses on, and returns its refusal:

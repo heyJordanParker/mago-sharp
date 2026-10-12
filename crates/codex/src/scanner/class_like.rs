@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_word::Word;
 use std::collections::BTreeMap;
 
+use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::TagValue;
@@ -354,6 +355,7 @@ where
         scope,
     )?;
     class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::STRUCT;
+    require_struct_properties(&mut class_like_metadata, &r#struct.members);
     create_struct_methods(codebase, &mut class_like_metadata, span);
 
     finish_registration(codebase, class_like_metadata)
@@ -1655,6 +1657,35 @@ fn add_method(
     codebase.function_likes.insert(method_id, function_like_metadata);
 }
 
+/// Marks each property of a struct written without an initial value as required, spec section 10: a struct has no
+/// default value, so a creation sets every such property, a `T?` one too. Its main constructor's parameters are
+/// registered later, as their own properties, and are never required.
+fn require_struct_properties(class_like: &mut ClassLikeMetadata, members: &Sequence<ClassLikeMember<'_>>) {
+    for member in members {
+        let ClassLikeMember::Property(property) = member else {
+            continue;
+        };
+        if property.initial_value().is_some() {
+            continue;
+        }
+
+        for variable in property.variables() {
+            let name = php_variable_name(variable.name);
+            let Some(metadata) = class_like.properties.get_mut(&name) else {
+                continue;
+            };
+            if metadata.flags.is_static() || metadata.flags.is_virtual_property() {
+                continue;
+            }
+
+            metadata.flags.insert(MetadataFlags::REQUIRED);
+            metadata.flags.remove(MetadataFlags::HAS_DEFAULT);
+            metadata.set_default_type_metadata(None);
+            class_like.initialized_properties.remove(&name);
+        }
+    }
+}
+
 /// A struct's `operator ==`, which the bridge writes to compare each property, spec section 10, and its `parse` and
 /// `tryParse`, which read a `Map<string, Any?>` or an object's public properties. `operator ==` takes any value, so an
 /// `Any?` compares with a struct, and is false when the other value is no instance of the struct. The analyzer
@@ -1756,6 +1787,7 @@ fn create_static_method(
             is_constructor: false,
             visibility: Visibility::Public,
             where_constraints: WordMap::default(),
+            assigned_properties: WordSet::default(),
         }),
         type_resolution_context: None,
         thrown_types,

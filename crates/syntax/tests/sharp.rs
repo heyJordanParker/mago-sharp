@@ -428,12 +428,12 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required` and `via` are spec syntax outside the slice. Each one is a single error where it starts, and the class
-/// around it still parses.
+/// `required` on a method and `via` are spec syntax outside the slice. Each one is a single error where it starts, and
+/// the class around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
-        ("public required int count { get; set; }", "`required` is not supported yet in PHP#.", "required"),
+        ("public required int count() { return 1; }", "`required` is not supported yet in PHP#.", "required"),
         ("public string name { get; set; } via Trimmed, Tracked;", "`via` is not supported yet in PHP#.", "via"),
         (
             "public Report(public int id { get; } via Tracked, int other) {}",
@@ -642,8 +642,12 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
         ),
         ("class Report\n{\n    private count = 0;\n}\n", "A PHP# field needs a type, as in `private int count = 0;`."),
         (
-            "class Report\n{\n    public required int count { get; set; }\n}\n",
+            "class Report\n{\n    public required int count() { return 1; }\n}\n",
             "`required` is not supported yet in PHP#.",
+        ),
+        (
+            "struct Username : string\n{\n}\n",
+            "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value.",
         ),
         (
             "class Report\n{\n    public void run() { for (const line in lines) {} }\n}\n",

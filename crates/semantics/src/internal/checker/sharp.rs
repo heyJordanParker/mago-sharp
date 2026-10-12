@@ -795,13 +795,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PropertyAbstractItem(_)
             | Node::PropertyConcreteItem(_)
             | Node::DirectVariable(_)
-            // `is_slice_property` refuses `override` on a member that is not a field.
+            // `is_slice_property` refuses `override` on a member that is not a field, and `required` on one without
+            // `init` or `set`.
             | Node::Modifier(
                 Modifier::Public(_)
                 | Modifier::Protected(_)
                 | Modifier::Private(_)
                 | Modifier::Static(_)
-                | Modifier::Override(_),
+                | Modifier::Override(_)
+                | Modifier::Required(_),
             ),
             FieldOrProperty,
         ) => Some(FieldOrProperty),
@@ -2063,6 +2065,21 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
                 "An initial value that is not constant runs in the constructor, which a static member does not wait for.",
             )));
         }
+    }
+
+    // Language rule 9: a required property is set where its object is created, so it takes `init` or `set`.
+    if let Some(required) = property.modifiers().iter().find(|modifier| matches!(modifier, Modifier::Required(_)))
+        && !matches!(property, Property::Hooked(hooked) if hooked.hook_list.setter().is_some())
+    {
+        let name = property.first_variable().name;
+
+        return Err(Box::new(
+            Issue::error(format!(
+                "`{}` is required, so it is set when its object is created: give it `init` or `set`.",
+                BytesDisplay(name.strip_prefix(b"$").unwrap_or(name))
+            ))
+            .with_annotation(Annotation::primary(required.span()).with_message("Written here.")),
+        ));
     }
 
     let is_override = property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Override(_)));

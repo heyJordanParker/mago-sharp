@@ -1388,6 +1388,7 @@ where
 
     if has_complete_hierarchy {
         crate::readonly::finalize_class_writes(context, artifacts, class_like_metadata);
+        initialization::check_get_only_initialization(context, class_like_metadata);
         initialization::check_property_initialization(
             context,
             artifacts,

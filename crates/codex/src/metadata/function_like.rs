@@ -51,6 +51,10 @@ pub struct MethodMetadata {
     /// is the `TUnion` type constraint that `T` must satisfy for this specific method
     /// to be considered callable.
     pub where_constraints: WordMap<TypeMetadata>,
+
+    /// For a PHP# constructor, main or named, the properties its body assigns on every path, as `$name`. A creation
+    /// sets every required property the constructor that runs does not assign.
+    pub assigned_properties: WordSet,
 }
 
 /// Distinguishes between different kinds of callable constructs in PHP.

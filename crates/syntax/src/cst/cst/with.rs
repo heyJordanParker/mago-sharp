@@ -6,9 +6,10 @@ use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::sequence::TokenSeparatedSequence;
 
-/// Represents PHP# `with`, spec section 16: a copy of the object with the values it names set through their `init` or
-/// `set` accessors. The original is unchanged. Roslyn calls it `WithExpressionSyntax`, and gives it the initializer an
-/// object creation takes.
+/// Represents PHP# `with`, spec section 16: a copy of the object with the values it names set.
+///
+/// It sets them through their `init` or `set` accessors, and the original is unchanged. Roslyn calls it
+/// `WithExpressionSyntax`, and gives it the initializer an object creation takes.
 ///
 /// Example: `point with { y: 9 }`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -31,8 +32,10 @@ pub struct ObjectInitializer<'arena> {
     pub right_brace: Span,
 }
 
-/// Represents a value named after the property it sets, spec section 16. The shorthand `currency` names the local
-/// `currency`: it has no colon, and its value is that local, read where the name is written.
+/// Represents a value named after the property it sets, spec section 16.
+///
+/// The shorthand `currency` names the local `currency`: it has no colon, and its value is that local, read where the
+/// name is written.
 ///
 /// Example: `amount: 500` and `currency` in `new Amount { amount: 500, currency }`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]

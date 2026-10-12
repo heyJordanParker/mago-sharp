@@ -19,6 +19,52 @@ use crate::error::AnalysisError;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_property_name;
 
+/// Reports a PHP# get-only property that nothing sets, spec section 6.1: no initial value, and no constructor, main or
+/// named, that assigns it on every path. A get-only property can be set nowhere else.
+pub fn check_get_only_initialization<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || class_like_metadata.flags.is_abstract() || !class_like_metadata.kind.is_class() {
+        return;
+    }
+
+    let class = class_like_metadata.name.as_bytes();
+    let assigned: WordSet = class_like_metadata
+        .methods
+        .iter()
+        .filter_map(|method| context.codebase.get_method(class, method.as_bytes()))
+        .filter(|method| method.flags.is_named_constructor())
+        .chain(context.codebase.get_declaring_method(class, b"__construct"))
+        .filter_map(|constructor| constructor.method_metadata.as_ref())
+        .flat_map(|constructor| constructor.assigned_properties.iter().copied())
+        .collect();
+    for (name, property) in class_like_metadata.properties.iter().sorted_by_key(|(name, _)| **name) {
+        let never_set = property.flags.is_readonly()
+            && !property.flags.is_promoted_property()
+            && !property.flags.has_default()
+            && !property.flags.is_static()
+            && !property.flags.is_virtual_property()
+            && !assigned.contains(name);
+        if !never_set {
+            continue;
+        }
+
+        let property_name = String::from_utf8_lossy(name.as_bytes().strip_prefix(b"$").unwrap_or(name.as_bytes()));
+        let mut issue = Issue::error(format!(
+            "`{property_name}` is get-only and never set: set it in the main constructor, or give it an initial value."
+        ))
+        .with_note(
+            "A get-only property is set only while its object is created, and no constructor sets it on every path.",
+        );
+        if let Some(span) = property.name_span {
+            issue = issue.with_annotation(Annotation::primary(span).with_message("Declared here."));
+        }
+
+        context.collector.report_with_code(IssueCode::UninitializedProperty, issue);
+    }
+}
+
 /// Check property initialization for a class-like.
 pub fn check_property_initialization<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,

@@ -1,5 +1,7 @@
 use mago_allocator::Arena;
+use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
+use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::AssertPattern;
@@ -12,10 +14,13 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::Event;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Function;
@@ -24,6 +29,9 @@ use mago_syntax::cst::Law;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::PatternMatch;
+use mago_syntax::cst::PatternMatchArmBody;
+use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::SwitchBody;
 use mago_syntax::cst::SwitchCase;
@@ -133,7 +141,11 @@ where
             Visibility::Public
         },
         where_constraints: WordMap::default(),
+        assigned_properties: WordSet::default(),
     };
+    if context.program.dialect.is_sharp() && method_metadata.is_constructor {
+        method_metadata.assigned_properties = definitely_assigned_properties(method.body, context);
+    }
 
     match method.body {
         MethodBody::Concrete(block) => {
@@ -998,6 +1010,176 @@ fn parse_assertions_from_tag(
     }
 
     assertions
+}
+
+/// The properties a PHP# constructor, main or named, assigns on every path through `body`, spec sections 6.1 and 10,
+/// as C#'s definite assignment and Swift's definite initialization count them. `this.name = …` and a bare `name = …`
+/// assign. Both arms of an `if`/`else` and every arm of a `match` must assign, and a path that throws needs nothing,
+/// since no object comes out of it. A call to another method assigns nothing, and a loop's body may not run, so a
+/// `return` inside a loop counts what was assigned before the loop.
+pub(crate) fn definitely_assigned_properties<A>(body: &MethodBody, context: &Context<'_, '_, A>) -> WordSet
+where
+    A: Arena,
+{
+    let mut assignment = DefiniteAssignment { context, returned: None };
+    let end = match body {
+        MethodBody::Concrete(block) => assignment.statements(block.statements.as_slice(), Some(WordSet::default())),
+        MethodBody::Expression(body) => assignment.expression(body.expression, Some(WordSet::default())),
+        MethodBody::Abstract(_) => Some(WordSet::default()),
+    };
+
+    meet(end, assignment.returned).unwrap_or_default()
+}
+
+/// The properties assigned on every path that reaches a point, or none when no path reaches it.
+type Assigned = Option<WordSet>;
+
+/// What every path of `left` and `right` assigns. A path that never arrives asks nothing of the other.
+fn meet(left: Assigned, right: Assigned) -> Assigned {
+    match (left, right) {
+        (None, assigned) | (assigned, None) => assigned,
+        (Some(left), Some(right)) => Some(left.intersection(&right).copied().collect()),
+    }
+}
+
+struct DefiniteAssignment<'context, 'ctx, 'arena, A> {
+    context: &'context Context<'ctx, 'arena, A>,
+    /// What every `return` seen so far had assigned.
+    returned: Assigned,
+}
+
+impl<A> DefiniteAssignment<'_, '_, '_, A>
+where
+    A: Arena,
+{
+    fn statements(&mut self, statements: &[Statement<'_>], mut assigned: Assigned) -> Assigned {
+        for statement in statements {
+            if assigned.is_none() {
+                break;
+            }
+            assigned = self.statement(statement, assigned);
+        }
+
+        assigned
+    }
+
+    fn statement(&mut self, statement: &Statement<'_>, assigned: Assigned) -> Assigned {
+        match statement {
+            Statement::Block(block) => self.statements(block.statements.as_slice(), assigned),
+            Statement::Expression(statement) => self.expression(statement.expression, assigned),
+            Statement::If(r#if) => {
+                let IfBody::Statement(body) = &r#if.body else {
+                    return assigned;
+                };
+                let mut arms = self.statement(body.statement, assigned.clone());
+                for clause in &body.else_if_clauses {
+                    arms = meet(arms, self.statement(clause.statement, assigned.clone()));
+                }
+                let otherwise = match &body.else_clause {
+                    Some(clause) => self.statement(clause.statement, assigned),
+                    None => assigned,
+                };
+
+                meet(arms, otherwise)
+            }
+            Statement::Return(r#return) => {
+                let assigned = match r#return.value {
+                    Some(value) => self.expression(value, assigned),
+                    None => assigned,
+                };
+                self.returned = meet(self.returned.take(), assigned);
+
+                None
+            }
+            // A `catch` may run after any statement of the `try`, so it starts from what came before it.
+            Statement::Try(r#try) => {
+                let mut after = self.statements(r#try.block.statements.as_slice(), assigned.clone());
+                for clause in &r#try.catch_clauses {
+                    after = meet(after, self.statements(clause.block.statements.as_slice(), assigned.clone()));
+                }
+
+                match &r#try.finally_clause {
+                    Some(finally) => self.statements(finally.block.statements.as_slice(), after),
+                    None => after,
+                }
+            }
+            Statement::PatternMatch(r#match) => self.pattern_match(r#match, assigned),
+            Statement::While(_)
+            | Statement::DoWhile(_)
+            | Statement::For(_)
+            | Statement::Foreach(_)
+            | Statement::ForOf(_)
+            | Statement::Switch(_) => {
+                let returns = utils::control_flow::find_control_flows_in_statement(statement)
+                    .iter()
+                    .any(|control_flow| matches!(control_flow, utils::control_flow::ControlFlow::Return(_)));
+                if returns {
+                    self.returned = meet(self.returned.take(), assigned.clone());
+                }
+
+                assigned
+            }
+            _ => assigned,
+        }
+    }
+
+    fn expression(&mut self, expression: &Expression<'_>, assigned: Assigned) -> Assigned {
+        match expression {
+            Expression::Parenthesized(parenthesized) => self.expression(parenthesized.expression, assigned),
+            Expression::Assignment(assignment) if assignment.operator.is_assign() => {
+                let mut assigned = self.expression(assignment.rhs, assigned);
+                if let (Some(properties), Some(property)) = (&mut assigned, self.assigned_property(assignment.lhs)) {
+                    properties.insert(property);
+                }
+
+                assigned
+            }
+            Expression::Throw(_) => None,
+            // A `match` no arm takes throws, so only its arms reach what follows.
+            Expression::Match(r#match) => {
+                let assigned = self.expression(r#match.expression, assigned);
+
+                r#match
+                    .arms
+                    .iter()
+                    .fold(None, |arms, arm| meet(arms, self.expression(arm.expression(), assigned.clone())))
+            }
+            Expression::PatternMatch(r#match) => self.pattern_match(r#match, assigned),
+            _ => assigned,
+        }
+    }
+
+    fn pattern_match(&mut self, r#match: &PatternMatch<'_>, assigned: Assigned) -> Assigned {
+        let assigned = self.expression(r#match.expression, assigned);
+
+        r#match.arms.iter().fold(None, |arms, arm| {
+            let arm = match arm.body() {
+                PatternMatchArmBody::Expression(expression) => self.expression(expression, assigned.clone()),
+                PatternMatchArmBody::Block(block) => self.statements(block.statements.as_slice(), assigned.clone()),
+            };
+
+            meet(arms, arm)
+        })
+    }
+
+    /// The property `target` writes, as `$name`: `this.name`, or a bare `name` that binds to a member.
+    fn assigned_property(&self, target: &Expression<'_>) -> Option<Word> {
+        match target.unparenthesized() {
+            Expression::Access(Access::Property(PropertyAccess {
+                object,
+                property: ClassLikeMemberSelector::Identifier(name),
+                ..
+            })) => matches!(object.unparenthesized(), Expression::ConstantAccess(this)
+                    if self.context.resolved_names.binding(&this.name) == Some(Binding::This))
+            .then(|| php_variable_name(name.value)),
+            Expression::ConstantAccess(member)
+                if self.context.resolved_names.binding(&member.name) == Some(Binding::Member) =>
+            {
+                Some(php_variable_name(member.name.value()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Collects every variable imported via `global $x;` anywhere in `block`, without
