@@ -746,8 +746,9 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     context,
                 );
             }
-            // Only a PHP# file declares an operator or a law, and `check_slice` refuses either in an interface.
-            ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) => {}
+            // Only a PHP# file declares an operator, a law or a named constructor, and `check_slice` refuses each in an
+            // interface.
+            ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) | ClassLikeMember::NamedConstructor(_) => {}
         }
     }
 }
@@ -1285,10 +1286,12 @@ pub fn check_members<'ast, 'arena>(
     let mut property_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
 
     for member in members {
-        // A law shares its class's method names, so a law and a method of one name are declared twice.
+        // A law and a named constructor share their class's method names, as the static method a named constructor
+        // lowers to does, so either and a method of one name are declared twice.
         let callable_name = match member {
             ClassLikeMember::Method(method) => Some(&method.name),
             ClassLikeMember::Law(law) => Some(&law.name),
+            ClassLikeMember::NamedConstructor(named_constructor) => Some(&named_constructor.name),
             _ => None,
         };
         if let Some(name) = callable_name {
@@ -1301,12 +1304,16 @@ pub fn check_members<'ast, 'arena>(
                 context.report(
                     Issue::error("A class has one main constructor: PHP# has no overloading by argument types.")
                         .with_annotation(Annotation::primary(name.span()).with_message("A second constructor."))
-                        .with_annotation(Annotation::secondary(main).with_message("The main constructor.")),
+                        .with_annotation(Annotation::secondary(main).with_message("The main constructor."))
+                        .with_help(format!(
+                            "Give it a name that passes control to the main constructor, as in `public {}.fromName(…) : this(…) {{ }}`.",
+                            BytesDisplay(class_like_name)
+                        )),
                 );
             } else if is_sharp_constructor {
-                // A method named after its class has its own error, so a constructor after one is not defined again.
+                // The constructor is PHP's `__construct`, so it shares no name with a method, and a method named after
+                // its class has only its own error.
                 main_constructor = Some(name.span());
-                method_names.entry(lowercase_name).or_insert(name.span());
             } else if let Some(previous) = method_names.get(&lowercase_name) {
                 let method_display = context.display_member(class_like_name, BytesDisplay(name.value));
                 context.report(

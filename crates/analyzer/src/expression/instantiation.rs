@@ -3,6 +3,7 @@ use foldhash::fast::RandomState;
 use indexmap::IndexMap;
 
 use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
@@ -26,9 +27,11 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::ConstructorName;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::PartialArgumentList;
 use mago_word::WordMap;
+use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -117,6 +120,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
                 &classname,
                 instantiation_span,
                 class_expression_span,
+                self.constructor.as_ref(),
                 argument_list,
             )?;
 
@@ -133,6 +137,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     }
 }
 
+/// Analyzes `new` of `classname` with its main constructor, or with the PHP# named `constructor` it declares, spec
+/// section 9.1.
+#[allow(clippy::too_many_arguments)]
 fn analyze_class_instantiation<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -140,6 +147,7 @@ fn analyze_class_instantiation<'ctx, 'arena, A>(
     classname: &ResolvedClassname,
     instantiation_span: Span,
     class_expression_span: Span,
+    constructor: Option<&ConstructorName<'arena>>,
     argument_list: Option<&ArgumentList<'arena>>,
 ) -> Result<TUnion, AnalysisError>
 where
@@ -326,7 +334,41 @@ where
 
     let mut type_parameters = None;
 
-    let constructor_id = MethodIdentifier::new(metadata.original_name, word("__construct"));
+    let (constructor_id, invocation_kind) = match constructor {
+        // A named constructor is the class's own: a subclass inherits none, so `new Sub.fromJson(…)` creates no `Sub`.
+        Some(constructor) => {
+            let constructor_id = MethodIdentifier::new(metadata.name, ascii_lowercase_word(constructor.name.value));
+            if !context
+                .codebase
+                .get_method_by_id(&constructor_id)
+                .is_some_and(|method| method.flags.is_named_constructor())
+            {
+                let name = BytesDisplay(constructor.name.value);
+                let inherited = context
+                    .codebase
+                    .get_declaring_method(metadata.name.as_bytes(), constructor.name.value)
+                    .is_some_and(|method| method.flags.is_named_constructor());
+                let message = if inherited {
+                    format!("`{classname_str}` has no constructor `{name}`: named constructors are not inherited.")
+                } else {
+                    format!("`{classname_str}` has no constructor `{name}`.")
+                };
+
+                context.collector.report_with_code(
+                    IssueCode::NonExistentMethod,
+                    Issue::error(message)
+                        .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
+                );
+
+                argument_list.analyze(context, block_context, artifacts)?;
+
+                return Ok(get_never());
+            }
+
+            (constructor_id, MethodInvocationKind::Static)
+        }
+        None => (MethodIdentifier::new(metadata.original_name, word("__construct")), MethodInvocationKind::Instance),
+    };
     let constructor_declraing_id = context.codebase.get_declaring_method_identifier(&constructor_id);
 
     artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_id);
@@ -356,7 +398,7 @@ where
                 inferred_return_type: None,
                 effective_signature: None,
                 method_context: Some(MethodTargetContext {
-                    invocation_kind: MethodInvocationKind::Instance,
+                    invocation_kind,
                     declaring_method_id: Some(constructor_declraing_id),
                     class_like_metadata: metadata,
                     class_type: StaticClassType::Exact(metadata.original_name),
