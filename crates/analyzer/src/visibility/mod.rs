@@ -363,7 +363,7 @@ where
         block_context.scope.get_class_like_name(),
     );
     if !is_visible {
-        if declaring_class_metadata.flags.is_event() {
+        if context.dialect.is_sharp() && declaring_class_metadata.flags.is_event() {
             let event = display_class_like_name(context, declaring_class_metadata.original_name);
             let property = display_property_name(context, property_name);
 

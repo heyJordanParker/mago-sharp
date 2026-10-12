@@ -10491,7 +10491,7 @@ const ORDER_EVENTS: [(&str, &str); 2] = [
 
 /// Spec section 15: an event is a final class whose parameters are its public get-only properties, and its header
 /// names the interfaces it gives. So its properties read by name and its interface types it, a write is refused, and
-/// `new` checks its arguments as a constructor's.
+/// `new` checks its arguments as a constructor's. A `.php` file keeps PHP's messages for both writes.
 #[test]
 fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
     let reader = (
@@ -10502,9 +10502,20 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
         "app/Shop/Writer.sharp",
         "namespace App.Shop;\n\npublic class Writer\n{\n    public void write(OrderPaid paid, OrderEvent event)\n    {\n        paid.orderId = 2;\n        event.orderId = 2;\n    }\n\n    public OrderPaid make() => new OrderPaid(\"one\");\n}\n",
     );
+    let php_writer = (
+        "src/Shop/PhpWriter.php",
+        "<?php\n\nnamespace App\\Shop;\n\nfinal class PhpWriter\n{\n    public function write(OrderPaid $paid, OrderEvent $event): void\n    {\n        $paid->orderId = 2;\n        $event->orderId = 2;\n    }\n}\n",
+    );
     let sub = ("app/Shop/Sub.sharp", "namespace App.Shop;\n\npublic class Sub : OrderPaid\n{\n}\n");
 
     assert_eq!(worded(reader, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(
+        messages(php_writer, &ORDER_EVENTS),
+        [
+            "Cannot initialize readonly property `App\\Shop\\OrderPaid::$orderId` from within `App\\Shop\\PhpWriter`.",
+            "Cannot write to read-only property `App\\Shop\\OrderEvent::$orderId` - property only has a get hook.",
+        ]
+    );
     assert_eq!(
         issues(writer, &ORDER_EVENTS),
         ["7:14 invalid-property-write", "8:15 invalid-property-write", "11:46 invalid-argument"]
@@ -10554,7 +10565,9 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 /// refused, as the engine refuses the class it runs as. An event gives a property through a parameter, and a class
 /// through a property, as each help writes it. A get-only property may give a narrower type, and a PHP interface's
 /// property with `set` takes its type exactly. A class that names the interface answers for the property it inherits
-/// too, from a PHP# or a plain PHP base class, a base's `private` field included.
+/// too, from a PHP# or a plain PHP base class, a base's `private` field included. A property stated with `set` needs
+/// one the class can set, reported once: a class gives it with `{ get; set; }`, and an event, whose properties `new`
+/// sets once, cannot give it.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : OrderEvent;\n");
@@ -10619,6 +10632,22 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         "namespace App.Shop;\n\npublic class WrongBase : OrderEvent\n{\n    public string orderId { get; } = \"x\";\n}\n",
     );
     let from_wrong = ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : WrongBase\n{\n}\n");
+    let settable_interface = (
+        "src/Shop/Settable.php",
+        "<?php\n\nnamespace App\\Shop;\n\ninterface Settable\n{\n    public int $total { get; set; }\n}\n",
+    );
+    let unset_class = ("app/Shop/Tally.sharp", "namespace App.Shop;\n\npublic class Tally : Settable\n{\n}\n");
+    let unset_event = ("app/Shop/Counted.sharp", "namespace App.Shop;\n\npublic event Counted(int id) : Settable;\n");
+    let get_only_class = (
+        "app/Shop/Fixed.sharp",
+        "namespace App.Shop;\n\npublic class Fixed : Settable\n{\n    public int total { get; }\n\n    public Fixed(int total)\n    {\n        this.total = total;\n    }\n}\n",
+    );
+    let get_only_event =
+        ("app/Shop/Totaled.sharp", "namespace App.Shop;\n\npublic event Totaled(int total) : Settable;\n");
+    let set_given = (
+        "app/Shop/Tally.sharp",
+        "namespace App.Shop;\n\npublic class Tally : Settable\n{\n    public int total { get; set; } = 0;\n}\n",
+    );
 
     assert_eq!(
         worded(event, &ORDER_EVENTS),
@@ -10687,25 +10716,69 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         ["3:14 incompatible-property-type"]
     );
     assert_eq!(issues(from_wrong, &[order_event, order_paid, wrong_base]), Vec::<String>::new());
+    assert_eq!(
+        worded(unset_class, &[settable_interface]),
+        [
+            "3:14 unimplemented-abstract-property-hook `Tally` does not give `total`, which `Settable` states. | Declared here. | Stated here. | Add the property `public int total { get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(unset_event, &[settable_interface]),
+        [
+            "3:14 unimplemented-abstract-property-hook `Counted` cannot give `total`, which `Settable` states with `set`: an event's properties are set once, by `new`. | Declared here. | Stated here."
+        ]
+    );
+    assert_eq!(
+        worded(get_only_class, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Fixed` gives `total` get-only, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(get_only_event, &[settable_interface]),
+        [
+            "3:26 incompatible-property-access `Totaled` cannot give `total`, which `Settable` states with `set`: an event's properties are set once, by `new`. | Given here. | Stated here."
+        ]
+    );
+    assert_eq!(worded(set_given, &[settable_interface]), Vec::<String>::new());
 }
 
 /// Spec section 15: `emit` raises an event, one an `event` declares or a plain PHP class an `extern event` marks. Any
-/// other value is refused, an interface its events share included, and a refused value or a type that names no class
-/// reports only its own error.
+/// other value is refused, an interface its events share included, and so is a union with a part that is not an event.
+/// `extern event` marks only a class. A refused value or a type that names no class reports only its own error.
 #[test]
 fn emit_takes_an_event() {
     let [order_event, order_paid] = ORDER_EVENTS;
-    let failed =
-        ("src/Queue/JobFailed.php", "<?php\n\nnamespace Queue;\n\nclass JobFailed\n{\n}\n\nclass Ledger\n{\n}\n");
+    let failed = (
+        "src/Queue/JobFailed.php",
+        "<?php\n\nnamespace Queue;\n\nclass JobFailed\n{\n}\n\nclass Ledger\n{\n}\n\ninterface Notice\n{\n}\n",
+    );
     let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
     let raiser = (
         "app/Shop/Raiser.sharp",
-        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count, Missing missing)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n        emit missing;\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count, Missing missing)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n        emit missing;\n    }\n\n    public void choose(OrderPaid? maybe, OrderPaid|Money mixed, OrderPaid|OrderRefunded either)\n    {\n        emit maybe;\n        emit mixed;\n        emit either;\n    }\n}\n",
+    );
+    let refunded = (
+        "app/Shop/OrderRefunded.sharp",
+        "namespace App.Shop;\n\npublic event OrderRefunded(int orderId) : OrderEvent;\n",
+    );
+    let notice = ("app/Stubs/Notices.sharp", "namespace App.Stubs;\n\nimport Queue.Notice;\n\nextern event Notice;\n");
+    let noticed = (
+        "app/Shop/Noticed.sharp",
+        "namespace App.Shop;\n\nimport Queue.Notice;\n\npublic class Noticed\n{\n    public void raise(Notice notice)\n    {\n        emit notice;\n    }\n}\n",
     );
     let note = "An event is a class that `event` declares, or a plain PHP class that `extern event` marks.";
 
     assert_eq!(
-        worded(raiser, &[order_event, order_paid, failed, money]),
+        worded(notice, &[failed]),
+        ["5:14 invalid-event `extern event` marks a class, and `Notice` is an interface."]
+    );
+    assert_eq!(
+        worded(noticed, &[failed, notice]),
+        [format!("9:14 invalid-event `emit` takes an event, and `Notice` is not one. | Emitted here. | {note}")]
+    );
+    assert_eq!(
+        worded(raiser, &[order_event, order_paid, refunded, failed, money]),
         [
             "11:116 non-existent-class-like Cannot find type `Missing`. | `Missing` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.".to_owned(),
             format!("16:14 invalid-event `emit` takes an event, and `OrderEvent` is not one. | Emitted here. | {note}"),
@@ -10714,6 +10787,8 @@ fn emit_takes_an_event() {
             format!("19:14 invalid-event `emit` takes an event, and `int` is not one. | Emitted here. | {note}"),
             format!("20:14 invalid-event `emit` takes an event, and `null` is not one. | Emitted here. | {note}"),
             "21:18 non-existent-class Class `Missing` not found. | `Missing` is not defined or cannot be autoloaded | Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.".to_owned(),
+            format!("27:14 invalid-event `emit` takes an event, and `OrderPaid?` is not one. | Emitted here. | {note}"),
+            format!("28:14 invalid-event `emit` takes an event, and `Money|OrderPaid` is not one. | Emitted here. | {note}"),
         ]
     );
 }

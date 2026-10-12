@@ -5,6 +5,7 @@ use std::sync::Arc;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::scanner::get_union_from_hint;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -534,20 +535,28 @@ where
     Ok(())
 }
 
-/// Whether `atomic` is an object of an event: a class an `event` declares, or a plain PHP class an `extern event` marks.
+/// Whether `atomic` is an object of an event.
 fn is_event(codebase: &CodebaseMetadata, atomic: &TAtomic) -> bool {
     let TAtomic::Object(object) = atomic else {
         return false;
     };
 
-    object.get_name().is_some_and(|name| {
-        codebase.get_class_like(name.as_bytes()).is_some_and(|class_like| class_like.flags.is_event())
-            || codebase
+    object
+        .get_name()
+        .and_then(|name| codebase.get_class_like(name.as_bytes()))
+        .is_some_and(|class_like| is_event_class(codebase, class_like))
+}
+
+/// Whether `class_like` is an event, spec section 15: a class an `event` declares, or a plain PHP class an
+/// `extern event` marks.
+pub(crate) fn is_event_class(codebase: &CodebaseMetadata, class_like: &ClassLikeMetadata) -> bool {
+    class_like.flags.is_event()
+        || class_like.kind.is_class()
+            && codebase
                 .externs
-                .get(&(ascii_lowercase_word(name.as_bytes()), empty_word()))
+                .get(&(class_like.name, empty_word()))
                 .and_then(|declarations| declarations.first())
                 .is_some_and(|declaration| declaration.event)
-    })
 }
 
 /// The type a written type would give a value: every literal and narrowed scalar widened, and every list or map shape

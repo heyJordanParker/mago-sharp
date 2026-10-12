@@ -510,3 +510,13 @@ fn a_super_argument_change_changes_the_fingerprint() {
 
     assert_ne!(row, other, "Changing a `: super(…)` argument should change the fingerprint");
 }
+
+#[test]
+fn an_emitted_event_change_changes_the_fingerprint() {
+    let order = |code| fingerprint_of(b"src/Order.sharp", code);
+    let paid = order(b"class Order\n{\n    public void run()\n    {\n        emit new OrderPaid(1);\n    }\n}\n");
+    let refunded =
+        order(b"class Order\n{\n    public void run()\n    {\n        emit new OrderRefunded(1);\n    }\n}\n");
+
+    assert_ne!(paid, refunded, "Changing what `emit` raises should change the fingerprint");
+}

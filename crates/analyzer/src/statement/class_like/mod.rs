@@ -1199,6 +1199,7 @@ where
                         });
 
                     if !is_implemented && context.dialect.is_sharp() {
+                        // PHP# states a property, not its hooks, so it reports the property once.
                         report_unstated_property(
                             context,
                             class_like_metadata,
@@ -1208,6 +1209,8 @@ where
                             parent_property,
                             hook_metadata.span,
                         );
+
+                        break;
                     } else if !is_implemented {
                         let fqcn = parent_metadata.original_name;
                         let hook_span = hook_metadata.span;
@@ -1402,7 +1405,8 @@ where
 }
 
 /// Reports a PHP# class or event, declared at `span`, that does not give the property `property_name` that `parent`
-/// states at `stated`. An event gives its properties through its parameters, spec section 15.
+/// states at `stated`. An event gives its properties through its parameters, which are set once, by `new`, spec
+/// section 15, so it cannot give a property stated with `set`.
 fn report_unstated_property<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
@@ -1421,21 +1425,29 @@ fn report_unstated_property<A>(
         context,
         parent_property.type_metadata.as_ref().map_or(&mixed, |metadata| &metadata.type_union),
     );
-    let help = if class_like_metadata.flags.is_event() {
-        format!("Add the parameter `{written} {property}`.")
+    let parent_name = display_class_like_name(context, parent.original_name);
+    let settable = parent_property.hooks.contains_key(&word(b"set"));
+    let issue = if class_like_metadata.flags.is_event() && settable {
+        Issue::error(format!(
+            "`{name}` cannot give `{property}`, which `{parent_name}` states with `set`: an event's properties are set once, by `new`."
+        ))
     } else {
-        format!("Add the property `public {written} {property} {{ get; }}`.")
+        let help = if class_like_metadata.flags.is_event() {
+            format!("Add the parameter `{written} {property}`.")
+        } else if settable {
+            format!("Add the property `public {written} {property} {{ get; set; }}`.")
+        } else {
+            format!("Add the property `public {written} {property} {{ get; }}`.")
+        };
+
+        Issue::error(format!("`{name}` does not give `{property}`, which `{parent_name}` states.")).with_help(help)
     };
 
     context.collector.report_with_code(
         IssueCode::UnimplementedAbstractPropertyHook,
-        Issue::error(format!(
-            "`{name}` does not give `{property}`, which `{}` states.",
-            display_class_like_name(context, parent.original_name)
-        ))
-        .with_annotation(Annotation::primary(span).with_message("Declared here."))
-        .with_annotation(Annotation::secondary(stated).with_message("Stated here."))
-        .with_help(help),
+        issue
+            .with_annotation(Annotation::primary(span).with_message("Declared here."))
+            .with_annotation(Annotation::secondary(stated).with_message("Stated here.")),
     );
 }
 
@@ -4213,6 +4225,33 @@ fn report_unfit_interface_property<A>(
     if property.flags.is_static() != stated.flags.is_static() {
         let (given, help) = ("as `static`".to_owned(), format!("Remove `static`{place}."));
         report(context, IssueCode::IncompatibleStaticModifier, given, "on each object".to_owned(), help);
+    }
+
+    // PHP refuses a readonly, a `private(set)` or a get-only virtual property for one stated with `set`.
+    let set = word(b"set");
+    let given_settable = !property.flags.is_readonly()
+        && property.write_visibility == Visibility::Public
+        && (!property.flags.is_virtual_property() || property.hooks.contains_key(&set));
+    if stated.hooks.contains_key(&set) && !given_settable {
+        if owner.flags.is_event() {
+            context.collector.report_with_code(
+                IssueCode::IncompatiblePropertyAccess,
+                Issue::error(format!(
+                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: an event's properties are set once, by `new`."
+                ))
+                .with_annotation(Annotation::primary(property_span).with_message("Given here."))
+                .with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")),
+            );
+        } else {
+            let help = format!("Declare `{property_name}` with `{{ get; set; }}`{place}.");
+            report(
+                context,
+                IssueCode::IncompatiblePropertyAccess,
+                "get-only".to_owned(),
+                "with `set`".to_owned(),
+                help,
+            );
+        }
     }
 
     if let Some((given, stated_type)) =

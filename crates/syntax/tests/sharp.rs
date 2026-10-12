@@ -3857,12 +3857,12 @@ fn event_stays_a_name_where_no_declaration_follows() {
     assert_eq!(field.first_variable().name, b"event");
 }
 
-/// Spec section 15 raises an event with `emit` and the expression after it. Before `(`, an operator or `is`, `emit`
-/// stays a name, and plain PHP keeps it a name everywhere.
+/// Spec section 15 raises an event with `emit` and the expression after it. Spec section 2 reserves `emit`, so at the
+/// start of a `.sharp` statement it always raises, `emit(paid);` included. Plain PHP keeps `emit` a name.
 #[test]
 fn emit_raises_the_expression_after_it() {
-    const CODE: &str = "class Order\n{\n    public void run(OrderPaid paid, int emit)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit 5;\n        emit(paid);\n        const next = emit + 1;\n        const known = emit is int;\n    }\n}\n";
-    const PHP: &str = "<?php\n\nemit(new Paid());\n";
+    const CODE: &str = "class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit 5;\n        emit(paid);\n        emit (paid);\n    }\n}\n";
+    const PHP: &str = "<?php\n\nemit new Paid();\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Order.sharp", CODE);
     let php = parse(&arena, "src/raise.php", PHP);
@@ -3876,25 +3876,13 @@ fn emit_raises_the_expression_after_it() {
 
                 ("emit", source(CODE, emit.value))
             }
-            Statement::Expression(statement) => ("expression", source(CODE, statement.expression)),
-            Statement::LocalDeclaration(local) => ("local", source(CODE, local.value)),
-            _ => panic!("expected an emit, an expression or a local, got {statement:#?}"),
+            _ => panic!("expected an emit, got {statement:#?}"),
         })
         .collect();
     assert_eq!(
         statements,
-        [
-            ("emit", "new OrderPaid(1)"),
-            ("emit", "paid"),
-            ("emit", "5"),
-            ("expression", "emit(paid)"),
-            ("local", "emit + 1"),
-            ("local", "emit is int"),
-        ]
+        [("emit", "new OrderPaid(1)"), ("emit", "paid"), ("emit", "5"), ("emit", "(paid)"), ("emit", "(paid)")]
     );
-    assert!(php.errors.is_empty(), "{:#?}", php.errors);
-    let [_, call] = php.statements.as_slice() else {
-        panic!("expected an opening tag and a call, got {:#?}", php.statements);
-    };
-    assert_eq!(source(PHP, expression(call)), "emit(new Paid())");
+    assert!(!php.errors.is_empty(), "`emit new` must stay a parse error in plain PHP");
+    assert!(!php.statements.iter().any(|statement| matches!(statement, Statement::Emit(_))), "{:#?}", php.statements);
 }

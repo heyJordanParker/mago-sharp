@@ -465,7 +465,7 @@ generate_ast_walker! {
             Statement::Switch(switch) => walker.walk_switch(switch, context),
             Statement::If(r#if) => walker.walk_if(r#if, context),
             Statement::Return(r#return) => walker.walk_return(r#return, context),
-        Statement::Emit(emit) => walker.walk_emit(emit, context),
+            Statement::Emit(emit) => walker.walk_emit(emit, context),
             Statement::Expression(expression) => walker.walk_statement_expression(expression, context),
             Statement::EchoTag(echo) => walker.walk_echo_tag(echo, context),
             Statement::Echo(echo) => walker.walk_echo(echo, context),

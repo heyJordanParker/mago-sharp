@@ -230,6 +230,21 @@ where
             Issue::error(format!("`{written}` is PHP# code, so it needs no `extern`: PHP# infers its effects."))
                 .with_annotation(Annotation::primary(target)),
         );
+    } else if own.event && !class_metadata.kind.is_class() {
+        // Spec section 15: only a class is an event, so `emit` never takes a value plain PHP fills with a non-event.
+        let kind = if class_metadata.kind.is_interface() {
+            "an interface"
+        } else if class_metadata.kind.is_trait() {
+            "a trait"
+        } else {
+            "an enum"
+        };
+
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!("`extern event` marks a class, and `{written}` is {kind}."))
+                .with_annotation(Annotation::primary(target)),
+        );
     } else if !member.is_empty() && context.codebase.get_declaring_method(class.as_bytes(), member.as_bytes()).is_none()
     {
         context.collector.report_with_code(

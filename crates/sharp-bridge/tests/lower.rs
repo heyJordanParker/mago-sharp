@@ -5418,7 +5418,7 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
 }
 
 /// ```php
-/// \Sharp\Internal\emit(new \App\Order\Paid(1));
+/// \Sharp\Internal\emit(new \App\OrderPaid(1));
 /// \Sharp\Internal\emit($paid);
 /// ```
 ///
