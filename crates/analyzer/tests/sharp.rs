@@ -2908,47 +2908,56 @@ fn a_type_class_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
 }
 
 /// Spec section 23: a class cannot share its full name with a namespace, when the class or anything in the namespace
-/// is PHP#. Two plain PHP names may, as PHP allows.
+/// is PHP#. Two plain PHP names may, as PHP allows. The error names the first class in the namespace by name.
 #[test]
 fn a_class_that_shares_its_full_name_with_a_namespace_is_an_error() {
     let store = ("src/App/Tenant/Store.sharp", "namespace App.Tenant;\n\npublic class Store\n{\n}\n");
     let order = ("src/App/Tenant/Store/Order.sharp", "namespace App.Tenant.Store;\n\npublic class Order\n{\n}\n");
     let php_store = ("src/App/Tenant/Store.php", "<?php\n\nnamespace App\\Tenant;\n\nclass Store\n{\n}\n");
     let php_order = ("src/App/Tenant/Store/Order.php", "<?php\n\nnamespace App\\Tenant\\Store;\n\nclass Order\n{\n}\n");
+    let receipts =
+        ("src/App/Tenant/Store/Receipts.sharp", "namespace App.Tenant.Store;\n\npublic class Receipts\n{\n}\n");
     let rows = [
         (
             store,
             vec![order],
             Some(
-                "3:14 name-already-in-use `App.Tenant.Store` is both a class and a namespace: rename the class or the folder.",
+                "3:14 name-already-in-use `App.Tenant.Store` is both a class and a namespace: rename the class or the folder. | `App.Tenant.Store.Order` is in the namespace `App.Tenant.Store`.",
             ),
         ),
         (
             ("src/App/Tenant/Store.sharp", "namespace App.Tenant;\n\npublic interface Store\n{\n}\n"),
             vec![order],
             Some(
-                "3:18 name-already-in-use `App.Tenant.Store` is both an interface and a namespace: rename the interface or the folder.",
+                "3:18 name-already-in-use `App.Tenant.Store` is both an interface and a namespace: rename the interface or the folder. | `App.Tenant.Store.Order` is in the namespace `App.Tenant.Store`.",
             ),
         ),
         (
             ("src/App/Tenant/Store.sharp", "namespace App.Tenant;\n\npublic enum Store\n{\n    case Open;\n}\n"),
             vec![order],
             Some(
-                "3:13 name-already-in-use `App.Tenant.Store` is both an enum and a namespace: rename the enum or the folder.",
+                "3:13 name-already-in-use `App.Tenant.Store` is both an enum and a namespace: rename the enum or the folder. | `App.Tenant.Store.Order` is in the namespace `App.Tenant.Store`.",
+            ),
+        ),
+        (
+            store,
+            vec![receipts, order],
+            Some(
+                "3:14 name-already-in-use `App.Tenant.Store` is both a class and a namespace: rename the class or the folder. | `App.Tenant.Store.Order` is in the namespace `App.Tenant.Store`.",
             ),
         ),
         (
             store,
             vec![php_order],
             Some(
-                "3:14 name-already-in-use `App.Tenant.Store` is both a class and a namespace: rename the class or the folder.",
+                "3:14 name-already-in-use `App.Tenant.Store` is both a class and a namespace: rename the class or the folder. | `App.Tenant.Store.Order` is in the namespace `App.Tenant.Store`.",
             ),
         ),
         (
             php_store,
             vec![order],
             Some(
-                "5:7 name-already-in-use `App\\Tenant\\Store` is both a class and a namespace: rename the class or the folder.",
+                "5:7 name-already-in-use `App\\Tenant\\Store` is both a class and a namespace: rename the class or the folder. | `App\\Tenant\\Store\\Order` is in the namespace `App\\Tenant\\Store`.",
             ),
         ),
         (php_store, vec![php_order], None),
@@ -2970,7 +2979,10 @@ fn a_class_that_shares_its_full_name_with_a_namespace_is_an_error() {
     for (analyzed, others, expected) in rows {
         let refusals: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), analyzed, &others)
             .iter()
-            .map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message))
+            .map(|issue| {
+                let inside = issue.annotations.last().and_then(|annotation| annotation.message.as_deref());
+                format!("{} {} | {}", located(analyzed.1, issue), issue.message, inside.unwrap_or_default())
+            })
             .collect();
         assert_eq!(refusals, Vec::from_iter(expected), "{} beside {others:?}", analyzed.0);
     }
