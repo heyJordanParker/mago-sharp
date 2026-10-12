@@ -386,7 +386,7 @@ pub(crate) enum Toolchain {
     Ready,
     /// No `lake` is on the `PATH`, and Mago could not install Lean, with what failed.
     Missing(String),
-    /// No `lake` is on the `PATH`, and elan ships no build for the platform Mago is built for.
+    /// No `lake` is on the `PATH`, and Lean has no build for the platform Mago is built for.
     Unsupported,
     /// elan could not install the pinned Lean version, with its message.
     Failed(String),

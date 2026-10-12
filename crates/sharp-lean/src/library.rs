@@ -77,6 +77,9 @@ const ARCHIVE: Option<Archive> = if cfg!(all(target_os = "macos", target_arch = 
     None
 };
 
+/// The platform Mago is built for, as a message names it when Lean has no build for it.
+pub(crate) const PLATFORM: &str = if cfg!(target_env = "musl") { "musl Linux" } else { std::env::consts::OS };
+
 /// The `lake` Mago runs.
 #[derive(Debug)]
 pub(crate) struct Lake {

@@ -235,13 +235,10 @@ pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
     .with_annotation(Annotation::primary(span))
 }
 
-/// No `lake` is on the `PATH`, on a platform elan ships no build for, so Mago cannot install Lean.
-pub(crate) fn no_elan_build(span: Span) -> Issue {
-    let libc = if cfg!(target_env = "musl") { " with musl" } else { "" };
-    let platform = format!("{} {}{libc}", std::env::consts::OS, std::env::consts::ARCH);
-
+/// No `lake` is on the `PATH`, on a `platform` Lean has no build for, such as `musl Linux`.
+pub(crate) fn no_lean_build(span: Span, platform: &str) -> Issue {
     Issue::error(format!(
-        "Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. Mago installs Lean with elan, which ships no build for {platform}. Install elan where it runs with `curl https://elan.lean-lang.org/elan-init.sh -sSf | sh`, then run vendor/bin/mago compile again."
+        "Lean has no build for {platform}, so laws and structure rules can't be checked on this system."
     ))
     .with_code(IssueCode::MissingLean.as_str())
     .with_annotation(Annotation::primary(span))
@@ -255,4 +252,20 @@ pub(crate) fn elan_failed(span: Span, message: &str) -> Issue {
 
 fn unproven(law: &Law, message: String) -> Issue {
     Issue::error(message).with_code(IssueCode::UnprovenLaw.as_str()).with_annotation(Annotation::primary(law.span))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_platform_lean_has_no_build_for_is_named_and_given_no_install_command() {
+        let issue = no_lean_build(Span::zero(), "musl Linux");
+
+        assert_eq!(
+            issue.message,
+            "Lean has no build for musl Linux, so laws and structure rules can't be checked on this system."
+        );
+        assert_eq!(issue.code.as_deref(), Some("missing-lean"));
+    }
 }
