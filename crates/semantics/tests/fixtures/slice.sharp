@@ -435,6 +435,11 @@ public class Order
     public Order.Paid pay(int orderId) => new Order.Paid(orderId);
 
     public int amountOf(Paid paid) => paid.amount;
+
+    public void settle(int orderId)
+    {
+        emit new Paid(orderId);
+    }
 }
 
 public event Shipped(int shipmentId);

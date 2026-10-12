@@ -59,6 +59,7 @@ use crate::cst::cst::DocumentString;
 use crate::cst::cst::DottedIdentifier;
 use crate::cst::cst::Echo;
 use crate::cst::cst::EchoTag;
+use crate::cst::cst::Emit;
 use crate::cst::cst::EmptyConstruct;
 use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
@@ -464,6 +465,7 @@ generate_ast_walker! {
             Statement::Switch(switch) => walker.walk_switch(switch, context),
             Statement::If(r#if) => walker.walk_if(r#if, context),
             Statement::Return(r#return) => walker.walk_return(r#return, context),
+        Statement::Emit(emit) => walker.walk_emit(emit, context),
             Statement::Expression(expression) => walker.walk_statement_expression(expression, context),
             Statement::EchoTag(echo) => walker.walk_echo_tag(echo, context),
             Statement::Echo(echo) => walker.walk_echo(echo, context),
@@ -1782,6 +1784,12 @@ generate_ast_walker! {
         }
 
         walker.walk_terminator(&r#return.terminator, context);
+    }
+
+    'arena Emit as emit => {
+        walker.walk_keyword(&emit.emit, context);
+        walker.walk_expression(emit.value, context);
+        walker.walk_terminator(&emit.terminator, context);
     }
 
     'arena ExpressionStatement as statement_expression => {

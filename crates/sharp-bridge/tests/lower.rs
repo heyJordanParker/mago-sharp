@@ -5254,6 +5254,39 @@ fn an_event_is_a_final_class_and_a_nested_type_is_declared_after_its_class() {
 }
 
 /// ```php
+/// \Sharp\Internal\emit(new \App\Order\Paid(1));
+/// \Sharp\Internal\emit($paid);
+/// ```
+///
+/// Spec section 15: `emit` raises the event its expression gives, through the one function the engine adds, which runs
+/// every listener of the event before it returns.
+#[test]
+fn emit_is_a_call_of_the_engine_emit() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic class Order\n{\n    public event Paid(int orderId);\n\n    public void run(Paid paid)\n    {\n        emit new Paid(1);\n        emit paid;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              CALL
+                ZVAL "Sharp\\Internal\\emit"
+                ARG_LIST
+                  NEW
+                    ZVAL "App\\Order\\Paid"
+                    ARG_LIST
+                      ZVAL 1
+              CALL
+                ZVAL "Sharp\\Internal\\emit"
+                ARG_LIST
+                  VAR
+                    ZVAL "paid"
+        "#}
+    );
+}
+
+/// ```php
 /// public function size(): int { return 1; }
 /// #[\Override] public function name(): string { return 'thumbnail'; }
 /// ```

@@ -26,6 +26,7 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::template::GenericTemplate;
@@ -82,6 +83,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 
 pub mod constant;
@@ -1206,18 +1208,21 @@ where
                             })
                         });
 
-                    if !is_implemented {
+                    if !is_implemented && context.dialect.is_sharp() {
+                        report_unstated_property(
+                            context,
+                            class_like_metadata,
+                            name_span.unwrap_or(declaration_span),
+                            parent_metadata,
+                            *property_name,
+                            parent_property,
+                            hook_metadata.span,
+                        );
+                    } else if !is_implemented {
                         let fqcn = parent_metadata.original_name;
                         let hook_span = hook_metadata.span;
-                        let (missing_hook, abstract_hook) = if context.dialect.is_sharp() {
-                            let accessor = display_sharp_accessor(context, fqcn, *property_name, *hook_name);
-                            (accessor.clone(), accessor)
-                        } else {
-                            (
-                                format!("{property_name}::{hook_name}()"),
-                                format!("{fqcn}::{property_name}::{hook_name}()"),
-                            )
-                        };
+                        let missing_hook = format!("{property_name}::{hook_name}()");
+                        let abstract_hook = format!("{fqcn}::{property_name}::{hook_name}()");
                         let property = display_property_name(context, *property_name);
 
                         context.collector.report_with_code(
@@ -1404,6 +1409,44 @@ where
     }
 
     Ok(())
+}
+
+/// Reports a PHP# class or event, declared at `span`, that does not give the property `property_name` that `parent`
+/// states at `stated`. An event gives its properties through its parameters, spec section 15.
+fn report_unstated_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    span: Span,
+    parent: &ClassLikeMetadata,
+    property_name: Word,
+    parent_property: &PropertyMetadata,
+    stated: Span,
+) where
+    A: Arena,
+{
+    let name = display_class_like_name(context, class_like_metadata.original_name);
+    let property = display_property_name(context, property_name);
+    let mixed = get_mixed();
+    let written = display_sharp_type(
+        context,
+        parent_property.type_metadata.as_ref().map_or(&mixed, |metadata| &metadata.type_union),
+    );
+    let help = if class_like_metadata.flags.is_event() {
+        format!("Add the parameter `{written} {property}`.")
+    } else {
+        format!("Add the property `public {written} {property} {{ get; }}`.")
+    };
+
+    context.collector.report_with_code(
+        IssueCode::UnimplementedAbstractPropertyHook,
+        Issue::error(format!(
+            "`{name}` does not give `{property}`, which `{}` states.",
+            display_class_like_name(context, parent.original_name)
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Declared here."))
+        .with_annotation(Annotation::secondary(stated).with_message("Stated here."))
+        .with_help(help),
+    );
 }
 
 #[allow(clippy::unwrap_used)]

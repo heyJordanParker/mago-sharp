@@ -65,6 +65,7 @@ where
             T![Identifier] if !self.state.within_block && self.is_at_event()? => {
                 Statement::Event(self.parse_event_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?)
             }
+            T![Identifier] if self.is_at_emit()? => Statement::Emit(self.parse_emit()?),
             T!["const" | Identifier | "list" | "function" | "("] if self.is_at_local_declaration()? => {
                 Statement::LocalDeclaration(self.parse_local_declaration()?)
             }

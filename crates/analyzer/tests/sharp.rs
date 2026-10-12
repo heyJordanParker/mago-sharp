@@ -7950,8 +7950,9 @@ fn a_message_names_an_accessor_as_sharp_writes_it() {
     );
 }
 
-/// A plain PHP parent's abstract, final and by-reference hooks are named as PHP# names an accessor, `Priced.total.get`,
-/// when a PHP# class misses or replaces them. The PHP twin keeps Mago's text.
+/// A plain PHP parent's final and by-reference hooks are named as PHP# names an accessor, `Priced.total.get`, when a
+/// PHP# class replaces them, and a property a PHP# class misses is named as the property it lacks. The PHP twin keeps
+/// Mago's text.
 #[test]
 fn a_message_names_an_inherited_accessor_as_sharp_writes_it() {
     let library = "<?php\n\nnamespace Lib;\n\ninterface Priced\n{\n    public int $total { get; }\n}\n\nclass Counter\n{\n    public int $count = 0 {\n        final get => $this->count;\n    }\n}\n\ninterface Shared\n{\n    public array $items { &get; }\n}\n";
@@ -7970,7 +7971,7 @@ fn a_message_names_an_inherited_accessor_as_sharp_writes_it() {
     assert_eq!(
         worded(("src/Demo/Order.sharp", sharp), &others),
         [
-            "7:14 unimplemented-abstract-property-hook Class `Order` does not implement the abstract property hook `Priced.total.get`. | `Order` is not abstract and must implement this hook | `Priced.total.get` is defined as abstract here | When a concrete class extends an abstract class or implements an interface, it must provide an implementation for all inherited abstract property hooks. | You can either implement the `get` hook for property `total` in `Order`, or declare `Order` as an abstract class.",
+            "7:14 unimplemented-abstract-property-hook `Order` does not give `total`, which `Priced` states. | Declared here. | Stated here. | Add the property `public int total { get; }`.",
             "13:33 override-final-property-hook Cannot override final property hook `Counter.count.get`. | Attempting to override final hook here | Hook `Counter.count.get` is declared as final | Final property hooks cannot be overridden in child classes. | Remove the `get` hook from `Tally.count`, or remove the final modifier from the parent hook.",
             "18:30 incompatible-property-hook-signature Declaration of `Bag.items.get` must be compatible with `& Shared.items.get`. | This hook does not return by reference | Interface `Shared` requires this hook to return by reference | When an interface declares a by-reference hook (`&get`), the implementing class must also return by reference. | Add `&` to the `get` hook declaration: `&get => ...`",
         ]
@@ -10442,11 +10443,12 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
     assert_eq!(worded(reader, &[ORDER_EVENTS]), Vec::<String>::new());
     assert_eq!(issues(writer, &[ORDER_EVENTS]), ["7:14 invalid-property-write", "10:48 invalid-argument"]);
     assert_eq!(
-        messages(writer, &[ORDER_EVENTS]),
-        [
-            "Cannot initialize readonly property `Order.Paid.orderId` from within `Writer`.",
-            "Invalid argument type for argument #1 of `Order.Paid.__construct`: expected `int`, but found `string`."
-        ]
+        worded(writer, &[ORDER_EVENTS])[0],
+        "7:14 invalid-property-write Event `Order.Paid` sets `orderId` once, by `new`. | Written here. | An event's parameters are its properties, and nothing changes them after `new`. | Create a new event with the value instead."
+    );
+    assert_eq!(
+        messages(writer, &[ORDER_EVENTS])[1],
+        "Invalid argument type for argument #1 of `Order.Paid.__construct`: expected `int`, but found `string`."
     );
 }
 
@@ -10476,19 +10478,78 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 }
 
 /// Spec section 15: the interface a family of events shares states the get-only properties each event gives, so an
-/// event or a class that names it and lacks one is refused, as the engine refuses the class it runs as.
+/// event or a class that names it and lacks one is refused, as the engine refuses the class it runs as. An event gives
+/// a property through a parameter, and a class through a property, as each help writes it.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : Order.Event;\n");
     let class = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic class Moved : Order.Event\n{\n}\n");
     let given = (
         "app/Shop/Moved.sharp",
-        "namespace App.Shop;\n\npublic event Moved(int orderId) : Order.Event;\n\npublic class Kept : Order.Event\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n",
+        "namespace App.Shop;\n\npublic event Moved(int id, int orderId) : Order.Event;\n\npublic class Kept : Order.Event\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n",
     );
 
-    assert_eq!(issues(event, &[ORDER_EVENTS]), ["3:14 unimplemented-abstract-property-hook"]);
-    assert_eq!(issues(class, &[ORDER_EVENTS]), ["3:14 unimplemented-abstract-property-hook"]);
+    assert_eq!(
+        worded(event, &[ORDER_EVENTS]),
+        [
+            "3:14 unimplemented-abstract-property-hook `Moved` does not give `orderId`, which `Order.Event` states. | Declared here. | Stated here. | Add the parameter `int orderId`."
+        ]
+    );
+    assert_eq!(
+        worded(class, &[ORDER_EVENTS]),
+        [
+            "3:14 unimplemented-abstract-property-hook `Moved` does not give `orderId`, which `Order.Event` states. | Declared here. | Stated here. | Add the property `public int orderId { get; }`."
+        ]
+    );
     assert_eq!(worded(given, &[ORDER_EVENTS]), Vec::<String>::new());
+}
+
+/// Spec section 15: `emit` raises an event, one an `event` declares, in a class or a file, or a plain PHP class an
+/// `extern event` marks. Any other value is refused, an interface its events share included, and a refused value
+/// reports only its own error.
+#[test]
+fn emit_takes_an_event() {
+    let failed =
+        ("src/Queue/JobFailed.php", "<?php\n\nnamespace Queue;\n\nclass JobFailed\n{\n}\n\nclass Ledger\n{\n}\n");
+    let raiser = (
+        "app/Shop/Raiser.sharp",
+        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(Order.Paid paid, JobFailed failed, Order.Event family, Money amount, Ledger ledger, int count)\n    {\n        emit new Order.Paid(1);\n        emit paid;\n        emit new Shipped(2);\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n    }\n}\n\npublic class Money\n{\n}\n\npublic event Shipped(int shipmentId);\n",
+    );
+    let note = "An event is a class that `event` declares, or a plain PHP class that `extern event` marks.";
+
+    assert_eq!(
+        worded(raiser, &[ORDER_EVENTS, failed]),
+        [
+            format!("17:14 invalid-event `emit` takes an event, and `Order.Event` is not one. | Emitted here. | {note}"),
+            format!("18:14 invalid-event `emit` takes an event, and `Money` is not one. | Emitted here. | {note}"),
+            format!("19:14 invalid-event `emit` takes an event, and `Ledger` is not one. | Emitted here. | {note}"),
+            format!("20:14 invalid-event `emit` takes an event, and `int` is not one. | Emitted here. | {note}"),
+            format!("21:14 invalid-event `emit` takes an event, and `null` is not one. | Emitted here. | {note}"),
+            "22:18 non-existent-class Class `Missing` not found. | `Missing` is not defined or cannot be autoloaded | Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.".to_owned(),
+        ]
+    );
+}
+
+/// Spec section 15: `emit` has the effect `Events`, whatever its listeners do, so a getter or a law that emits, or
+/// reaches a method that does, is refused naming the event, and a lambda that emits fits only a function type that
+/// lists `Events`.
+#[test]
+fn emit_has_the_effect_events() {
+    let checkout = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new Order.Paid(1); };\n\n    private Function<void()> silent = () => { emit new Order.Paid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new Order.Paid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    public int complete()\n    {\n        emit new Order.Paid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n}\n",
+    );
+
+    assert_eq!(issues(checkout, &[ORDER_EVENTS]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[checkout, ORDER_EVENTS]),
+        [
+            "app/Shop/Checkout.sharp:13:13 impure-getter: Getter `paid` emits `Order.Paid`, which has the effect `Events`. Getters must be pure.",
+            "app/Shop/Checkout.sharp:18:25 impure-getter: Getter `total` reaches `Checkout.complete`, which emits `Order.Paid` with the effect `Events`. Getters must be pure.",
+            "app/Shop/Checkout.sharp:20:41 impure-law: Law `completes` reaches `Checkout.complete`, which emits `Order.Paid` with the effect `Events`. Laws hold only over pure code.",
+            "app/Shop/Checkout.sharp:7:39 invalid-property-default-value: This lambda emits `Order.Paid`, which has the effect `Events`, so a `Function<void()>` cannot hold it.",
+        ]
+    );
 }
 
 /// `Order.Name` names the type `Order` nests, spec section 15, and otherwise the named constructor `Name` of

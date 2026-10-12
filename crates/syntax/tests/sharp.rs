@@ -3846,3 +3846,45 @@ fn an_interface_nests_in_a_class_beside_its_events() {
     assert_eq!(source(CODE, order_id), "public int orderId { get; }");
     assert_eq!(paid.name.value, b"Paid");
 }
+
+/// Spec section 15 raises an event with `emit` and the expression after it. Before `(`, an operator or `is`, `emit`
+/// stays a name, and plain PHP keeps it a name everywhere.
+#[test]
+fn emit_raises_the_expression_after_it() {
+    const CODE: &str = "class Order\n{\n    public void run(Order.Paid paid, int emit)\n    {\n        emit new Order.Paid(1);\n        emit paid;\n        emit 5;\n        emit(paid);\n        const next = emit + 1;\n        const known = emit is int;\n    }\n}\n";
+    const PHP: &str = "<?php\n\nemit(new Paid());\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+    let php = parse(&arena, "src/raise.php", PHP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let statements: Vec<(&str, &str)> = method_body(program)
+        .iter()
+        .map(|statement| match statement {
+            Statement::Emit(emit) => {
+                assert_eq!(emit.emit.value, b"emit");
+
+                ("emit", source(CODE, emit.value))
+            }
+            Statement::Expression(statement) => ("expression", source(CODE, statement.expression)),
+            Statement::LocalDeclaration(local) => ("local", source(CODE, local.value)),
+            _ => panic!("expected an emit, an expression or a local, got {statement:#?}"),
+        })
+        .collect();
+    assert_eq!(
+        statements,
+        [
+            ("emit", "new Order.Paid(1)"),
+            ("emit", "paid"),
+            ("emit", "5"),
+            ("expression", "emit(paid)"),
+            ("local", "emit + 1"),
+            ("local", "emit is int"),
+        ]
+    );
+    assert!(php.errors.is_empty(), "{:#?}", php.errors);
+    let [_, call] = php.statements.as_slice() else {
+        panic!("expected an opening tag and a call, got {:#?}", php.statements);
+    };
+    assert_eq!(source(PHP, expression(call)), "emit(new Paid())");
+}

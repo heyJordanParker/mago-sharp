@@ -291,7 +291,7 @@ where
         context,
         scope,
     )?;
-    class_like_metadata.flags |= MetadataFlags::FINAL;
+    class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::EVENT;
 
     let constructor = scan_event_constructor(event, &class_like_metadata, context, scope);
     for parameter in &constructor.parameters {

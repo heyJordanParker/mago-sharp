@@ -57,6 +57,8 @@ impl MetadataFlags {
     /// A PHP# module, spec section 32: the class-like `<Namespace>\Module` its `Module.sharp` declares, which holds only
     /// laws and never runs.
     pub const MODULE: MetadataFlags = MetadataFlags(1 << 45);
+    /// A PHP# event, spec section 15: the final class an `event` declaration runs as.
+    pub const EVENT: MetadataFlags = MetadataFlags(1 << 46);
 }
 
 impl MetadataFlags {
@@ -127,6 +129,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_module(self) -> bool {
         self.contains(Self::MODULE)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_event(self) -> bool {
+        self.contains(Self::EVENT)
     }
 
     #[inline]

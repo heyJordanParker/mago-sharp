@@ -688,6 +688,14 @@ fn writing_a_const_local_after_its_block_closes_reports_only_the_scope_error() {
     assert_eq!(issues(code), ["10:9 `inner` is used after the block that declares it closes."]);
 }
 
+/// Spec section 15 raises an event with `emit` in code that runs, so a file holds none.
+#[test]
+fn emit_is_a_statement_of_a_body_and_of_no_file() {
+    let code = "namespace App.Shop;\n\nemit new Order.Paid(1);\n";
+
+    assert_eq!(issues(code), ["3:1 This statement is not supported yet in PHP#."]);
+}
+
 #[test]
 fn a_top_level_function_is_an_error() {
     let code = "namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n";

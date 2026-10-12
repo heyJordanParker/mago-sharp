@@ -1255,6 +1255,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
             }
+            // `emit e;` is `\Sharp\Internal\emit($e);`, which runs every listener of the event before it returns.
+            Statement::Emit(emit) => {
+                let line = self.line(emit);
+                let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\emit");
+                let event = self.expression(emit.value);
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[event]);
+
+                self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+            }
             Statement::LocalDeclaration(local) => self.local(local),
             Statement::If(r#if) => self.r#if(r#if),
             Statement::For(r#for) => self.r#for(r#for),

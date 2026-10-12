@@ -65,6 +65,7 @@ use crate::cst::cst::DocumentString;
 use crate::cst::cst::DottedIdentifier;
 use crate::cst::cst::Echo;
 use crate::cst::cst::EchoTag;
+use crate::cst::cst::Emit;
 use crate::cst::cst::EmptyConstruct;
 use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
@@ -465,6 +466,7 @@ pub enum NodeKind {
     Break,
     Continue,
     Return,
+    Emit,
     Static,
     StaticAbstractItem,
     StaticConcreteItem,
@@ -738,6 +740,7 @@ pub enum Node<'ast, 'arena> {
     Break(&'ast Break<'arena>),
     Continue(&'ast Continue<'arena>),
     Return(&'ast Return<'arena>),
+    Emit(&'ast Emit<'arena>),
     Static(&'ast Static<'arena>),
     StaticAbstractItem(&'ast StaticAbstractItem<'arena>),
     StaticConcreteItem(&'ast StaticConcreteItem<'arena>),
@@ -893,6 +896,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Switch(_)
                 | Self::If(_)
                 | Self::Return(_)
+                | Self::Emit(_)
                 | Self::ExpressionStatement(_)
                 | Self::Echo(_)
                 | Self::EchoTag(_)
@@ -1096,6 +1100,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Break(_) => NodeKind::Break,
             Self::Continue(_) => NodeKind::Continue,
             Self::Return(_) => NodeKind::Return,
+            Self::Emit(_) => NodeKind::Emit,
             Self::Static(_) => NodeKind::Static,
             Self::StaticAbstractItem(_) => NodeKind::StaticAbstractItem,
             Self::StaticConcreteItem(_) => NodeKind::StaticConcreteItem,
@@ -2497,6 +2502,11 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
 
                 f(Node::Terminator(&node.terminator));
             }
+            Node::Emit(node) => {
+                f(Node::Keyword(&node.emit));
+                f(Node::Expression(node.value));
+                f(Node::Terminator(&node.terminator));
+            }
             Node::Static(node) => {
                 f(Node::Keyword(&node.r#static));
 
@@ -2679,6 +2689,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Statement::Switch(node) => f(Node::Switch(node)),
                 Statement::If(node) => f(Node::If(node)),
                 Statement::Return(node) => f(Node::Return(node)),
+                Statement::Emit(node) => f(Node::Emit(node)),
                 Statement::Expression(node) => f(Node::ExpressionStatement(node)),
                 Statement::EchoTag(node) => f(Node::EchoTag(node)),
                 Statement::Echo(node) => f(Node::Echo(node)),
@@ -3042,6 +3053,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Break(node) => node.span(),
             Self::Continue(node) => node.span(),
             Self::Return(node) => node.span(),
+            Self::Emit(node) => node.span(),
             Self::Static(node) => node.span(),
             Self::StaticAbstractItem(node) => node.span(),
             Self::StaticConcreteItem(node) => node.span(),

@@ -204,6 +204,7 @@ enum NodeKind: string
     case Break = 'Break';
     case Continue = 'Continue';
     case Return = 'Return';
+    case Emit = 'Emit';
     case Static = 'Static';
     case StaticAbstractItem = 'StaticAbstractItem';
     case StaticConcreteItem = 'StaticConcreteItem';

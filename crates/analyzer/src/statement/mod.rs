@@ -31,6 +31,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ExpressionStatement;
 use mago_syntax::cst::ForOf;
@@ -52,6 +53,7 @@ use mago_syntax::cst::UseItems;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
+use mago_word::empty_word;
 use mago_word::word;
 
 use crate::Context;
@@ -73,6 +75,7 @@ use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_function_like_id_from_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
+use crate::utils::names::display_sharp_type;
 
 pub mod attributes;
 pub mod class_like;
@@ -260,6 +263,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Break(r#break) => r#break.analyze(context, block_context, artifacts),
                 Statement::If(r#if) => r#if.analyze(context, block_context, artifacts),
                 Statement::Return(r#return) => r#return.analyze(context, block_context, artifacts),
+                Statement::Emit(emit) => analyze_emit(emit, context, block_context, artifacts),
                 Statement::Echo(echo) => echo.analyze(context, block_context, artifacts),
                 Statement::EchoTag(echo) => echo.analyze(context, block_context, artifacts),
                 Statement::Global(global) => global.analyze(context, block_context, artifacts),
@@ -492,6 +496,54 @@ fn report_key_mixing_a_backed_enum<A>(
         )
         .with_help("Key the `Map` by one backed enum alone."),
     );
+}
+
+/// Analyzes a PHP# `emit`, spec section 15: it raises an event, so its value's type is an event. A refused value is
+/// `never`, and its error already reports it.
+fn analyze_emit<'ctx, 'arena, A>(
+    emit: &Emit<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    emit.value.analyze(context, block_context, artifacts)?;
+
+    let codebase = context.codebase;
+    let not_an_event = artifacts.get_expression_type(emit.value).filter(|value_type| {
+        !value_type.is_never() && !value_type.types.iter().all(|atomic| is_event(codebase, atomic))
+    });
+    if let Some(value_type) = not_an_event {
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!(
+                "`emit` takes an event, and `{}` is not one.",
+                display_sharp_type(context, value_type)
+            ))
+            .with_annotation(Annotation::primary(emit.value.span()).with_message("Emitted here."))
+            .with_note("An event is a class that `event` declares, or a plain PHP class that `extern event` marks."),
+        );
+    }
+
+    Ok(())
+}
+
+/// Whether `atomic` is an object of an event: a class an `event` declares, or a plain PHP class an `extern event` marks.
+fn is_event(codebase: &CodebaseMetadata, atomic: &TAtomic) -> bool {
+    let TAtomic::Object(object) = atomic else {
+        return false;
+    };
+
+    object.get_name().is_some_and(|name| {
+        codebase.get_class_like(name.as_bytes()).is_some_and(|class_like| class_like.flags.is_event())
+            || codebase
+                .externs
+                .get(&(ascii_lowercase_word(name.as_bytes()), empty_word()))
+                .and_then(|declarations| declarations.first())
+                .is_some_and(|declaration| declaration.event)
+    })
 }
 
 /// The type a written type would give a value: every literal and narrowed scalar widened, and every list or map shape
