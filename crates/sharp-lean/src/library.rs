@@ -7,6 +7,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::ExitStatus;
 use std::process::Output;
 use std::time::Duration;
 
@@ -21,10 +22,11 @@ pub(crate) const TOOLCHAIN: &str = include_str!("../lean/lean-toolchain");
 pub(crate) const NAMESPACE: &str = "Sharp";
 
 /// The library's Lake package, as `crates/sharp-lean/lean/` holds it.
-const PACKAGE: [(&str, &str); 7] = [
+const PACKAGE: [(&str, &str); 8] = [
     ("lakefile.toml", include_str!("../lean/lakefile.toml")),
     ("lean-toolchain", TOOLCHAIN),
     ("Sharp/Lean/Int.lean", include_str!("../lean/Sharp/Lean/Int.lean")),
+    ("Sharp/Lean/Interface.lean", include_str!("../lean/Sharp/Lean/Interface.lean")),
     ("Sharp/Lean/Law.lean", include_str!("../lean/Sharp/Lean/Law.lean")),
     ("Sharp/Lean/String.lean", include_str!("../lean/Sharp/Lean/String.lean")),
     ("Sharp/Lean/Facts.lean", include_str!("../lean/Sharp/Lean/Facts.lean")),
@@ -36,6 +38,10 @@ const ELAN_VERSION: &str = "4.2.4";
 
 /// The largest elan archive Mago downloads. The pinned ones are about 5 MB.
 const ELAN_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// The processor seconds each Lean process Mago starts may use: far above any real proof or rule, so that ordinary load
+/// never reaches it, and a proof or rule that never ends stops instead of holding the compile.
+const PROCESSOR_SECONDS: u64 = 120;
 
 /// elan's release archive for one platform, and the size of the Lean archive elan then downloads there.
 struct Archive {
@@ -93,14 +99,74 @@ impl Lake {
         Self { program: PathBuf::from("lake"), home: None }
     }
 
-    /// A command that runs this `lake`.
+    /// A command that runs this `lake`. On Unix it may use `processor_seconds()`, as may each Lean process it starts,
+    /// which inherits the limit.
     pub(crate) fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         if let Some(home) = &self.home {
             command.env("ELAN_HOME", home);
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+
+            let seconds = processor_seconds();
+            // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
+            unsafe { command.pre_exec(move || limit_processor_time(seconds)) };
+        }
 
         command
+    }
+}
+
+/// The processor seconds each Lean process may use: `PROCESSOR_SECONDS`, or the lower limit Mago itself runs under, such
+/// as one `ulimit -t` set.
+pub(crate) fn processor_seconds() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: `limit` is a valid `rlimit` for `getrlimit` to fill.
+        if unsafe { libc::getrlimit(libc::RLIMIT_CPU, &raw mut limit) } == 0 {
+            return PROCESSOR_SECONDS.min(limit.rlim_cur);
+        }
+    }
+
+    PROCESSOR_SECONDS
+}
+
+/// Lowers the soft processor-time limit of the process about to start to `seconds`, which it reaches as `SIGXCPU`, and
+/// its core-file limit to none, so a Lean stopped that way leaves no core file of gigabytes in the project.
+#[cfg(unix)]
+fn limit_processor_time(seconds: u64) -> io::Result<()> {
+    for (resource, soft) in [(libc::RLIMIT_CPU, seconds), (libc::RLIMIT_CORE, 0)] {
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: `limit` is a valid `rlimit` for `getrlimit` to fill and `setrlimit` to read.
+        if unsafe { libc::getrlimit(resource, &raw mut limit) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        limit.rlim_cur = limit.rlim_cur.min(soft);
+        // SAFETY: as above.
+        if unsafe { libc::setrlimit(resource, &raw const limit) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether a Lean process stopped at `processor_seconds()`: `SIGXCPU` ended it, or ended the program `lake env` ran,
+/// which `lake env` reports as the exit status 128 plus the signal.
+pub(crate) fn stopped(status: ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        status.signal() == Some(libc::SIGXCPU) || status.code() == Some(128 + libc::SIGXCPU)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
     }
 }
 
@@ -191,9 +257,7 @@ pub(crate) fn install() -> io::Result<Option<Lake>> {
 /// never reuses or deletes the download a killed install left there.
 fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> {
     let home = cache.join("elan");
-    fs::create_dir_all(cache)?;
-    let lock = fs::File::options().create(true).truncate(false).write(true).open(cache.join("elan.lock"))?;
-    lock.lock()?;
+    let _lock = install_lock(cache)?;
 
     let lake = Lake { program: home.join("bin/lake"), home: Some(home.clone()) };
     let has_elan = Path::new(elan(&home).get_program()).is_file();
@@ -219,6 +283,28 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
     }
 
     Ok(lake)
+}
+
+/// Runs `command`, the first call to a `lake`, under the lock Mago's own installs take. elan's `lake` installs the
+/// pinned Lean on its first call, with no lock of its own, so compiles that start together on a machine without that
+/// Lean take turns to install it once instead of breaking it. With no such program on the `PATH`, the call installs
+/// nothing and takes no lock, so it fails as not found even where Mago's cache folder can hold no lock.
+pub(crate) fn first_call(command: &mut Command) -> io::Result<Output> {
+    let program = Path::new(command.get_program()).with_extension(std::env::consts::EXE_EXTENSION);
+    let found = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|folder| folder.join(&program).is_file()));
+    let _lock = if found { Some(install_lock(&cache_root()?)?) } else { None };
+
+    command.output()
+}
+
+/// The exclusive lock on `elan.lock` in `cache`, held across threads and processes alike until it is dropped.
+fn install_lock(cache: &Path) -> io::Result<fs::File> {
+    fs::create_dir_all(cache)?;
+    let lock = fs::File::options().create(true).truncate(false).write(true).open(cache.join("elan.lock"))?;
+    lock.lock()?;
+
+    Ok(lock)
 }
 
 /// Downloads elan's archive from `url`, checks its SHA-256, and runs its `elan-init` with `elan.staging/` as elan's

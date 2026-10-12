@@ -574,6 +574,56 @@ fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
     assert!(!cache.path().join("mago/elan").exists(), "{}", printed(&output));
 }
 
+/// Puts a `lake` first on the `PATH` that runs the real one, except that its first `--version`, the call on which elan
+/// installs a missing Lean, installs into the empty folder `toolchain` in `folder`, as elan does, with no lock of its
+/// own: an install takes a second, and an install that starts while another runs leaves `overlap` in `folder`.
+#[cfg(unix)]
+fn installing_lake(folder: &Path) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = std::env::var_os("PATH").unwrap();
+    let real =
+        std::env::split_paths(&path).map(|directory| directory.join("lake")).find(|lake| lake.is_file()).unwrap();
+    let toolchain = folder.join("toolchain");
+    std::fs::create_dir_all(&toolchain).unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ] && [ ! -e '{toolchain}/installed' ]; then\n  if mkdir '{toolchain}/installing' 2>/dev/null; then\n    sleep 1\n    echo lean >> '{toolchain}/installed'\n    rmdir '{toolchain}/installing'\n  else\n    touch '{overlap}'\n  fi\nfi\nexec '{real}' \"$@\"\n",
+        toolchain = toolchain.display(),
+        overlap = folder.join("overlap").display(),
+        real = real.display(),
+    );
+    let lake = folder.join("bin/lake");
+    write(folder, "bin/lake", &script);
+    std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    std::env::join_paths(std::iter::once(folder.join("bin")).chain(std::env::split_paths(&path))).unwrap()
+}
+
+/// elan's `lake` installs a missing Lean on its first call, with no lock of its own, so compiles that start together on
+/// a machine without that Lean would break it. Mago makes that call under the lock its own installs take, so the
+/// compiles take turns and Lean is installed once.
+#[cfg(unix)]
+#[test]
+fn compiles_that_start_together_install_the_missing_lean_of_the_lake_on_the_path_once() {
+    let lake = tempfile::tempdir().unwrap();
+    let path = installing_lake(lake.path());
+    let projects: Vec<_> = (0..2).map(|_| lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)])).collect();
+
+    let outputs: Vec<Output> = std::thread::scope(|scope| {
+        let compiles: Vec<_> = projects
+            .iter()
+            .map(|project| scope.spawn(|| command(project.path(), "never").env("PATH", &path).output().unwrap()))
+            .collect();
+        compiles.into_iter().map(|compile| compile.join().unwrap()).collect()
+    });
+
+    for output in &outputs {
+        assert!(output.status.success(), "{}", printed(output));
+    }
+    assert!(!lake.path().join("overlap").exists(), "two compiles installed Lean at once");
+    assert_eq!(read(lake.path(), "toolchain/installed"), "lean\n");
+}
+
 #[test]
 fn compile_refuses_a_gap_every_time_and_never_leaves_a_current_compiled_file() {
     let directory = lawful_project(&[
@@ -829,6 +879,57 @@ fn compile_proves_spec_section_28_1_s_state_machine_law_over_an_enum_match() {
         read(root, "app/Shop/Status.lean").contains("theorem refundedIsFinal : App.Shop.Status.refundedIsFinal := by")
     );
     assert!(compiled(root, "app/Shop/Status.sharp").exists());
+}
+
+/// Spec section 28's `state-machine-law` example as it stands, whose `Payment` is an interface: the law holds for every
+/// class that implements it.
+#[test]
+fn compile_proves_spec_section_28_s_state_machine_law_over_an_interface() {
+    let directory = lawful_project(&[
+        ("app/Shop/Payment.sharp", "namespace App.Shop;\n\npublic interface Payment\n{\n}\n"),
+        (
+            "app/Shop/Status.sharp",
+            "namespace App.Shop;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n    case Paid = \"paid\";\n    case Refunded = \"refunded\";\n\n    public Status after(Payment e) => match (this) {                               // pure: the next status for every status and event\n        Status.Open => Status.Paid,\n        Status.Paid => Status.Refunded,\n        Status.Refunded => Status.Refunded,\n    };\n    law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(
+        read(root, "app/Shop/Status.lean").contains("theorem refundedIsFinal : App.Shop.Status.refundedIsFinal := by")
+    );
+    assert!(compiled(root, "app/Shop/Status.sharp").exists());
+}
+
+/// A class can hold an interface's value and call its methods, directly and through `?.`, and a law over it still
+/// proves: each method is a function Lean knows nothing about, so the law holds whatever each implementation returns.
+#[test]
+fn compile_proves_a_law_over_a_class_that_holds_an_interface_and_calls_its_methods() {
+    let directory = lawful_project(&[
+        ("app/Shop/Payment.sharp", "namespace App.Shop;\n\npublic interface Payment\n{\n    int amount();\n}\n"),
+        (
+            "app/Shop/Refund.sharp",
+            "namespace App.Shop;\n\npublic class Refund\n{\n    public Refund(public Payment payment { get; }, public Payment? fee { get; }, public bool settled { get; }) { }\n\n    public int owed()\n    {\n        if (this.settled) {\n            return 0;\n        }\n        return this.payment.amount() - (this.fee?.amount() ?? 0);\n    }\n\n    law settledOwesNothing(Payment payment) => new Refund(payment, null, true).owed() == 0;\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(
+        read(root, "app/Shop/Refund.lean")
+            .contains("theorem settledOwesNothing : App.Shop.Refund.settledOwesNothing := by")
+    );
+    let payment = read(root, ".sharp/.lean/Code/App/Shop/Payment.lean");
+    assert!(
+        payment.ends_with(
+            "open Sharp\n\nabbrev App.Shop.Payment : Type := Interface \"App.Shop.Payment\"\n\nopaque App.Shop.Payment.amount (this : App.Shop.Payment) : M int\n"
+        ),
+        "{payment}"
+    );
 }
 
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
@@ -1912,6 +2013,113 @@ fn compile_checks_a_structure_rule_over_thousands_of_imports() {
         "{}",
         printed(&output)
     );
+}
+
+/// `mago compile` with each issue on one line, as `compile_lines` runs it, under a processor-time limit of `seconds`,
+/// which Mago passes on to each Lean process it starts, so a row reaches Mago's limit long before its 120 seconds.
+#[cfg(unix)]
+fn compile_lines_within(root: &Path, seconds: u64) -> Output {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = command(root, "never");
+    command.env("MAGO_REPORTING_FORMAT", "emacs");
+    // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
+    unsafe {
+        command.pre_exec(move || {
+            let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            if libc::getrlimit(libc::RLIMIT_CPU, &raw mut limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            limit.rlim_cur = seconds;
+            if libc::setrlimit(libc::RLIMIT_CPU, &raw const limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    };
+
+    command.output().unwrap()
+}
+
+/// A loop over a trillion numbers, which no rule or proof ends in time.
+const ENDLESS: &str = "Id.run do\n  let mut n := 0\n  for i in [0:1000000000000] do\n    n := n + i\n  return n == 0";
+
+/// A loop that takes about 2 processor seconds on an Apple M-series core, a fifth of the limit the test below sets, so
+/// ten of them run past it on a machine twice as fast, and one ends within it on a machine twice as slow.
+fn slow(length: u64) -> String {
+    ENDLESS.replace("1000000000000", &(30_000_000 + length).to_string())
+}
+
+/// Each Lean process Mago starts may use 120 processor seconds, so Lean work that never ends stops there instead of
+/// holding the compile, and is reported where it sits while every other rule runs. Each row runs under a limit of 10
+/// seconds, after a compile that built the runtime library: a rule that never ends is refused at its name, and the
+/// other rule of its `Module.lean` still judges `StoreService.sharp`; a slow rule that ends within the limit runs; ten
+/// slow rules that together run past the limit all run, since each rule gets the limit of its own; a
+/// `#eval` that never ends refuses each file its `Module.lean` judges; and a proof that never ends under
+/// `set_option maxHeartbeats 0`, which lifts Lean's own limit, refuses its law's file.
+#[cfg(unix)]
+#[test]
+fn lean_work_that_never_ends_stops_at_the_processor_time_limit_and_every_other_rule_runs() {
+    compile_succeeds(lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]).path());
+    let stopped = "it ran past 10 processor seconds, the limit Mago sets on each Lean process";
+    let store_breaks = "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.";
+    let endless_rule = rules(
+        "App.Tenant.Store",
+        &format!("{IMPORTS_ONLY}\n@[rule] def endless : Rule := .imports fun _ _ => {ENDLESS}"),
+    );
+    let refused = |file: &str| {
+        format!(
+            "app/Tenant/Store/{file}.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and its rule endless at line 5, column 13 does not run: {stopped}. Make the rule end sooner."
+        )
+    };
+    let slow_rule = rules(
+        "App.Tenant.Store",
+        &format!("{IMPORTS_ONLY}\n@[rule] def slow : Rule := .imports fun _ _ => {}", slow(0)),
+    );
+    // Each loop has its own length, so Lean shares no loop between rules.
+    let slow_rules: String =
+        (1..=10).map(|rule| format!("\n@[rule] def slow{rule} : Rule := .imports fun _ _ => {}", slow(rule))).collect();
+    let slow_rules = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}{slow_rules}"));
+    let endless_eval = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}\n#eval {ENDLESS}"));
+    let rejected = |file: &str| {
+        format!(
+            "app/Tenant/Store/{file}.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and Lean rejected app/Tenant/Store/Module.lean: {stopped}. Make its proofs and rules end sooner."
+        )
+    };
+    let endless_proof = MONEY_PROOF
+        .replace("theorem", "set_option maxHeartbeats 0 in\ntheorem")
+        .replace("  simp [App.Shared.Money.addKeepsCurrency, App.Shared.Money.add]", "  repeat (first | skip)");
+    let money_rejected = format!(
+        "app/Shared/Money.sharp:3:14:error - unproven-law: Lean rejected app/Shared/Money.lean: {stopped}. Make its proofs and rules end sooner"
+    );
+    for (files, expected) in [
+        (
+            vec![("app/Tenant/Store/Module.lean", endless_rule.as_str())],
+            vec![LEDGER_BREAKS.to_owned(), refused("Receipts"), store_breaks.to_owned(), refused("StoreService")],
+        ),
+        (
+            vec![("app/Tenant/Store/Module.lean", slow_rule.as_str())],
+            vec![LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
+        ),
+        (
+            vec![("app/Tenant/Store/Module.lean", slow_rules.as_str())],
+            vec![LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
+        ),
+        (
+            vec![("app/Tenant/Store/Module.lean", endless_eval.as_str())],
+            vec![LEDGER_BREAKS.to_owned(), rejected("Receipts"), rejected("StoreService")],
+        ),
+        (
+            vec![("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Money.lean", endless_proof.as_str())],
+            vec![LEDGER_BREAKS.to_owned(), money_rejected, store_breaks.to_owned()],
+        ),
+    ] {
+        let directory = structured(&files);
+
+        let output = compile_lines_within(directory.path(), 10);
+
+        assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
+    }
 }
 
 #[test]

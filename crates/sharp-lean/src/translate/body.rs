@@ -619,6 +619,7 @@ impl<'body, 'program> Body<'body, 'program> {
         let target = self.checked.types().call_target(expression);
         match target.kind {
             DeclarationKind::Method { overridable: false } => {}
+            DeclarationKind::Method { overridable: true } if self.is_interface(class) => {}
             DeclarationKind::Method { overridable: true } => {
                 return self.unmodeled(
                     expression.span(),
@@ -645,7 +646,11 @@ impl<'body, 'program> Body<'body, 'program> {
             return "default".to_owned();
         };
         let target = self.checked.types().call_target(expression);
-        if target.kind != (DeclarationKind::Method { overridable: false }) {
+        let translated = match target.kind {
+            DeclarationKind::Method { overridable } => !overridable || self.is_interface(class),
+            _ => false,
+        };
+        if !translated {
             return self.unmodeled(
                 expression.span(),
                 format!("a call to the overridable method {}.{}", names::short_name(class), target.name),
@@ -934,6 +939,11 @@ impl<'body, 'program> Body<'body, 'program> {
         }
 
         true
+    }
+
+    /// Whether `class` is an interface, whose methods Lean calls as `opaque` functions.
+    fn is_interface(&self, class: &[u8]) -> bool {
+        self.checked.types().class_declaration(class).kind == DeclarationKind::Interface
     }
 
     /// The Lean type of the class `class` a hint names.

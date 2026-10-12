@@ -21,6 +21,7 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -145,10 +146,7 @@ impl Translator<'_, '_> {
             }
             Statement::Class(class) => self.class(class),
             Statement::Enum(r#enum) => self.r#enum(r#enum),
-            Statement::Interface(interface) => {
-                let full = self.checked.names().get(&interface.name);
-                self.name_module(full, interface.name.span);
-            }
+            Statement::Interface(interface) => self.interface(interface),
             Statement::Module(module) => self.module(module),
             _ => {}
         }
@@ -347,6 +345,23 @@ impl Translator<'_, '_> {
         self.members(full, &lean, &short, &r#enum.members);
     }
 
+    /// An interface as a type Lean knows nothing about, `Interface "App.Shop.Payment"`, so a proof holds for every class
+    /// that implements it. Its reached methods are `opaque` functions of that type.
+    fn interface(&mut self, interface: &Interface) {
+        let full = self.checked.names().get(&interface.name);
+        self.name_module(full, interface.name.span);
+        if !self.reach.reaches(full, b"") {
+            return;
+        }
+
+        let lean = names::full_name(full);
+        let short = names::short_name(full);
+        let body = Body::new(self.checked, self.reach, full, short.clone());
+        let text = format!("abbrev {lean} : Type := Interface \"{lean}\"");
+        self.declare(body, lean.clone(), interface.name.span, text, false);
+        self.members(full, &lean, &short, &interface.members);
+    }
+
     /// The reached methods and constants, and every law, of a class-like.
     fn members(&mut self, full: &[u8], lean: &str, short: &str, members: &Sequence<'_, ClassLikeMember<'_>>) {
         for member in members {
@@ -380,6 +395,8 @@ impl Translator<'_, '_> {
         }
     }
 
+    /// A method as the definition of its body, or an interface's method as an `opaque` function, whose body each class
+    /// that implements the interface gives.
     fn method(&mut self, full: &[u8], lean: &str, short: &str, method: &Method) {
         let key = names::member(lean, method.name.value);
         let place = format!("{short}.{}", String::from_utf8_lossy(method.name.value));
@@ -407,6 +424,11 @@ impl Translator<'_, '_> {
         let returns =
             method.return_type_hint.as_ref().map_or_else(|| "Unit".to_owned(), |hint| body.r#type(&hint.hint));
 
+        if self.checked.types().class_declaration(full).kind == DeclarationKind::Interface {
+            let text = format!("opaque {key} {} : M {returns}", parameters.join(" "));
+            self.declare(body, key, method.name.span, text, false);
+            return;
+        }
         let (lines, uses, unmodeled) = match &method.body {
             MethodBody::Concrete(block) => body.block_body(block, void),
             MethodBody::Expression(expression) => body.expression_body(expression.expression),

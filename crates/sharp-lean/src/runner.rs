@@ -4,6 +4,7 @@
 use std::io;
 use std::io::Write;
 use std::path::Path;
+use std::process::Output;
 use std::process::Stdio;
 
 use mago_extension::PayloadReader;
@@ -21,6 +22,9 @@ const CHECK_REQUEST: u16 = 1;
 const CHECKED_RESPONSE: u16 = 2;
 const RULES_REQUEST: u16 = 3;
 const BROKEN_RESPONSE: u16 = 4;
+
+/// What the runner writes on its standard error before the name of each rule it judges.
+const JUDGING: &str = "judging ";
 
 /// One law a request asks about.
 pub(crate) struct Question<'question> {
@@ -92,6 +96,8 @@ pub(crate) enum Refusal {
     Reserved(String),
     /// Lean's message when it could not evaluate the rule.
     Unevaluable(String),
+    /// The runner ran past `library::processor_seconds()` while it judged the rule.
+    Stopped,
 }
 
 /// Runs the runner of `library` on the modules Lake built in `package`, which imports `module` and answers each
@@ -105,29 +111,71 @@ pub(crate) fn check(
 ) -> io::Result<Vec<Answer>> {
     let output = run(library, package, &encode(module, proof_module, questions)?)?;
 
-    decode(&output, questions.len()).map_err(io::Error::other)
+    decode(&answer(output)?, questions.len()).map_err(io::Error::other)
 }
 
 /// Runs the runner of `library` on the modules Lake built in `package`, which imports every rules module, each named
 /// with the namespace its rules constrain, and answers with each rule and the facts of `files` that break it, or why it
 /// did not run the rule.
+///
+/// The runner names each rule on its standard error before it judges it, and writes each judged rule as soon as it has
+/// one, so each rule gets `library::processor_seconds()` of its own. A runner that stops at that limit while it judges a
+/// rule after others runs again from that rule, skipping the rules it judged. Only a rule that the limit stops as the
+/// first a runner judges is refused as `Refusal::Stopped`, so every other rule still runs.
 pub(crate) fn rules(
     library: &Path,
     package: &Package,
     modules: &[(&str, &str)],
     files: &[(&str, &Facts)],
 ) -> io::Result<Vec<Broken>> {
-    let output = run(library, package, &encode_rules(modules, files)?)?;
+    let mut judged: Vec<Broken> = Vec::new();
+    let mut stopped: Vec<String> = Vec::new();
+    loop {
+        let output = run(library, package, &encode_rules(modules, files, &judged, &stopped)?)?;
+        let started = judging(&output.stderr);
+        if library::stopped(output.status)
+            && let Some(rule) = started.last()
+        {
+            judged.extend(decode_broken(&output.stdout, modules.len(), files).map_err(io::Error::other)?);
+            if started.len() == 1 {
+                stopped.push(rule.clone());
+            }
+            continue;
+        }
 
-    decode_broken(&output, modules.len(), files).map_err(io::Error::other)
+        judged.extend(decode_broken(&answer(output)?, modules.len(), files).map_err(io::Error::other)?);
+        return Ok(judged);
+    }
 }
 
-/// Runs the runner on one request and returns its answer.
+/// The rules the runner started to judge, in order, from the `judging <rule>` lines of its standard error.
+fn judging(stderr: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stderr).lines().filter_map(|line| line.strip_prefix(JUDGING)).map(str::to_owned).collect()
+}
+
+/// The answer the runner wrote, or an error with its exit status and the rest of its standard error.
+fn answer(output: Output) -> io::Result<Vec<u8>> {
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let message: Vec<&str> = stderr.lines().filter(|line| !line.starts_with(JUDGING)).collect();
+    let failure = if library::stopped(output.status) {
+        format!("ran past {} processor seconds, the limit Mago sets on each Lean process", library::processor_seconds())
+    } else {
+        format!("failed with {}", output.status)
+    };
+
+    Err(io::Error::other(format!("the Lean runner {failure}: {}", message.join("\n").trim())))
+}
+
+/// Runs the runner on one request and returns how it exited and what it wrote.
 ///
 /// Each call runs its own runner, since Lean cannot free an imported environment in a process that elaborated with
 /// it. `lake env` gives the runner the package's search path, and on Windows the folder of Lean's shared libraries,
 /// which an executable that interprets Lean links to there.
-fn run(library: &Path, package: &Package, request: &[u8]) -> io::Result<Vec<u8>> {
+fn run(library: &Path, package: &Package, request: &[u8]) -> io::Result<Output> {
     let mut runner = package
         .lake
         .command()
@@ -145,16 +193,11 @@ fn run(library: &Path, package: &Package, request: &[u8]) -> io::Result<Vec<u8>>
     drop(input);
 
     let output = runner.wait_with_output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "the Lean runner failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+    if output.status.success() {
+        written?;
     }
-    written?;
 
-    Ok(output.stdout)
+    Ok(output)
 }
 
 fn header(kind: u16) -> PayloadWriter {
@@ -239,8 +282,14 @@ fn decode(payload: &[u8], questions: usize) -> Result<Vec<Answer>, String> {
     Ok(answers)
 }
 
-/// A `Rules` request: each module and its namespace, then each file's path and facts.
-fn encode_rules(modules: &[(&str, &str)], files: &[(&str, &Facts)]) -> io::Result<Vec<u8>> {
+/// A `Rules` request: each module and its namespace, then each file's path and facts, then each rule an earlier runner
+/// judged, which the runner skips, then each rule it refuses as `Refusal::Stopped` without judging it.
+fn encode_rules(
+    modules: &[(&str, &str)],
+    files: &[(&str, &Facts)],
+    judged: &[Broken],
+    stopped: &[String],
+) -> io::Result<Vec<u8>> {
     let mut writer = header(RULES_REQUEST);
     writer.write_length(modules.len()).map_err(io::Error::other)?;
     for (module, namespace) in modules {
@@ -275,19 +324,28 @@ fn encode_rules(modules: &[(&str, &str)], files: &[(&str, &Facts)]) -> io::Resul
             writer.write_u32(fact.location.end_column);
         }
     }
+    writer.write_length(judged.len()).map_err(io::Error::other)?;
+    for broken in judged {
+        writer.write_string(&broken.rule).map_err(io::Error::other)?;
+    }
+    writer.write_length(stopped.len()).map_err(io::Error::other)?;
+    for rule in stopped {
+        writer.write_string(rule).map_err(io::Error::other)?;
+    }
 
     Ok(writer.finish())
 }
 
-/// A `Broken` answer, each index checked against the `modules` and `files` of its request.
+/// A `Broken` answer, the rules it holds up to its end, each index checked against the `modules` and `files` of its
+/// request. A runner writes each rule whole as soon as it has judged it, so the answer of a stopped runner holds every
+/// rule it judged.
 fn decode_broken(payload: &[u8], modules: usize, files: &[(&str, &Facts)]) -> Result<Vec<Broken>, String> {
     let mut reader = PayloadReader::new(payload);
     let error = |error: mago_extension::PayloadError| error.to_string();
     read_header(&mut reader, BROKEN_RESPONSE)?;
 
-    let count = reader.read_count("rule count", reader.remaining()).map_err(error)?;
-    let mut rules = Vec::with_capacity(count);
-    for _ in 0..count {
+    let mut rules = Vec::new();
+    while reader.remaining() > 0 {
         let module = reader.read_u32("rule module").map_err(error)? as usize;
         if module >= modules {
             return Err(format!("the runner answered with the rules module {module} of {modules}"));
@@ -303,6 +361,7 @@ fn decode_broken(payload: &[u8], modules: usize, files: &[(&str, &Facts)]) -> Re
                 4 => Refusal::ImplementedBy(detail),
                 5 => Refusal::Reserved(detail),
                 6 => Refusal::Unevaluable(detail),
+                7 => Refusal::Stopped,
                 code => return Err(format!("the runner answered with the unknown rule refusal {code}")),
             };
             let line = reader.read_u32("rule line").map_err(error)?;
@@ -338,15 +397,14 @@ mod tests {
     #[test]
     fn an_answer_with_an_unknown_refusal_is_an_error() {
         let mut writer = header(BROKEN_RESPONSE);
-        writer.write_length(1).unwrap();
         writer.write_u32(0);
         writer.write_string("App.Shared.Module.neverReachesTenant").unwrap();
-        writer.write_u8(7);
+        writer.write_u8(8);
         writer.write_string("App.Shared.Ledgr").unwrap();
 
         assert_eq!(
             decode_broken(&writer.finish(), 1, &[]).unwrap_err(),
-            "the runner answered with the unknown rule refusal 7"
+            "the runner answered with the unknown rule refusal 8"
         );
     }
 }

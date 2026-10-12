@@ -5,6 +5,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
 
+use crate::library;
 use crate::package;
 use crate::package::Message;
 use crate::runner::Refusal;
@@ -139,22 +140,24 @@ pub(crate) fn axiom(law: &Law, proof: &str, axiom: &str) -> Issue {
 /// A law whose generated module Lean refused: a bug in Mago's translation, never in the project.
 pub(crate) fn generated_module_refused(law: &Law, module: &str, line: u32, message: &str) -> Issue {
     let first = message.lines().next().unwrap_or(message);
+    let place = if line == 0 { String::new() } else { format!(", at line {line}") };
 
     unproven(
         law,
         format!(
-            "Law {} is not proven: Lean refused the module {module} that Mago generated for it, at line {line}: {first}. This is a bug in Mago; report it to Mago's maintainers.",
+            "Law {} is not proven: Lean refused the module {module} that Mago generated for it{place}: {first}. This is a bug in Mago; report it to Mago's maintainers.",
             law.name
         ),
     )
     .with_note(message.to_owned())
 }
 
-/// An error in a proof file that no theorem for a law holds.
+/// An error in a proof file that no theorem for a law holds, or, at line 0, of the whole file.
 pub(crate) fn rejected_file(span: Span, proof: &str, line: u32, message: &str) -> Issue {
     let first = message.lines().next().unwrap_or(message);
+    let place = if line == 0 { String::new() } else { format!(" line {line}") };
 
-    Issue::error(format!("Lean rejected {proof} line {line}: {first}"))
+    Issue::error(format!("Lean rejected {proof}{place}: {first}"))
         .with_code(IssueCode::UnprovenLaw.as_str())
         .with_annotation(Annotation::primary(span))
         .with_note(message.to_owned())
@@ -192,6 +195,7 @@ pub(crate) fn refused_rule(span: Span, rules: &str, namespace: &str, rule: &str,
             "it reaches {name}, which makes a namespace from a string. Name the namespace by its full name, as App.Shared.Schema"
         ),
         Refusal::Unevaluable(message) => format!("Lean cannot evaluate it: {}", one_line(message)),
+        Refusal::Stopped => stopped("the rule"),
     };
 
     Issue::error(format!(
@@ -209,6 +213,7 @@ pub(crate) fn rejected_rules(span: Span, rules: &str, namespace: &str, error: &M
     rejected_lean_error(
         span,
         format!("This file is in {namespace}, whose structure rules {rules} holds, and Lean rejected {rules}"),
+        "",
         error,
     )
 }
@@ -225,8 +230,9 @@ pub(crate) fn rejected_rules_import(
     rejected_lean_error(
         span,
         format!(
-            "This file is in {namespace}, whose structure rules {rules} holds, and {rules} imports {imported}, which Lean rejected at"
+            "This file is in {namespace}, whose structure rules {rules} holds, and {rules} imports {imported}, which Lean rejected"
         ),
+        " at",
         error,
     )
 }
@@ -234,20 +240,30 @@ pub(crate) fn rejected_rules_import(
 /// An error of a Lean file in a PSR-4 folder that no Lean file imports and Lean rejected, such as one that holds a
 /// `@[rule]` but is no `Module.lean`, on each file of the namespace of its folder.
 pub(crate) fn rejected_lean(span: Span, file: &str, namespace: &str, error: &Message) -> Issue {
-    rejected_lean_error(span, format!("This file is in {namespace}, and Lean rejected {file}"), error)
+    rejected_lean_error(span, format!("This file is in {namespace}, and Lean rejected {file}"), "", error)
 }
 
-/// `rejection` followed by where Lean reported `error`, with its column counted from 1, and its whole message, each
-/// line joined to the next by one space.
-fn rejected_lean_error(span: Span, rejection: String, error: &Message) -> Issue {
-    Issue::error(format!(
-        "{rejection} line {}, column {}: {}.",
-        error.pos.line,
-        error.pos.column + 1,
-        one_line(&error.data)
-    ))
-    .with_code(IssueCode::BrokenRule.as_str())
-    .with_annotation(Annotation::primary(span))
+/// `rejection` followed by where Lean reported `error`, after `at`, with its column counted from 1, and its whole
+/// message, each line joined to the next by one space. An error of a whole file, at line 0, has no place.
+fn rejected_lean_error(span: Span, rejection: String, at: &str, error: &Message) -> Issue {
+    let place = if error.pos.line == 0 {
+        String::new()
+    } else {
+        format!("{at} line {}, column {}", error.pos.line, error.pos.column + 1)
+    };
+
+    Issue::error(format!("{rejection}{place}: {}.", one_line(&error.data)))
+        .with_code(IssueCode::BrokenRule.as_str())
+        .with_annotation(Annotation::primary(span))
+}
+
+/// Why Lean did not finish a file or a rule: it ran past the processor-time limit Mago sets on each Lean process.
+/// `what` names what to make end sooner, such as "the rule".
+pub(crate) fn stopped(what: &str) -> String {
+    format!(
+        "it ran past {} processor seconds, the limit Mago sets on each Lean process. Make {what} end sooner",
+        library::processor_seconds()
+    )
 }
 
 /// Lean's `message` on one line: each line trimmed and joined to the next by one space, without its final period.
