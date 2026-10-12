@@ -320,6 +320,7 @@ fn compiled_consumer(
                 inputs.push(String::from_utf8_lossy(path).into_owned());
                 Ok(None)
             },
+            |_| Ok(Vec::new()),
             |_| Ok(Default::default()),
         )
         .expect("the compile runs");
