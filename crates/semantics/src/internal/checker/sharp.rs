@@ -1107,11 +1107,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::Expression(Expression::Construct(Construct::Die(_))), Body) => {
-            report_removed_construct(b"die", node.span(), context);
-
-            None
-        }
         (Node::Expression(Expression::Construct(Construct::Exit(exit))), Body) if exit.arguments.is_none() => {
             context.report(
                 Issue::error("PHP# calls `exit` as a function: write `exit(0)`.")
