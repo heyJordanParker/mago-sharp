@@ -854,7 +854,7 @@ where
         },
     );
 
-    signature_union
+    if function_like_metadata.flags.is_sharp() { known_type_or_error(signature_union) } else { signature_union }
 }
 
 pub(super) fn add_properties_to_context<'ctx, A>(
@@ -1749,11 +1749,17 @@ pub fn report_undefined_type_references<A>(context: &mut Context<'_, '_, A>, typ
 where
     A: Arena,
 {
-    if type_metadata.inferred {
-        return;
+    if !type_metadata.inferred {
+        report_undefined_types(context, &type_metadata.type_union, type_metadata.span);
     }
+}
 
-    for type_ref in type_metadata.type_union.get_all_child_nodes() {
+/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares.
+pub(crate) fn report_undefined_types<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
+where
+    A: Arena,
+{
+    for type_ref in type_union.get_all_child_nodes() {
         let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref else {
             continue;
         };
@@ -1762,16 +1768,14 @@ where
             let name = display_class_like_name(context, *name);
             Issue::error(format!("Cannot find type `{name}`."))
                 .with_annotation(
-                    Annotation::primary(type_metadata.span)
-                        .with_message(format!("`{name}` is not defined in the current codebase")),
+                    Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
                 )
                 .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
                 .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
         } else {
             Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
                 .with_annotation(
-                    Annotation::primary(type_metadata.span)
-                        .with_message(format!("`{name}` is not defined in the current codebase")),
+                    Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
                 )
                 .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
                 .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
@@ -1779,6 +1783,18 @@ where
         };
         context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
     }
+}
+
+/// `declared`, a type a PHP# declaration writes, or an error when it names a type no analyzed file or stub declares.
+/// `report_undefined_types` reports that type where it is written, so a value of it adds no second issue, as a refused
+/// index read adds none.
+pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
+    let names_unknown_type = declared
+        .get_all_child_nodes()
+        .into_iter()
+        .any(|node| matches!(node, TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { .. }))));
+
+    if names_unknown_type { TUnion::from_atomic(TAtomic::Error) } else { declared }
 }
 
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an
@@ -1891,7 +1907,8 @@ where
 
 /// Reports each PHP# `Map` written in `type_union` whose key type is a class, an enum without a backing value, or a
 /// struct that holds a class instance. Spec section 12 keys a `Map` by an `int`, a `string` or a backed enum, which
-/// runs as its backing value, and section 10 by a struct, which runs as its key text.
+/// runs as its backing value, and section 10 by a struct, which runs as its key text. A key type that names no type is
+/// reported as a type that cannot be found.
 pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -1911,9 +1928,13 @@ where
             report_class_held_by_key(context, key_type, false, span);
             continue;
         }
+        if key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. }))) {
+            continue;
+        }
 
         let key_id = display_sharp_type(context, key_type);
-        context.collector.report_with_code(IssueCode::TemplateConstraintViolation, map_key_error(&key_id, span));
+        let error = map_key_error(context, key_type, &key_id, span);
+        context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
     }
 }
 
@@ -1944,12 +1965,22 @@ where
     }
 }
 
-/// The error for a PHP# `Map` keyed by `key_id`, a type that is not `int`, not `string`, not a backed enum and not a
-/// struct, written at `span`. A `Map` type and a `Map` literal state the rule in these words.
-pub(crate) fn map_key_error(key_id: &str, span: Span) -> Issue {
-    Issue::error(format!(
-        "A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `{key_id}` is none of them."
-    ))
-    .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
-    .with_help("Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.")
+/// The error for a PHP# `Map` keyed by `key_type`, written `key_id`, a type that is not `int`, not `string`, not a
+/// backed enum and not a struct, at `span`. A `Map` type and a `Map` literal state the rule in these words. A key type
+/// whose other parts key a `Map`, as `Status?`, is refused for its `null` alone.
+pub(crate) fn map_key_error<A>(context: &Context<'_, '_, A>, key_type: &TUnion, key_id: &str, span: Span) -> Issue
+where
+    A: Arena,
+{
+    let reason = if key_type.is_nullable()
+        && get_backing_key_type(&key_type.to_non_nullable(), context.codebase).is_always_array_key(true)
+    {
+        "may be null"
+    } else {
+        "is none of them"
+    };
+
+    Issue::error(format!("A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `{key_id}` {reason}."))
+        .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
+        .with_help("Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.")
 }

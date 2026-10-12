@@ -43,6 +43,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
@@ -75,6 +76,9 @@ use crate::resolver::method::report_non_existent_method;
 use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::resolver::static_property::StaticProperty;
+use crate::statement::keys_mix_a_stored_key;
+use crate::statement::report_keys_read_back;
+use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
@@ -326,8 +330,12 @@ where
         block_context.called_methods.insert(method_name);
     }
 
-    let mut method_resolution =
-        resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)?;
+    // The receiver's issues wait until the call is known: spec section 12 refuses a change through a `Map` index once,
+    // as a change to a copy, so the bare read of that index is not reported beside it.
+    let (method_resolution, receiver_issues) = context.record(|context| {
+        resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)
+    });
+    let mut method_resolution = method_resolution?;
 
     let mut collections = method_resolution
         .resolved_methods
@@ -355,6 +363,16 @@ where
                 && ["contains", "indexOf", "remove"]
                     .iter()
                     .any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        });
+    let takes_map_key = context.dialect.is_sharp()
+        && !refused_on_object
+        && method_resolution.resolved_methods.iter().any(|method| {
+            let name = method.method_identifier.get_method_name();
+
+            sharp_collection_name(&TObject::new_named(method.classname)) == Some("Map")
+                && ["get", "has", "remove", "keys"]
+                    .iter()
+                    .any(|keyed| keyed.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
         });
 
     let undocumented_template_result =
@@ -406,9 +424,21 @@ where
         });
     }
 
-    if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target && !refused_on_object {
-        check_changed_collection(context, block_context, artifacts, object)?;
-    }
+    let copy = if context.dialect.is_sharp()
+        && changes_collection
+        && !method_resolution.has_invalid_target
+        && !refused_on_object
+    {
+        check_changed_collection(context, block_context, artifacts, object)
+    } else {
+        Ok(None)
+    };
+    let copy_span = copy.as_ref().ok().copied().flatten();
+    context.collector.extend(receiver_issues.into_iter().filter(|issue| {
+        issue.code.as_deref() != Some(IssueCode::PossiblyUndefinedArrayIndex.as_str())
+            || copy_span.is_none_or(|copy| issue.primary_span() != Some(copy))
+    }));
+    copy?;
 
     if !method_resolution.unresolved_methods.is_empty() {
         method_resolution.has_invalid_target |= prepare_unresolved_method_targets(
@@ -509,6 +539,28 @@ where
         check_element_equality(context, &method, object, value, &element_type, value_type, is_null_safe);
     }
 
+    // The engine holds a `Map`'s key as its backing value or its key text, and reads it back only through one enum or
+    // one struct. A `Map` whose keys mix a backed enum or a struct with other types cannot read them back in `keys()`,
+    // and its `get`, `has` and `remove` cannot tell such a key from the key equal to its backing value or key text.
+    if takes_map_key
+        && let ClassLikeMemberSelector::Identifier(method) = selector
+        && let Some(map_type) = artifacts.get_expression_type(object)
+        && keys_mix_a_stored_key(context, map_type)
+    {
+        if method.value.eq_ignore_ascii_case(b"keys") {
+            report_keys_read_back(context, IssueCode::InvalidArrayAccess, object, "`keys()`", selector.span());
+        } else {
+            let finder = format!("`{}`", String::from_utf8_lossy(method.value));
+            report_keys_sharing_entries(
+                context,
+                IssueCode::InvalidArgument,
+                object.span(),
+                &finder,
+                Annotation::primary(method.span()).with_message("Its key is looked up here."),
+            );
+        }
+    }
+
     if !method_resolution.undocumented_methods.is_empty() {
         analyze_undocumented_method_return_type(
             context,
@@ -577,15 +629,16 @@ where
 
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the
 /// collection is a place the caller can write: a local or a parameter, `field`, which its accessor writes as the
-/// storage, or a property whose `set` the caller reaches, which the property write check decides as it does for an
-/// index write. The change may fill the collection past any literal the analyzer saw in it, so the place holds the
-/// collections it is declared as from then on, beside whatever else, such as `null`, it held.
+/// storage, a property whose `set` the caller reaches, which the property write check decides as it does for an
+/// index write, or a `List` index of a place, which changes that place too. The change may fill the collection past
+/// any literal the analyzer saw in it, so the place holds the collections it is declared as from then on, beside
+/// whatever else, such as `null`, it held. Gives the span of the `Map` index the change is refused through as a copy.
 fn check_changed_collection<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     collection: &Expression<'arena>,
-) -> Result<(), AnalysisError>
+) -> Result<Option<Span>, AnalysisError>
 where
     A: Arena,
 {
@@ -607,10 +660,10 @@ where
                 block_context.locals.insert(place, Rc::new(changed_type));
             }
 
-            Ok(())
+            Ok(None)
         }
         Expression::Access(Access::Property(access)) => {
-            match StaticProperty::from_property_access(access, context.resolved_names) {
+            let written = match StaticProperty::from_property_access(access, context.resolved_names) {
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,
@@ -630,7 +683,9 @@ where
                     None,
                     PropertyWriteKind::Mutation,
                 ),
-            }
+            };
+
+            written.map(|()| None)
         }
         Expression::Access(Access::NullSafeProperty(access)) => property_assignment::analyze(
             context,
@@ -645,7 +700,15 @@ where
             &changed_type,
             None,
             PropertyWriteKind::Mutation,
-        ),
+        )
+        .map(|()| None),
+        Expression::ArrayAccess(access) => {
+            if check_change_through_index(access, context, block_context, artifacts) {
+                check_changed_collection(context, block_context, artifacts, access.array)
+            } else {
+                Ok(Some(access.span()))
+            }
+        }
         _ => {
             context.collector.report_with_code(
                 IssueCode::InvalidPassByReference,
@@ -656,7 +719,7 @@ where
                     .with_help("Store the collection in a local or a property, then call the method on it."),
             );
 
-            Ok(())
+            Ok(None)
         }
     }
 }
