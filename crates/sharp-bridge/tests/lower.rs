@@ -1761,15 +1761,15 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 }
 
 /// ```php
-/// public static function sized(int $size): \App\Report
+/// public static function sized(int $size, string ...$notes): \App\Report
 /// {
 ///     ${'this#1'} = new \App\Report($size);
-///     (function ($size) {
+///     (function ($size, ...$notes) {
 ///         if ($size === 0) { return; }
 ///         $this->label = parent::describe();
 ///         $read = function () { return $this->label; };
 ///         $skip = function () { return; };
-///     })->call(${'this#1'}, $size);
+///     })->call(${'this#1'}, $size, ...$notes);
 ///     return ${'this#1'};
 /// }
 /// ```
@@ -1777,11 +1777,11 @@ fn super_with_no_constructor_above_lowers_to_nothing() {
 /// Spec section 9.1: a named constructor is the static method it runs as. `: this(…)` creates the object with the
 /// main constructor, and the body is a closure bound to it, so it runs as a method body on a real `$this`: `super.m()`
 /// is `parent::m()`, `return;` and a lambda's `return;` return nothing, and a lambda reads `$this` as in a method. The
-/// method returns the object after its body.
+/// closure takes each parameter, a variadic one spread back out. The method returns the object after its body.
 #[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
     let lowered = Lowered::new(
-        "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
+        "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
     );
 
     assert_eq!(
@@ -1792,6 +1792,13 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                 PARAM
                   ZVAL [1] "int"
                   ZVAL "size"
+                  null
+                  null
+                  null
+                  null
+                PARAM [16]
+                  ZVAL [1] "string"
+                  ZVAL "notes"
                   null
                   null
                   null
@@ -1812,6 +1819,13 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                       PARAM
                         null
                         ZVAL "size"
+                        null
+                        null
+                        null
+                        null
+                      PARAM [16]
+                        null
+                        ZVAL "notes"
                         null
                         null
                         null
@@ -1869,6 +1883,9 @@ fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates()
                       ZVAL "this#1"
                     VAR
                       ZVAL "size"
+                    UNPACK
+                      VAR
+                        ZVAL "notes"
                 RETURN
                   VAR
                     ZVAL "this#1"
