@@ -4608,20 +4608,24 @@ fn super_without_a_constructor_above_takes_no_arguments() {
 }
 
 /// Spec section 9.1: PHP# has no implicit `super()`, so the constructor of a class whose base class has one, its own or
-/// inherited, plain PHP's included, calls it with `: super(…)`.
+/// inherited, plain PHP's included, calls it with `: super(…)`. A PHP# base class without one gets one for its initial
+/// values that are not constant, in this file or another, and a class without initial values gets none.
 #[test]
 fn a_constructor_without_super_under_a_base_class_constructor_is_missing_super_call() {
     let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function __construct()\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(int id) { }\n}\n\nclass Shipment : Order\n{\n    public Shipment() { }\n}\n\nclass Saved : Model\n{\n    public Saved() { }\n}\n\nclass Middle : Entity\n{\n}\n\nclass Leaf : Middle\n{\n    public Leaf() { }\n}\n\nclass Plain\n{\n}\n\nclass Free : Plain\n{\n    public Free() { }\n}\n";
+    let sealed = "namespace Demo;\n\nclass Sealed\n{\n    public string stamp { get; set; } = strtoupper(\"s\");\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(int id) { }\n}\n\nclass Shipment : Order\n{\n    public Shipment() { }\n}\n\nclass Saved : Model\n{\n    public Saved() { }\n}\n\nclass Middle : Entity\n{\n}\n\nclass Leaf : Middle\n{\n    public Leaf() { }\n}\n\nclass Plain\n{\n}\n\nclass Free : Plain\n{\n    public Free() { }\n}\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"p\");\n}\n\nclass Unsuper : Stamped\n{\n    public Unsuper() { }\n}\n\nclass Unsealed : Sealed\n{\n    public Unsealed() { }\n}\n";
 
     assert_messages(
         sharp,
-        &[("src/Lib/Model.php", model)],
+        &[("src/Lib/Model.php", model), ("src/Demo/Sealed.sharp", sealed)],
         &[
             "12:12 missing-super-call: `Order`'s constructor must call `Entity`'s with `: super(…)`.",
             "17:12 missing-super-call: `Shipment`'s constructor must call `Order`'s with `: super(…)`.",
             "22:12 missing-super-call: `Saved`'s constructor must call `Model`'s with `: super(…)`.",
             "31:12 missing-super-call: `Leaf`'s constructor must call `Middle`'s with `: super(…)`.",
+            "50:12 missing-super-call: `Unsuper`'s constructor must call `Stamped`'s with `: super(…)`.",
+            "55:12 missing-super-call: `Unsealed`'s constructor must call `Sealed`'s with `: super(…)`.",
         ],
     );
 }

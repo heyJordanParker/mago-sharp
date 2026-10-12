@@ -1831,6 +1831,48 @@ fn the_base_class_constructor_can_be_inherited() {
     }
 }
 
+/// ```php
+/// public function __construct() { parent::__construct(); }
+/// ```
+///
+/// A PHP# base class without a constructor gets one for its initial values that are not constant, so `: super()` and
+/// the constructor that runs a subclass's initial values call it, with the base class in another file or the same one.
+#[test]
+fn super_calls_the_constructor_a_base_class_gets_for_its_initial_values() {
+    let base = (
+        "src/Lib/Stamped.sharp",
+        "namespace Lib;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"p\");\n}\n",
+    );
+    let parent_construct = "  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n";
+    for (code, body) in [
+        (
+            "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            format!("STMT_LIST\n{parent_construct}"),
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"q\");\n}\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            format!("STMT_LIST\n{parent_construct}"),
+        ),
+        (
+            "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    private string extra = strtoupper(\"e\");\n}\n",
+            format!(
+                "STMT_LIST\n  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"extra\"\n    CALL\n      ZVAL \"strtoupper\"\n      ARG_LIST\n        ZVAL \"e\"\n{parent_construct}"
+            ),
+        ),
+    ] {
+        let lowered = Lowered::with(code, &[base]);
+        assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "{code}");
+        // `Report` is the file's last class, so its constructor is the last one.
+        let report = lowered
+            .nodes()
+            .iter()
+            .rposition(|node| node.kind == sharp_kind::SHARP_AST_METHOD && lowered.text(node.text) == "__construct")
+            .expect("Report declares a constructor") as u32;
+
+        assert_eq!(lowered.render(lowered.child(report, 2)), body, "{code}");
+    }
+}
+
 /// `: super()` with no constructor above the class does nothing, as C#'s `: base()` on `object`.
 #[test]
 fn super_with_no_constructor_above_lowers_to_nothing() {

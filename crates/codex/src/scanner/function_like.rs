@@ -14,6 +14,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::Class;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::ForBody;
@@ -277,6 +278,31 @@ where
         .iter()
         .filter_map(|p| scan_function_like_parameter(p, Some(class_like_metadata.original_name), context, scope))
         .collect();
+    metadata.method_metadata =
+        Some(MethodMetadata { is_constructor: true, visibility: Visibility::Public, ..MethodMetadata::default() });
+
+    metadata
+}
+
+/// Scans the constructor a PHP# class without one gets for its initial values that are not constant, spec section
+/// 9.1: public and without parameters, it sets those values, then calls the base class's constructor.
+#[inline]
+pub(crate) fn scan_initial_values_constructor<'arena, A>(
+    class: &'arena Class<'arena>,
+    context: &Context<'_, 'arena, A>,
+) -> FunctionLikeMetadata
+where
+    A: Arena,
+{
+    let name = word(b"__construct");
+    let mut metadata = FunctionLikeMetadata::new(
+        FunctionLikeKind::Method,
+        name,
+        name,
+        class.span(),
+        MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
+    );
+    metadata.name_span = Some(class.name.span);
     metadata.method_metadata =
         Some(MethodMetadata { is_constructor: true, visibility: Visibility::Public, ..MethodMetadata::default() });
 
