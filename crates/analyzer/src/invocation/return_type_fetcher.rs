@@ -53,16 +53,22 @@ where
     }
 
     if context.dialect.is_sharp()
-        && let Some(selector) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
-        && let Some(selector) = selector.value()
+        && let Some(argument) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
+        && let Some(selector) = argument.value()
         && let Some([key_type]) = artifacts
             .inferred_type_arguments
             .get(&(invocation.span.start.offset, invocation.span.end.offset))
             .map(Vec::as_slice)
     {
+        // A key is checked only where a function fills the key parameter. Otherwise the argument check refused the
+        // call, and the key it left is no key the code wrote.
+        let fills_key_parameter = argument.get_parameter_name().is_none_or(|name| name == b"key")
+            && artifacts.get_expression_type(selector).is_some_and(TUnion::is_callable);
+
         if is_collection_method(&invocation.target, b"sortedBy") {
             check_sorted_by_key(context, selector, key_type);
         } else if keys_a_map_by_its_function(&invocation.target)
+            && fills_key_parameter
             && !get_backing_key_type(key_type, context.codebase).is_always_array_key(true)
         {
             let key_name = display_sharp_type(context, key_type);

@@ -7073,6 +7073,18 @@ fn a_map_key_type_without_a_backing_value_is_an_error() {
     );
 }
 
+/// A `groupBy` or `associateBy` key is checked where a function fills the key parameter, by position or as `key:`. A
+/// call whose argument is refused, as `groupBy(5)` or `groupBy(selector: …)`, gives that one issue, as on master.
+#[test]
+fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int group(List<int> items)\n    {\n        const byFive = items.groupBy(5);\n        const bySelector = items.groupBy(selector: n => n);\n        const byHalf = items.associateBy(key: n => 0.5);\n        return count(byFive) + count(bySelector) + count(byHalf);\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Tally.sharp", sharp), &[]),
+        ["7:38 invalid-argument", "8:42 invalid-named-argument", "9:47 template-constraint-violation"]
+    );
+}
+
 /// A `.php` caller of a PHP# collection's `groupBy` or `associateBy` keys a PHP array, so their `G` keeps its
 /// `array-key` bound there, as on master: a class or a backed enum key is refused at the call.
 #[test]
