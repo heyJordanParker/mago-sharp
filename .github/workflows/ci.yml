@@ -267,14 +267,25 @@ jobs:
       - name: Measure the tests' coverage
         run: cargo llvm-cov --locked -p mago-analyzer -p mago-semantics -p mago-sharp-bridge --lcov --output-path lcov.info
 
+      # As coverage.py's exclude_lines leaves out `raise NotImplementedError`: an impossible arm is an unreachable!(…)
+      # call, which no test can run. cargo-llvm-cov has no line exclusion, so its lcov loses the line's records:
+      # DA, and FN, which diff-cover reads as the line of a closure such as `|| unreachable!(…)`.
+      - name: Leave out the lines that call unreachable!
+        run: |
+          awk '
+            /^SF:/ { delete unreachable; file = substr($0, 4); for (n = 1; (getline line < file) > 0; n++) if (index(line, "unreachable!(")) unreachable[n]; close(file) }
+            /^(DA|FN):/ { split(substr($0, 4), record, ","); if (record[1] in unreachable) next }
+            { print }
+          ' lcov.info > reachable.info
+
       - name: Every line the pull request adds is covered
         run: |
-          pipx run --spec diff-cover==10.6.0 diff-cover lcov.info \
+          pipx run --spec diff-cover==10.6.0 diff-cover reachable.info \
             --compare-branch "origin/$GITHUB_BASE_REF" \
             --include 'crates/analyzer/src/**' 'crates/semantics/src/**' 'crates/sharp-bridge/src/**' \
             --format github-annotations:error \
             --fail-under 100 || {
-            echo "::error::A test must run every line above. Mark a function that cannot run by design with #[cfg_attr(coverage_nightly, coverage(off))]."
+            echo "::error::A test must run every line above. Mark a function that cannot run by design with #[cfg_attr(coverage_nightly, coverage(off))], and write an impossible arm as unreachable!(…) with its reason."
             exit 1
           }
 
