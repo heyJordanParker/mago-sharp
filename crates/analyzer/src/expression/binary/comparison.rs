@@ -1058,10 +1058,7 @@ pub(crate) fn check_element_equality<A>(
     let element_name = display_operand(context, &element_type);
     let (code, issue) = match sharp_refusal(&equality, &element_type, &element_type, context.codebase) {
         None => return,
-        Some(
-            refusal @ (Refusal::Instance | Refusal::Identity | Refusal::NullableOperand | Refusal::UnorderedOperand),
-        ) => {
-            debug_assert!(matches!(refusal, Refusal::Instance), "`==` on two elements of one type refuses an instance");
+        Some(Refusal::Instance) => {
             let class = display_refused_part(context, &element_type, |comparand| comparand == Comparand::Instance);
             let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
             // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses it.
@@ -1099,6 +1096,11 @@ pub(crate) fn check_element_equality<A>(
                 ))
                 .with_note("A search compares two elements, both of the element type.")
                 .with_help(format!("Make the `operator ==` of `{class}` take two `{class}`.")),
+            )
+        }
+        Some(Refusal::Identity | Refusal::NullableOperand | Refusal::UnorderedOperand) => {
+            unreachable!(
+                "`==` on two elements of one type is refused only for an instance, a collection or its operator"
             )
         }
     };
