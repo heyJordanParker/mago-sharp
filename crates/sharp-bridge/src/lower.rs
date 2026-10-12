@@ -4,6 +4,7 @@ use mago_allocator::LocalArena;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::union::TUnion;
+use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
@@ -1782,7 +1783,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
 
                 let is_property_call = tested && self.is_property_call(expression, call.object);
-                let object = if tested { self.expression(call.object) } else { self.null_safe_object(call.object) };
+                let object = if tested || self.changes_list_element(expression, call.object) {
+                    self.expression(call.object)
+                } else {
+                    self.null_safe_object(call.object)
+                };
                 let method = self.member(&call.method);
                 let keys = self.types.key_arguments(expression);
                 let arguments = self.arguments(&call.argument_list, &keys);
@@ -2306,6 +2311,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
 
         self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[condition, null, rest])
+    }
+
+    /// Whether the null-safe `call` changes the element the `List` index `object` reads, as `rows[0]?.add(5)` does. A
+    /// `List` index is a place (spec section 12), so the change reaches the element the list stores, through the index
+    /// itself and not a copy of it. `?.` then skips only a null element.
+    fn changes_list_element(&self, call: &Expression, object: &Expression) -> bool {
+        matches!(object.unparenthesized(), Expression::ArrayAccess(access) if self.is_list(access.array))
+            && self.types.collection_method(call).is_some_and(|(_, method)| {
+                CHANGING_COLLECTION_METHODS.iter().any(|changing| changing.as_bytes() == method)
+            })
     }
 
     /// The object of `?.`. An index there reads a missing key as null, as `??` does, so `x[k]?.name` is

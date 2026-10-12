@@ -4065,6 +4065,67 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 }
 
 /// ```php
+/// $rows[0]?->add(5);
+/// $maybe[1]?->insert(0, 6);
+/// $this->held[0]?->add(7);
+/// ($maybe[0] ?? null)?->entries();
+/// ```
+///
+/// Spec section 12 makes a `List` index a place, so a change after `?.` on one runs on the index itself, as a change
+/// without `?.` does, and reaches the element the list stores, here a local's, a nullable element's and a hooked
+/// property's. `?.` skips only a null element. A method that changes nothing still reads a missing key as null, as
+/// `null_safe_access_on_an_index_coalesces_a_missing_key_to_null` shows.
+#[test]
+fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
+    assert_eq!(
+        child_body(
+            "void run(List<List<int>> rows, List<List<int>?> maybe)",
+            "        rows[0]?.add(5);\n        maybe[1]?.insert(0, 6);\n        this.held[0]?.add(7);\n        maybe[0]?.entries();\n",
+            "<?php namespace App\\Tenant; class Base { /** @var list<list<int>> */ public array $held = [[1]] { set { $this->held = $value; } } }"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              NULLSAFE_METHOD_CALL
+                DIM
+                  VAR
+                    ZVAL "rows"
+                  ZVAL 0
+                ZVAL "add"
+                ARG_LIST
+                  ZVAL 5
+              NULLSAFE_METHOD_CALL
+                DIM
+                  VAR
+                    ZVAL "maybe"
+                  ZVAL 1
+                ZVAL "insert"
+                ARG_LIST
+                  ZVAL 0
+                  ZVAL 6
+              NULLSAFE_METHOD_CALL
+                DIM
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "held"
+                  ZVAL 0
+                ZVAL "add"
+                ARG_LIST
+                  ZVAL 7
+              NULLSAFE_METHOD_CALL
+                COALESCE
+                  DIM
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL 0
+                  ZVAL null
+                ZVAL "entries"
+                ARG_LIST
+        "#}
+    );
+}
+
+/// ```php
 /// $this->sizes->put('a', $extra);
 /// $this->sizes['b'] ?? $this->sizes->put('b', 2);
 /// (${'receiver#1'} = $this->me())->sizes['c'] ?? ${'receiver#1'}->sizes->put('c', 3);
