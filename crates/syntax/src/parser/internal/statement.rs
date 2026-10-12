@@ -62,6 +62,10 @@ where
             {
                 Statement::Module(self.parse_module()?)
             }
+            // Spec section 5's `internal` starts a declaration's modifiers, as `public` does.
+            T![Identifier] if self.dialect.is_sharp() && !self.state.within_block && token.value == b"internal" => {
+                self.parse_modified_class_like_with_attributes(Sequence::empty())?
+            }
             T![Identifier] if !self.state.within_block && self.is_at_event()? => {
                 Statement::Event(self.parse_event_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?)
             }
@@ -94,7 +98,11 @@ where
                         expression: self.parse_closure_with_attributes(attributes)?,
                         terminator: self.parse_terminator()?,
                     }),
-                    kind if kind.is_modifier() => self.parse_modified_class_like_with_attributes(attributes)?,
+                    kind if kind.is_modifier()
+                        || (self.dialect.is_sharp() && kind == T![Identifier] && next.value == b"internal") =>
+                    {
+                        self.parse_modified_class_like_with_attributes(attributes)?
+                    }
                     T![Identifier] if self.is_at_event()? => {
                         Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, Sequence::empty())?)
                     }

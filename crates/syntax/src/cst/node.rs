@@ -2376,6 +2376,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Modifier::Required(node) => Node::Keyword(node),
                 Modifier::Extern(node) => Node::Keyword(node),
                 Modifier::Lazy(node) => Node::Keyword(node),
+                Modifier::Internal(node) => Node::Keyword(node),
             }),
             Node::Namespace(node) => {
                 f(Node::Keyword(&node.r#namespace));

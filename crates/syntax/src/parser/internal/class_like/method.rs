@@ -70,17 +70,21 @@ where
             return Err(self.parse_nested_type(attributes, modifiers)?);
         }
 
-        // `required` or `extern` written before any other modifier starts the member's modifiers.
+        // `required`, `extern` or `internal` written before any other modifier starts the member's modifiers.
         let modifiers = if modifiers.is_empty()
-            && self
-                .stream
-                .lookahead(0)?
-                .is_some_and(|token| token.kind == T![Identifier] && matches!(token.value, b"required" | b"extern"))
-        {
+            && self.stream.lookahead(0)?.is_some_and(|token| {
+                token.kind == T![Identifier] && matches!(token.value, b"required" | b"extern" | b"internal")
+            }) {
             self.parse_modifier_sequence()?
         } else {
             modifiers
         };
+        // `internal const int MAX = 1;` is a constant, as it is after `public`.
+        if self.stream.is_at(T!["const"])? {
+            return Ok(ClassLikeMember::Constant(
+                self.parse_class_like_constant_with_attributes_and_modifiers(attributes, modifiers)?,
+            ));
+        }
 
         let hint = self.parse_type_hint()?;
         // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1.

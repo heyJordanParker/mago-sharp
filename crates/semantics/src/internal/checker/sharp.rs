@@ -556,7 +556,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Enum(_), File) => Some(Enum),
         (Node::Event(_), File) => Some(Place::Event),
         (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
-        (Node::Modifier(modifier), Place::Event) => {
+        // Spec section 5's `internal` is not supported yet on any declaration.
+        (Node::Modifier(modifier), Place::Event) if !matches!(modifier, Modifier::Internal(_)) => {
             context.report(
                 Issue::error("An event takes only `public`.")
                     .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier."))
@@ -616,11 +617,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
             if is_interface_property(property) =>
         {
-            property.modifiers.iter().for_each(|modifier| report_interface_member_access(modifier, context));
-
             Some(FieldOrProperty)
         }
-        (Node::Modifier(modifier @ (Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_))), Signature) => {
+        // An interface member is public, written bare. A method's modifiers are in its signature, and an interface
+        // property, which `is_interface_property` keeps whatever its access modifier, walks as a property.
+        (
+            Node::Modifier(
+                modifier @ (Modifier::Public(_)
+                | Modifier::Protected(_)
+                | Modifier::Private(_)
+                | Modifier::Internal(_)),
+            ),
+            Signature | FieldOrProperty,
+        ) if is_in_interface(context.program, modifier.span()) => {
             report_interface_member_access(modifier, context);
 
             None
@@ -1545,11 +1554,9 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), (&'static s
             "This method name is not supported yet in PHP#.",
             "PHP reserves method names that start with `__` for its magic methods.",
         )
-    } else if !method
-        .modifiers
-        .iter()
-        .any(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)))
-    {
+    } else if !method.modifiers.iter().any(|modifier| {
+        matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
+    }) {
         (
             "A method without `public`, `protected` or `private` is not supported yet in PHP#.",
             "A PHP# member without an access modifier is `private`, while PHP makes it `public`.",
@@ -1808,14 +1815,16 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
 
 /// Whether the slice has an interface property: a type, a name and `{ get; }`, which PHP runs as a public interface
 /// property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15. An access
-/// modifier keeps it in the slice, and `enter` reports the modifier.
+/// modifier keeps it in the slice, and `enter` reports the modifier where the walk reaches it.
 fn is_interface_property(property: &HookedProperty) -> bool {
     property.attribute_lists.is_empty()
         && property.var.is_none()
-        && property
-            .modifiers
-            .iter()
-            .all(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)))
+        && property.modifiers.iter().all(|modifier| {
+            matches!(
+                modifier,
+                Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_)
+            )
+        })
         && property.hint.is_some()
         && matches!(property.item, PropertyItem::Abstract(_))
         && property.initial_value.is_none()
@@ -2033,7 +2042,7 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
             }
         }
         Property::Hooked(auto_property) => {
-            if !auto_property.modifiers.contains_visibility() {
+            if !writes_access(&auto_property.modifiers) {
                 Err(Box::new(not_supported(
                     property.first_variable().span,
                     "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -2078,7 +2087,7 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
             }
         }
         Property::Computed(computed) => {
-            if !computed.modifiers.contains_visibility() {
+            if !writes_access(&computed.modifiers) {
                 Err(Box::new(not_supported(
                     computed.variable.span,
                     "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -2139,6 +2148,12 @@ fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_
 }
 
 /// Whether the slice has a class constant, with the refusal when it does not: an access modifier and one name.
+/// Whether a member writes its access, spec section 5's `internal` included, which the walk refuses on its own as not
+/// supported yet.
+fn writes_access(modifiers: &Sequence<Modifier>) -> bool {
+    modifiers.contains_visibility() || modifiers.iter().any(|modifier| matches!(modifier, Modifier::Internal(_)))
+}
+
 fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
     let not_supported = |span: Span, message: &str, note: &str| {
         Box::new(
@@ -2154,7 +2169,7 @@ fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
             "A constant declaring several names is not supported yet in PHP#.",
             supported(Place::ClassConstant),
         ))
-    } else if !constant.modifiers.contains_visibility() {
+    } else if !writes_access(&constant.modifiers) {
         Err(not_supported(
             constant.first_item().name.span,
             "A constant without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -2985,20 +3000,20 @@ fn check_named_constructor(constructor: &NamedConstructor, class: &Class, contex
         );
     }
 
-    for modifier in &constructor.modifiers {
-        if !modifier.is_read_visibility() {
-            report(
-                format!(
-                    "A named constructor takes only `public`, `protected` or `private`: remove `{}`.",
-                    BytesDisplay(modifier.get_keyword().value)
-                ),
-                modifier.span(),
-                "Written here.",
-            );
-        }
+    // Spec section 5's `internal` is an access, which the walk refuses as not supported yet.
+    let is_access = |modifier: &Modifier| modifier.is_read_visibility() || matches!(modifier, Modifier::Internal(_));
+    for modifier in constructor.modifiers.iter().filter(|modifier| !is_access(modifier)) {
+        report(
+            format!(
+                "A named constructor takes only `public`, `protected` or `private`: remove `{}`.",
+                BytesDisplay(modifier.get_keyword().value)
+            ),
+            modifier.span(),
+            "Written here.",
+        );
     }
 
-    if !constructor.modifiers.iter().any(Modifier::is_read_visibility) {
+    if !constructor.modifiers.iter().any(is_access) {
         report(
             "A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             constructor.name.span,
@@ -4197,4 +4212,10 @@ fn enclosing_class_like_name<'arena>(program: &Program<'arena>, span: Span) -> O
         Statement::Enum(r#enum) if r#enum.span().contains(&span.start) => Some(r#enum.name.value),
         _ => None,
     })
+}
+
+/// Whether `span` is in an interface of a PHP# file, in any of the file's namespaces.
+fn is_in_interface(program: &Program, span: Span) -> bool {
+    file_statements(program)
+        .any(|statement| matches!(statement, Statement::Interface(interface) if interface.span().contains(&span.start)))
 }

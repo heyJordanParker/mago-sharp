@@ -2612,6 +2612,65 @@ fn lazy_is_a_modifier_and_stays_a_name_elsewhere() {
     assert!(program.errors.is_empty(), "an untyped lambda parameter named `lazy`: {:#?}", program.errors);
 }
 
+/// Spec section 5's `internal` is a modifier of a declaration, a member, an accessor and a parameter, written first or
+/// after another, so semantics can name it, and stays a name elsewhere.
+#[test]
+fn internal_is_a_modifier_and_stays_a_name_elsewhere() {
+    const CODE: &str = "class Report\n{\n    internal const int MAX = 1;\n    internal static int count = 0;\n    public string name { get; internal set; } = \"\";\n    internal Report(internal int size { get; }) {}\n    public internal int run()\n    {\n        int internal = 5;\n        return internal;\n    }\n    public int internal() => 1;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let modifiers = |sequence: &Sequence<Modifier>| sequence.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let [
+        ClassLikeMember::Constant(constant),
+        ClassLikeMember::Property(count),
+        ClassLikeMember::Property(Property::Hooked(name)),
+        ClassLikeMember::Method(constructor),
+        ClassLikeMember::Method(run),
+        ClassLikeMember::Method(named),
+    ] = class_members(program).as_slice()
+    else {
+        panic!("expected six members, got {:#?}", class_members(program));
+    };
+    assert_eq!(modifiers(&constant.modifiers), ["Internal"]);
+    assert_eq!(modifiers(count.modifiers()), ["Internal", "Static"]);
+    let Some(setter) = name.hook_list.setter() else {
+        panic!("expected a setter, got {:#?}", name.hook_list);
+    };
+    assert_eq!(modifiers(&setter.modifiers), ["Internal"]);
+    assert_eq!(modifiers(&constructor.modifiers), ["Internal"]);
+    let Some(parameter) = constructor.parameter_list.parameters.first() else {
+        panic!("expected a parameter, got {:#?}", constructor.parameter_list);
+    };
+    assert_eq!(modifiers(&parameter.modifiers), ["Internal"]);
+    assert_eq!(modifiers(&run.modifiers), ["Public", "Internal"]);
+    assert_eq!(source(CODE, &named.name), "internal");
+
+    for (code, kind) in [
+        ("internal class Ledger\n{\n}\n", "class"),
+        ("internal interface Priced\n{\n}\n", "interface"),
+        ("[Flags]\ninternal enum Suit\n{\n    case Hearts;\n}\n", "enum"),
+        ("internal event Paid(int orderId);\n", "event"),
+    ] {
+        let program = parse(&arena, "src/Ledger.sharp", code);
+
+        assert!(program.errors.is_empty(), "{kind}: {:#?}", program.errors);
+        let declared = match program.statements.first() {
+            Some(Statement::Class(class)) => &class.modifiers,
+            Some(Statement::Interface(interface)) => &interface.modifiers,
+            Some(Statement::Enum(r#enum)) => &r#enum.modifiers,
+            Some(Statement::Event(event)) => &event.modifiers,
+            statement => panic!("expected a declaration, got {statement:#?}"),
+        };
+        assert_eq!(modifiers(declared), ["Internal"], "{kind}");
+    }
+
+    let php = parse(&arena, "src/report.php", "<?php\n\ninternal(1);\n");
+    assert!(php.errors.is_empty(), "{:#?}", php.errors);
+    assert!(matches!(php.statements.as_slice(), [_, Statement::Expression(_)]), "{:#?}", php.statements);
+}
+
 /// Spec section 9: a parameter has no computed property, because it receives its value. It is one error at its `=>`,
 /// and the parameter list and the class parse on.
 #[test]

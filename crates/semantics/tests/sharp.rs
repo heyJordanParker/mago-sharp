@@ -1113,7 +1113,7 @@ fn an_interface_member_is_public_written_bare() {
     assert_eq!(issues(bare), Vec::<String>::new());
 
     let message = "An interface member is always public, so it takes no access modifier.";
-    for modifier in ["public", "protected", "private"] {
+    for modifier in ["public", "protected", "private", "internal"] {
         let code = leak(bare.replace("    string", &format!("    {modifier} string")));
 
         assert_eq!(issues(code), [format!("5:5 {message}"), format!("7:5 {message}")], "{modifier}");
@@ -1128,6 +1128,40 @@ fn an_interface_member_is_public_written_bare() {
             "9:5 Interface method `Named::label` cannot have `private` modifier."
         ]
     );
+}
+
+/// Spec section 5's `internal` is not supported yet: on a member, a parameter or a declaration it is one error at the
+/// modifier, and the member is not one written without an access modifier.
+#[test]
+fn internal_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    internal const int MAX = 1;\n    internal int count = 0;\n    internal int views { get; set; } = 0;\n    internal int total => 7;\n    public string name { get; internal set; } = \"\";\n\n    internal Report(internal int size { get; })\n    {\n    }\n\n    internal Report.empty() : this(0)\n    {\n    }\n\n    internal void run()\n    {\n    }\n}\n";
+    let message = "This modifier is not supported yet in PHP#.";
+
+    assert_eq!(
+        issues(code),
+        [
+            format!("5:5 {message}"),
+            format!("6:5 {message}"),
+            format!("7:5 {message}"),
+            format!("8:5 {message}"),
+            "9:31 This accessor is not supported yet in PHP#.".to_owned(),
+            format!("11:5 {message}"),
+            format!("11:21 {message}"),
+            format!("15:5 {message}"),
+            format!("19:5 {message}"),
+        ]
+    );
+
+    for declaration in [
+        "internal class Ledger\n{\n}\n",
+        "internal interface Priced\n{\n}\n",
+        "internal enum Suit\n{\n    case Hearts;\n}\n",
+        "internal event Paid(int orderId);\n",
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
+
+        assert_eq!(issues(code), [format!("3:1 {message}")], "{declaration}");
+    }
 }
 
 #[test]

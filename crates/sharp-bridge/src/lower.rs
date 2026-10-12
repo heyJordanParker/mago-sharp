@@ -3362,7 +3362,8 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
             | Modifier::PrivateSet(_)
-            | Modifier::Lazy(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
         };
     }
 
@@ -3388,7 +3389,8 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Extern(_)
-            | Modifier::Lazy(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
         };
     }
 
