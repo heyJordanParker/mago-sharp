@@ -4136,7 +4136,8 @@ fn check_class_like_properties<'ctx, A>(
 }
 
 /// Reports a PHP# class's or event's property that does not fit the property `interface` states, as the engine refuses
-/// the class: it is public, on each object, and of the stated type or a narrower one for a get-only property.
+/// the class: it is public, on each object, and of the stated type or a narrower one for a get-only property. Every
+/// interface property is virtual, so its hooks alone say whether it is get-only.
 fn report_unfit_interface_property<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
@@ -4180,7 +4181,7 @@ fn report_unfit_interface_property<A>(
             context.codebase,
             &given.type_union,
             &stated_type.type_union,
-            stated.flags.is_virtual_property() && !stated.hooks.contains_key(&word("set")),
+            !stated.hooks.contains_key(&word("set")),
             false,
         )
     {
