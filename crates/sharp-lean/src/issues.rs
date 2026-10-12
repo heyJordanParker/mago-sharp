@@ -257,6 +257,29 @@ fn one_line(message: &str) -> String {
     message.strip_suffix('.').unwrap_or(&message).to_owned()
 }
 
+/// Why the workspace Lean file `file`, in the PSR-4 folder of `namespace`, cannot be built: Lean or Mago owns the root of
+/// `namespace`.
+pub(crate) fn owned_root(namespace: &str, file: &str) -> String {
+    let owner = namespace.split('.').next().unwrap_or(namespace);
+
+    format!(
+        "`{owner}` is a name Lean or Mago keeps, so Lean files under the `{}\\` root, such as {file}, can't be built. Move them under one of your own namespaces",
+        namespace.replace('.', "\\")
+    )
+}
+
+/// A Lean file under a root Lean or Mago owns, on each file under its folder, since none of its rules can run.
+pub(crate) fn owned_lean(span: Span, namespace: &str, file: &str) -> Issue {
+    Issue::error(format!("{}.", owned_root(namespace, file)))
+        .with_code(IssueCode::BrokenRule.as_str())
+        .with_annotation(Annotation::primary(span))
+}
+
+/// A law whose proof file sits under a root Lean or Mago owns, so it cannot be built.
+pub(crate) fn owned_proof(law: &Law, namespace: &str, file: &str) -> Issue {
+    unproven(law, format!("Law {} is not proven: {}.", law.name, owned_root(namespace, file)))
+}
+
 /// A `Module.lean` in no PSR-4 folder, on each file under its folder, since none of its rules can run.
 pub(crate) fn no_rules_module(span: Span, rules: &str) -> Issue {
     Issue::error(format!(

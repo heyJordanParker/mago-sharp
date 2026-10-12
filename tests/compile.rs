@@ -1371,6 +1371,97 @@ fn a_structure_rule_that_reaches_more_than_lean_checks_does_not_run() {
     }
 }
 
+/// The runner trusts every module under a root Lean or Mago owns: `Init`, `Lean`, `Std`, `Lake`, `Code` and `Sharp`.
+/// So a Lean file of the project never builds as one, and a PSR-4 folder under one of them gets no link. Its Lean files
+/// cannot be built, which refuses each file that needs one, naming the root, and every other rule still runs. Each row
+/// is a project with `App\` in `app/`: the reviewer's helper in a `Code\Evil\` root that reaches `Rule.breaks`, a
+/// `Std\Evil\` file that a `Module.lean` imports, and a `Module.lean`, a Lean file nothing imports and a law in a
+/// `Code\Evil\` root inside `app/`.
+#[test]
+fn a_lean_file_under_a_root_lean_or_mago_owns_is_refused_and_every_other_rule_runs() {
+    let outside = "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", \"Code\\\\Evil\\\\\": \"code-evil/\", \"Std\\\\Evil\\\\\": \"std-evil/\"}}}\n";
+    let inside = "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", \"Code\\\\Evil\\\\\": \"app/Evil/\"}}}\n";
+    let owned = |owner: &str, root: &str, file: &str| {
+        format!(
+            "`{owner}` is a name Lean or Mago keeps, so Lean files under the `{root}` root, such as {file}, can't be built. Move them under one of your own namespaces"
+        )
+    };
+    let code = owned("Code", "Code\\Evil\\", "code-evil/Names.lean");
+    let std = owned("Std", "Std\\Evil\\", "std-evil/Names.lean");
+    let names = "import Sharp.Lean.Facts\nopen Sharp\n\ndef Code.Evil.Names.neverImports (forbidden : String) : Rule :=\n  .imports fun _ i => Rule.breaks (.imports fun ns j => under j.name ns) forbidden {} (.import { i with namespace_ := forbidden })\n";
+    let via_code = "import Code.App.Tenant.Store.Module\nimport Code.Evil.Names\nopen Sharp\n\n@[rule] def viaCodeModule : Rule := Code.Evil.Names.neverImports \"App.Shared.Ledgr\"\n@[rule] def viaCodeModuleLegacy : Rule := Code.Evil.Names.neverImports \"App.Shared\"\n";
+    let via_std = format!("import Code.App.Tenant.Store.Module\nimport Std.Evil.Names\nopen Sharp\n\n{IMPORTS_ONLY}\n");
+    let answer = "def Std.Evil.Names.answer : Nat := 42\n";
+    let evil_rules =
+        "import Code.Code.Evil.Module\nopen Sharp\n\n@[rule] def importsNothing : Rule := .importsOnly []\n";
+    let money = LAWFUL_MONEY.replace("namespace App.Shared;", "namespace Code.Evil;");
+    let store_imports = "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.";
+    for (files, refused) in [
+        (
+            vec![
+                ("composer.json", outside),
+                ("code-evil/Names.lean", names),
+                ("app/Tenant/Store/Module.lean", via_code),
+            ],
+            vec![
+                LEDGER_BREAKS.to_owned(),
+                store_rejected("Receipts", "line 2, column 1", &code),
+                store_rejected("StoreService", "line 2, column 1", &code),
+            ],
+        ),
+        (
+            vec![
+                ("composer.json", outside),
+                ("std-evil/Names.lean", answer),
+                ("app/Tenant/Store/Module.lean", via_std.as_str()),
+            ],
+            vec![
+                LEDGER_BREAKS.to_owned(),
+                store_rejected("Receipts", "line 2, column 1", &std),
+                store_rejected("StoreService", "line 2, column 1", &std),
+            ],
+        ),
+        (
+            vec![
+                ("composer.json", inside),
+                ("app/Evil/Thing.sharp", "namespace Code.Evil;\n\npublic class Thing { }\n"),
+                ("app/Evil/Module.lean", evil_rules),
+                ("app/Evil/Helper.lean", "def Code.Evil.Helper.answer : Nat := 42\n"),
+            ],
+            vec![
+                format!(
+                    "app/Evil/Thing.sharp:1:11:error - broken-rule: {}.",
+                    owned("Code", "Code\\Evil\\", "app/Evil/Helper.lean")
+                ),
+                format!(
+                    "app/Evil/Thing.sharp:1:11:error - broken-rule: {}.",
+                    owned("Code", "Code\\Evil\\", "app/Evil/Module.lean")
+                ),
+                LEDGER_BREAKS.to_owned(),
+                store_imports.to_owned(),
+            ],
+        ),
+        (
+            vec![("composer.json", inside), ("app/Evil/Money.sharp", money.as_str())],
+            vec![
+                format!(
+                    "app/Evil/Money.sharp:8:5:error - unproven-law: Law addKeepsCurrency is not proven: {}.",
+                    owned("Code", "Code\\Evil\\", "app/Evil/Money.lean")
+                ),
+                LEDGER_BREAKS.to_owned(),
+                store_imports.to_owned(),
+            ],
+        ),
+    ] {
+        let directory = structured(&files);
+
+        let output = compile_lines(directory.path());
+
+        assert_eq!(output.status.code(), Some(1), "{files:?}: {}", printed(&output));
+        assert_eq!(issue_lines(&output), refused, "{files:?}: {}", printed(&output));
+    }
+}
+
 /// The namespaces a rule may name are those of the project's `.sharp` files when `mago compile` runs, so a rule that
 /// names a namespace an edit deletes is Lean's unknown identifier on the next compile, though no `.sharpc` file the rule
 /// judges lists the deleted file as an input. Each row is an edit to a project that compiled.

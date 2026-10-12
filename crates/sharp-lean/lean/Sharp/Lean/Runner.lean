@@ -266,13 +266,14 @@ def Refusal.detail : Refusal → String
 /-- The constants only the runtime library and the runner use to make a `Namespace`. -/
 def reserved : Array Name := #[`Sharp.Namespace.mk, ``Rule.breaks]
 
-/-- Whether `name` belongs to Lean, to the runtime library, or to the modules `mago compile` generates, which the walk
-trusts and does not enter. -/
+/-- The roots of the module names Lean and Mago own: Lean's, Lake's, the generated modules' and the runtime library's.
+`mago compile` links no PSR-4 folder under them, and `OWNED_ROOTS` in `src/package.rs` holds the same roots. -/
+def ownedRoots : Array Name := #[`Init, `Lean, `Std, `Lake, `Code, `Sharp]
+
+/-- Whether `name` belongs to a module under a root Lean or Mago owns, which the walk trusts and does not enter. -/
 def trusted (env : Environment) (name : Name) : Bool :=
   match env.getModuleIdxFor? name with
-  | some index =>
-    let module := env.header.moduleNames[index.toNat]!
-    [`Init, `Lean, `Std, `Code].contains module.getRoot || (`Sharp.Lean).isPrefixOf module
+  | some index => ownedRoots.contains env.header.moduleNames[index.toNat]!.getRoot
   | none => false
 
 /-- The first constant `rule` reaches that a rule may not: a reserved constant, an `unsafe` one, or a workspace

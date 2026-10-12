@@ -34,6 +34,11 @@ pub const PACKAGE_FOLDER: &str = ".lean";
 /// The generated module that declares the namespaces: the root of the generated modules, which no class's module is.
 const NAMESPACES: &str = "Code";
 
+/// The roots of the module names Lean and Mago own: Lean's, Lake's, the generated modules' and the runtime library's.
+/// No PSR-4 folder under them gets a link, so no Lean file of the project builds as a module the runner trusts.
+/// `ownedRoots` in `Sharp/Lean/Runner.lean` holds the same roots.
+const OWNED_ROOTS: [&str; 6] = ["Init", "Lean", "Std", "Lake", NAMESPACES, library::NAMESPACE];
+
 /// The file in the package that lists the Lean files the last structure rules check read, each with its hash.
 const CHECKED: &str = "checked-rules";
 
@@ -363,17 +368,38 @@ pub(crate) fn roots(package: &Path) -> io::Result<Vec<Root>> {
 /// The Lean module of the proof file `file`: the PHP namespace of its folder, under the PSR-4 folder that holds it most
 /// closely, and its name. `None` when no PSR-4 folder with a namespace holds it.
 pub(crate) fn proof_module(roots: &[Root], file: &Path) -> Option<String> {
-    let (root, relative) = roots
-        .iter()
-        .filter(|root| !root.namespace.is_empty())
-        .filter_map(|root| Some((root, file.with_extension("").strip_prefix(&root.directory).ok()?.to_path_buf())))
-        .min_by_key(|(_, relative)| relative.components().count())?;
+    let (root, relative) = closest_root(roots, file)?;
 
     let segments: Vec<String> = std::iter::once(root.namespace.clone())
         .chain(relative.components().map(|component| component.as_os_str().to_string_lossy().into_owned()))
         .collect();
 
     Some(segments.join("."))
+}
+
+/// The PSR-4 folder that holds the Lean file `file` most closely, when its namespace is under a root Lean or Mago owns,
+/// so `file` cannot be built.
+pub(crate) fn owned_root<'root>(roots: &'root [Root], file: &Path) -> Option<&'root Root> {
+    closest_root(roots, file).map(|(root, _)| root).filter(|root| is_owned(root))
+}
+
+/// The PSR-4 folders under a root Lean or Mago owns.
+pub(crate) fn owned_roots(roots: &[Root]) -> impl Iterator<Item = &Root> {
+    roots.iter().filter(|root| is_owned(root))
+}
+
+/// The PSR-4 folder with a namespace that holds `file` most closely, and the path of `file` without its extension
+/// inside it.
+fn closest_root<'root>(roots: &'root [Root], file: &Path) -> Option<(&'root Root, PathBuf)> {
+    roots
+        .iter()
+        .filter(|root| !root.namespace.is_empty())
+        .filter_map(|root| Some((root, file.with_extension("").strip_prefix(&root.directory).ok()?.to_path_buf())))
+        .min_by_key(|(_, relative)| relative.components().count())
+}
+
+fn is_owned(root: &Root) -> bool {
+    root.namespace.split('.').next().is_some_and(|first| OWNED_ROOTS.contains(&first))
 }
 
 #[derive(Serialize)]
@@ -594,18 +620,12 @@ impl Package {
     }
 }
 
-/// The roots that get a link: each with a namespace outside the runtime library's, since a link there would make the
-/// `Proofs` library claim the runtime library's modules, apart from one whose link would sit inside another's, since
-/// that link would be written into the linked folder of the project.
+/// The roots that get a link: each with a namespace outside the roots Lean and Mago own, since a link there would make
+/// the `Proofs` library claim modules of Lean, of Mago or of the runtime library, apart from one whose link would sit
+/// inside another's, since that link would be written into the linked folder of the project.
 pub(crate) fn linked_roots(roots: &[Root]) -> Vec<&Root> {
-    let mut linked: Vec<&Root> = roots
-        .iter()
-        .filter(|root| {
-            !root.namespace.is_empty()
-                && root.namespace.split('.').next() != Some(library::NAMESPACE)
-                && root.directory.is_dir()
-        })
-        .collect();
+    let mut linked: Vec<&Root> =
+        roots.iter().filter(|root| !root.namespace.is_empty() && !is_owned(root) && root.directory.is_dir()).collect();
     linked.sort_by(|a, b| a.namespace.cmp(&b.namespace));
     linked.dedup_by(|a, b| a.namespace == b.namespace);
 
@@ -722,6 +742,31 @@ mod tests {
         let linked: Vec<&str> = linked_roots(&roots).iter().map(|root| root.namespace.as_str()).collect();
 
         assert_eq!(linked, ["App", "Lib"]);
+    }
+
+    #[test]
+    fn a_root_under_a_name_lean_or_mago_owns_gets_no_link() {
+        let roots: Vec<Root> = ["App", "Init", "Lean.Evil", "Std.Evil", "Lake", "Code.Evil", "Sharp.Lean", "Coder"]
+            .into_iter()
+            .map(|namespace| Root { namespace: namespace.to_owned(), directory: std::env::temp_dir() })
+            .collect();
+
+        let linked: Vec<&str> = linked_roots(&roots).iter().map(|root| root.namespace.as_str()).collect();
+
+        assert_eq!(linked, ["App", "Coder"]);
+    }
+
+    /// The runner trusts every module under a root Lean or Mago owns, so it must own the roots no PSR-4 folder links.
+    #[test]
+    fn the_runner_trusts_the_roots_lean_and_mago_own() {
+        let runner = include_str!("../lean/Sharp/Lean/Runner.lean");
+        let list = runner
+            .lines()
+            .find_map(|line| line.strip_prefix("def ownedRoots : Array Name := #[")?.strip_suffix(']'))
+            .expect("Runner.lean declares ownedRoots on one line");
+        let trusted: Vec<&str> = list.split(", ").map(|root| root.trim_start_matches('`')).collect();
+
+        assert_eq!(trusted, OWNED_ROOTS);
     }
 
     #[test]

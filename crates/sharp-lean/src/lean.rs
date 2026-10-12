@@ -26,6 +26,7 @@ use crate::package::Program;
 use crate::package::Root;
 use crate::package::Toolchain;
 use crate::rules;
+use crate::rules::Unbuilt;
 use crate::runner;
 use crate::runner::Answer;
 use crate::runner::Question;
@@ -73,7 +74,8 @@ impl Lean {
     /// whenever one `.sharpc` is not current, the namespaces changed, or a workspace Lean file the check builds changed,
     /// joined or left, so a compile checks every rule exactly. Every Lean file of a PSR-4 folder that no Lean file
     /// imports is built then too, so a `@[rule]` outside a `Module.lean` is an error, though no `.sharpc` lists that
-    /// file. A `Module.lean` in no PSR-4 folder refuses each file under its folder. No Lean process starts when no file
+    /// file. A `Module.lean` in no PSR-4 folder, and a Lean file in a PSR-4 folder under a root Lean or Mago owns, each
+    /// refuse every file under their folder. No Lean process starts when no file
     /// states a law or has a proof file and no workspace Lean file is left to build, nor when each `.sharpc` is current
     /// and neither the namespaces nor those Lean files changed. When none of those remains, `.sharp/.lean/` is deleted.
     ///
@@ -109,14 +111,20 @@ impl Lean {
             }
         }
         let roots = self.roots(translations.iter())?;
-        let (files, unnamed) = rules::find(&self.root, &roots, &translations)?;
-        for path in &unnamed {
-            let folder = path.strip_suffix("Module.lean").unwrap_or(path).as_bytes();
+        let (files, unbuilt) = rules::find(&self.root, &roots, &translations)?;
+        for unbuilt in &unbuilt {
+            let (Unbuilt::Unnamed(path) | Unbuilt::Owned(path, _)) = unbuilt;
+            let folder = &path.as_bytes()[..path.rfind('/').map_or(0, |end| end + 1)];
             for translation in translations
                 .iter()
                 .filter(|translation| translation.name.starts_with(folder) && !translation.name.starts_with(VENDOR))
             {
-                report(&mut issues, translation, issues::no_rules_module(translation.facts.anchor, path));
+                let anchor = translation.facts.anchor;
+                let issue = match unbuilt {
+                    Unbuilt::Unnamed(path) => issues::no_rules_module(anchor, path),
+                    Unbuilt::Owned(path, namespace) => issues::owned_lean(anchor, namespace, path),
+                };
+                report(&mut issues, translation, issue);
             }
         }
         if candidates.is_empty() && files.is_empty() {
@@ -167,8 +175,14 @@ impl Lean {
                 continue;
             }
 
+            let file = String::from_utf8_lossy(&proof);
+            if let Some(owned) = package::owned_root(&roots, &self.path(&proof)) {
+                for law in &translation.laws {
+                    report(&mut issues, translation, issues::owned_proof(law, &owned.namespace, &file));
+                }
+                continue;
+            }
             let Some(module) = package::proof_module(&roots, &self.path(&proof)) else {
-                let file = String::from_utf8_lossy(&proof);
                 for law in &translation.laws {
                     report(&mut issues, translation, issues::no_module(law, &file));
                 }
