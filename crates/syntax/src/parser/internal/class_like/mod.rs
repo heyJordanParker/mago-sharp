@@ -89,6 +89,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "An interface";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -143,6 +144,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A class";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -184,6 +186,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A class";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -233,6 +236,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A trait";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -288,6 +292,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "An enum";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),

@@ -18,6 +18,7 @@ use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Implements;
+use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::Method;
@@ -100,6 +101,23 @@ impl Fingerprintable for Implements<'_> {
     }
 }
 
+impl Fingerprintable for Inheritance<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "inheritance".hash(hasher);
+        for type_name in &self.types {
+            type_name.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
 impl Fingerprintable for ClassLikeMember<'_> {
     #[inline]
     fn fingerprint_with_hasher<H>(
@@ -132,12 +150,6 @@ impl Fingerprintable for ClassLikeMember<'_> {
             ClassLikeMember::Law(law) => {
                 law.fingerprint_with_hasher(hasher, resolved_names, options);
             }
-            ClassLikeMember::Event(event) => {
-                event.fingerprint_with_hasher(hasher, resolved_names, options);
-            }
-            ClassLikeMember::Interface(interface) => {
-                interface.fingerprint_with_hasher(hasher, resolved_names, options);
-            }
         }
     }
 }
@@ -159,9 +171,7 @@ impl Fingerprintable for Event<'_> {
         crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
-        for type_name in self.inheritance.iter().flat_map(|inheritance| inheritance.types.iter()) {
-            type_name.fingerprint_with_hasher(hasher, resolved_names, options);
-        }
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }
 
@@ -734,6 +744,7 @@ impl Fingerprintable for Class<'_> {
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.extends.fingerprint_with_hasher(hasher, resolved_names, options);
         self.implements.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);
         }
@@ -763,6 +774,7 @@ impl Fingerprintable for Interface<'_> {
         }
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.extends.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);
         }
@@ -820,6 +832,7 @@ impl Fingerprintable for Enum<'_> {
         }
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.backing_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         self.implements.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);

@@ -60,7 +60,6 @@ use mago_syntax::cst::InterpolatedString;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralStringPart;
 use mago_syntax::cst::LocalDeclaration;
-use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MatchArm;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -451,26 +450,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // An `extern` declaration tells only the checker what plain PHP does, and a module's laws are checked and
             // never run.
             Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
-            Statement::Class(class) => {
-                statements.push(self.class(class));
-
-                // A type nested in a class, spec section 15, is declared after it as `Order\Paid`, which the engine
-                // prefixes with the file's namespace, as it does every declared name.
-                for member in &class.members {
-                    match member {
-                        ClassLikeMember::Event(event) => {
-                            statements.push(self.event(event, &nested_name(class, &event.name)));
-                        }
-                        ClassLikeMember::Interface(interface) => {
-                            statements.push(self.interface(interface, &nested_name(class, &interface.name)));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Statement::Interface(interface) => statements.push(self.interface(interface, interface.name.value)),
+            Statement::Class(class) => statements.push(self.class(class)),
+            Statement::Interface(interface) => statements.push(self.interface(interface)),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
-            Statement::Event(event) => statements.push(self.event(event, event.name.value)),
+            Statement::Event(event) => statements.push(self.event(event)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
         }
     }
@@ -499,12 +482,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let mut members = Vec::new();
         let mut has_constructor = false;
-        // A law, spec section 28, is checked and never runs, so the engine gets no node for it. A nested type is a
-        // class-like of its own, which `file_statement` declares after the class.
-        let is_member = |member: &&ClassLikeMember| {
-            !matches!(member, ClassLikeMember::Law(_) | ClassLikeMember::Event(_) | ClassLikeMember::Interface(_))
-        };
-        for member in class.members.iter().filter(is_member) {
+        // A law, spec section 28, is checked and never runs, so the engine gets no node for it.
+        for member in class.members.iter().filter(|member| !matches!(member, ClassLikeMember::Law(_))) {
             let member = match member {
                 ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => {
                     has_constructor = true;
@@ -606,9 +585,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_NAME_LIST, 0, self.line(inheritance), &names)
     }
 
-    /// An interface is a class declaration with `ZEND_ACC_INTERFACE` named `name`, and its methods are `public`, as
-    /// php-src's grammar builds `interface Measured { public function area(): float; }`.
-    fn interface(&mut self, interface: &Interface, name: &[u8]) -> u32 {
+    /// An interface is a class declaration with `ZEND_ACC_INTERFACE`, and its methods are `public`, as php-src's
+    /// grammar builds `interface Measured { public function area(): float; }`.
+    fn interface(&mut self, interface: &Interface) -> u32 {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
         for member in &interface.members {
@@ -631,7 +610,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ZEND_ACC_INTERFACE,
             interface.interface.span,
             interface.right_brace,
-            name,
+            interface.name.value,
             &[NULL, header, members, NULL, NULL],
         )
     }
@@ -656,11 +635,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
     }
 
-    /// An event is a final class named `name`, whose constructor promotes each parameter to a `public readonly`
-    /// property, with its header as its interface list, as php-src's grammar builds
-    /// `final class Paid implements \App\Order\Event { public function __construct(public readonly int $orderId) {} }`.
+    /// An event is a final class, whose constructor promotes each parameter to a `public readonly` property, with its
+    /// header as its interface list, as php-src's grammar builds
+    /// `final class OrderPaid implements \App\OrderEvent { public function __construct(public readonly int $orderId) {} }`.
     /// The constructor spans the event's name and parameters.
-    fn event(&mut self, event: &Event, name: &[u8]) -> u32 {
+    fn event(&mut self, event: &Event) -> u32 {
         self.class = self.names.get(&event.name);
         self.enter(b"__construct");
         let mut parameters = Vec::new();
@@ -689,7 +668,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ZEND_ACC_FINAL,
             event.event.span,
             event.terminator,
-            name,
+            event.name.value,
             &[NULL, header, members, NULL, NULL],
         )
     }
@@ -2537,9 +2516,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
         let element = || {
-            let element = arguments.arguments.first().map(Argument::value);
-
-            element.unwrap_or_else(|| unreachable!("the checker refuses a collection method without its element"))
+            arguments
+                .arguments
+                .first()
+                .map(Argument::value)
+                .unwrap_or_else(|| unreachable!("the checker refuses a collection method call without its element"))
         };
 
         let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
@@ -3289,11 +3270,6 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
     }
 
     flags
-}
-
-/// The name a type nested in `class` declares, `Order\Paid`.
-fn nested_name(class: &Class, name: &LocalIdentifier) -> Vec<u8> {
-    [class.name.value, b"\\", name.value].concat()
 }
 
 /// The flags of a class's modifiers. `public` adds none, because every PHP class is public. A static class, whose

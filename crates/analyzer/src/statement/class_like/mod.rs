@@ -558,15 +558,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
             }
         }
 
-        // A type nested in the class, spec section 15, is a class-like of its own beside it.
-        for member in &self.members {
-            match member {
-                ClassLikeMember::Event(event) => event.analyze(context, block_context, artifacts)?,
-                ClassLikeMember::Interface(interface) => interface.analyze(context, block_context, artifacts)?,
-                _ => {}
-            }
-        }
-
         Ok(())
     }
 }

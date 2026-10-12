@@ -917,12 +917,6 @@ generate_ast_walker! {
             ClassLikeMember::Law(law) => {
                 walker.walk_law(law, context);
             }
-            ClassLikeMember::Event(event) => {
-                walker.walk_event(event, context);
-            }
-            ClassLikeMember::Interface(interface) => {
-                walker.walk_interface(interface, context);
-            }
         }
     }
 

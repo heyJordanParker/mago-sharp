@@ -523,11 +523,18 @@ impl Package {
     }
 }
 
-/// The roots that get a link: each with a namespace, apart from one whose link would sit inside another's, since that
-/// link would be written into the linked folder of the project.
+/// The roots that get a link: each with a namespace outside the runtime library's, since a link there would make the
+/// `Proofs` library claim the runtime library's modules, apart from one whose link would sit inside another's, since
+/// that link would be written into the linked folder of the project.
 pub(crate) fn linked_roots(roots: &[Root]) -> Vec<&Root> {
-    let mut linked: Vec<&Root> =
-        roots.iter().filter(|root| !root.namespace.is_empty() && root.directory.is_dir()).collect();
+    let mut linked: Vec<&Root> = roots
+        .iter()
+        .filter(|root| {
+            !root.namespace.is_empty()
+                && root.namespace.split('.').next() != Some(library::NAMESPACE)
+                && root.directory.is_dir()
+        })
+        .collect();
     linked.sort_by(|a, b| a.namespace.cmp(&b.namespace));
     linked.dedup_by(|a, b| a.namespace == b.namespace);
 

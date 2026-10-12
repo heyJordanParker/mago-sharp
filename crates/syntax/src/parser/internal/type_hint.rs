@@ -101,7 +101,7 @@ where
                 // PHP# writes PHP's `mixed` as `Any`, as spec section 24 decides.
                 b"Any" if self.dialect.is_sharp() => Hint::Mixed(self.parse_local_identifier()?),
                 val if val.eq_ignore_ascii_case(b"iterable") => Hint::Iterable(self.parse_local_identifier()?),
-                _ => Hint::Identifier(self.parse_type_name()?),
+                _ => Hint::Identifier(self.parse_identifier()?),
             },
             _ => {
                 return Err(self.stream.unexpected(

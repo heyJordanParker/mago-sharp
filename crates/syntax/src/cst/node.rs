@@ -1413,8 +1413,6 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 ClassLikeMember::Method(node) => f(Node::Method(node)),
                 ClassLikeMember::Operator(node) => f(Node::Operator(node)),
                 ClassLikeMember::Law(node) => f(Node::Law(node)),
-                ClassLikeMember::Event(node) => f(Node::Event(node)),
-                ClassLikeMember::Interface(node) => f(Node::Interface(node)),
             },
             Node::ClassLikeMemberExpressionSelector(node) => f(Node::Expression(node.expression)),
             Node::ClassLikeMemberSelector(node) => match node {

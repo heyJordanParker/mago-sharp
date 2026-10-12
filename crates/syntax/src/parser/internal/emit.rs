@@ -10,7 +10,7 @@ where
     A: Arena,
 {
     /// Whether a PHP# `emit` statement starts here: `emit` and then `new`, a name or a literal, as in
-    /// `emit new Order.Paid(…);` and `emit paid;`. Everywhere else `emit` is a name, such as a local `emit`, a call
+    /// `emit new OrderPaid(…);` and `emit paid;`. Everywhere else `emit` is a name, such as a local `emit`, a call
     /// `emit(x)` or a test `emit is Paid`.
     pub(crate) fn is_at_emit(&mut self) -> Result<bool, ParseError> {
         let starts_with_emit =

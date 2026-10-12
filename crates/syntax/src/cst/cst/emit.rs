@@ -10,7 +10,7 @@ use crate::cst::cst::terminator::Terminator;
 /// Example:
 ///
 /// ```csharp
-/// emit new Order.Paid(order.id, order.total);
+/// emit new OrderPaid(order.id, order.total);
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

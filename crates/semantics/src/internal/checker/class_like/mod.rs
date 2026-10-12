@@ -746,12 +746,8 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     context,
                 );
             }
-            // Only a PHP# file declares an operator, a law or a nested type, and `check_slice` refuses each in an
-            // interface.
-            ClassLikeMember::Operator(_)
-            | ClassLikeMember::Law(_)
-            | ClassLikeMember::Event(_)
-            | ClassLikeMember::Interface(_) => {}
+            // Only a PHP# file declares an operator or a law, and `check_slice` refuses either in an interface.
+            ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) => {}
         }
     }
 }

@@ -124,16 +124,6 @@ pub struct NameWalker<'arena> {
     accessors: Option<Span>,
     /// The names of the class-likes the file declares, compared as PHP compares class names.
     declared_classes: foldhash::HashSet<IgnoringCase<'arena>>,
-    /// The types nested in each PHP# class being walked, innermost last.
-    nested_types: std::vec::Vec<NestedTypes<'arena>>,
-}
-
-/// The types a PHP# class nests, spec section 15: its full name, and the names of its events and interfaces, compared
-/// as PHP compares class names.
-#[derive(Debug)]
-struct NestedTypes<'arena> {
-    class: &'arena [u8],
-    names: foldhash::HashSet<IgnoringCase<'arena>>,
 }
 
 /// The member names of one class, compared as PHP compares them: method names ignoring case, and property and
@@ -292,30 +282,10 @@ impl<'arena> NameWalker<'arena> {
 
     /// Resolves a name written where a class goes. In a PHP# file a bare name of the standard library is the class in
     /// the `Sharp` namespace, unless the file imports or declares a class-like of that name, spec section 23.
-    ///
-    /// A PHP# type nested in a class is `Order.Paid`, whose first part resolves as any class name does, and inside
-    /// the class a bare name is its nested type first, as C# looks up a nested type, spec section 15.
     fn resolve_class<A>(&self, context: &NameResolutionContext<'arena, A>, name: &[u8]) -> (&'arena [u8], bool)
     where
         A: Arena,
     {
-        if self.sharp {
-            let mut parts = name.split(|byte| *byte == b'.');
-            let first = parts.next().unwrap_or(name);
-            if first.len() < name.len() {
-                let (outer, imported) = self.resolve_class(context, first);
-                let nested: std::vec::Vec<&[u8]> = std::iter::once(outer).chain(parts).collect();
-
-                return (context.intern(&concat_with_sep(&nested, b'\\')), imported);
-            }
-
-            if let Some(nested) =
-                self.nested_types.iter().rev().find(|nested| nested.names.contains(&IgnoringCase(name)))
-            {
-                return (context.intern(&concat_with_sep(&[nested.class, name], b'\\')), false);
-            }
-        }
-
         let (fqn, imported) = context.resolve(NameKind::Default, name);
         if !self.sharp || imported || self.declared_classes.contains(&IgnoringCase(name)) {
             return (fqn, imported);
@@ -340,32 +310,6 @@ impl<'arena> NameWalker<'arena> {
 
         (class, false)
     }
-
-    /// The full name of an event or an interface declared here: named after the class that nests it, or in the
-    /// namespace when no class does.
-    fn declared_type_name<A>(&self, context: &NameResolutionContext<'arena, A>, name: &'arena [u8]) -> &'arena [u8]
-    where
-        A: Arena,
-    {
-        match self.nested_types.last() {
-            Some(nested) => context.intern(&concat_with_sep(&[nested.class, name], b'\\')),
-            None => context.qualify_name(name),
-        }
-    }
-}
-
-/// The names of the events and interfaces a PHP# class nests.
-fn nested_type_names<'arena>(
-    members: &Sequence<'arena, ClassLikeMember<'arena>>,
-) -> foldhash::HashSet<IgnoringCase<'arena>> {
-    members
-        .iter()
-        .filter_map(|member| match member {
-            ClassLikeMember::Event(event) => Some(IgnoringCase(event.name.value)),
-            ClassLikeMember::Interface(interface) => Some(IgnoringCase(interface.name.value)),
-            _ => None,
-        })
-        .collect()
 }
 
 /// The variables a pattern declares.
@@ -621,21 +565,18 @@ where
 
         if self.sharp {
             self.class_members.push(class_member_names(&class.members));
-            self.nested_types.push(NestedTypes { class: classlike, names: nested_type_names(&class.members) });
         }
     }
 
     fn walk_out_class(&mut self, _class: &'ast Class<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.class_members.pop();
-            self.nested_types.pop();
         }
     }
 
-    /// An event nested in a class is named after it, `App\Order\Paid` for `Paid` in `App.Order`, spec section 15. Its
-    /// parameters are its constructor's.
+    /// An event is a class of its namespace, spec section 15, and its parameters are its constructor's.
     fn walk_in_event(&mut self, event: &'ast Event<'arena>, context: &mut NameResolutionContext<'arena, A>) {
-        let classlike = self.declared_type_name(context, event.name.value);
+        let classlike = context.qualify_name(event.name.value);
 
         self.resolved_names.insert_at(event.name.span, classlike, false);
         self.locals.enter_method();
@@ -1081,7 +1022,7 @@ where
         interface: &'ast Interface<'arena>,
         context: &mut NameResolutionContext<'arena, A>,
     ) {
-        let classlike = self.declared_type_name(context, interface.name.value);
+        let classlike = context.qualify_name(interface.name.value);
 
         self.resolved_names.insert_at(interface.name.span, classlike, false);
     }

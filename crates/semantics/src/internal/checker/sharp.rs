@@ -501,14 +501,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(File)
         }
-        // A dotted name is a namespace or an import at file level, and a type nested in a class anywhere else.
-        (
-            Node::Keyword(_)
-            | Node::LocalIdentifier(_)
-            | Node::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
-            | Node::DottedIdentifier(_),
-            _,
-        ) => Some(place),
+        (Node::Keyword(_) | Node::LocalIdentifier(_) | Node::Identifier(Identifier::Local(_)), _) => Some(place),
         (Node::Terminator(Terminator::Semicolon(_)), _) => Some(place),
         (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
 
@@ -529,6 +522,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::NamespaceImplicitBody(_)
             // A braced namespace's body, after its namespace was refused.
             | Node::Block(_)
+            | Node::Identifier(Identifier::Dotted(_))
+            | Node::DottedIdentifier(_)
             | Node::Use(_)
             | Node::Extern(_)
             | Node::UseItems(UseItems::Sequence(_))
@@ -545,25 +540,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Class)
         }
-        // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`. A class nests
-        // an event or an interface, spec section 15, and nothing else nests a type.
-        (Node::Interface(_), File | Class) => Some(Interface),
+        // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
+        (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
-        (Node::Event(_), File | Class) => Some(Place::Event),
-        (Node::ClassLikeMember(ClassLikeMember::Event(event)), Class) => {
-            let written = event.event.span().join(event.terminator.span());
-            let message = "An event takes only `public`.";
-            check_nested_type(message, event.event.span(), &event.name, event.modifiers.is_empty(), written, context);
-
-            Some(Class)
-        }
-        (Node::ClassLikeMember(ClassLikeMember::Interface(interface)), Class) => {
-            let (keyword, name) = (interface.interface.span(), &interface.name);
-            let message = "A nested interface takes only `public`.";
-            check_nested_type(message, keyword, name, interface.modifiers.is_empty(), keyword.join(name.span), context);
-
-            Some(Class)
-        }
+        (Node::Event(_), File) => Some(Place::Event),
         (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
         (Node::Modifier(modifier), Place::Event) => {
             context.report(
@@ -621,7 +601,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Modifier(Modifier::Public(_)), Interface | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
-        // An interface states a property its classes give, as `Order.Event` states `orderId`, spec section 15.
+        // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
         (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
             if is_interface_property(property) =>
         {
@@ -1387,13 +1367,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::NamedArgument(_),
             Body,
         ) => Some(Body),
-        // `new Order.Paid(…)` creates a type nested in a class, spec section 15.
         (Node::Expression(Expression::Instantiation(instantiation)), Body)
             if matches!(
                 instantiation.class,
-                Expression::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
-                    | Expression::Self_(_)
-                    | Expression::Static(_)
+                Expression::Identifier(Identifier::Local(_)) | Expression::Self_(_) | Expression::Static(_)
             ) =>
         {
             check_instantiation(instantiation, context)
@@ -1402,9 +1379,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (
             Node::Instantiation(_)
             | Node::Expression(
-                Expression::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
-                | Expression::Self_(_)
-                | Expression::Static(_),
+                Expression::Identifier(Identifier::Local(_)) | Expression::Self_(_) | Expression::Static(_),
             ),
             Instantiation,
         ) => Some(Instantiation),
@@ -1738,53 +1713,19 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
     )
 }
 
-/// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, and its
-/// `uses` is not supported yet.
+/// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
+/// effects its `uses` lists.
 fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
-    let issue = if let Identifier::Dotted(target) = &r#extern.target {
-        Issue::error(format!("An `extern event` names a class, and `{}` names a member.", BytesDisplay(target.value)))
-            .with_annotation(Annotation::primary(target.span).with_message("Named here."))
-            .with_help("Name the event's class, as in `extern event JobFailed;`.")
-    } else if let Some(uses) = &r#extern.uses {
-        Issue::error("An `extern event` with `uses` is not supported yet in PHP#.")
-            .with_annotation(Annotation::primary(uses.span()).with_message("Not supported yet."))
-            .with_note("`extern event JobFailed;` marks the class as an event, and states that it has no effects.")
-    } else {
+    let Identifier::Dotted(target) = &r#extern.target else {
         return Some(Place::File);
     };
 
+    let issue =
+        Issue::error(format!("An `extern event` names a class, and `{}` names a member.", BytesDisplay(target.value)))
+            .with_annotation(Annotation::primary(target.span).with_message("Named here."))
+            .with_help("Name the event's class, as in `extern event JobFailed;`.");
+
     report_refusal(issue, r#extern.span(), Place::File, context)
-}
-
-/// Decides a type a class nests, spec section 15: an event or an interface, from its `keyword` to the end of what
-/// `written` spans. A member without an access modifier is private (spec section 5), and a nested type is public, so
-/// it writes `public`. A nested type named like its class would take the class's name inside it, which C# refuses too
-/// (CS0542).
-fn check_nested_type(
-    message: &str,
-    keyword: Span,
-    name: &LocalIdentifier,
-    is_unmodified: bool,
-    written: Span,
-    context: &mut Context<'_, '_, '_>,
-) {
-    if is_unmodified {
-        context.report(
-            Issue::error(message)
-                .with_annotation(Annotation::primary(keyword).with_message("Private without `public`."))
-                .with_note("A member without an access modifier is private, and a type nested in a class is public.")
-                .with_help(format!("Write `public {}`.", BytesDisplay(context.get_code_snippet(written)))),
-        );
-    }
-
-    let class = context.get_name(name.span.start).rsplit(|byte| *byte == b'\\').nth(1).unwrap_or_default();
-    if class == name.value {
-        context.report(
-            Issue::error(format!("`{0}` cannot declare a nested type named `{0}`.", BytesDisplay(name.value)))
-                .with_annotation(Annotation::primary(name.span).with_message("Named here."))
-                .with_note("Inside the class, its name would name the nested type."),
-        );
-    }
 }
 
 /// Decides an event's parameter, which runs as a public get-only property of the event, spec section 15: a type, a
@@ -1818,7 +1759,7 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
 }
 
 /// Whether the slice has an interface property: `public`, a type, a name and `{ get; }`, which PHP runs as an
-/// interface property its classes give, as an event's parameters give `Order.Event`'s `orderId`, spec section 15.
+/// interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15.
 /// PHP's own check reports one without `public`.
 fn is_interface_property(property: &HookedProperty) -> bool {
     property.attribute_lists.is_empty()
@@ -2729,16 +2670,15 @@ fn is_slice_type(hint: &Hint) -> bool {
         | Hint::Bool(_)
         | Hint::String(_)
         | Hint::Void(_)
-        | Hint::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
+        | Hint::Identifier(Identifier::Local(_))
         | Hint::Nullable(_) => true,
         Hint::Mixed(any) => any.value == ANY,
         Hint::Generic(generic) => match (generic.name.value, generic.arguments.as_slice()) {
             (b"List", [element]) => !matches!(element, Hint::Void(_)),
             (b"Map", [key, value]) => !matches!(key, Hint::Void(_)) && !matches!(value, Hint::Void(_)),
-            (b"Set", [element]) => matches!(
-                element,
-                Hint::Integer(_) | Hint::String(_) | Hint::Identifier(Identifier::Local(_) | Identifier::Dotted(_))
-            ),
+            (b"Set", [element]) => {
+                matches!(element, Hint::Integer(_) | Hint::String(_) | Hint::Identifier(Identifier::Local(_)))
+            }
             _ => false,
         },
         Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),
@@ -3228,7 +3168,7 @@ const fn supported(place: Place) -> &'static str {
     match place {
         Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
         Place::Class => {
-            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, operators, laws, events and interfaces, with no other modifiers, `extends` or `implements`."
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, operators and laws, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
             "A PHP# interface has an optional `public`, a name, an optional `: Interface` header, methods and `public` get-only properties, as in `public int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
@@ -3240,7 +3180,7 @@ const fn supported(place: Place) -> &'static str {
             "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`."
         }
         Place::Event => {
-            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event Paid(int orderId) : Event;`."
+            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
         Place::Module => "A PHP# module states laws.",
         Place::FieldOrProperty => {

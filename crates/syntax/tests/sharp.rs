@@ -351,9 +351,8 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required`, `via`, a named constructor and a nested class, enum or trait are spec syntax outside the slice. Each
-/// one is a single error where it starts, and the class around it still parses. `new Report.fromJson(…)` parses as a
-/// dotted class name, because only the class tells a named constructor from a nested type.
+/// `required`, `via` and a named constructor are spec syntax outside the slice. Each one is a
+/// single error where it starts, and the class around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
@@ -369,9 +368,11 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
             "A named constructor is not supported yet in PHP#.",
             "Report.fromJson",
         ),
-        ("public class Line { }", "A nested class is not supported yet in PHP#.", "public class Line { }"),
-        ("enum Kind { case One; }", "A nested enum is not supported yet in PHP#.", "enum Kind { case One; }"),
-        ("trait Logs { }", "A nested trait is not supported yet in PHP#.", "trait Logs { }"),
+        (
+            "public Report make() { return new Report.fromJson(\"{}\"); }",
+            "A named constructor is not supported yet in PHP#.",
+            "Report.fromJson",
+        ),
     ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
@@ -395,6 +396,56 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
             "the class keeps parsing after `{member}`"
         );
     }
+}
+
+/// Every type, events and interfaces included, is declared at file level in its own file, spec section 15, so a type
+/// declared inside a class, an interface, an enum, a trait or a module is one error over the whole type that names
+/// its owner, and the owner parses on without it.
+#[test]
+fn a_type_declared_inside_another_is_one_error_and_its_owner_parses_on() {
+    for (owner, named, member, name) in [
+        ("class", "A class", "public event Paid(int orderId) : OrderEvent;", "Paid"),
+        ("class", "A class", "public interface OrderEvent { public int orderId { get; } }", "OrderEvent"),
+        ("class", "A class", "public class Line { }", "Line"),
+        ("class", "A class", "enum Kind { case One; }", "Kind"),
+        ("class", "A class", "trait Logs { }", "Logs"),
+        ("interface", "An interface", "public class Line { public int size() { return 1; } }", "Line"),
+        ("enum", "An enum", "public event Paid(int orderId);", "Paid"),
+        ("trait", "A trait", "public event Paid(int orderId);", "Paid"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("{owner} Order\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}` in a {owner}, got {:#?}", program.errors);
+        };
+        let message = format!("{named} can't declare a type inside it: declare `{name}` in its own file.");
+        assert_eq!(error.to_string(), message);
+        assert_eq!(source(code, error), member, "{message}");
+        let members = match program.statements.first() {
+            Some(Statement::Class(class)) => &class.members,
+            Some(Statement::Interface(interface)) => &interface.members,
+            Some(Statement::Enum(r#enum)) => &r#enum.members,
+            Some(Statement::Trait(r#trait)) => &r#trait.members,
+            _ => panic!("expected a {owner}, got {:#?}", program.statements),
+        };
+        let [ClassLikeMember::Method(run)] = members.as_slice() else {
+            panic!("expected only the method `run` after `{member}`, got {members:#?}");
+        };
+        assert_eq!(run.name.value, b"run", "{message}");
+    }
+
+    const MODULE: &str = "module\n{\n    public event Paid(int orderId);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Module.sharp", MODULE);
+    let [error] = program.errors else {
+        panic!("expected one error in a module, got {:#?}", program.errors);
+    };
+    assert_eq!(error.to_string(), "A module can't declare a type inside it: declare `Paid` in its own file.");
+    assert_eq!(source(MODULE, error), "public event Paid(int orderId);");
 }
 
 /// A case that carries data, spec section 20, is one error from its name to its closing parenthesis. The case stays
@@ -3702,14 +3753,13 @@ fn php_keeps_reading_operator_as_a_name() {
     assert_eq!(constant.first_item().name.value, b"operator");
 }
 
-/// Spec section 15 declares an event as its name and its parameters, with an optional header of the interfaces it
-/// implements, inside the class that raises it or on its own in a file. A name PHP reserves, such as `Empty`, still
-/// declares an event, which the checks refuse.
+/// Spec section 15 declares an event at file level as its name and its parameters, with an optional header of the
+/// interfaces it implements. A name PHP reserves, such as `Empty`, still declares an event, which the checks refuse.
 #[test]
 fn an_event_declares_its_parameters_and_its_interfaces() {
-    const CODE: &str = "namespace App;\n\npublic event Shipped(int shipmentId);\n\npublic event Exit(int code);\n\npublic class Order\n{\n    public event Paid(int orderId, Money amount) : Event;\n    event Refunded(int orderId) : Event, Audited;\n    public event Cleared();\n    public event Empty();\n}\n";
+    const CODE: &str = "namespace App;\n\npublic event Shipped(int shipmentId);\n\npublic event Exit(int code);\n\npublic event OrderPaid(int orderId, Money amount) : OrderEvent;\n\nevent Refunded(int orderId) : OrderEvent, Audited;\n\npublic event Cleared();\n\npublic event Empty();\n";
     let arena = LocalArena::new();
-    let program = parse(&arena, "src/App/Order.sharp", CODE);
+    let program = parse(&arena, "src/App/Events.sharp", CODE);
 
     assert!(program.errors.is_empty(), "{:#?}", program.errors);
     let Some(Statement::Namespace(namespace)) = program.statements.first() else {
@@ -3718,17 +3768,9 @@ fn an_event_declares_its_parameters_and_its_interfaces() {
     let events: Vec<(&str, Vec<&str>, Vec<&str>, &str)> = namespace
         .statements()
         .iter()
-        .flat_map(|statement| match statement {
-            Statement::Event(event) => vec![event],
-            Statement::Class(class) => class
-                .members
-                .iter()
-                .filter_map(|member| match member {
-                    ClassLikeMember::Event(event) => Some(event),
-                    _ => None,
-                })
-                .collect(),
-            _ => vec![],
+        .filter_map(|statement| match statement {
+            Statement::Event(event) => Some(event),
+            _ => None,
         })
         .map(|event| {
             assert_eq!(event.event.value, b"event");
@@ -3752,16 +3794,16 @@ fn an_event_declares_its_parameters_and_its_interfaces() {
             ("Shipped", vec!["int shipmentId"], vec![], "public event Shipped(int shipmentId);"),
             ("Exit", vec!["int code"], vec![], "public event Exit(int code);"),
             (
-                "Paid",
+                "OrderPaid",
                 vec!["int orderId", "Money amount"],
-                vec!["Event"],
-                "public event Paid(int orderId, Money amount) : Event;"
+                vec!["OrderEvent"],
+                "public event OrderPaid(int orderId, Money amount) : OrderEvent;"
             ),
             (
                 "Refunded",
                 vec!["int orderId"],
-                vec!["Event", "Audited"],
-                "event Refunded(int orderId) : Event, Audited;"
+                vec!["OrderEvent", "Audited"],
+                "event Refunded(int orderId) : OrderEvent, Audited;"
             ),
             ("Cleared", vec![], vec![], "public event Cleared();"),
             ("Empty", vec![], vec![], "public event Empty();"),
@@ -3769,26 +3811,26 @@ fn an_event_declares_its_parameters_and_its_interfaces() {
     );
 }
 
-/// An event's parameters are its whole declaration, so a body after them is one error, and the class parses on.
+/// An event's parameters are its whole declaration, so a body after them is one error, and the file parses on.
 #[test]
-fn an_event_with_a_body_is_one_parse_error_and_the_class_parses_on() {
+fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
     const CODE: &str =
-        "class Order\n{\n    public event Paid(int orderId) { }\n\n    public int run() { return 1; }\n}\n";
+        "public event OrderPaid(int orderId) { }\n\npublic class Order\n{\n    public int run() { return 1; }\n}\n";
     let arena = LocalArena::new();
-    let program = parse(&arena, "src/Order.sharp", CODE);
+    let program = parse(&arena, "src/OrderPaid.sharp", CODE);
 
     let [error] = program.errors else {
         panic!("expected one error, got {:#?}", program.errors);
     };
     assert_eq!(
         error.to_string(),
-        "An event declares no body: its parameters are its properties, as in `public event Paid(int orderId);`."
+        "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`."
     );
     assert_eq!(source(CODE, error), "{ }");
-    let [ClassLikeMember::Method(run)] = class_members(program).as_slice() else {
-        panic!("expected the method `run`, got {:#?}", class_members(program));
+    let [.., Statement::Class(order)] = program.statements.as_slice() else {
+        panic!("expected the class `Order` last, got {:#?}", program.statements);
     };
-    assert_eq!(run.name.value, b"run");
+    assert_eq!(order.name.value, b"Order");
 }
 
 /// `event` declares an event only before a name and `(`, so a parameter, a field, a local, a call such as Laravel's
@@ -3815,47 +3857,11 @@ fn event_stays_a_name_where_no_declaration_follows() {
     assert_eq!(field.first_variable().name, b"event");
 }
 
-/// Spec section 15 names a type nested in a class with a dot, `Order.Paid`, wherever a type goes: a parameter, a
-/// return type, a field, `new` and a header.
-#[test]
-fn a_dotted_type_names_a_nested_type() {
-    const CODE: &str = "class Shop\n{\n    public Order.Paid pay(Order.Paid? paid, List<Order.Paid> all) => new Order.Paid(1);\n\n    private Order.Event last;\n}\n\npublic event Moved(int id) : Order.Event;\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Shop.sharp", CODE);
-
-    assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let dotted: Vec<&str> = Node::Program(program).filter_map(|node| match node {
-        Node::Identifier(name @ Identifier::Dotted(_)) => Some(source(CODE, name)),
-        _ => None,
-    });
-    assert_eq!(dotted, ["Order.Paid", "Order.Paid", "Order.Paid", "Order.Paid", "Order.Event", "Order.Event"]);
-}
-
-/// Spec section 15 declares the interface a class's events share inside the class, beside them, with the get-only
-/// properties they give.
-#[test]
-fn an_interface_nests_in_a_class_beside_its_events() {
-    const CODE: &str = "public class Order\n{\n    public interface Event\n    {\n        public int orderId { get; }\n    }\n\n    public event Paid(int orderId) : Event;\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Order.sharp", CODE);
-
-    assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let [ClassLikeMember::Interface(event), ClassLikeMember::Event(paid)] = class_members(program).as_slice() else {
-        panic!("expected an interface and an event, got {:#?}", class_members(program));
-    };
-    let [ClassLikeMember::Property(order_id)] = event.members.as_slice() else {
-        panic!("expected a property, got {:#?}", event.members);
-    };
-    assert_eq!(event.name.value, b"Event");
-    assert_eq!(source(CODE, order_id), "public int orderId { get; }");
-    assert_eq!(paid.name.value, b"Paid");
-}
-
 /// Spec section 15 raises an event with `emit` and the expression after it. Before `(`, an operator or `is`, `emit`
 /// stays a name, and plain PHP keeps it a name everywhere.
 #[test]
 fn emit_raises_the_expression_after_it() {
-    const CODE: &str = "class Order\n{\n    public void run(Order.Paid paid, int emit)\n    {\n        emit new Order.Paid(1);\n        emit paid;\n        emit 5;\n        emit(paid);\n        const next = emit + 1;\n        const known = emit is int;\n    }\n}\n";
+    const CODE: &str = "class Order\n{\n    public void run(OrderPaid paid, int emit)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit 5;\n        emit(paid);\n        const next = emit + 1;\n        const known = emit is int;\n    }\n}\n";
     const PHP: &str = "<?php\n\nemit(new Paid());\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Order.sharp", CODE);
@@ -3878,7 +3884,7 @@ fn emit_raises_the_expression_after_it() {
     assert_eq!(
         statements,
         [
-            ("emit", "new Order.Paid(1)"),
+            ("emit", "new OrderPaid(1)"),
             ("emit", "paid"),
             ("emit", "5"),
             ("expression", "emit(paid)"),
