@@ -5905,6 +5905,11 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
                 return Pager.orders();
             }
 
+            public Box<Order> listed()
+            {
+                return orders();
+            }
+
             public void keep(Box<Order> box) { }
 
             public static Box<Order> make() => new Box<Order>();
@@ -5915,10 +5920,16 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
             private static Box<Order>? latest;
         }
         "},
-        &[(
-            "src/Lib/Pager.php",
-            "<?php\n\nnamespace Lib;\n\nuse App\\Box;\n\nfinal class Pager\n{\n    /** @return Box<\\App\\Order> */\n    public static function orders(): Box\n    {\n        return new Box();\n    }\n\n    public static function count(): int\n    {\n        return 1;\n    }\n}\n",
-        )],
+        &[
+            (
+                "src/Lib/Pager.php",
+                "<?php\n\nnamespace Lib;\n\nuse App\\Box;\n\nfinal class Pager\n{\n    /** @return Box<\\App\\Order> */\n    public static function orders(): Box\n    {\n        return new Box();\n    }\n\n    public static function count(): int\n    {\n        return 1;\n    }\n}\n",
+            ),
+            (
+                "src/orders.php",
+                "<?php\n\n/** @return \\App\\Box<\\App\\Order> */\nfunction orders(): \\App\\Box\n{\n    return new \\App\\Box();\n}\n",
+            ),
+        ],
     );
 
     // `Pager.orders()`, checked, at the depth `depth`.
@@ -5975,6 +5986,20 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
         .concat()
     );
     assert_eq!(lowered.body_of("give"), format!("STMT_LIST\n  RETURN\n{}", orders(2)));
+    // A plain PHP function's result names the function.
+    assert_eq!(
+        lowered.body_of("listed"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                VERIFY_TYPE_ARGS
+                  CALL
+                    ZVAL "orders"
+                    ARG_LIST
+                  ZVAL "App.Box<App.Order>"
+                  ZVAL "the result of orders()"
+        "#}
+    );
 
     let tree = lowered.tree();
     let check = |property: &str, text: &str| {
@@ -6017,8 +6042,9 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 }
 
 /// A type argument a plain PHP value fixes as a refinement PHP# writes as a wider type carries that type's text:
-/// `list<int>` is `List<int>`, `non-empty-string` is `string`, `positive-int` is `int` and `class-string` is
-/// `Class<Object>`. A written type argument carries its own text.
+/// `list<int>` is `List<int>`, `array{a: int}` is `Map<string, int>`, `non-empty-string` is `string`, `positive-int` is
+/// `int` and `class-string` is `Class<Object>`. A list or map literal carries its collection's text, as `[1, 2]` does
+/// `List<int>`, and keeps a `Set` in it a `Set`. A written type argument carries its own text.
 #[test]
 fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
     let lowered = Lowered::with(
@@ -6031,7 +6057,7 @@ fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
         {
             public static T keep<T>(T value) => value;
 
-            public void run()
+            public void run(Set<string> tags)
             {
                 Registry.keep(Pager.list());
                 Registry.keep(Pager.text());
@@ -6039,6 +6065,10 @@ fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
                 Registry.keep(Pager.class());
                 Registry.keep<Map<string, int>>(Pager.shape());
                 Registry.keep<int|string>(Pager.key());
+                Registry.keep(Pager.shape());
+                Registry.keep([1, 2]);
+                Registry.keep([\"k\": [1]]);
+                Registry.keep([tags]);
             }
         }
         "},
@@ -6049,9 +6079,18 @@ fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
     );
 
     let body = lowered.body();
-    assert_eq!(body.matches("SHARP_TYPE_ARGS").count(), 6, "{body}");
-    for text in ["List<int>", "string", "int", "Class<Object>", "Map<string, int>", "int|string"] {
-        assert!(body.contains(&format!("ZVAL \"{text}\"\n")), "{text}: {body}");
+    assert_eq!(body.matches("SHARP_TYPE_ARGS").count(), 10, "{body}");
+    for (text, calls) in [
+        ("List<int>", 2),
+        ("string", 1),
+        ("int", 1),
+        ("Class<Object>", 1),
+        ("Map<string, int>", 2),
+        ("int|string", 1),
+        ("Map<string, List<int>>", 1),
+        ("List<Set<string>>", 1),
+    ] {
+        assert_eq!(body.matches(&format!("ZVAL \"{text}\"\n")).count(), calls, "{text}: {body}");
     }
 }
 
@@ -7296,6 +7335,72 @@ fn a_static_field_or_property_is_a_static_property_group() {
 }
 
 /// ```php
+/// public static ?\App\Box $latest = null;
+/// protected static ?\App\Box $inherited = null;
+/// private static ?\App\Box $hidden = null;
+/// ```
+///
+/// A static property plain PHP can write, whose type has type arguments, has its PHP# type text around its PHP type,
+/// which PHP's own typed property check reads on every write, since PHP gives a static property no hooks. A `private`
+/// one, which plain PHP can't write, has its PHP type alone.
+#[test]
+fn a_static_property_with_type_arguments_has_its_type_text_around_its_type() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Registry\n{\n    public static Box<int>? latest { get; set; }\n\n    protected static Box<string>? inherited;\n\n    private static Box<int>? hidden;\n\n    public static Box<int>? last() => Registry.hidden;\n}\n",
+    );
+    let groups: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_PROP_GROUP)
+        .map(|(index, _)| lowered.render(index as u32))
+        .collect();
+
+    assert_eq!(
+        groups,
+        [
+            indoc! {r#"
+                PROP_GROUP [17]
+                  SHARP_TYPE_ARGS
+                    ZVAL [256] "App\\Box"
+                    ZVAL "App.Box<int>?"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "latest"
+                      ZVAL null
+                      null
+                      null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [18]
+                  SHARP_TYPE_ARGS
+                    ZVAL [256] "App\\Box"
+                    ZVAL "App.Box<string>?"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "inherited"
+                      ZVAL null
+                      null
+                      null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [20]
+                  ZVAL [256] "App\\Box"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "hidden"
+                      ZVAL null
+                      null
+                      null
+                  null
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// \Lib\Calc::$rate = 2;
 /// \Lib\Calc::$count++;
 /// \Lib\Calc::$limit ??= 1;
@@ -8347,6 +8452,62 @@ fn a_method_value_of_a_method_that_is_not_generic_is_a_first_class_callable() {
                     ZVAL "pick"
                   ARG_LIST
                     ZVAL 5
+        "#}
+    );
+}
+
+/// ```php
+/// return \Lib\Shapes::named()->name;
+/// ```
+///
+/// A plain PHP object shape names no class, so a read of its property is a property read, and never a method value.
+#[test]
+fn a_property_of_a_plain_php_object_shape_is_a_property_read() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.Shapes;\n\nclass Report\n{\n    public string run() => Shapes.named().name;\n}\n",
+        &[(
+            "src/Lib/Shapes.php",
+            "<?php namespace Lib; final class Shapes { /** @return object{name: string} */ public static function named(): object { return (object) ['name' => 'a']; } }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                PROP
+                  STATIC_CALL
+                    ZVAL "Lib\\Shapes"
+                    ZVAL "named"
+                    ARG_LIST
+                  ZVAL "name"
+        "#}
+    );
+}
+
+/// ```php
+/// return $status->label(...);
+/// ```
+///
+/// An enum value's method value is the method's first-class callable, as a class value's is, not a read of a property
+/// of that name.
+#[test]
+fn a_method_value_of_an_enum_value_is_a_first_class_callable() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nenum Status\n{\n    case Active;\n\n    public string label() => \"active\";\n}\n\nclass Report\n{\n    public Function<string()> run(Status status) => status.label;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                METHOD_CALL
+                  VAR
+                    ZVAL "status"
+                  ZVAL "label"
+                  CALLABLE_CONVERT
         "#}
     );
 }

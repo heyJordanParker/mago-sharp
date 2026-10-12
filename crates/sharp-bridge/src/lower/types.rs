@@ -264,10 +264,9 @@ impl<'analysis> Types<'analysis> {
         Some((text, format!("the result of {name}()")))
     }
 
-    /// The type text the `set` hook of the property `property` of the fully qualified class name `class` checks a value
-    /// against, as a parameter checks an argument from plain PHP: [`Self::checked_text`] of its type, when plain PHP can
-    /// write it. That is a property PHP# writes as public or protected and not read-only. The analyzer refuses such a
-    /// static property whose type this checks, since PHP has no hooks on a static property.
+    /// The type text the property `property` of the fully qualified class name `class` checks a value from plain PHP
+    /// against, as a parameter checks an argument: [`Self::checked_text`] of its type, when plain PHP can write it. That
+    /// is a property PHP# writes as public or protected and not read-only.
     pub(crate) fn property_check(&self, class: &[u8], property: &[u8]) -> Option<String> {
         let metadata = self.codebase.get_property(class, &[b"$", property].concat())?;
         if metadata.write_visibility.is_private() || metadata.flags.is_readonly() {

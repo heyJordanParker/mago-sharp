@@ -261,18 +261,24 @@ pub fn expect_type<A>(
     A: Arena,
 {
     if context.dialect.is_sharp()
-        && (matches!(
-            expression.unparenthesized(),
-            Expression::ArrowFunction(_)
-                | Expression::Closure(_)
-                | Expression::Call(_)
-                | Expression::Conditional(_)
-                | Expression::Binary(Binary { operator: BinaryOperator::NullCoalesce(_), .. })
-        ) || is_member_read(expression))
+        && takes_declared_type(expression)
         && let Some(expected) = expected
     {
         artifacts.expected_type = Some((expression.unparenthesized().span(), expected.clone()));
     }
+}
+
+/// Whether `expression` takes the declared type its value goes into: a lambda, a call, a member read, or `??` and `?:`,
+/// which give it to their sides.
+pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
+    matches!(
+        expression.unparenthesized(),
+        Expression::ArrowFunction(_)
+            | Expression::Closure(_)
+            | Expression::Call(_)
+            | Expression::Conditional(_)
+            | Expression::Binary(Binary { operator: BinaryOperator::NullCoalesce(_), .. })
+    ) || is_member_read(expression)
 }
 
 /// Whether `expression` reads a member, `x.m` or `Class.m`, which in PHP# is a method value when the class declares

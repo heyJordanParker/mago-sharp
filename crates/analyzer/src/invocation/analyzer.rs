@@ -52,6 +52,7 @@ use crate::context::block::BlockContext;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgument;
 use crate::invocation::InvocationArgumentsSource;
@@ -68,6 +69,7 @@ use crate::invocation::template_result::get_class_template_parameters_from_resul
 use crate::invocation::template_result::populate_template_result_from_invocation;
 use crate::invocation::template_result::refine_template_result_for_function_like;
 use crate::statement::function_like::is_member_read;
+use crate::statement::function_like::takes_declared_type;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
@@ -229,12 +231,11 @@ where
         };
 
         let parameter = get_parameter_of_argument(&invocation.target, argument, *argument_offset);
-        // A PHP# method value takes its type arguments from its parameter's function type, as `pages.map(this.take)`,
-        // and a generic call those its parameter's type fixes, as `this.show(this.make())`, once that type holds no
-        // type parameter of this call that nothing has fixed yet.
-        let is_call = matches!(argument_expression.unparenthesized(), Expression::Call(_));
+        // A PHP# argument takes its parameter's type as the declared type its value goes into, as `expect_type` gives a
+        // typed local's, once that type holds no type parameter of this call that nothing has fixed yet. A method value
+        // takes it even then, as `pages.map(this.take)` fixes both calls' type arguments together.
         let expected_type = parameter
-            .filter(|_| context.dialect.is_sharp() && (is_member_read(argument_expression) || is_call))
+            .filter(|_| context.dialect.is_sharp() && takes_declared_type(argument_expression))
             .map(|(_, parameter)| {
                 let parameter_type = get_parameter_type(
                     context,
@@ -248,7 +249,9 @@ where
 
                 inferred_type_replacer::replace(&parameter_type, template_result, context.codebase)
             })
-            .filter(|parameter_type| !is_call || !holds_unfixed_template(parameter_type, template_result));
+            .filter(|parameter_type| {
+                is_member_read(argument_expression) || !holds_unfixed_template(parameter_type, template_result)
+            });
 
         analyze_and_store_argument_type(
             context,
@@ -1442,7 +1445,7 @@ fn report_unwritable_type_arguments<A>(
     A: Arena,
 {
     for ((name, _), type_argument) in metadata.template_types.iter().zip(type_arguments) {
-        if is_written_in_sharp(type_argument) {
+        if is_written_in_sharp(type_argument) || is_refused_type(type_argument) {
             continue;
         }
 

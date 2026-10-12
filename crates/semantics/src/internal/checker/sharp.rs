@@ -654,7 +654,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(Hint::Identifier(_) | Hint::Intersection(_)) | Node::IntersectionHint(_), Place::TypeParameter) => {
             Some(Place::TypeParameter)
         }
-        (Node::Hint(hint @ Hint::Generic(_)), Place::TypeParameter) if is_slice_type(hint) => Some(Parameter),
+        (Node::Hint(Hint::Generic(_)), Place::TypeParameter) => Some(Parameter),
         (Node::Modifier(Modifier::Public(_)), Interface | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
         (Node::Modifier(modifier), Signature) => {
@@ -828,8 +828,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::GenericHint(generic), FieldOrProperty | Method | Signature | Parameter | Body) => {
             check_generic(generic, place, context)
         }
-        // A generic type's type arguments are checked where the generic type is, which `is_slice_type` checked for
-        // `void`. Those of `new` and of a method call are a method body's types, which are never `void` there either.
+        // A generic type's type arguments, and those of `new` and of a method call, are never `void`.
         (
             Node::TypeArgumentList(list),
             FieldOrProperty | Method | Signature | Parameter | Body | Instantiation,
@@ -2673,10 +2672,10 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
 
 /// Whether the slice has a type: the built-in types of spec section 24, or a class or a type parameter written by its
 /// short name, or a nullable type, or `List<T>`, `Map<TKey, TValue>` or `Set<T>` of spec section 12, `Class<T>` of
-/// section 25 or a class with type arguments of section 11, none of them `void`, or a function type of spec section
-/// 14.1 without a `void` parameter, whose inner types the walk checks next. The analyzer checks a generic class's arity.
-/// A `Set` holds an `int`, a `string` or a named type, which the analyzer accepts only as a backed enum, because its
-/// elements run as the keys of a PHP array.
+/// section 25 or a class with type arguments of section 11, or a function type of spec section 14.1 without a `void`
+/// parameter, whose inner types the walk checks next, refusing a `void` type argument and a wrong count of them as
+/// such. The analyzer checks a generic class's arity. A `Set` holds an `int`, a `string` or a named type, which the
+/// analyzer accepts only as a backed enum, because its elements run as the keys of a PHP array.
 fn is_slice_type(hint: &Hint) -> bool {
     match hint {
         Hint::Integer(_)
@@ -2687,17 +2686,13 @@ fn is_slice_type(hint: &Hint) -> bool {
         | Hint::Identifier(Identifier::Local(_))
         | Hint::Nullable(_) => true,
         Hint::Mixed(any) => any.value == ANY,
-        Hint::Generic(generic) => {
-            let arguments = generic.type_arguments.arguments.as_slice();
-
-            built_in_generic_arity(generic.name.value).is_none_or(|arity| arguments.len() == arity)
-                && match (generic.name.value, arguments) {
-                    (b"Set", [element]) => {
-                        matches!(element, Hint::Integer(_) | Hint::String(_) | Hint::Identifier(Identifier::Local(_)))
-                    }
-                    _ => !arguments.iter().any(|argument| matches!(argument, Hint::Void(_))),
-                }
-        }
+        Hint::Generic(generic) => match (generic.name.value, generic.type_arguments.arguments.as_slice()) {
+            (b"Set", [element]) => matches!(
+                element,
+                Hint::Integer(_) | Hint::String(_) | Hint::Identifier(Identifier::Local(_)) | Hint::Void(_)
+            ),
+            _ => true,
+        },
         Hint::Function(function) => !function.parameters.iter().any(|parameter| matches!(parameter, Hint::Void(_))),
         _ => false,
     }
@@ -2730,9 +2725,9 @@ fn untested_catch_name<'ast>(hint: &'ast Hint<'ast>, context: &Context<'_, '_, '
     }
 }
 
-/// The refusal of `hint` in a constant or static field, property or method of its class, when `hint` names one of the
-/// class's type parameters or is `Self`, which carries them all. `None` for any other type, a static method's own type
-/// parameter included, because the method declares it.
+/// The refusal of `hint` in a constant or static method of its class, when `hint` names one of the class's type
+/// parameters or is `Self`, which carries them all. `None` for any other type, a static method's own type parameter
+/// included, because the method declares it. A static field or property of a generic class is refused whole.
 fn static_member_use(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> Option<String> {
     match hint {
         Hint::Identifier(name) => {
@@ -2754,8 +2749,8 @@ fn static_member_use(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> Option<S
     }
 }
 
-/// The refusal of PHP#'s `Self` at `span` in a constant or static field, property or method of a generic class, as a
-/// type or in `new Self(…)`: `Self` carries the class's type parameters, which no static member names.
+/// The refusal of PHP#'s `Self` at `span` in a constant or static method of a generic class, as a type or in
+/// `new Self(…)`: `Self` carries the class's type parameters, which no static member names.
 fn static_self_use(span: Span, context: &Context<'_, '_, '_>) -> Option<String> {
     let class = static_member_class(span, context)?;
     let names: Vec<String> = class
@@ -2775,7 +2770,7 @@ fn static_self_use(span: Span, context: &Context<'_, '_, '_>) -> Option<String> 
     ))
 }
 
-/// The class of the constant or static field, property or method that holds `span`.
+/// The class of the constant or static method that holds `span`.
 fn static_member_class<'ast, 'arena>(
     span: Span,
     context: &Context<'_, 'ast, 'arena>,
@@ -2784,7 +2779,6 @@ fn static_member_class<'ast, 'arena>(
     let in_static_member = class.members.iter().any(|member| {
         let (member_span, is_static) = match member {
             ClassLikeMember::Method(method) => (method.span(), method.modifiers.contains_static()),
-            ClassLikeMember::Property(property) => (property.span(), property.modifiers().contains_static()),
             ClassLikeMember::Constant(constant) => (constant.span(), true),
             _ => return false,
         };
@@ -2877,14 +2871,33 @@ fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     }
 }
 
-/// Checks the type arguments a generic type's name takes: a `Map`'s key, spec section 12, `Class<T>`'s class, section
-/// 25, and none on a type parameter. The analyzer checks a generic class's arity and bounds. Returns the place of the
-/// type arguments, or none when the walk skips them.
+/// Checks the type arguments a generic type's name takes: their count for `List`, `Set` and `Map`, spec section 12, and
+/// `Class<T>`, section 25, a `Map`'s key, `Class<T>`'s class, and none on a type parameter. The analyzer checks a
+/// generic class's arity and bounds. Returns the place of the type arguments, or none when the walk skips them.
 fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     if context.names.is_type_parameter(&generic.name) {
         context.report(
             Issue::error(format!(
                 "A type parameter takes no type arguments: write `{}`.",
+                BytesDisplay(generic.name.value)
+            ))
+            .with_annotation(Annotation::primary(generic.span()).with_message("Written here.")),
+        );
+
+        return None;
+    }
+
+    let written = generic.type_arguments.arguments.len();
+    if let Some(arity) = built_in_generic_arity(generic.name.value).filter(|arity| *arity != written) {
+        let roles = match generic.name.value {
+            b"Map" => "the key and the value",
+            b"Class" => "the class",
+            _ => "the element",
+        };
+        let plural = if arity == 1 { "" } else { "s" };
+        context.report(
+            Issue::error(format!(
+                "`{}` takes {arity} type argument{plural}: {roles}.",
                 BytesDisplay(generic.name.value)
             ))
             .with_annotation(Annotation::primary(generic.span()).with_message("Written here.")),

@@ -3046,19 +3046,32 @@ fn a_null_start_needs_a_type() {
     assert_eq!(issues(code), ["7:21 A null start needs a type: write `T? value = null`."]);
 }
 
-/// `List` and `Set` take one type argument and `Map` two, and none is `void`. A class takes any number, which the
-/// analyzer checks, so `Paged<Line>` is a generic class type.
+/// `List`, `Set` and `Class` take one type argument and `Map` two, wherever the type is written, and none is `void`,
+/// which is only a return type. A wrong count is refused with the count and what each type argument is. A class takes
+/// any number, which the analyzer checks, so `Paged<Line>` is a generic class type.
 #[test]
-fn a_list_map_or_set_with_the_wrong_type_arguments_is_not_supported_yet() {
-    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d)\n    {\n        return [];\n    }\n}\n";
+fn a_list_map_set_or_class_with_the_wrong_count_of_type_arguments_names_the_count() {
+    let code = "class Report\n{\n    private Map<string> cache = [];\n\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d, Map<string, int, int>? e, Class<Line, Line> f)\n    {\n        List<int, string> local = [];\n        return [];\n    }\n}\n";
+    let refused = |at: &str, name: &str| {
+        let takes = match name {
+            "Map" => "2 type arguments: the key and the value",
+            "Class" => "1 type argument: the class",
+            _ => "1 type argument: the element",
+        };
+        format!("{at} `{name}` takes {takes}.")
+    };
 
     assert_eq!(
         issues(code),
         [
-            "3:12 This type is not supported yet in PHP#.",
-            "3:27 This type is not supported yet in PHP#.",
-            "3:47 This type is not supported yet in PHP#.",
-            "3:65 This type is not supported yet in PHP#.",
+            refused("3:13", "Map"),
+            "5:17 A type argument cannot be `void`: `void` is only a return type.".to_owned(),
+            refused("5:27", "Set"),
+            refused("5:47", "List"),
+            refused("5:65", "Map"),
+            refused("5:95", "Map"),
+            refused("5:121", "Class"),
+            refused("7:9", "List"),
         ]
     );
 }
@@ -3497,7 +3510,7 @@ fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_not_supp
         issues(code),
         [
             "7:14 This type is not supported yet in PHP#.",
-            "9:20 This type is not supported yet in PHP#.",
+            "9:34 A type argument cannot be `void`: `void` is only a return type.",
             "11:37 This type is not supported yet in PHP#.",
             "11:50 `Self` is only a return type in PHP#.",
             "11:57 This type is not supported yet in PHP#.",
@@ -3606,6 +3619,22 @@ fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error(
         == ["A PHP# type parameter is a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<TItem : DatabaseEntity & Shareable>`."]));
 }
 
+/// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with
+/// `&`.
+#[test]
+fn a_type_argument_of_a_bound_is_never_void() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TA : Comparable<void>>\n{\n    public void a<TB : DatabaseEntity & Comparable<void>>() { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "3:34 A type argument cannot be `void`: `void` is only a return type.",
+            "5:41 Type `Comparable<void>` cannot be part of an intersection.",
+            "5:52 A type argument cannot be `void`: `void` is only a return type.",
+        ]
+    );
+}
+
 /// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
 /// interface or a type parameter, a class value with type arguments is not supported yet, a type argument is never
 /// `void`, and a type parameter takes no type arguments. The analyzer checks a generic class's arity and bounds.
@@ -3619,7 +3648,7 @@ fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_tak
             "6:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
             "7:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
             "8:31 A class value with type arguments is not supported yet in PHP#.",
-            "9:13 This type is not supported yet in PHP#.",
+            "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "17:29 A type parameter takes no type arguments: write `TItem`.",
         ]
     );
@@ -3643,10 +3672,10 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
 
 /// The engine does not read type arguments while the code runs until R3, so what reads one is not supported yet: `is`,
 /// `as` and a `match` arm of a type parameter or of a class with type arguments, which PHP has no test of, and
-/// `typeof`, `new` and a catch clause of a type parameter.
+/// `typeof`, `new` and a catch clause of a type parameter, alone or in a union.
 #[test]
 fn what_needs_a_type_argument_while_the_code_runs_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public bool run<TItem>(Any value, List<TItem> items)\n    {\n        const a = value is TItem;\n        const b = value is TItem item;\n        const c = value as TItem;\n        const i = match (value) { TItem => 1, default => 0 };\n        const j = typeof(TItem);\n        const k = new TItem(value);\n        try {\n        } catch (TItem failure) {\n        }\n        const d = value is PaginatedList<Order> page;\n        const e = value as PaginatedList<Order>;\n        const f = match (value) { PaginatedList<Order> page => 1, default => 0 };\n        return a;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public bool run<TItem>(Any value, List<TItem> items)\n    {\n        const a = value is TItem;\n        const b = value is TItem item;\n        const c = value as TItem;\n        const i = match (value) { TItem => 1, default => 0 };\n        const j = typeof(TItem);\n        const k = new TItem(value);\n        try {\n        } catch (TItem failure) {\n        }\n        try {\n        } catch (RuntimeException | TItem failure) {\n        }\n        const d = value is PaginatedList<Order> page;\n        const e = value as PaginatedList<Order>;\n        const f = match (value) { PaginatedList<Order> page => 1, default => 0 };\n        return a;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -3658,9 +3687,10 @@ fn what_needs_a_type_argument_while_the_code_runs_is_not_supported_yet() {
             "11:19 `typeof(TItem)` is not supported yet in PHP#.",
             "12:19 `new TItem` is not supported yet in PHP#.",
             "14:18 `catch (TItem)` is not supported yet in PHP#.",
-            "16:28 This type is not supported yet in PHP#.",
-            "17:28 This type is not supported yet in PHP#.",
-            "18:35 This type is not supported yet in PHP#.",
+            "17:37 `catch (RuntimeException | TItem)` is not supported yet in PHP#.",
+            "19:28 This type is not supported yet in PHP#.",
+            "20:28 This type is not supported yet in PHP#.",
+            "21:35 This type is not supported yet in PHP#.",
         ]
     );
 }
@@ -3722,19 +3752,20 @@ fn a_static_method_uses_its_own_type_parameters() {
 }
 
 /// `Self` is the class with its own type parameters, so a static member of a generic class can't return it or create
-/// one with `new Self()`, as it can't name `TItem`: the refusal names `Self` and every type parameter it carries. A
-/// static member of a class without type parameters returns `Self`.
+/// one with `new Self()`, as it can't name `TItem`: the refusal names `Self` and every type parameter it carries. PHP's
+/// `self` there keeps its own refusal. A static member of a class without type parameters returns `Self`.
 #[test]
 fn a_static_member_of_a_generic_class_cannot_return_self() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public static Self make() => new Self();\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n\n    public static Self make() => new Self();\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public static Self? none() => null;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public static Self make() => new Self();\n\n    public static self? none() => null;\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n\n    public static Self make() => new Self();\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public static Self? none() => null;\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "9:19 A static member can't use `Self`, because every `Box<…>` shares it and `Self` carries `TItem`.",
             "9:38 A static member can't use `Self`, because every `Box<…>` shares it and `Self` carries `TItem`.",
-            "23:19 A static member can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
-            "28:19 A static member can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
+            "11:19 PHP# has no `self`: write the class's own name, `Box`, for the declaring class, or `Self` for the class a static method is called on.",
+            "25:19 A static member can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
+            "30:19 A static member can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
         ]
     );
 }
@@ -3752,12 +3783,12 @@ fn a_generic_type_in_a_union_takes_the_type_arguments_it_takes_outside_a_union()
             "6:13 A type parameter takes no type arguments: write `TItem`.",
             "7:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
             "8:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "9:18 This type is not supported yet in PHP#.",
-            "10:18 This type is not supported yet in PHP#.",
+            "9:23 A type argument cannot be `void`: `void` is only a return type.",
+            "10:23 A type argument cannot be `void`: `void` is only a return type.",
             "11:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
             "12:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "13:22 This type is not supported yet in PHP#.",
-            "14:22 This type is not supported yet in PHP#.",
+            "13:27 A type argument cannot be `void`: `void` is only a return type.",
+            "14:27 A type argument cannot be `void`: `void` is only a return type.",
         ]
     );
 }

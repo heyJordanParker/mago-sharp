@@ -11,9 +11,14 @@ use mago_algebra::assertion_set::AssertionSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::combine_union_types;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::combiner::combine;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
@@ -264,7 +269,8 @@ impl AnalysisArtifacts {
     }
 
     /// Records the type arguments of the generic call or `new` at `span`, one per template in declaration order. A
-    /// template no argument bound is `mixed`, and a literal is its scalar type, as in `int` for `5`.
+    /// template no argument bound is `mixed`, a literal is its scalar type, as in `int` for `5`, and a list or map
+    /// literal is its collection type, as in `List<int>` for `[1, 2]` and `Map<string, int>` for `["k": 1]`.
     pub(crate) fn record_type_arguments(
         &mut self,
         span: Span,
@@ -273,7 +279,8 @@ impl AnalysisArtifacts {
     ) {
         let type_arguments = type_arguments
             .map(|type_argument| match type_argument {
-                Some(mut type_argument) if !type_argument.is_placeholder() => {
+                Some(type_argument) if !type_argument.is_placeholder() => {
+                    let mut type_argument = collection_type(&type_argument, codebase);
                     type_argument.widen_scalars();
 
                     TUnion::from_vec(combine(type_argument.types.into_owned(), codebase, CombinerOptions::default()))
@@ -359,6 +366,30 @@ fn node_or_same_span_descendant_is_targeted(node: Node<'_, '_>, span: Span, targ
     });
 
     targeted
+}
+
+/// `union` with each array in it, and each array inside one, as the `List`, `Map` or `Set` of its key and value types, so
+/// the shape of `[1, 2]` is a `List<int>` and that of `["k": 1]` a `Map<"k", int>`.
+fn collection_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    TUnion::from_vec(
+        union
+            .types
+            .iter()
+            .map(|atomic| match atomic {
+                TAtomic::Array(array) => {
+                    let (key, value) = get_array_parameters(array, codebase);
+                    let value = Arc::new(collection_type(&value, codebase));
+
+                    TAtomic::Array(match array {
+                        TArray::List(_) => TArray::List(TList::new(value)),
+                        TArray::Keyed(_) => TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key), value)),
+                        TArray::Set(_) => TArray::Set(value),
+                    })
+                }
+                atomic => atomic.clone(),
+            })
+            .collect(),
+    )
 }
 
 fn is_plain_variable(variable: Word) -> bool {

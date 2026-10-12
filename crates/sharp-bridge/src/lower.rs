@@ -936,7 +936,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         let accessor_flags =
             parameter.hooks.as_ref().map_or(0, |accessors| accessor_flags(&parameter.modifiers, accessors, self.names));
-        let hooks = self.hooks(&parameter.variable, parameter.hooks.as_ref());
+        let check = self.types.property_check(self.class, parameter.variable.name);
+        let hooks = self.hooks(&parameter.variable, parameter.hooks.as_ref(), check.as_deref());
 
         (modifier_flags(&parameter.modifiers) | accessor_flags, hooks)
     }
@@ -968,12 +969,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// a field with `#[\Override]`. PHP refuses a type on a property whose parent's property has none, so an override of
     /// a property of `parent` whose root declaration has no type has none either, down the whole chain (decision 028).
     fn property(&mut self, property: &Property, parent: Option<&[u8]>) -> u32 {
+        // An instance property checks a value from plain PHP in a `set` hook, and a static one, which PHP gives no
+        // hooks, in PHP's own typed property check, which takes the type text around the type.
+        let check = self.types.property_check(self.class, property.first_variable().name);
+        let (hook_check, type_check) =
+            if property.modifiers().contains_static() { (None, check) } else { (check, None) };
         let (accessor_flags, attribute_lists, hooks) = match property {
-            Property::Plain(field) => (0, &field.attribute_lists, self.hooks(property.first_variable(), None)),
+            Property::Plain(field) => {
+                (0, &field.attribute_lists, self.hooks(property.first_variable(), None, hook_check.as_deref()))
+            }
             Property::Hooked(hooked) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
                 &hooked.attribute_lists,
-                self.hooks(hooked.item.variable(), Some(&hooked.hook_list)),
+                self.hooks(hooked.item.variable(), Some(&hooked.hook_list), hook_check.as_deref()),
             ),
             Property::Computed(computed) => {
                 let hook = self.accessor_bodies(computed.variable.name, |lowering| {
@@ -1004,6 +1012,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => self.hint(hint),
         };
         let line = self.line(variable);
+        let hint = match type_check {
+            Some(text) if hint != NULL => {
+                let text = self.string(0, line, text.as_bytes());
+                self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[hint, text])
+            }
+            _ => hint,
+        };
         let name = self.string(0, line, variable.name);
         let default = match property.initial_value() {
             Some(value) if !property.initial_value_runs_in_constructor() => self.expression(value),
@@ -1021,11 +1036,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A property's hook list, or null when it needs none: an auto-property is plain storage. Each body is a hook. An
     /// auto accessor beside a body that uses `field` is PHP's backing store, so it is no hook, and beside bodies that
-    /// never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. A property
-    /// plain PHP can write whose type [`Types::property_check`] checks has a `set` hook that checks the value first, as
+    /// never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. An instance
+    /// property whose type [`Types::property_check`] checks as `check` has a `set` hook that checks the value first, as
     /// a parameter checks an argument from plain PHP: its own `set` body, or one over the storage.
-    fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>) -> u32 {
-        let check = self.types.property_check(self.class, variable.name);
+    fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>, check: Option<&str>) -> u32 {
         let has_body = accessors.is_some_and(|accessors| {
             accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
         });
@@ -1046,7 +1060,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     PropertyHookBody::Abstract(_) if uses_field || !has_body => continue,
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
-                let body = match &check {
+                let body = match check {
                     Some(text) if accessor.name.value == b"set" => {
                         checked = true;
                         lowering.checked_set(accessor.name.span, text, body)
@@ -1055,7 +1069,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 };
                 hooks.push(lowering.hook(accessor.name.value, accessor.name, accessor, body));
             }
-            if let Some(text) = &check
+            if let Some(text) = check
                 && !checked
             {
                 let body = lowering.storage_set(variable.span);

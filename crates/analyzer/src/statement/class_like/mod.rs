@@ -19,7 +19,6 @@ use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
-use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::combine_union_types;
@@ -3599,29 +3598,6 @@ fn check_class_like_properties<'ctx, A>(
         if declaring_fqcn != &class_like_metadata.name {
             // Property is inherited, not declared in this class
             continue;
-        }
-
-        // An instance property's `set` hook checks the type arguments of a value plain PHP writes, and PHP has no hooks
-        // on a static one.
-        if class_like_metadata.flags.is_sharp()
-            && property_metadata.flags.is_static()
-            && !property_metadata.write_visibility.is_private()
-            && let Some(declared) = property_metadata.type_declaration_metadata.as_ref()
-            && declared.type_union.types.iter().any(|atomic| {
-                matches!(atomic, TAtomic::Object(TObject::Named(object))
-                    if object.get_type_parameters().is_some_and(|arguments| !arguments.is_empty())
-                        && context.codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| class.flags.is_sharp()))
-            })
-        {
-            context.collector.report_with_code(
-                IssueCode::NotSupportedYet,
-                Issue::error("A static property with type arguments is not supported yet in PHP#, unless it is `private`.")
-                    .with_annotation(Annotation::primary(declared.span).with_message("Not supported yet."))
-                    .with_note(
-                        "PHP has no hooks on a static property, so nothing checks the type arguments of a value plain PHP writes to it.",
-                    )
-                    .with_help("Make the property `private`."),
-            );
         }
 
         // Validate set hook parameter type is supertype of property type
