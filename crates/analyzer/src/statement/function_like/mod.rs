@@ -506,7 +506,6 @@ where
     std::mem::swap(&mut context.type_resolution_context, &mut previous_type_resolution_context);
     parent_artifacts.expression_types.extend(std::mem::take(&mut artifacts.expression_types));
     parent_artifacts.inferred_type_arguments.extend(std::mem::take(&mut artifacts.inferred_type_arguments));
-    parent_artifacts.local_value_types.extend(std::mem::take(&mut artifacts.local_value_types));
     parent_artifacts.variable_definedness.extend(std::mem::take(&mut artifacts.variable_definedness));
     parent_artifacts.resolved_method_calls.append(&mut artifacts.resolved_method_calls);
     parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));

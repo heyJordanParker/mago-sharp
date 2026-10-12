@@ -5845,14 +5845,14 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
     assert!(!lowered.parameters_of("keep").contains("SHARP_TYPE_ARGS"), "{}", lowered.parameters_of("keep"));
 }
 
-/// A value that enters PHP# from plain PHP is checked where a typed local or a property takes it, as a parameter checks
-/// an argument from plain PHP: a typed local checks a plain PHP call's return, at its declaration and at a later
-/// assignment, in a `VERIFY_TYPE_ARGS` that names the local. A property plain PHP can write checks the value in its `set`
-/// hook first, a `VERIFY_TYPE_ARGS` marked `1` that a write from PHP# skips: its own `set` body, or one over the storage.
-/// A PHP# call's return, a call of a function a property holds, a private, static or read-only property and a type with
-/// nothing to check need none.
+/// A value that enters PHP# from plain PHP is checked, as a parameter checks an argument from plain PHP: a call the
+/// checker resolved to plain PHP checks its result in a `VERIFY_TYPE_ARGS` that names the call, wherever the value goes,
+/// whether a typed local, a `let`, an argument, a return or a property write takes it. A property plain PHP can write
+/// checks the value in its `set` hook first, a `VERIFY_TYPE_ARGS` marked `1` that a write from PHP# skips: its own `set`
+/// body, or one over the storage. A PHP# call's return, a call of a function a property holds, a private property,
+/// static or not, a read-only one and a type with nothing to check need none.
 #[test]
-fn a_value_from_plain_php_is_checked_where_a_typed_local_or_property_takes_it() {
+fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
     let lowered = Lowered::with(
         indoc! {"
         namespace App;
@@ -5892,17 +5892,27 @@ fn a_value_from_plain_php_is_checked_where_a_typed_local_or_property_takes_it() 
             {
                 Box<Order> box = Pager.orders();
                 box = Pager.orders();
+                let untyped = Pager.orders();
+                this.keep(Pager.orders());
+                this.auto = Pager.orders();
                 Box<Order> made = Shelf.make();
                 Box<Order> held = this.maker();
                 int count = Pager.count();
             }
+
+            public Box<Order> give()
+            {
+                return Pager.orders();
+            }
+
+            public void keep(Box<Order> box) { }
 
             public static Box<Order> make() => new Box<Order>();
         }
 
         public class Order
         {
-            protected static Box<Order>? latest;
+            private static Box<Order>? latest;
         }
         "},
         &[(
@@ -5911,30 +5921,22 @@ fn a_value_from_plain_php_is_checked_where_a_typed_local_or_property_takes_it() 
         )],
     );
 
-    assert_eq!(
-        lowered.body(),
-        indoc! {r#"
-        STMT_LIST
-          ASSIGN
-            VAR
-              ZVAL "box"
-            VERIFY_TYPE_ARGS
-              STATIC_CALL
-                ZVAL "Lib\\Pager"
-                ZVAL "orders"
-                ARG_LIST
-              ZVAL "App.Box<App.Order>"
-              ZVAL "local box"
-          ASSIGN
-            VAR
-              ZVAL "box"
-            VERIFY_TYPE_ARGS
-              STATIC_CALL
-                ZVAL "Lib\\Pager"
-                ZVAL "orders"
-                ARG_LIST
-              ZVAL "App.Box<App.Order>"
-              ZVAL "local box"
+    // `Pager.orders()`, checked, at the depth `depth`.
+    let orders = |depth: usize| {
+        let lines = [
+            "VERIFY_TYPE_ARGS",
+            "  STATIC_CALL",
+            r#"    ZVAL "Lib\\Pager""#,
+            r#"    ZVAL "orders""#,
+            "    ARG_LIST",
+            r#"  ZVAL "App.Box<App.Order>""#,
+            r#"  ZVAL "the result of Lib\\Pager::orders()""#,
+        ];
+
+        lines.map(|line| format!("{}{line}\n", "  ".repeat(depth))).concat()
+    };
+    let assign = |variable: &str| format!("  ASSIGN\n    VAR\n      ZVAL \"{variable}\"\n{}", orders(2));
+    let unchecked = indoc! {r#"
           ASSIGN
             VAR
               ZVAL "made"
@@ -5958,8 +5960,21 @@ fn a_value_from_plain_php_is_checked_where_a_typed_local_or_property_takes_it() 
               ZVAL "Lib\\Pager"
               ZVAL "count"
               ARG_LIST
-        "#}
+    "#};
+    assert_eq!(
+        lowered.body(),
+        [
+            "STMT_LIST\n".to_owned(),
+            assign("box"),
+            assign("box"),
+            assign("untyped"),
+            format!("  METHOD_CALL\n    VAR\n      ZVAL \"this\"\n    ZVAL \"keep\"\n    ARG_LIST\n{}", orders(3)),
+            format!("  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"auto\"\n{}", orders(2)),
+            unchecked.lines().flat_map(|line| ["  ", line, "\n"]).collect(),
+        ]
+        .concat()
     );
+    assert_eq!(lowered.body_of("give"), format!("STMT_LIST\n  RETURN\n{}", orders(2)));
 
     let tree = lowered.tree();
     let check = |property: &str, text: &str| {
@@ -6936,19 +6951,23 @@ fn a_call_through_plain_php(wrap: &str, plain: &str) -> String {
     .body_of("run")
 }
 
+/// The call resolves to plain PHP, so its result is checked too.
 const CALL_WITH_TYPE_ARGUMENTS: &str = indoc! {r#"
     STMT_LIST
       RETURN
-        METHOD_CALL
-          VAR
-            ZVAL "wrapper"
-          ZVAL "wrap"
-          ARG_LIST
+        VERIFY_TYPE_ARGS
+          METHOD_CALL
             VAR
-              ZVAL "order"
-            SHARP_TYPE_ARGS
-              null
-              ZVAL "App.Order"
+              ZVAL "wrapper"
+            ZVAL "wrap"
+            ARG_LIST
+              VAR
+                ZVAL "order"
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "App.Order"
+          ZVAL "App.Box<App.Order>"
+          ZVAL "the result of App\\Wrapper::wrap()"
 "#};
 
 /// A generic call through a plain PHP `@template` interface carries the type arguments the checker found, since the

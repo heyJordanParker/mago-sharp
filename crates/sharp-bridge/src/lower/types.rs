@@ -238,30 +238,39 @@ impl<'analysis> Types<'analysis> {
         )
     }
 
-    /// The type text a typed local checks `value` against when it takes it, as a parameter checks an argument from plain
-    /// PHP: [`Self::checked_text`] of the local's type, when `value` is a call the checker resolved to a plain PHP
-    /// function or method. The checker reads a plain PHP return type that names a PHP# generic class from a docblock it
-    /// can't prove, so the engine tests the value spec section 12 lets in.
-    pub(crate) fn local_check(&self, value: &Expression) -> Option<String> {
-        let span = value.span();
-        let declared = self.artifacts.local_value_types.get(&(span.start.offset, span.end.offset))?;
-        let calls_plain_php = self.artifacts.get_callees(value).any(|target| match target {
-            CallTarget::FunctionLike { callee, .. } | CallTarget::MagicMethod { callee, .. } => {
-                self.codebase.get_function_like(callee).is_some_and(|callee| !callee.flags.is_sharp())
+    /// The type text a call from PHP# into plain PHP checks its result against, as a parameter checks an argument from
+    /// plain PHP, and the call as the check names it, `the result of Lib\Pager::orders()`: [`Self::checked_text`] of
+    /// the call's type, when the checker resolved `call` to a plain PHP function or method. The checker reads a plain
+    /// PHP return type that names a PHP# generic class from a docblock it can't prove, so the engine tests the value
+    /// spec section 12 lets in, wherever it goes next.
+    pub(crate) fn call_check(&self, call: &Expression) -> Option<(String, String)> {
+        let (callee, metadata) = self.artifacts.get_callees(call).find_map(|target| match target {
+            CallTarget::FunctionLike { callee, .. } | CallTarget::MagicMethod { callee, .. } => self
+                .codebase
+                .get_function_like(callee)
+                .filter(|metadata| !metadata.flags.is_sharp())
+                .map(|metadata| (callee, metadata)),
+            CallTarget::Property { .. } => None,
+        })?;
+        let text = self.checked_text(self.artifacts.get_expression_type(call)?)?;
+        let name = match callee {
+            FunctionLikeIdentifier::Method(class, _) => {
+                let class = self.codebase.get_class_like(class.as_bytes()).map_or(*class, |class| class.original_name);
+                format!("{class}::{}", metadata.original_name)
             }
-            CallTarget::Property { .. } => false,
-        });
+            _ => metadata.original_name.to_string(),
+        };
 
-        calls_plain_php.then(|| self.checked_text(declared)).flatten()
+        Some((text, format!("the result of {name}()")))
     }
 
     /// The type text the `set` hook of the property `property` of the fully qualified class name `class` checks a value
     /// against, as a parameter checks an argument from plain PHP: [`Self::checked_text`] of its type, when plain PHP can
-    /// write it. That is a property PHP# writes as public or protected, which PHP lets a hook check: neither static nor
-    /// read-only.
+    /// write it. That is a property PHP# writes as public or protected and not read-only. The analyzer refuses such a
+    /// static property whose type this checks, since PHP has no hooks on a static property.
     pub(crate) fn property_check(&self, class: &[u8], property: &[u8]) -> Option<String> {
         let metadata = self.codebase.get_property(class, &[b"$", property].concat())?;
-        if metadata.write_visibility.is_private() || metadata.flags.is_static() || metadata.flags.is_readonly() {
+        if metadata.write_visibility.is_private() || metadata.flags.is_readonly() {
             return None;
         }
 

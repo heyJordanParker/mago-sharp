@@ -9713,6 +9713,26 @@ fn a_type_argument_php_sharp_cant_write_is_refused() {
     );
 }
 
+/// A static property plain PHP can write, whose type has type arguments of a PHP# generic class, is not supported yet:
+/// PHP has no hooks on a static property, so nothing would check a value plain PHP writes to it, as a `set` hook checks
+/// an instance property's. A `public` and a `protected` one are refused. A `private` one, one of a `List` or a `Map`,
+/// and one of a plain PHP generic class, whose type arguments are erased, compile.
+#[test]
+fn a_static_property_plain_php_can_write_with_type_arguments_is_not_supported_yet() {
+    let php = "<?php\n\nnamespace Lib;\n\n/** @template T */\nfinal class Holder\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Holder;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Registry\n{\n    public static Box<Order>? latest;\n\n    protected static Box<Order>? inherited;\n\n    private static Box<Order>? hidden;\n\n    public static List<Box<Order>> boxes = [];\n\n    public static Map<string, Box<Order>> named = [:];\n\n    public static Holder<Order>? held;\n\n    public static Box<Order>? last() => Registry.hidden;\n}\n";
+    let refused = |line: u32, column: u32| {
+        format!(
+            "{line}:{column} not-supported-yet A static property with type arguments is not supported yet in PHP#, unless it is `private`. | Not supported yet. | PHP has no hooks on a static property, so nothing checks the type arguments of a value plain PHP writes to it. | Make the property `private`."
+        )
+    };
+
+    assert_eq!(
+        worded(("src/Demo/Registry.sharp", sharp), &[("src/Lib/Holder.php", php)]),
+        [refused(16, 19), refused(18, 22)]
+    );
+}
+
 /// A method's type parameter its body names is used, as `catch (TError error)` and a typed local name it, since a call
 /// writes its type argument. One that nothing names is reported. Semantics refuses the generic `catch` until R3b, so
 /// only the unused type parameters are read here.

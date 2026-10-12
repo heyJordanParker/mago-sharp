@@ -1420,7 +1420,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn local(&mut self, local: &LocalDeclaration) -> u32 {
         let line = self.line(local);
         let variable = self.variable(local.name.span, local.name.value);
-        let value = self.local_value(local.name.value, local.value);
+        let value = self.expression(local.value);
         let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
         if self.loop_depth == 0 || !self.by_reference.contains(&local.name.span.start.offset) {
             return assignment;
@@ -1431,15 +1431,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let unset = self.node(SHARP_AST_STMT_LIST, 0, line, &[unset]);
 
         self.node(SHARP_AST_STMT_LIST, 0, line, &[unset, assignment])
-    }
-
-    /// The value `value` that an assignment gives the local `name`, checked as [`Types::local_check`] says.
-    fn local_value(&mut self, name: &[u8], value: &Expression) -> u32 {
-        let lowered = self.expression(value);
-        match self.types.local_check(value) {
-            Some(text) => self.verified(self.line(value), lowered, &text, &[b"local ", name].concat(), false),
-            None => lowered,
-        }
     }
 
     /// Each part of the header is an `EXPR_LIST`, or null when it is empty. A `let` or `const` counter is the
@@ -1531,6 +1522,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CATCH, 0, line, &[classes, variable, block])
     }
 
+    /// A call into plain PHP is checked as [`Types::call_check`] says, wherever its value goes.
     fn expression(&mut self, expression: &Expression) -> u32 {
         let line = self.line(expression);
         if let Some((_, name)) = self.null_safe_receivers.iter().find(|(span, _)| *span == expression.span()) {
@@ -1542,6 +1534,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.null_safe_chain(expression, link, receiver);
         }
 
+        let lowered = self.unchecked_expression(line, expression);
+        match self.types.call_check(expression) {
+            Some((text, target)) => self.verified(line, lowered, &text, target.as_bytes(), false),
+            None => lowered,
+        }
+    }
+
+    fn unchecked_expression(&mut self, line: u32, expression: &Expression) -> u32 {
         ensure_sufficient_stack(|| match expression {
             Expression::Literal(literal) => self.literal(literal),
             Expression::Parenthesized(parenthesized) => {
@@ -1700,12 +1700,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     (operator, _) => {
                         let (kind, attr) = assignment_kind(operator);
                         let lhs = self.target(assignment.lhs);
-                        let rhs = match (operator, assignment.lhs) {
-                            (AssignmentOperator::Assign(_), Expression::ConstantAccess(local)) => {
-                                self.local_value(local.name.value(), assignment.rhs)
-                            }
-                            _ => self.expression(assignment.rhs),
-                        };
+                        let rhs = self.expression(assignment.rhs);
 
                         self.node(kind, attr, line, &[lhs, rhs])
                     }
