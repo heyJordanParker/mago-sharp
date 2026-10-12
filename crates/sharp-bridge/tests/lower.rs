@@ -3160,17 +3160,20 @@ fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
 /// ```php
 /// $x = 1;
 /// return \array_find_key($this->bump($xs), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($this->n)) !== null
-///     && \array_find_key(\App\Tenant\Report::pick($xs, $x = 2), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($x)) === 0;
+///     && \array_find_key(\App\Tenant\Report::pick($xs, $x = 2), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($x)) === 0
+///     && ((${'index#2'} = \array_find_key((${'receiver#1'} = $this->bumped())->items, (fn (${'value#3'}) => fn (${'element#4'}) =>
+///         ${'element#4'} === ${'value#3'})($this->n))) !== null) && ${'receiver#1'}->items->removeAt(${'index#2'}) === null;
 /// ```
 ///
 /// PHP's `in_array` and `array_search` read their value before their array, so a search whose receiver or value runs
 /// code takes the form that runs the receiver first, as the call runs it: `this.bump(xs)` changes `this.n` before
-/// `contains` reads it, and `Report.pick(xs, x = 2)` assigns `x` before `indexOf` reads it.
+/// `contains` reads it, `Report.pick(xs, x = 2)` assigns `x` before `indexOf` reads it, and `this.bumped()` changes
+/// `this.n` before `remove` reads it.
 #[test]
 fn a_list_search_runs_its_receiver_before_its_value() {
     assert_eq!(
         Lowered::new(
-            "namespace App.Tenant;\n\nclass Report\n{\n    private int n = 1;\n\n    public List<int> bump(List<int> xs)\n    {\n        this.n = this.n + 1;\n        return xs;\n    }\n\n    public static List<int> pick(List<int> xs, int ignored) => xs;\n\n    public bool run(List<int> xs)\n    {\n        let x = 1;\n        return this.bump(xs).contains(this.n) && Report.pick(xs, x = 2).indexOf(x) == 0;\n    }\n}\n"
+            "namespace App.Tenant;\n\nclass Report\n{\n    private int n = 1;\n\n    public List<int> items { get; set; } = [];\n\n    public List<int> bump(List<int> xs)\n    {\n        this.n = this.n + 1;\n        return xs;\n    }\n\n    public Report bumped()\n    {\n        this.n = this.n + 1;\n        return this;\n    }\n\n    public static List<int> pick(List<int> xs, int ignored) => xs;\n\n    public bool run(List<int> xs)\n    {\n        let x = 1;\n        return this.bump(xs).contains(this.n) && Report.pick(xs, x = 2).indexOf(x) == 0 && this.bumped().items.remove(this.n);\n    }\n}\n"
         )
         .body(),
         indoc! {r#"
@@ -3181,101 +3184,167 @@ fn a_list_search_runs_its_receiver_before_its_value() {
                 ZVAL 1
               RETURN
                 AND
-                  BINARY_OP [17]
-                    CALL
-                      ZVAL "array_find_key"
-                      ARG_LIST
-                        METHOD_CALL
-                          VAR
-                            ZVAL "this"
-                          ZVAL "bump"
-                          ARG_LIST
+                  AND
+                    BINARY_OP [17]
+                      CALL
+                        ZVAL "array_find_key"
+                        ARG_LIST
+                          METHOD_CALL
                             VAR
-                              ZVAL "xs"
-                        CALL
-                          ARROW_FUNC "" @18-18
-                            PARAM_LIST
-                              PARAM
-                                null
-                                ZVAL "value#1"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            ARROW_FUNC "" @18-18
+                              ZVAL "this"
+                            ZVAL "bump"
+                            ARG_LIST
+                              VAR
+                                ZVAL "xs"
+                          CALL
+                            ARROW_FUNC "" @26-26
                               PARAM_LIST
                                 PARAM
                                   null
-                                  ZVAL "element#2"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              BINARY_OP [16]
-                                VAR
-                                  ZVAL "element#2"
-                                VAR
                                   ZVAL "value#1"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              ARROW_FUNC "" @26-26
+                                PARAM_LIST
+                                  PARAM
+                                    null
+                                    ZVAL "element#2"
+                                    null
+                                    null
+                                    null
+                                    null
+                                null
+                                BINARY_OP [16]
+                                  VAR
+                                    ZVAL "element#2"
+                                  VAR
+                                    ZVAL "value#1"
+                                null
+                                null
                               null
                               null
-                            null
-                            null
-                          ARG_LIST
-                            PROP
+                            ARG_LIST
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "n"
+                      ZVAL null
+                    BINARY_OP [16]
+                      CALL
+                        ZVAL "array_find_key"
+                        ARG_LIST
+                          STATIC_CALL
+                            ZVAL "App\\Tenant\\Report"
+                            ZVAL "pick"
+                            ARG_LIST
                               VAR
-                                ZVAL "this"
-                              ZVAL "n"
-                    ZVAL null
-                  BINARY_OP [16]
-                    CALL
-                      ZVAL "array_find_key"
-                      ARG_LIST
-                        STATIC_CALL
-                          ZVAL "App\\Tenant\\Report"
-                          ZVAL "pick"
-                          ARG_LIST
-                            VAR
-                              ZVAL "xs"
-                            ASSIGN
+                                ZVAL "xs"
+                              ASSIGN
+                                VAR
+                                  ZVAL "x"
+                                ZVAL 2
+                          CALL
+                            ARROW_FUNC "" @26-26
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "value#1"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              ARROW_FUNC "" @26-26
+                                PARAM_LIST
+                                  PARAM
+                                    null
+                                    ZVAL "element#2"
+                                    null
+                                    null
+                                    null
+                                    null
+                                null
+                                BINARY_OP [16]
+                                  VAR
+                                    ZVAL "element#2"
+                                  VAR
+                                    ZVAL "value#1"
+                                null
+                                null
+                              null
+                              null
+                            ARG_LIST
                               VAR
                                 ZVAL "x"
-                              ZVAL 2
+                      ZVAL 0
+                  AND
+                    BINARY_OP [17]
+                      ASSIGN
+                        VAR
+                          ZVAL "index#2"
                         CALL
-                          ARROW_FUNC "" @18-18
-                            PARAM_LIST
-                              PARAM
-                                null
-                                ZVAL "value#1"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            ARROW_FUNC "" @18-18
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "element#2"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              BINARY_OP [16]
-                                VAR
-                                  ZVAL "element#2"
-                                VAR
-                                  ZVAL "value#1"
-                              null
-                              null
-                            null
-                            null
+                          ZVAL "array_find_key"
                           ARG_LIST
-                            VAR
-                              ZVAL "x"
-                    ZVAL 0
+                            PROP
+                              ASSIGN
+                                VAR
+                                  ZVAL "receiver#1"
+                                METHOD_CALL
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "bumped"
+                                  ARG_LIST
+                              ZVAL "items"
+                            CALL
+                              ARROW_FUNC "" @26-26
+                                PARAM_LIST
+                                  PARAM
+                                    null
+                                    ZVAL "value#3"
+                                    null
+                                    null
+                                    null
+                                    null
+                                null
+                                ARROW_FUNC "" @26-26
+                                  PARAM_LIST
+                                    PARAM
+                                      null
+                                      ZVAL "element#4"
+                                      null
+                                      null
+                                      null
+                                      null
+                                  null
+                                  BINARY_OP [16]
+                                    VAR
+                                      ZVAL "element#4"
+                                    VAR
+                                      ZVAL "value#3"
+                                  null
+                                  null
+                                null
+                                null
+                              ARG_LIST
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "n"
+                      ZVAL null
+                    BINARY_OP [16]
+                      METHOD_CALL
+                        PROP
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "items"
+                        ZVAL "removeAt"
+                        ARG_LIST
+                          VAR
+                            ZVAL "index#2"
+                      ZVAL null
         "#}
     );
 }
