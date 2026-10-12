@@ -60,6 +60,8 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::LocalIdentifier;
@@ -247,6 +249,7 @@ where
 /// return type, as a call gives an argument its parameter's type. Spec section 14.2: a PHP# lambda takes its parameter
 /// types from it. A member read takes them too, because a method value of a generic method infers its type arguments
 /// from them (section 14.3), and a generic call infers the type arguments nothing else fixes from it (section 11).
+/// `??` and `?:` give it to the sides their value comes from.
 pub fn expect_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -258,7 +261,11 @@ pub fn expect_type<A>(
     if context.dialect.is_sharp()
         && (matches!(
             expression.unparenthesized(),
-            Expression::ArrowFunction(_) | Expression::Closure(_) | Expression::Call(_)
+            Expression::ArrowFunction(_)
+                | Expression::Closure(_)
+                | Expression::Call(_)
+                | Expression::Conditional(_)
+                | Expression::Binary(Binary { operator: BinaryOperator::NullCoalesce(_), .. })
         ) || is_member_read(expression))
         && let Some(expected) = expected
     {

@@ -2009,11 +2009,11 @@ fn titled(analyzed: (&'static str, &'static str), others: &[(&'static str, &'sta
 }
 
 /// Spec section 24 refuses an `int` where a `float` is expected in PHP# code, wherever the value lands. Each place
-/// reports it once, at the value, with the issue code it gives any value of the wrong type. One row per place, one
-/// line each.
+/// reports it once, at the value, with the issue code it gives any value of the wrong type, a `float` type argument too,
+/// written on a call or on `new` and carried to a method. One row per place, one line each.
 #[test]
 fn an_int_where_a_float_is_expected_is_refused_in_every_place_with_its_code() {
-    let sharp = "namespace Demo;\n\nimport Lib.Cell;\n\nclass Report\n{\n    public const float RATE = 10;\n    public static float shared = 0.5;\n    public float rate = 5;\n    private Map<string, float> rates = [:];\n    public float computed => 9;\n\n    public float local() { float total = 0; total = 3; return total; }\n    public void field() { this.rate = 2; }\n    public void sharedField() { Report.shared = 11; }\n    public float scale(float by = 2) => by;\n    public float argument() => this.scale(3);\n    public float returned() { return 0; }\n    public List<float> list() { List<float> prices = [1, 2.5]; return prices; }\n    public Map<string, float> map() { Map<string, float> prices = [\"tea\": 4]; return prices; }\n    public float? nullable() { float? discount = 1; return discount; }\n    public float|string either() { float|string label = 7; return label; }\n    public float template() { const cell = new Cell(0.5); cell.put(2); return cell.get(); }\n    public List<float> added() { List<float> prices = []; prices.add(6); return prices; }\n    public Map<string, float> keyed() { Map<string, float> prices = [:]; prices[\"tea\"] = 8; return prices; }\n    public Map<string, float> keyedField() { this.rates[\"a\"] = 2; return this.rates; }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Cell;\n\nclass Report\n{\n    public const float RATE = 10;\n    public static float shared = 0.5;\n    public float rate = 5;\n    private Map<string, float> rates = [:];\n    public float computed => 9;\n\n    public float local() { float total = 0; total = 3; return total; }\n    public void field() { this.rate = 2; }\n    public void sharedField() { Report.shared = 11; }\n    public float scale(float by = 2) => by;\n    public float argument() => this.scale(3);\n    public float returned() { return 0; }\n    public List<float> list() { List<float> prices = [1, 2.5]; return prices; }\n    public Map<string, float> map() { Map<string, float> prices = [\"tea\": 4]; return prices; }\n    public float? nullable() { float? discount = 1; return discount; }\n    public float|string either() { float|string label = 7; return label; }\n    public float template() { const cell = new Cell(0.5); cell.put(2); return cell.get(); }\n    public List<float> added() { List<float> prices = []; prices.add(6); return prices; }\n    public Map<string, float> keyed() { Map<string, float> prices = [:]; prices[\"tea\"] = 8; return prices; }\n    public Map<string, float> keyedField() { this.rates[\"a\"] = 2; return this.rates; }\n    public static T same<T>(T value) => value;\n    public float written() => Report.same<float>(3);\n    public float boxed() { const box = new Box<float>(1); box.put(2); return box.value; }\n}\n\nclass Box<TValue>\n{\n    public Box(public TValue value { get; }) { }\n    public void put(TValue value) { }\n}\n";
 
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Cell.php", CELL)]),
@@ -2036,6 +2036,9 @@ fn an_int_where_a_float_is_expected_is_refused_in_every_place_with_its_code() {
             "24:70 invalid-argument `int` is not `float`: write 6.0 | Declared `float`.",
             "25:90 invalid-local-assignment-value `int` is not `float`: write 8.0 | Declared `Map<string, float>`.",
             "26:64 invalid-property-assignment-value `int` is not `float`: write 2.0 | Declared `Map<string, float>`.",
+            "28:50 invalid-argument `int` is not `float`: write 3.0 | Declared `float`.",
+            "29:55 invalid-argument `int` is not `float`: write 1.0 | Declared `float`.",
+            "29:67 invalid-argument `int` is not `float`: write 2.0 | Declared `float`.",
         ]
     );
 }
@@ -7822,48 +7825,27 @@ fn the_type_arguments_of_new_fix_the_type_parameters_of_the_class() {
     );
 }
 
-/// `OrderPage : PaginatedList<Order>` inherits the constructor that takes `List<TItem>`, and its header fixes `TItem` to
-/// `Order`, so `new OrderPage(…)` takes a `List<Order>`. `OrderList<TItem> : PaginatedList<TItem>` passes its own type
-/// parameter on, so `new OrderList<Order>(…)` takes one too.
+/// An inherited constructor or method takes the type arguments its class's header fixes. `OrderPage :
+/// PaginatedList<Order>` takes a `List<Order>` where `PaginatedList`'s constructor declares `List<TItem>`,
+/// `OrderList<TItem> : PaginatedList<TItem>` passes its own type parameter on, and `OrderTray : Tray<Order>`'s inherited
+/// `replace` takes a `List<Order>`. A list of another type is refused with the list it takes, though `Invoice` is within
+/// the bound of `TItem`. A plain PHP child with `@extends PaginatedList<Order>` takes the same, the plain PHP fix the
+/// generics slice names.
 #[test]
-fn an_inherited_constructor_takes_the_type_arguments_of_the_header() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static OrderPage paged(List<Order> orders) => new OrderPage(orders);\n\n    public static OrderList<Order> listed(List<Order> orders) => new OrderList<Order>(orders);\n}\n";
-
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]), Vec::<String>::new());
-}
-
-/// An inherited constructor refuses a list of another type than the header fixes and names the list it takes. An
-/// `Invoice` is a `DatabaseEntity`, so only the header's `Order` refuses it, not the bound of `TItem`.
-#[test]
-fn an_inherited_constructor_refuses_a_list_of_another_type_and_names_the_list_it_takes() {
-    let sharp = "namespace Demo;\n\npublic class Invoice : DatabaseEntity\n{\n}\n\npublic class Report\n{\n    public static OrderPage paged(List<Invoice> invoices) => new OrderPage(invoices);\n\n    public static OrderList<Order> listed(List<Invoice> invoices) => new OrderList<Order>(invoices);\n}\n";
-
-    assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "Invalid argument type for argument #1 of `PaginatedList.__construct`: expected `List<Order>`, but found `List<Invoice>`.",
-            "Invalid argument type for argument #1 of `PaginatedList.__construct`: expected `List<Order>`, but found `List<Invoice>`.",
-        ]
-    );
-}
-
-/// A method `OrderTray` inherits from `Tray<Order>` takes a `List<Order>` where it declares `List<TItem>`, as an
-/// inherited constructor does.
-#[test]
-fn an_inherited_method_takes_the_type_arguments_of_the_header() {
+fn an_inherited_constructor_and_method_take_the_type_arguments_of_the_header() {
     let tray = "namespace Demo;\n\npublic class Tray<TItem : DatabaseEntity>\n{\n    private List<TItem> items = [];\n\n    public void replace(List<TItem> items)\n    {\n        this.items = items;\n    }\n\n    public List<TItem> all() => this.items;\n}\n\npublic class OrderTray : Tray<Order>\n{\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Invoice : DatabaseEntity\n{\n}\n\npublic class Report\n{\n    public static void ordered(OrderTray tray, List<Order> orders)\n    {\n        tray.replace(orders);\n    }\n\n    public static void invoiced(OrderTray tray, List<Invoice> invoices)\n    {\n        tray.replace(invoices);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Invoice : DatabaseEntity\n{\n}\n\npublic class Report\n{\n    public static OrderPage paged(List<Order> orders) => new OrderPage(orders);\n\n    public static OrderList<Order> listed(List<Order> orders) => new OrderList<Order>(orders);\n\n    public static OrderPage invoicePaged(List<Invoice> invoices) => new OrderPage(invoices);\n\n    public static OrderList<Order> invoiceListed(List<Invoice> invoices) => new OrderList<Order>(invoices);\n\n    public static void ordered(OrderTray tray, List<Order> orders)\n    {\n        tray.replace(orders);\n    }\n\n    public static void invoiced(OrderTray tray, List<Invoice> invoices)\n    {\n        tray.replace(invoices);\n    }\n}\n";
+    let constructed = "Invalid argument type for argument #1 of `PaginatedList.__construct`: expected `List<Order>`, but found `List<Invoice>`.";
 
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING), ("src/Demo/Tray.sharp", tray)]),
-        ["Invalid argument type for argument #1 of `Tray.replace`: expected `List<Order>`, but found `List<Invoice>`."]
+        [
+            constructed,
+            constructed,
+            "Invalid argument type for argument #1 of `Tray.replace`: expected `List<Order>`, but found `List<Invoice>`.",
+        ]
     );
-}
 
-/// The PHP twin of the inherited constructor and method: `OrderPage` with `@extends PaginatedList<Order>` takes a
-/// `list<Order>` where `PaginatedList` declares `list<TItem>`, and refuses a `list<Invoice>`.
-#[test]
-fn an_inherited_constructor_and_method_of_a_php_child_take_its_extends_type_arguments() {
     let php = "<?php\n\nnamespace Demo;\n\nclass Invoice extends DatabaseEntity\n{\n}\n\nclass Report\n{\n    /** @param list<Order> $orders */\n    public static function paged(array $orders): OrderPage\n    {\n        return new OrderPage($orders);\n    }\n\n    /** @param list<Invoice> $invoices */\n    public static function invoicePaged(array $invoices): OrderPage\n    {\n        return new OrderPage($invoices);\n    }\n\n    /** @param list<Order> $orders */\n    public static function ordered(OrderPage $page, array $orders): void\n    {\n        $page->replace($orders);\n    }\n\n    /** @param list<Invoice> $invoices */\n    public static function invoiced(OrderPage $page, array $invoices): void\n    {\n        $page->replace($invoices);\n    }\n}\n";
     let paging = "<?php\n\nnamespace Demo;\n\nabstract class DatabaseEntity\n{\n}\n\nclass Order extends DatabaseEntity\n{\n}\n\n/**\n * @template TItem of DatabaseEntity\n */\nclass PaginatedList\n{\n    /** @param list<TItem> $rows */\n    public function __construct(private array $rows)\n    {\n    }\n\n    /** @return list<TItem> */\n    public function rows(): array\n    {\n        return $this->rows;\n    }\n\n    /** @param list<TItem> $rows */\n    public function replace(array $rows): void\n    {\n        $this->rows = $rows;\n    }\n}\n\n/** @extends PaginatedList<Order> */\nclass OrderPage extends PaginatedList\n{\n}\n";
 
@@ -9516,78 +9498,29 @@ fn a_generic_call_takes_the_type_argument_an_argument_fixes() {
     );
 }
 
-/// Spec section 11's own example: a typed local fixes the type argument of the generic call its value is, as Swift
-/// infers a generic parameter from the contextual type of the result. The PHP twin keeps Mago's issues.
+/// Spec section 11: the declared type a generic call's result goes into fixes the type arguments nothing else fixes, as
+/// Swift infers a generic parameter from the contextual type of the result. The declared type is a typed local's, a
+/// property's, a nullable one too, a return type, from a `return` and from an expression body, and a parameter's, the
+/// caller's own type parameter too. The result goes into it through either side of `??`, the left side nullable, as
+/// Swift's `??` takes a `T?`, and through either branch of `?:`.
 #[test]
-fn the_declared_type_of_a_local_fixes_the_type_argument_of_a_call() {
-    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\ninterface Cache\n{\n    /**\n     * @template T\n     * @return T\n     */\n    public function get(string $key): mixed;\n}\n\nclass Report\n{\n    /** @return list<Order> */\n    public function run(Cache $cache): array\n    {\n        $orders = $cache->get('orders');\n        return $orders;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic interface Cache\n{\n    T get<T>(string key);\n}\n\npublic class Report\n{\n    public List<Order> run(Cache cache)\n    {\n        List<Order> orders = cache.get(\"orders\");\n        return orders;\n    }\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Report.php", php), &[]),
-        [
-            "23:9 mixed-assignment Assigning `mixed` type to a variable may lead to unexpected behavior. Consider using a more specific type to avoid potential issues.",
-            "24:16 mixed-return-statement Could not infer a precise return type for function `Demo\\Report::run`. Saw type `mixed`. Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the function signature to catch potential mismatches earlier.",
-        ]
-    );
-    assert_eq!(
-        recorded_type_arguments(("src/Demo/Report.sharp", sharp), "<?php\n", "cache.get(\"orders\")"),
-        ["list<Demo\\Order>"]
-    );
-}
-
-/// The declared type of a property fixes the type argument of the generic call written to it, a nullable one too.
-/// The PHP twin keeps Mago's issues.
-#[test]
-fn the_declared_type_of_a_property_fixes_the_type_argument_of_a_call() {
-    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /** @var Box<Order>|null */\n    public ?Box $box = null;\n\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    public function run(): void\n    {\n        $this->box = $this->make();\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<Order>? box { get; set; }\n\n    public Box<T> make<T>() => new Box<T>();\n\n    public void run()\n    {\n        this.box = this.make();\n    }\n}\n";
-
-    assert_eq!(
-        explained(("src/Demo/Report.php", php), &[]),
-        [
-            "35:22 mixed-property-type-coercion A value with a less specific type `Demo\\Box<mixed>` is being assigned to property `$box` (Demo\\Box<Demo\\Order>|null). Consider adding a type assertion to narrow the type of the value before the assignment."
-        ]
-    );
-    assert_eq!(recorded_type_arguments(("src/Demo/Report.sharp", sharp), "<?php\n", "this.make()"), ["Demo\\Order"]);
-}
-
-/// A method's return type fixes the type argument of the generic call it returns, from a `return` and from an
-/// expression body alike. The PHP twin keeps Mago's issues.
-#[test]
-fn the_return_type_fixes_the_type_argument_of_a_returned_call() {
-    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public static function make(): Box\n    {\n        return new Box();\n    }\n\n    /** @return Box<Order> */\n    public function run(): Box\n    {\n        return Report::make();\n    }\n\n    /** @return Box<Order> */\n    public function made(): Box\n    {\n        return self::make();\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public static Box<T> make<T>() => new Box<T>();\n\n    public Box<Order> run()\n    {\n        return Report.make();\n    }\n\n    public Box<Order> made() => Self.make();\n}\n";
+fn the_declared_type_a_call_goes_into_fixes_its_type_arguments() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic interface Cache\n{\n    T get<T>(string key);\n}\n\npublic class Report\n{\n    public Box<Order>? box { get; set; }\n\n    public Box<T> make<T>() => new Box<T>();\n\n    public static Box<T> made<T>() => new Box<T>();\n\n    public Box<T> fresh<T>() => new Box<T>();\n\n    public void show(Box<Order> box)\n    {\n    }\n\n    public List<Order> local(Cache cache)\n    {\n        List<Order> orders = cache.get(\"orders\");\n        return orders;\n    }\n\n    public void property()\n    {\n        this.box = this.make();\n    }\n\n    public Box<Order> returned()\n    {\n        return Report.made();\n    }\n\n    public Box<Order> body() => Self.made();\n\n    public void argument()\n    {\n        this.show(this.fresh());\n    }\n\n    public List<Order> coalesced(Cache cache)\n    {\n        List<Order> orders = cache.get(\"cached\") ?? [];\n        return orders;\n    }\n\n    public List<Order> picked(Cache cache, bool fresh)\n    {\n        List<Order> orders = fresh ? cache.get(\"fresh\") : cache.get(\"stale\");\n        return orders;\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public Box<T> shelved<T>() => new Box<T>();\n\n    public void stock(Box<TItem> box)\n    {\n    }\n\n    public void run()\n    {\n        this.stock(this.shelved());\n    }\n}\n";
     let analyzed = ("src/Demo/Report.sharp", sharp);
 
-    assert_eq!(
-        explained(("src/Demo/Report.php", php), &[]),
-        [
-            "33:16 less-specific-nested-return-statement Returned type `Demo\\Box<mixed>` is less specific than the declared return type `Demo\\Box<Demo\\Order>` for function `Demo\\Report::run` due to nested 'mixed'. Ensure the structure returned by `Demo\\Report::run` strictly adheres to the types specified in the `Demo\\Box<Demo\\Order>` return type declaration.",
-            "39:16 less-specific-nested-return-statement Returned type `Demo\\Box<mixed>` is less specific than the declared return type `Demo\\Box<Demo\\Order>` for function `Demo\\Report::made` due to nested 'mixed'. Ensure the structure returned by `Demo\\Report::made` strictly adheres to the types specified in the `Demo\\Box<Demo\\Order>` return type declaration.",
-        ]
-    );
-    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "Report.make()"), ["Demo\\Order"]);
-    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "Self.make()"), ["Demo\\Order"]);
-}
-
-/// A parameter's declared type is the declared type an argument's result goes into, so it fixes the type argument of
-/// a generic call passed to it, as Swift's contextual type does, the caller's own type parameter too. The PHP twin
-/// keeps Mago's issues.
-#[test]
-fn the_declared_type_of_a_parameter_fixes_the_type_argument_of_a_call_passed_to_it() {
-    let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template T */\nclass Box\n{\n    /** @return T|null */\n    public function item(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    /**\n     * @template T\n     * @return Box<T>\n     */\n    public function make(): Box\n    {\n        return new Box();\n    }\n\n    /** @param Box<Order> $box */\n    public function show(Box $box): void\n    {\n    }\n\n    public function run(): void\n    {\n        $this->show($this->make());\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public T? item() => null;\n}\n\npublic class Report\n{\n    public Box<T> make<T>() => new Box<T>();\n\n    public void show(Box<Order> box)\n    {\n    }\n\n    public void run()\n    {\n        this.show(this.make());\n    }\n}\n\npublic class Shelf<TItem>\n{\n    public Box<T> fresh<T>() => new Box<T>();\n\n    public void stock(Box<TItem> box)\n    {\n    }\n\n    public void run()\n    {\n        this.stock(this.fresh());\n    }\n}\n";
-    let analyzed = ("src/Demo/Report.sharp", sharp);
-
-    assert_eq!(
-        explained(("src/Demo/Report.php", php), &[]),
-        [
-            "37:21 less-specific-nested-argument-type Argument type mismatch for argument #1 of `Demo\\Report::show`: expected `Demo\\Box<Demo\\Order>`, but provided type `Demo\\Box<mixed>` is less specific. Provide a value that more precisely matches `Demo\\Box<Demo\\Order>` or adjust the parameter type."
-        ]
-    );
-    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "this.make()"), ["Demo\\Order"]);
-    assert_eq!(recorded_type_arguments(analyzed, "<?php\n", "this.fresh()"), ["('TItem.demo\\shelf extends mixed)"]);
+    for (call, recorded) in [
+        ("cache.get(\"orders\")", "list<Demo\\Order>"),
+        ("this.make()", "Demo\\Order"),
+        ("Report.made()", "Demo\\Order"),
+        ("Self.made()", "Demo\\Order"),
+        ("this.fresh()", "Demo\\Order"),
+        ("this.shelved()", "('TItem.demo\\shelf extends mixed)"),
+        ("cache.get(\"cached\")", "list<Demo\\Order>|null"),
+        ("cache.get(\"fresh\")", "list<Demo\\Order>"),
+        ("cache.get(\"stale\")", "list<Demo\\Order>"),
+    ] {
+        assert_eq!(recorded_type_arguments(analyzed, "<?php\n", call), [recorded], "{call}");
+    }
 }
 
 /// A declared type outside a type parameter's bound fixes nothing, so the call runs with the bound and the
