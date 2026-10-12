@@ -1,4 +1,7 @@
 import Lean.Attributes
+import Lean.Elab.Command
+import Lean.Elab.Term
+import Lean.IdentifierSuggestion
 import Std.Data.HashMap
 import Std.Data.HashSet
 
@@ -9,9 +12,50 @@ The structure of PHP# code as data, and the structure rules that judge it.
 structure rule is a `@[rule]` definition of type `Rule` in a `Module.lean`. It constrains the namespace of the
 `Module.lean` that holds it: the runner passes it that namespace and only the facts under it, and reports each fact that
 breaks it on the code that holds the fact.
+
+A rule names a namespace by its full name, `App.Shared.Schema`, which Lean resolves like any name: `mago compile`
+declares one `Namespace` constant per namespace of the codebase, so a misspelled namespace is Lean's unknown identifier.
+The constructor of `Namespace` is private, so `⟨"App.Shared.Ledgr"⟩` is refused too.
 -/
 
 namespace Sharp
+
+/-- One namespace of the codebase, by its full name. A rule gets one only from `namespace_decl`: the runner refuses a
+rule that reaches the constructor or `Rule.breaks`. -/
+structure Namespace where
+  private mk ::
+  /-- Dot separated: "App.Shared.Schema". -/
+  name : String
+  deriving Repr, DecidableEq
+
+open Lean Elab Command in
+/-- `namespace_decl App App.Shared` declares the namespace constants `App` and `App.Shared`, apart from a name Lean
+already holds a constant of, such as `List`. It works only in the module `Code` that `mago compile` generates, so a rule
+names only a namespace that a class-like of the codebase sits in. One command compiles every constant at once: on 2,648
+namespaces, that takes half the time of one command each. -/
+elab "namespace_decl " ids:ident+ : command => do
+  unless (← getMainModule) == `Code do
+    throwError "`namespace_decl` belongs in the module mago compile generates: a rule names only a namespace of the codebase"
+  let mut declared := #[]
+  for id in ids do
+    let name := id.getId
+    unless (← getEnv).contains name do
+      liftCoreM <| addDecl <| .defnDecl {
+        name, levelParams := [], type := mkConst ``Namespace,
+        value := mkApp (mkConst ``Namespace.mk) (mkStrLit (name.toString (escape := false))),
+        hints := .abbrev, safety := .safe }
+      declared := declared.push name
+  liftCoreM <| compileDecls declared
+
+open Lean Elab Term in
+/-- A name below a namespace that names nothing, such as `App.Shared.Ledgr` below `App.Shared`, is an unknown identifier,
+as any name that names nothing is, and not a field Lean cannot find on `App.Shared`. -/
+@[term_elab ident] def elabNamespaceName : TermElab := fun stx _ => do
+  if (← resolveLocalName stx.getId).isSome then throwUnsupportedSyntax
+  let [(name, field :: _)] ← resolveGlobalName stx.getId | throwUnsupportedSyntax
+  unless (← getConstInfo name).type == .const ``Namespace [] && !(← getEnv).contains (``Namespace ++ .mkSimple field) do
+    throwUnsupportedSyntax
+  throwUnknownNameWithSuggestions stx.getId (ref? := stx)
 
 /-- Where a fact sits in its `.sharp` file, as CodeQL's `locations_default`: 1-based, inclusive, columns count bytes. -/
 structure Location where
@@ -65,13 +109,19 @@ def Fact.location : Fact → Location
   | .import i => i.location
   | .reference r => r.location
 
-/-- `name` is the namespace `ns` or sits inside it: `under "App.Shared.Money" "App.Shared"`. -/
-def under (name ns : String) : Bool :=
-  name == ns || name.startsWith (ns ++ ".")
+/-- `name` is the namespace `ns` or sits inside it: `under "App.Shared.Money" App.Shared`. -/
+def under (name : String) (ns : Namespace) : Bool :=
+  name == ns.name || name.startsWith (ns.name ++ ".")
 
 /-- The namespace that holds `name`: "A.B.C" ↦ "A.B", "C" ↦ "" (the global namespace). -/
 def namespaceOf (name : String) : String :=
   ".".intercalate (name.splitOn ".").dropLast
+
+/-- The namespace whose code holds the fact. -/
+def Fact.namespace_ : Fact → String
+  | .declaration d => namespaceOf d.name
+  | .import i => i.namespace_
+  | .reference r => r.namespace_
 
 /-- The import's edge in the namespace import graph: from the importing namespace to the namespace of the imported
 name. An import from the namespace's own code has no edge. -/
@@ -137,32 +187,41 @@ def Graph.ofEdges (edges : Array (String × String)) : Graph :=
 /-- A structure rule: the facts that break it. -/
 inductive Rule where
   /-- `ns` is the namespace of the Module.lean that holds the rule. The runner passes it only the facts under `ns`. -/
-  | each (breaks : (ns : String) → Fact → Bool)
+  | each (breaks : (ns : Namespace) → Fact → Bool)
   /-- As `each`, with the namespace import graph of every `.sharp` file. -/
-  | eachIn (breaks : (ns : String) → Graph → Fact → Bool)
+  | eachIn (breaks : (ns : Namespace) → Graph → Fact → Bool)
   deriving Inhabited
 
 /-- Breaks every import for which `breaks` is true. -/
-def Rule.imports (breaks : (ns : String) → Import → Bool) : Rule :=
+def Rule.imports (breaks : (ns : Namespace) → Import → Bool) : Rule :=
   .each fun ns => fun | .import i => breaks ns i | _ => false
 
 /-- Breaks every import for which `breaks` is true in the namespace import graph. -/
-def Rule.importsIn (breaks : (ns : String) → Graph → Import → Bool) : Rule :=
+def Rule.importsIn (breaks : (ns : Namespace) → Graph → Import → Bool) : Rule :=
   .eachIn fun ns graph => fun | .import i => breaks ns graph i | _ => false
 
 /-- Breaks every import of a name under `forbidden`. -/
-def Rule.neverImports (forbidden : String) : Rule :=
+def Rule.neverImports (forbidden : Namespace) : Rule :=
   .imports fun _ i => under i.name forbidden
 
 /-- Breaks every import of a name outside the rule's own namespace, outside every namespace in `allowed`, and outside
 `Sharp`: the standard library is always in reach, as a language's standard library is. `neverImports` still forbids a
 part of it. -/
-def Rule.importsOnly (allowed : List String) : Rule :=
-  .imports fun ns i => !(ns :: "Sharp" :: allowed).any (under i.name ·)
+def Rule.importsOnly (allowed : List Namespace) : Rule :=
+  .imports fun ns i => !(ns :: ⟨"Sharp"⟩ :: allowed).any (under i.name ·)
 
 /-- Breaks every import whose edge lies on a cycle of the namespace import graph. -/
 def Rule.noImportCycles : Rule :=
   .importsIn fun _ => Graph.onCycle
+
+/-- Whether `fact` breaks `rule`, which the Module.lean of the namespace `ns` holds: the fact sits under `ns` and the
+rule breaks it there. The runner names `ns` as its request does, so this is the one place a namespace comes from a
+string, and the runner refuses a rule that reaches it. -/
+def Rule.breaks (rule : Rule) (ns : String) (graph : Graph) (fact : Fact) : Bool :=
+  let ns : Namespace := ⟨ns⟩
+  under fact.namespace_ ns && match rule with
+    | .each breaks => breaks ns fact
+    | .eachIn breaks => breaks ns graph fact
 
 /-- Marks a definition of type `Sharp.Rule` in a `Module.lean` as a structure rule the runner checks. -/
 initialize ruleAttribute : Lean.TagAttribute ←

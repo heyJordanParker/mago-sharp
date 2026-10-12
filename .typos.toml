@@ -21,7 +21,9 @@ extend-ignore-re = [
     "FOF;",
     '"nd",',
     'GTI',
-    'ND'
+    'ND',
+    # A misspelled namespace a structure rule test expects Lean to refuse
+    'App\.Tenant\.Communty',
 ]
 
 [default.extend-words]
