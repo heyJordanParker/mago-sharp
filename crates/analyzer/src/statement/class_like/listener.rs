@@ -44,17 +44,27 @@ pub fn check_listener<'ctx, 'arena, A>(
     };
 
     let class_name = display_class_like_name(context, metadata.original_name);
-    if context
-        .codebase
-        .get_declaring_method(metadata.name.as_bytes(), b"__construct")
-        .is_some_and(|constructor| !constructor.parameters.is_empty())
+    let first_name = BytesDisplay(first.name.value);
+    let constructor = context.codebase.get_declaring_method(metadata.name.as_bytes(), b"__construct");
+    if let Some(visibility) = constructor
+        .and_then(|constructor| constructor.method_metadata.as_ref())
+        .map(|constructor| constructor.visibility)
+        .filter(|visibility| !visibility.is_public())
     {
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!(
+                "`{class_name}`'s constructor is {visibility}, so PHP# can't create a `{class_name}` to run `{first_name}`."
+            ))
+            .with_annotation(Annotation::primary(first_on.span()).with_message(format!("`{first_name}` listens here."))),
+        );
+    }
+    if constructor.is_some_and(|constructor| !constructor.parameters.is_empty()) {
         context.collector.report_with_code(
             IssueCode::InvalidEvent,
             Issue::error("A listener whose class takes constructor parameters is not supported yet in PHP#.")
                 .with_annotation(
-                    Annotation::primary(first_on.span())
-                        .with_message(format!("`{}` listens to events.", BytesDisplay(first.name.value))),
+                    Annotation::primary(first_on.span()).with_message(format!("`{first_name}` listens to events.")),
                 )
                 .with_note(format!("PHP# creates `{class_name}` with no arguments to run its listeners.")),
         );
@@ -75,8 +85,8 @@ pub fn check_listener<'ctx, 'arena, A>(
     }
 }
 
-/// Reports each name the `on` clause lists that names no event: an unknown type, a type that is not an event, or an
-/// interface no event implements.
+/// Reports each name the `on` clause lists that names no event: an unknown type, a type that is not an event, a
+/// built-in type included, or an interface no event implements.
 fn check_listed_events<'arena, A>(
     method: &Method<'arena>,
     method_metadata: &FunctionLikeMetadata,
@@ -87,21 +97,24 @@ fn check_listed_events<'arena, A>(
     let codebase = context.codebase;
     let events = method.on.iter().flat_map(|on| on.events.iter());
     for (event, listed) in events.zip(&method_metadata.listens) {
-        let Some(class_like) = codebase.get_class_like(listed.as_bytes()) else {
-            report_undefined_type(context, *listed, event.span);
+        let message = match codebase.get_class_like(listed.as_bytes()) {
+            Some(class_like) if is_heard(codebase, class_like) => continue,
+            Some(class_like) if class_like.kind.is_interface() => format!(
+                "No event implements `{}`, so `{}` never runs.",
+                display_class_like_name(context, class_like.original_name),
+                BytesDisplay(method.name.value)
+            ),
+            Some(class_like) => {
+                format!("`{}` is not an event.", display_class_like_name(context, class_like.original_name))
+            }
+            None if BUILT_IN_TYPES.iter().any(|built_in| built_in.eq_ignore_ascii_case(event.value)) => {
+                format!("`{}` is not an event.", BytesDisplay(event.value))
+            }
+            None => {
+                report_undefined_type(context, *listed, event.span);
 
-            continue;
-        };
-
-        if is_heard(codebase, class_like) {
-            continue;
-        }
-
-        let name = display_class_like_name(context, class_like.original_name);
-        let message = if class_like.kind.is_interface() {
-            format!("No event implements `{name}`, so `{}` never runs.", BytesDisplay(method.name.value))
-        } else {
-            format!("`{name}` is not an event.")
+                continue;
+            }
         };
 
         context.collector.report_with_code(
@@ -270,6 +283,29 @@ fn shared_interface(codebase: &CodebaseMetadata, listed: &[Word]) -> Option<Word
         })
         .map(|interface| interface.original_name)
 }
+
+/// The names PHP reserves for its own types (`reserved_class_names` in `zend_compile.c`), and `Any`, PHP#'s `mixed`. Each
+/// names a type that exists, and none is an event, so an `on` clause that lists one is told that, not "Cannot find type".
+const BUILT_IN_TYPES: [&[u8]; 18] = [
+    b"array",
+    b"bool",
+    b"callable",
+    b"false",
+    b"float",
+    b"int",
+    b"iterable",
+    b"mixed",
+    b"never",
+    b"null",
+    b"object",
+    b"parent",
+    b"self",
+    b"static",
+    b"string",
+    b"true",
+    b"void",
+    b"Any",
+];
 
 /// Whether an `on` clause may list `class_like`: an event, or an interface an event implements.
 fn is_heard(codebase: &CodebaseMetadata, class_like: &ClassLikeMetadata) -> bool {

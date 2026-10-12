@@ -9766,29 +9766,37 @@ fn a_listener_takes_no_parameter_or_one_that_every_listed_event_is() {
 }
 
 /// Spec section 15: an `on` clause lists events, which `event` or `extern event` declares, or interfaces an event
-/// implements, so every listener can run. A name of no type is the error any unknown type is.
+/// implements, so every listener can run. A type that exists and is not an event, a class, an enum or a built-in type,
+/// is refused as one. A name of no type is the error any unknown type is.
 #[test]
 fn an_on_clause_lists_events_or_interfaces_an_event_implements() {
     let watch = (
         "app/Shop/Watch.sharp",
-        "namespace App.Shop;\n\npublic class Watch\n{\n    public void log(Logger logger) on Logger { }\n\n    public void track() on Tracked, OrderSettled { }\n}\n",
+        "namespace App.Shop;\n\npublic class Watch\n{\n    public void log(Logger logger) on Logger { }\n\n    public void track() on Tracked, OrderSettled { }\n\n    public void scalar() on int, string { }\n\n    public void any() on Any { }\n\n    public void level() on Level { }\n}\n",
     );
     let tracked = ("app/Shop/Tracked.sharp", "namespace App.Shop;\n\npublic interface Tracked\n{\n}\n");
+    let level = ("app/Shop/Level.sharp", "namespace App.Shop;\n\npublic enum Level\n{\n    case Low;\n}\n");
     let [order_event, order_paid, refunded, shipped, events, queue, logger] = listened();
+    let note =
+        "An `on` clause lists events, which `event` or `extern event` declares, or interfaces an event implements.";
 
     assert_eq!(
-        worded(watch, &[order_event, order_paid, refunded, shipped, events, queue, logger, tracked]),
+        worded(watch, &[order_event, order_paid, refunded, shipped, events, queue, logger, tracked, level]),
         [
-            "5:39 invalid-event `Logger` is not an event. | Listed here. | An `on` clause lists events, which `event` or `extern event` declares, or interfaces an event implements.",
-            "7:28 invalid-event No event implements `Tracked`, so `track` never runs. | Listed here. | An `on` clause lists events, which `event` or `extern event` declares, or interfaces an event implements.",
-            "7:37 non-existent-class-like Cannot find type `OrderSettled`. | `OrderSettled` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            format!("5:39 invalid-event `Logger` is not an event. | Listed here. | {note}"),
+            format!("7:28 invalid-event No event implements `Tracked`, so `track` never runs. | Listed here. | {note}"),
+            "7:37 non-existent-class-like Cannot find type `OrderSettled`. | `OrderSettled` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.".to_owned(),
+            format!("9:29 invalid-event `int` is not an event. | Listed here. | {note}"),
+            format!("9:34 invalid-event `string` is not an event. | Listed here. | {note}"),
+            format!("11:26 invalid-event `Any` is not an event. | Listed here. | {note}"),
+            format!("13:28 invalid-event `Level` is not an event. | Listed here. | {note}"),
         ]
     );
 }
 
 /// Spec section 15: a listener runs on an object the container creates, so it is not `static`, and its class-like is a
-/// class that is not abstract. It returns nothing. Until spec section 32's container exists, the object is created with
-/// no arguments, so a class whose constructor takes parameters is not supported yet.
+/// class that is not abstract and whose constructor is public. It returns nothing. Until spec section 32's container
+/// exists, the object is created with no arguments, so a class whose constructor takes parameters is not supported yet.
 #[test]
 fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_creates() {
     let fixed = (
@@ -9817,8 +9825,33 @@ fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_c
         "app/Shop/Tick.sharp",
         "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick(public Logger logger { get; }) { }\n\n    public void tick() on OrderPaid { }\n}\n",
     );
+    let opened = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick() { }\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let hidden = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    private Tick() { }\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let guarded = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    protected Tick() { }\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
 
     assert_eq!(worded(fixed, &listened()), Vec::<String>::new());
+    assert_eq!(worded(opened, &listened()), Vec::<String>::new());
+    assert_eq!(
+        worded(hidden, &listened()),
+        [
+            "7:24 invalid-event `Tick`'s constructor is private, so PHP# can't create a `Tick` to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(guarded, &listened()),
+        [
+            "7:24 invalid-event `Tick`'s constructor is protected, so PHP# can't create a `Tick` to run `tick`. | `tick` listens here."
+        ]
+    );
     assert_eq!(
         worded(r#static, &listened()),
         ["5:12 invalid-event A listener runs on an object, so `tick` cannot be `static`. | Declared `static` here."]
@@ -10950,8 +10983,8 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 /// through a property, as each help writes it. A get-only property may give a narrower type, and a PHP interface's
 /// property with `set` takes its type exactly. A class that names the interface answers for the property it inherits
 /// too, from a PHP# or a plain PHP base class, a base's `private` field included. A property stated with `set` needs
-/// one the class can set, reported once: a class gives it with `{ get; set; }`, and an event, whose properties `new`
-/// sets once, cannot give it.
+/// one the class can set, reported once, naming what the class gives instead: get-only, `private set`, `protected set`
+/// or `init`. A class gives it with `{ get; set; }`, and an event, whose properties `new` sets once, cannot give it.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : OrderEvent;\n");
@@ -11031,6 +11064,22 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let set_given = (
         "app/Shop/Tally.sharp",
         "namespace App.Shop;\n\npublic class Tally : Settable\n{\n    public int total { get; set; } = 0;\n}\n",
+    );
+    let private_set = (
+        "app/Shop/Guarded.sharp",
+        "namespace App.Shop;\n\npublic class Guarded : Settable\n{\n    public int total { get; private set; } = 0;\n\n    public void bump()\n    {\n        this.total = this.total + 1;\n    }\n}\n",
+    );
+    let protected_set = (
+        "app/Shop/Guarded.sharp",
+        "namespace App.Shop;\n\npublic class Guarded : Settable\n{\n    public int total { get; protected set; } = 0;\n\n    public void bump()\n    {\n        this.total = this.total + 1;\n    }\n}\n",
+    );
+    let computed = (
+        "app/Shop/Guarded.sharp",
+        "namespace App.Shop;\n\npublic class Guarded : Settable\n{\n    public int total => 7;\n}\n",
+    );
+    let init = (
+        "app/Shop/Guarded.sharp",
+        "namespace App.Shop;\n\npublic class Guarded : Settable\n{\n    public int total { get; init; }\n\n    public Guarded(int total)\n    {\n        this.total = total;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -11125,6 +11174,30 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         ]
     );
     assert_eq!(worded(set_given, &[settable_interface]), Vec::<String>::new());
+    assert_eq!(
+        worded(private_set, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Guarded` gives `total` with `private set`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(protected_set, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Guarded` gives `total` with `protected set`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(computed, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Guarded` gives `total` get-only, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(init, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Guarded` gives `total` with `init`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
 }
 
 /// Spec section 15: `emit` raises an event, one an `event` declares or a plain PHP class an `extern event` marks. Any

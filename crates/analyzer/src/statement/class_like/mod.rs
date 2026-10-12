@@ -4306,14 +4306,15 @@ fn report_unfit_interface_property<A>(
                 .with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")),
             );
         } else {
+            let given = if property.flags.is_init() {
+                "with `init`".to_owned()
+            } else if property.flags.is_readonly() || property.write_visibility == Visibility::Public {
+                "get-only".to_owned()
+            } else {
+                format!("with `{} set`", property.write_visibility)
+            };
             let help = format!("Declare `{property_name}` with `{{ get; set; }}`{place}.");
-            report(
-                context,
-                IssueCode::IncompatiblePropertyAccess,
-                "get-only".to_owned(),
-                "with `set`".to_owned(),
-                help,
-            );
+            report(context, IssueCode::IncompatiblePropertyAccess, given, "with `set`".to_owned(), help);
         }
     }
 
