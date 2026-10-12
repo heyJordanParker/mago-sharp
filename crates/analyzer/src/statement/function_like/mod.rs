@@ -853,7 +853,7 @@ where
         },
     );
 
-    signature_union
+    if function_like_metadata.flags.is_sharp() { known_type_or_error(signature_union) } else { signature_union }
 }
 
 pub(super) fn add_properties_to_context<'ctx, A>(
@@ -1782,6 +1782,18 @@ where
         };
         context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
     }
+}
+
+/// `declared`, a type a PHP# declaration writes, or an error when it names a type no analyzed file or stub declares.
+/// `report_undefined_types` reports that type where it is written, so a value of it adds no second issue, as a refused
+/// index read adds none.
+pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
+    let names_unknown_type = declared
+        .get_all_child_nodes()
+        .into_iter()
+        .any(|node| matches!(node, TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { .. }))));
+
+    if names_unknown_type { TUnion::from_atomic(TAtomic::Error) } else { declared }
 }
 
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an

@@ -53,16 +53,6 @@ pub fn is_contained_by(
         return true;
     }
 
-    // PHP# refuses a type that names no type where it is written, so a value or a place of that type adds no second
-    // issue.
-    if atomic_comparison_result.sharp_rules
-        && [input_type_part, container_type_part]
-            .iter()
-            .any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. })))
-    {
-        return true;
-    }
-
     // Handle TAtomic::Alias - expand both input and container
     if let TAtomic::Alias(alias) = container_type_part {
         let Some(container_union) = alias.resolve(codebase) else {

@@ -27,6 +27,7 @@ use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationTarget;
 use crate::invocation::resolver::resolve_invocation_type;
+use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::map_key_error;
 use crate::utils::names::display_sharp_type;
 
@@ -273,9 +274,12 @@ where
         get_mixed()
     };
 
-    if let Some(function_like_metadata) = invocation.target.get_function_like_metadata()
-        && function_like_metadata.flags.is_by_reference()
-    {
+    let function_like_metadata = invocation.target.get_function_like_metadata();
+    if function_like_metadata.is_some_and(|metadata| metadata.flags.is_sharp()) {
+        resulting_type = known_type_or_error(resulting_type);
+    }
+
+    if function_like_metadata.is_some_and(|metadata| metadata.flags.is_by_reference()) {
         resulting_type.set_by_reference(true);
     }
 

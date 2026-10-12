@@ -7092,7 +7092,8 @@ fn a_php_caller_of_group_by_keys_the_array_by_an_array_key() {
 
 /// A PHP# field's and typed local's written types are checked where they are written, as a parameter's is, though
 /// their names have no `$`. A type that names no type is reported once, there, and a value of it adds no second issue
-/// where it is used.
+/// where it is used: a parameter, a `Map` key, a local, a field, a return and an argument. A PHP declaration that names
+/// no type stays checked where PHP# meets it, so a call that passes it a wrong value is refused.
 #[test]
 fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_is() {
     let sharp = "namespace Demo;\n\nclass Tally\n{\n    public Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        Missing? local = null;\n        return 0;\n    }\n}\n";
@@ -7104,10 +7105,30 @@ fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_
     );
     assert_eq!(messages(("src/Demo/Tally.sharp", sharp), &[]), ["Cannot find type `Missing`."; 3]);
 
-    let used = "namespace Demo;\n\nclass Tally\n{\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        return strlen(item) + count(counts);\n    }\n}\n";
+    let used = "namespace Demo;\n\nclass Tally\n{\n    public Missing? kept = null;\n\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        Missing? local = item;\n        return strlen(item) + count(counts) + strlen(local) + strlen(this.kept) + strlen(this.found(5));\n    }\n\n    public Missing found(Missing item) => item;\n}\n";
     assert_eq!(
         issues(("src/Demo/Tally.sharp", used), &[]),
-        ["5:21 non-existent-class-like", "5:35 non-existent-class-like"]
+        [
+            "5:12 non-existent-class-like",
+            "7:21 non-existent-class-like",
+            "7:35 non-existent-class-like",
+            "9:9 non-existent-class-like",
+            "13:12 non-existent-class-like",
+            "13:26 non-existent-class-like",
+        ]
+    );
+
+    let shelf = (
+        "src/Lib/Shelf.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Shelf\n{\n    public static function take(Ghost $ghost): int\n    {\n        return 1;\n    }\n\n    /** @return Ghost */\n    public static function make(): object\n    {\n        return new \\stdClass();\n    }\n}\n",
+    );
+    let vendor = "namespace Demo;\n\nimport Lib.Shelf;\n\nclass Caller\n{\n    public int run() => Shelf.take(5);\n\n    public int length() => strlen(Shelf.make());\n}\n";
+    assert_eq!(
+        messages(("src/Demo/Caller.sharp", vendor), &[shelf]),
+        [
+            "Invalid argument type for argument #1 of `Shelf.take`: expected `Ghost`, but found `int`.",
+            "Invalid argument type for argument #1 of `strlen`: expected `string`, but found `Ghost`.",
+        ]
     );
     assert_eq!(
         messages(("src/Demo/Tally.php", php), &[]),

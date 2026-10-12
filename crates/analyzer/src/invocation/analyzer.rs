@@ -67,6 +67,7 @@ use crate::invocation::template_inference::infer_parameter_templates_from_defaul
 use crate::invocation::template_result::get_class_template_parameters_from_result;
 use crate::invocation::template_result::populate_template_result_from_invocation;
 use crate::invocation::template_result::refine_template_result_for_function_like;
+use crate::statement::function_like::known_type_or_error;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
@@ -1488,6 +1489,8 @@ where
     let parameter_type = parameter_type.cloned().unwrap_or_else(get_mixed);
     let parameter_type = if context.dialect.is_sharp() && keys_a_map_by_its_function(invocation_target) {
         without_method_template_bounds(&parameter_type)
+    } else if invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) {
+        known_type_or_error(parameter_type)
     } else {
         parameter_type
     };
