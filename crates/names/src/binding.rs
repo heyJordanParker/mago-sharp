@@ -1,16 +1,22 @@
+use mago_allocator::Arena;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::ComputedProperty;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::FunctionLikeReturnTypeHint;
+use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
+use mago_syntax::cst::MethodExpressionBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::TokenSeparatedSequence;
 use mago_word::Word;
 use mago_word::concat_word;
 use mago_word::word;
@@ -126,6 +132,110 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             returns_by_reference: false,
         }
     }
+
+    /// The parts of an extension method, spec section 26, as the public static method of its static class it runs as:
+    /// `static`, with the extension's receiver before its own parameters. Semantics refuses an extension without one
+    /// receiver, whose methods have none.
+    #[must_use]
+    pub fn of_extension_method<A>(
+        arena: &'arena A,
+        extension: &'ast Extension<'arena>,
+        method: &'ast Method<'arena>,
+    ) -> Option<Self>
+    where
+        A: Arena,
+        'arena: 'ast,
+    {
+        Some(Self {
+            name: method.name.value,
+            name_span: method.name.span,
+            span: method.span(),
+            attribute_lists: &method.attribute_lists,
+            modifiers: static_modifiers(arena, extension, &method.modifiers),
+            parameter_list: receiver_first(arena, extension, &method.parameter_list)?,
+            return_type_hint: method.return_type_hint.as_ref(),
+            on: method.on.as_ref(),
+            body: &method.body,
+            returns_value: method.returns_value(),
+            returns_by_reference: method.ampersand.is_some(),
+        })
+    }
+
+    /// The parts of an extension's computed property, spec section 26, as the public static method of its static class
+    /// it runs as: `static`, with the extension's receiver as its one parameter, returning its expression.
+    #[must_use]
+    pub fn of_extension_property<A>(
+        arena: &'arena A,
+        extension: &'ast Extension<'arena>,
+        property: &'ast ComputedProperty<'arena>,
+    ) -> Option<Self>
+    where
+        A: Arena,
+        'arena: 'ast,
+    {
+        let own = arena.alloc(FunctionLikeParameterList {
+            left_parenthesis: extension.parameter_list.left_parenthesis,
+            parameters: TokenSeparatedSequence::empty(),
+            right_parenthesis: extension.parameter_list.right_parenthesis,
+        });
+        let body = &property.body;
+
+        Some(Self {
+            name: property.variable.name,
+            name_span: property.variable.span,
+            span: property.span(),
+            attribute_lists: &property.attribute_lists,
+            modifiers: static_modifiers(arena, extension, &property.modifiers),
+            parameter_list: receiver_first(arena, extension, own)?,
+            return_type_hint: property
+                .hint
+                .as_ref()
+                .map(|hint| &*arena.alloc(FunctionLikeReturnTypeHint { colon: None, hint: hint.clone() })),
+            on: None,
+            body: arena.alloc(MethodBody::Expression(MethodExpressionBody {
+                arrow: body.arrow,
+                expression: body.expression,
+                semicolon: body.semicolon,
+            })),
+            returns_value: true,
+            returns_by_reference: false,
+        })
+    }
+}
+
+/// An extension member's modifiers with `static`, written at the `extension` keyword, as the static method it runs as.
+fn static_modifiers<'arena, A>(
+    arena: &'arena A,
+    extension: &Extension<'arena>,
+    modifiers: &Sequence<'arena, Modifier<'arena>>,
+) -> &'arena Sequence<'arena, Modifier<'arena>>
+where
+    A: Arena,
+{
+    let r#static = Modifier::Static(Keyword { span: extension.extension.span, value: b"static" });
+
+    arena.alloc(Sequence::from_slice(arena.alloc_slice_fill_iter(modifiers.iter().cloned().chain([r#static]))))
+}
+
+/// An extension member's parameters after the extension's receiver, or none for an extension without one receiver.
+fn receiver_first<'arena, A>(
+    arena: &'arena A,
+    extension: &Extension<'arena>,
+    own: &FunctionLikeParameterList<'arena>,
+) -> Option<&'arena FunctionLikeParameterList<'arena>>
+where
+    A: Arena,
+{
+    let [receiver] = extension.parameter_list.parameters.as_slice() else {
+        return None;
+    };
+    let parameters = arena.alloc_slice_fill_iter(std::iter::once(receiver).chain(own.parameters.iter()).cloned());
+
+    Some(arena.alloc(FunctionLikeParameterList {
+        left_parenthesis: own.left_parenthesis,
+        parameters: TokenSeparatedSequence::from_slices(parameters, own.parameters.tokens),
+        right_parenthesis: own.right_parenthesis,
+    }))
 }
 
 /// What a bare PHP# name refers to.

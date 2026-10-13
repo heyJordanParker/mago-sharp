@@ -55,6 +55,26 @@ where
         self.lower_method_parts(parts, name, owner)
     }
 
+    /// Lowers a member a PHP# extension adds as the static method it runs as, which takes the receiver first, spec
+    /// section 26. A member whose extension semantics refuses lowers to none.
+    pub(crate) fn lower_extension_member(
+        &mut self,
+        extension: &'scratch cst::Extension<'scratch>,
+        member: &'scratch cst::ClassLikeMember<'scratch>,
+        owner: Identifier<'arena>,
+    ) -> Option<Method<'arena, (), (), ()>> {
+        let parts = match member {
+            cst::ClassLikeMember::Method(method) => MethodParts::of_extension_method(self.scratch, extension, method),
+            cst::ClassLikeMember::Property(cst::Property::Computed(property)) => {
+                MethodParts::of_extension_property(self.scratch, extension, property)
+            }
+            _ => None,
+        }?;
+        let name = Name { span: parts.name_span, value: self.interner.intern(parts.name) };
+
+        Some(self.lower_method_parts(parts, name, owner))
+    }
+
     fn lower_method_parts(
         &mut self,
         parts: MethodParts<'scratch, 'scratch>,

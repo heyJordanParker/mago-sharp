@@ -27,6 +27,7 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::LocalIdentifier;
@@ -36,6 +37,7 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Operator;
+use mago_syntax::cst::Property;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -122,6 +124,97 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NamedConstructor<'arena> {
         analyze_method(&method, self.initializer.as_ref(), word(self.name.value), context, block_context, artifacts)
             .map(|_| ())
     }
+}
+
+/// A PHP# extension's methods and computed properties analyze as the static methods they run as, spec section 26, each
+/// with the extension's receiver as its first parameter. Semantics refuses every other member.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Extension<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        for member in &self.members {
+            let method = match member {
+                ClassLikeMember::Method(method) => MethodParts::of_extension_method(context.arena, self, method),
+                ClassLikeMember::Property(Property::Computed(property)) => {
+                    MethodParts::of_extension_property(context.arena, self, property)
+                }
+                _ => None,
+            };
+
+            if let Some(method) = method
+                && let Some(class) =
+                    analyze_method(&method, None, word(method.name), context, block_context, artifacts)?
+            {
+                check_hidden_member(context, class, &method);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Reports an extension member named like a real member its receiver's class declares or inherits, or like a method
+/// its `List`, `Map` or `Set` receiver has, spec section 26, as
+/// [`mago_codex::metadata::CodebaseMetadata::get_classes_hidden_by_extension`] finds them: the real member always wins,
+/// so the extension member never runs. On a union receiver, only when every part that is not `null` has the member. A
+/// class's `__call` and `__get` declare no member, so the extension runs in their place.
+fn check_hidden_member<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, member: &MethodParts<'_, '_>)
+where
+    A: Arena,
+{
+    let extension = MethodIdentifier::new(class.name, ascii_lowercase_word(member.name));
+    let Some(receiver) = context
+        .codebase
+        .get_method_by_id(&extension)
+        .and_then(|metadata| metadata.parameters.first())
+        .and_then(|receiver| receiver.get_type_metadata())
+    else {
+        return;
+    };
+    // The member runs on a part of the receiver that declares none, so only a receiver whose every part that is not
+    // `null` declares it hides the member for good.
+    let mut parts = Vec::new();
+    for part in receiver.type_union.to_non_nullable().types.iter() {
+        let part = TUnion::from_atomic(part.clone());
+        let Some(&class) = context.codebase.get_classes_hidden_by_extension(&part, member.name).first() else {
+            return;
+        };
+        parts.push((format!("`{}`", display_type(context, &part)), class));
+    }
+    parts.sort();
+    let Some(((last, declaring_class), rest)) = parts.split_last() else {
+        unreachable!("`to_non_nullable` leaves a receiver at least one part, `never` where it held only `null`");
+    };
+
+    let name = mago_bytes::BytesDisplay(member.name);
+    let property = [b"$", member.name].concat();
+    let codebase = context.codebase;
+    let real_member = if codebase.property_exists(declaring_class.as_bytes(), &property)
+        || codebase.magic_property_exists(declaring_class.as_bytes(), &property)
+    {
+        name.to_string()
+    } else {
+        format!("{name}()")
+    };
+    let receiver = match rest {
+        [] => format!("{last} already declares"),
+        _ => {
+            let rest: Vec<&str> = rest.iter().map(|(part, _)| part.as_str()).collect();
+            format!("{} and {last} already declare", rest.join(", "))
+        }
+    };
+    context.collector.report_with_code(
+        IssueCode::DuplicateDefinition,
+        Issue::error(format!("{receiver} `{real_member}`, so this extension member never runs."))
+            .with_annotation(Annotation::primary(member.name_span).with_message("Declared here."))
+            .with_help("Rename the extension member."),
+    );
 }
 
 /// Analyzes a method, which messages name as `member` of its class, and returns its class when the method was

@@ -48,6 +48,7 @@ use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
 use crate::expression::binary::comparison::check_element_equality;
+use crate::expression::call::analyze_extension_access;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
@@ -336,6 +337,21 @@ where
         resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)
     });
     let mut method_resolution = method_resolution?;
+
+    if let Some(extension) = method_resolution.extension {
+        context.collector.extend(receiver_issues);
+
+        return analyze_extension_access(
+            context,
+            block_context,
+            artifacts,
+            extension,
+            object,
+            Some(argument_list),
+            is_null_safe,
+            span,
+        );
+    }
 
     let mut collections = method_resolution
         .resolved_methods
