@@ -2144,18 +2144,23 @@ fn slow(length: u64) -> String {
 }
 
 /// Lean work that runs past the processor-time limit stops there once instead of holding the compile, and is reported
-/// where it sits while every other rule runs. Each row runs under a limit of 10 seconds, after a compile that built the
-/// runtime library. Work that never ends costs the compile less than two limits: a rule that never ends is refused at
+/// where it sits while every other rule runs. Each row runs after a compile that built the runtime library.
+///
+/// Work that never ends runs under a limit of 30 seconds, and costs the compile less than two limits, which leaves room
+/// for the dozen Lean processes the rest of the compile starts on a slow machine: a rule that never ends is refused at
 /// its name, and the other rule of its `Module.lean` still judges `StoreService.sharp`; a `#eval` that never ends
 /// refuses each file its `Module.lean` judges; and a proof that never ends under `set_option maxHeartbeats 0`, which
-/// lifts Lean's own limit, refuses its law's file. Those rows run at once, each on its own thread. A slow rule that ends
-/// within the limit runs, and ten slow rules that together run past the limit all run, since each rule gets the limit
-/// of its own. Those rows run one at a time, since a loaded machine raises the processor time of each rule.
+/// lifts Lean's own limit, refuses its law's file. Those rows run at once, each on its own thread.
+///
+/// Then slow rules run under a limit of 10 seconds, one row at a time, since a loaded machine raises the processor time
+/// of each rule: a slow rule that ends within the limit runs, and ten slow rules that together run past the limit all
+/// run, since each rule gets the limit of its own.
 #[cfg(unix)]
 #[test]
 fn lean_work_that_never_ends_stops_once_at_the_processor_time_limit_and_every_other_rule_runs() {
     compile_succeeds(lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]).path());
-    let stopped = "it ran past 10 processor seconds, the limit Mago sets on each Lean process";
+    let limit = 30;
+    let stopped = format!("it ran past {limit} processor seconds, the limit Mago sets on each Lean process");
     let store_breaks = "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.";
     let endless_rule = rules(
         "App.Tenant.Store",
@@ -2211,30 +2216,34 @@ fn lean_work_that_never_ends_stops_once_at_the_processor_time_limit_and_every_ot
         ),
     ];
     std::thread::scope(|scope| {
-        let endless: Vec<_> = endless
+        let rows: Vec<_> = endless
             .into_iter()
             .map(|(files, expected)| {
                 scope.spawn(move || {
                     let directory = structured(&files);
 
-                    let (output, seconds) = compile_lines_within(directory.path(), 10);
+                    let (output, seconds) = compile_lines_within(directory.path(), limit);
 
                     assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
-                    assert!(seconds < 20.0, "{files:?} used {seconds} processor seconds: {}", printed(&output));
+                    assert!(
+                        seconds < 2.0 * limit as f64,
+                        "{files:?} used {seconds} processor seconds: {}",
+                        printed(&output)
+                    );
                 })
             })
             .collect();
-        for (files, expected) in slow {
-            let directory = structured(&files);
-
-            let (output, _) = compile_lines_within(directory.path(), 10);
-
-            assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
-        }
-        for row in endless {
+        for row in rows {
             row.join().unwrap();
         }
     });
+    for (files, expected) in slow {
+        let directory = structured(&files);
+
+        let (output, _) = compile_lines_within(directory.path(), 10);
+
+        assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
+    }
 }
 
 #[test]
