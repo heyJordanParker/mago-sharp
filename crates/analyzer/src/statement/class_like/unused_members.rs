@@ -178,7 +178,8 @@ fn collect_checkable_members(
             continue;
         }
 
-        if method_meta.is_abstract {
+        // The engine runs a PHP# listener when an event it lists is raised, spec section 15.
+        if method_meta.is_abstract || !method_metadata.listens.is_empty() {
             continue;
         }
 

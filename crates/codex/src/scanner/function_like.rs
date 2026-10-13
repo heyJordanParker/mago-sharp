@@ -113,6 +113,8 @@ where
         .iter()
         .filter_map(|p| scan_function_like_parameter(p, Some(class_like_metadata.original_name), context, scope))
         .collect();
+    metadata.listens =
+        method.on.iter().flat_map(|on| on.events.iter()).map(|event| word(context.resolved_names.get(event))).collect();
 
     if let Some(return_hint) = method.return_type_hint {
         metadata.set_return_type_declaration_metadata(Some(get_type_metadata_from_hint(

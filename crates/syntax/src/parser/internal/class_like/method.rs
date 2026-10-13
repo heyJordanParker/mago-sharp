@@ -12,8 +12,10 @@ use crate::cst::cst::MethodBody;
 use crate::cst::cst::MethodExpressionBody;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::NamedConstructor;
+use crate::cst::cst::On;
 use crate::cst::cst::Operator;
 use crate::cst::sequence::Sequence;
+use crate::cst::sequence::TokenSeparatedSequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
 use mago_allocator::prelude::*;
@@ -37,6 +39,7 @@ where
             name: self.parse_local_identifier()?,
             parameter_list: self.parse_function_like_parameter_list()?,
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,
+            on: None,
             initializer: None,
             body: self.parse_method_body()?,
         })
@@ -107,6 +110,7 @@ where
                 name,
                 parameter_list: self.parse_function_like_parameter_list()?,
                 return_type_hint: None,
+                on: None,
                 initializer: self.parse_optional_constructor_initializer()?,
                 body: self.parse_method_body()?,
             }));
@@ -151,9 +155,32 @@ where
             ampersand: None,
             name: self.parse_local_identifier()?,
             parameter_list: self.parse_function_like_parameter_list()?,
+            on: self.parse_optional_on()?,
             initializer: None,
             body: self.parse_method_body()?,
         }))
+    }
+
+    /// Parses an `on` clause when one starts here: `on`, which stays a name everywhere else, and the events it lists.
+    fn parse_optional_on(&mut self) -> Result<Option<On<'arena>>, ParseError> {
+        if !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"on") {
+            return Ok(None);
+        }
+
+        let on = self.expect_any_keyword()?;
+        let mut events = self.new_vec();
+        let mut commas = self.new_vec();
+        loop {
+            events.push(self.parse_local_identifier()?);
+
+            if let Some(T![","]) = self.stream.peek_kind(0)? {
+                commas.push(self.stream.consume()?);
+            } else {
+                break;
+            }
+        }
+
+        Ok(Some(On { on, events: TokenSeparatedSequence::new(events, commas) }))
     }
 
     /// Parses a type declared inside a PHP# class-like whole, so the class-like parses on, and returns its refusal:

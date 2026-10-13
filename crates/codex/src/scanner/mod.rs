@@ -452,6 +452,7 @@ where
             span: r#extern.span(),
             target,
             effects,
+            event: r#extern.event.is_some(),
         });
     }
 

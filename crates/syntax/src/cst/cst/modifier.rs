@@ -37,6 +37,9 @@ pub enum Modifier<'arena> {
     Extern(Keyword<'arena>),
     /// PHP#'s `lazy`, which marks a property that computes its value on first read.
     Lazy(Keyword<'arena>),
+    /// PHP#'s `internal`, spec section 5's access to a namespace and every namespace below it. PHP has no such access,
+    /// so the visibility queries leave it out.
+    Internal(Keyword<'arena>),
 }
 
 impl<'arena> Modifier<'arena> {
@@ -58,6 +61,7 @@ impl<'arena> Modifier<'arena> {
             Modifier::Required(k) => k,
             Modifier::Extern(k) => k,
             Modifier::Lazy(k) => k,
+            Modifier::Internal(k) => k,
         }
     }
 
@@ -165,7 +169,8 @@ impl HasSpan for Modifier<'_> {
             | Modifier::Override(value)
             | Modifier::Required(value)
             | Modifier::Extern(value)
-            | Modifier::Lazy(value) => value.span(),
+            | Modifier::Lazy(value)
+            | Modifier::Internal(value) => value.span(),
         }
     }
 }

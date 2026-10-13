@@ -2612,6 +2612,68 @@ fn lazy_is_a_modifier_and_stays_a_name_elsewhere() {
     assert!(program.errors.is_empty(), "an untyped lambda parameter named `lazy`: {:#?}", program.errors);
 }
 
+/// Spec section 5's `internal` is a modifier of a declaration, a member, an accessor and a parameter, written first or
+/// after another, so semantics can name it, and stays a name elsewhere.
+#[test]
+fn internal_is_a_modifier_and_stays_a_name_elsewhere() {
+    const CODE: &str = "class Report\n{\n    internal const int MAX = 1;\n    internal static int count = 0;\n    public string name { get; internal set; } = \"\";\n    internal Report(internal int size { get; }) {}\n    public internal int run()\n    {\n        int internal = 5;\n        return internal;\n    }\n    public int internal() => 1;\n    [Pure]\n    internal int sum() => 1;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let modifiers = |sequence: &Sequence<Modifier>| sequence.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let [
+        ClassLikeMember::Constant(constant),
+        ClassLikeMember::Property(count),
+        ClassLikeMember::Property(Property::Hooked(name)),
+        ClassLikeMember::Method(constructor),
+        ClassLikeMember::Method(run),
+        ClassLikeMember::Method(named),
+        ClassLikeMember::Method(sum),
+    ] = class_members(program).as_slice()
+    else {
+        panic!("expected seven members, got {:#?}", class_members(program));
+    };
+    assert_eq!(modifiers(&constant.modifiers), ["Internal"]);
+    assert_eq!(modifiers(count.modifiers()), ["Internal", "Static"]);
+    let Some(setter) = name.hook_list.setter() else {
+        panic!("expected a setter, got {:#?}", name.hook_list);
+    };
+    assert_eq!(modifiers(&setter.modifiers), ["Internal"]);
+    assert_eq!(modifiers(&constructor.modifiers), ["Internal"]);
+    let Some(parameter) = constructor.parameter_list.parameters.first() else {
+        panic!("expected a parameter, got {:#?}", constructor.parameter_list);
+    };
+    assert_eq!(modifiers(&parameter.modifiers), ["Internal"]);
+    assert_eq!(modifiers(&run.modifiers), ["Public", "Internal"]);
+    assert_eq!(source(CODE, &named.name), "internal");
+    assert_eq!(modifiers(&sum.modifiers), ["Internal"]);
+    assert_eq!(sum.attribute_lists.len(), 1);
+
+    for (code, kind) in [
+        ("internal class Ledger\n{\n}\n", "class"),
+        ("internal interface Priced\n{\n}\n", "interface"),
+        ("[Flags]\ninternal enum Suit\n{\n    case Hearts;\n}\n", "enum"),
+        ("internal event Paid(int orderId);\n", "event"),
+    ] {
+        let program = parse(&arena, "src/Ledger.sharp", code);
+
+        assert!(program.errors.is_empty(), "{kind}: {:#?}", program.errors);
+        let declared = match program.statements.first() {
+            Some(Statement::Class(class)) => &class.modifiers,
+            Some(Statement::Interface(interface)) => &interface.modifiers,
+            Some(Statement::Enum(r#enum)) => &r#enum.modifiers,
+            Some(Statement::Event(event)) => &event.modifiers,
+            statement => panic!("expected a declaration, got {statement:#?}"),
+        };
+        assert_eq!(modifiers(declared), ["Internal"], "{kind}");
+    }
+
+    let php = parse(&arena, "src/report.php", "<?php\n\ninternal(1);\n");
+    assert!(php.errors.is_empty(), "{:#?}", php.errors);
+    assert!(matches!(php.statements.as_slice(), [_, Statement::Expression(_)]), "{:#?}", php.statements);
+}
+
 /// Spec section 9: a parameter has no computed property, because it receives its value. It is one error at its `=>`,
 /// and the parameter list and the class parse on.
 #[test]
@@ -3900,6 +3962,62 @@ fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
     assert_eq!(order.name.value, b"Order");
 }
 
+/// Spec section 15: a trailing `on` clause after a method's parameters lists the events the method listens to, before
+/// its block, its `=>` body or its `;`.
+#[test]
+fn an_on_clause_lists_events_after_the_parameters() {
+    const CODE: &str = "class Notices\n{\n    public void refresh() on OrderPaid { }\n\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded => this.log(e);\n\n    abstract void heard(OrderEvent e) on OrderEvent;\n\n    public void run() { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Notices.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let methods: Vec<(&str, Option<(&str, Vec<&str>)>)> = class_members(program)
+        .iter()
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            let on = method.on.as_ref().map(|on| {
+                assert_eq!(on.on.value, b"on");
+
+                (source(CODE, on), on.events.iter().map(|event| source(CODE, event)).collect())
+            });
+
+            (source(CODE, &method.name), on)
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("refresh", Some(("on OrderPaid", vec!["OrderPaid"]))),
+            ("send", Some(("on OrderPaid, OrderRefunded", vec!["OrderPaid", "OrderRefunded"]))),
+            ("heard", Some(("on OrderEvent", vec!["OrderEvent"]))),
+            ("run", None),
+        ]
+    );
+}
+
+/// `on` starts a clause only after a method's parameters, so a method, a parameter and a local named `on` keep it as a
+/// name.
+#[test]
+fn on_stays_a_name_outside_the_clause() {
+    const CODE: &str =
+        "class Switch\n{\n    public bool on(bool on)\n    {\n        const was = on;\n        return was;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Switch.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(method)] = class_members(program).as_slice() else {
+        panic!("expected one method, got {:#?}", class_members(program));
+    };
+    assert_eq!(source(CODE, &method.name), "on");
+    assert!(method.on.is_none(), "{:#?}", method.on);
+    let [Statement::LocalDeclaration(was), _] = method_body(program) else {
+        panic!("expected a local and a return, got {:#?}", method_body(program));
+    };
+    assert_eq!(source(CODE, was.value), "on");
+}
+
 /// `event` declares an event only before a name and `(`, so a parameter, a field, a local, a call such as Laravel's
 /// `event(…)` and an operand of a word operator keep it as a name.
 #[test]
@@ -3922,4 +4040,34 @@ fn event_stays_a_name_where_no_declaration_follows() {
         panic!("expected a method and a field, got {:#?}", class_members(program));
     };
     assert_eq!(field.first_variable().name, b"event");
+}
+
+/// Spec section 15 raises an event with `emit` and the expression after it. Spec section 2 reserves `emit`, so at the
+/// start of a `.sharp` statement it always raises, `emit(paid);` included. Plain PHP keeps `emit` a name.
+#[test]
+fn emit_raises_the_expression_after_it() {
+    const CODE: &str = "class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit 5;\n        emit(paid);\n        emit (paid);\n    }\n}\n";
+    const PHP: &str = "<?php\n\nemit new Paid();\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+    let php = parse(&arena, "src/raise.php", PHP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let statements: Vec<(&str, &str)> = method_body(program)
+        .iter()
+        .map(|statement| match statement {
+            Statement::Emit(emit) => {
+                assert_eq!(emit.emit.value, b"emit");
+
+                ("emit", source(CODE, emit.value))
+            }
+            _ => panic!("expected an emit, got {statement:#?}"),
+        })
+        .collect();
+    assert_eq!(
+        statements,
+        [("emit", "new OrderPaid(1)"), ("emit", "paid"), ("emit", "5"), ("emit", "(paid)"), ("emit", "(paid)")]
+    );
+    assert!(!php.errors.is_empty(), "`emit new` must stay a parse error in plain PHP");
+    assert!(!php.statements.iter().any(|statement| matches!(statement, Statement::Emit(_))), "{:#?}", php.statements);
 }

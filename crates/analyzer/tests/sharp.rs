@@ -8374,8 +8374,9 @@ fn a_message_names_an_accessor_as_sharp_writes_it() {
     );
 }
 
-/// A plain PHP parent's abstract, final and by-reference hooks are named as PHP# names an accessor, `Priced.total.get`,
-/// when a PHP# class misses or replaces them. The PHP twin keeps Mago's text.
+/// A plain PHP parent's final and by-reference hooks are named as PHP# names an accessor, `Priced.total.get`, when a
+/// PHP# class replaces them, and a property a PHP# class misses is named as the property it lacks. The PHP twin keeps
+/// Mago's text.
 #[test]
 fn a_message_names_an_inherited_accessor_as_sharp_writes_it() {
     let library = "<?php\n\nnamespace Lib;\n\ninterface Priced\n{\n    public int $total { get; }\n}\n\nclass Counter\n{\n    public int $count = 0 {\n        final get => $this->count;\n    }\n}\n\ninterface Shared\n{\n    public array $items { &get; }\n}\n";
@@ -8394,7 +8395,7 @@ fn a_message_names_an_inherited_accessor_as_sharp_writes_it() {
     assert_eq!(
         worded(("src/Demo/Order.sharp", sharp), &others),
         [
-            "7:14 unimplemented-abstract-property-hook Class `Order` does not implement the abstract property hook `Priced.total.get`. | `Order` is not abstract and must implement this hook | `Priced.total.get` is defined as abstract here | When a concrete class extends an abstract class or implements an interface, it must provide an implementation for all inherited abstract property hooks. | You can either implement the `get` hook for property `total` in `Order`, or declare `Order` as an abstract class.",
+            "7:14 unimplemented-abstract-property-hook `Order` does not give `total`, which `Priced` states. | Declared here. | Stated here. | Add the property `public int total { get; }`.",
             "13:33 override-final-property-hook Cannot override final property hook `Counter.count.get`. | Attempting to override final hook here | Hook `Counter.count.get` is declared as final | Final property hooks cannot be overridden in child classes. | Remove the `get` hook from `Tally.count`, or remove the final modifier from the parent hook.",
             "18:30 incompatible-property-hook-signature Declaration of `Bag.items.get` must be compatible with `& Shared.items.get`. | This hook does not return by reference | Interface `Shared` requires this hook to return by reference | When an interface declares a by-reference hook (`&get`), the implementing class must also return by reference. | Add `&` to the `get` hook declaration: `&get => ...`",
         ]
@@ -9911,6 +9912,206 @@ fn an_extern_event_gives_its_class_the_effects_it_lists() {
     );
 }
 
+/// The files the listener tests listen to: `OrderEvent` and its events `OrderPaid` and `OrderRefunded`, `Shipped` of no
+/// family, the plain PHP `JobFailed` an `extern event` marks, and the plain class `Logger`.
+fn listened() -> [(&'static str, &'static str); 7] {
+    let [order_event, order_paid] = ORDER_EVENTS;
+
+    [
+        order_event,
+        order_paid,
+        (
+            "app/Shop/OrderRefunded.sharp",
+            "namespace App.Shop;\n\npublic event OrderRefunded(int orderId) : OrderEvent;\n",
+        ),
+        ("app/Shop/Shipped.sharp", "namespace App.Shop;\n\npublic event Shipped(int shipmentId);\n"),
+        (
+            "src/Queue/Events.php",
+            "<?php\n\nnamespace Illuminate\\Queue\\Events;\n\nfinal class JobFailed\n{\n    public function __construct(public int $id) {}\n}\n",
+        ),
+        (
+            "app/Stubs/Queue.sharp",
+            "namespace App.Stubs;\n\nimport Illuminate.Queue.Events.JobFailed;\n\nextern event JobFailed;\n",
+        ),
+        ("app/Shop/Logger.sharp", "namespace App.Shop;\n\npublic class Logger\n{\n}\n"),
+    ]
+}
+
+/// Spec section 15: a trailing `on` clause makes a method listen to the events it lists. The method takes no parameter,
+/// or one that every listed event is, and nothing else. The help names the most specific interface every listed event
+/// is or implements, when every listed name is a type. A `private` listener counts as used, because the engine runs it. A
+/// parameter without a type and a second method of one name report only their own errors.
+#[test]
+fn a_listener_takes_no_parameter_or_one_that_every_listed_event_is() {
+    let notices = (
+        "app/Shop/OrderNotices.sharp",
+        "namespace App.Shop;\n\nimport Illuminate.Queue.Events.JobFailed;\n\npublic class OrderNotices\n{\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded { }\n\n    public void refresh() on OrderPaid { }\n\n    public void audit(OrderEvent e) on OrderEvent { }\n\n    public void alert(JobFailed e) on JobFailed { }\n\n    private void deliver(OrderPaid e) on OrderPaid { }\n}\n",
+    );
+    let errors = (
+        "app/Shop/Errors.sharp",
+        "namespace App.Shop;\n\npublic class Errors\n{\n    public void send(OrderPaid e) on OrderPaid, OrderRefunded { }\n\n    public void ship(OrderPaid e) on OrderPaid, Shipped { }\n\n    public void log(OrderPaid e, Logger logger) on OrderPaid { }\n\n    public void settle(OrderPaid e) on OrderRefunded, OrderSettled { }\n\n    public void bill(Charge e) on Charge, Credit { }\n\n    public void watch(OrderPaid e) on OrderPaid, OrderEvent { }\n}\n",
+    );
+    let billed = ("app/Shop/Billed.sharp", "namespace App.Shop;\n\npublic interface Billed\n{\n}\n");
+    let charged = ("app/Shop/Charged.sharp", "namespace App.Shop;\n\npublic interface Charged : Billed\n{\n}\n");
+    let charge = ("app/Shop/Charge.sharp", "namespace App.Shop;\n\npublic event Charge(int id) : Billed, Charged;\n");
+    let credit = ("app/Shop/Credit.sharp", "namespace App.Shop;\n\npublic event Credit(int id) : Billed, Charged;\n");
+    let billing = (
+        "app/Shop/Billing.sharp",
+        "namespace App.Shop;\n\npublic class Billing\n{\n    public void bill(Charged e) on Charge, Credit { }\n\n    public void watch(OrderEvent e) on OrderPaid, OrderEvent { }\n}\n",
+    );
+    let untyped = (
+        "app/Shop/Untyped.sharp",
+        "namespace App.Shop;\n\npublic class Untyped\n{\n    public void send(e) on OrderPaid { }\n}\n",
+    );
+    let twice = (
+        "app/Shop/Twice.sharp",
+        "namespace App.Shop;\n\npublic class Twice\n{\n    public void send(OrderPaid e) on OrderPaid { }\n\n    public void send(OrderPaid e, Logger logger) on OrderPaid { }\n}\n",
+    );
+    let [order_event, order_paid, refunded, shipped, events, queue, logger] = listened();
+    let others = [order_event, order_paid, refunded, shipped, events, queue, logger, billed, charged, charge, credit];
+
+    assert_eq!(worded(notices, &listened()), Vec::<String>::new());
+    assert_eq!(
+        worded(errors, &others),
+        [
+            "5:49 invalid-event `send` takes an `OrderPaid`, and it listens to `OrderRefunded`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `OrderEvent`, or take no parameter.",
+            "7:49 invalid-event `ship` takes an `OrderPaid`, and it listens to `Shipped`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, or take no parameter.",
+            "9:34 invalid-event A listener takes only its event, and `log` also takes `logger`. | Not the event. | A listener gets everything else through its class's constructor.",
+            "11:55 non-existent-class-like Cannot find type `OrderSettled`. | `OrderSettled` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            "11:40 invalid-event `settle` takes an `OrderPaid`, and it listens to `OrderRefunded`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, or take no parameter.",
+            "13:43 invalid-event `bill` takes a `Charge`, and it listens to `Credit`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `Charged`, or take no parameter.",
+            "15:50 invalid-event `watch` takes an `OrderPaid`, and it listens to `OrderEvent`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `OrderEvent`, or take no parameter.",
+        ]
+    );
+    assert_eq!(worded(billing, &others), Vec::<String>::new());
+    assert_eq!(
+        worded(untyped, &listened()),
+        ["5:22 parse A PHP# parameter needs a type, as in `int extra`. | Written here."]
+    );
+    assert_eq!(worded(twice, &listened()), Vec::<String>::new());
+}
+
+/// Spec section 15: an `on` clause lists events, which `event` or `extern event` declares, or interfaces an event
+/// implements, so every listener can run. A type that exists and is not an event, a class, an enum or a built-in type,
+/// is refused as one. A name of no type is the error any unknown type is.
+#[test]
+fn an_on_clause_lists_events_or_interfaces_an_event_implements() {
+    let watch = (
+        "app/Shop/Watch.sharp",
+        "namespace App.Shop;\n\npublic class Watch\n{\n    public void log(Logger logger) on Logger { }\n\n    public void track() on Tracked, OrderSettled { }\n\n    public void scalar() on int, string { }\n\n    public void any() on Any { }\n\n    public void level() on Level { }\n}\n",
+    );
+    let tracked = ("app/Shop/Tracked.sharp", "namespace App.Shop;\n\npublic interface Tracked\n{\n}\n");
+    let level = ("app/Shop/Level.sharp", "namespace App.Shop;\n\npublic enum Level\n{\n    case Low;\n}\n");
+    let [order_event, order_paid, refunded, shipped, events, queue, logger] = listened();
+    let note =
+        "An `on` clause lists events, which `event` or `extern event` declares, or interfaces an event implements.";
+
+    assert_eq!(
+        worded(watch, &[order_event, order_paid, refunded, shipped, events, queue, logger, tracked, level]),
+        [
+            format!("5:39 invalid-event `Logger` is not an event. | Listed here. | {note}"),
+            format!("7:28 invalid-event No event implements `Tracked`, so `track` never runs. | Listed here. | {note}"),
+            "7:37 non-existent-class-like Cannot find type `OrderSettled`. | `OrderSettled` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.".to_owned(),
+            format!("9:29 invalid-event `int` is not an event. | Listed here. | {note}"),
+            format!("9:34 invalid-event `string` is not an event. | Listed here. | {note}"),
+            format!("11:26 invalid-event `Any` is not an event. | Listed here. | {note}"),
+            format!("13:28 invalid-event `Level` is not an event. | Listed here. | {note}"),
+        ]
+    );
+}
+
+/// Spec section 15: a listener runs on an object the container creates, so it is not `static`, and its class-like is a
+/// class that is not abstract and whose constructor is public. It returns nothing. Until spec section 32's container
+/// exists, the object is created with no arguments, so a class whose constructor takes parameters is not supported yet.
+#[test]
+fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_creates() {
+    let fixed = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let r#static = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public static void tick() on OrderPaid { }\n}\n",
+    );
+    let returning = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public int tick() on OrderPaid\n    {\n        return 1;\n    }\n}\n",
+    );
+    let r#abstract = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic abstract class Tick\n{\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let r#enum = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic enum Tick\n{\n    case Open;\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let interface =
+        ("app/Shop/Tick.sharp", "namespace App.Shop;\n\npublic interface Tick\n{\n    void tick() on OrderPaid;\n}\n");
+    let constructed = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick(public Logger logger { get; }) { }\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let opened = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick() { }\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let hidden = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    private Tick() { }\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    let guarded = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    protected Tick() { }\n\n    public void tick() on OrderPaid { }\n}\n",
+    );
+
+    assert_eq!(worded(fixed, &listened()), Vec::<String>::new());
+    assert_eq!(worded(opened, &listened()), Vec::<String>::new());
+    assert_eq!(
+        worded(hidden, &listened()),
+        [
+            "7:24 invalid-event `Tick`'s constructor is private, so PHP# can't create a `Tick` to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(guarded, &listened()),
+        [
+            "7:24 invalid-event `Tick`'s constructor is protected, so PHP# can't create a `Tick` to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(r#static, &listened()),
+        ["5:12 invalid-event A listener runs on an object, so `tick` cannot be `static`. | Declared `static` here."]
+    );
+    assert_eq!(
+        worded(returning, &listened()),
+        ["5:12 invalid-event A listener returns nothing, and `tick` returns `int`. | Returned type. | Return `void`."]
+    );
+    assert_eq!(
+        worded(r#abstract, &listened()),
+        [
+            "5:24 invalid-event `Tick` is abstract, so the container cannot create it to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(r#enum, &listened()),
+        [
+            "7:24 invalid-event `Tick` is an enum, so the container cannot create it to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(interface, &listened()),
+        [
+            "5:17 invalid-event `Tick` is an interface, so the container cannot create it to run `tick`. | `tick` listens here."
+        ]
+    );
+    assert_eq!(
+        worded(constructed, &listened()),
+        [
+            "7:24 invalid-event A listener whose class takes constructor parameters is not supported yet in PHP#. | `tick` listens to events. | PHP# creates `Tick` with no arguments to run its listeners."
+        ]
+    );
+}
+
 const LABEL: (&str, &str) = (
     "app/Shop/Label.sharp",
     "namespace App.Shop;\n\npublic class Label\n{\n    public Label(private string name) { }\n\n    public string text => trim(this.name);\n}\n",
@@ -10923,7 +11124,7 @@ fn a_getter_applying_a_pure_operator_passes() {
 const ORDER_EVENTS: [(&str, &str); 2] = [
     (
         "app/Shop/OrderEvent.sharp",
-        "namespace App.Shop;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n",
+        "namespace App.Shop;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n",
     ),
     (
         "app/Shop/OrderPaid.sharp",
@@ -10933,7 +11134,7 @@ const ORDER_EVENTS: [(&str, &str); 2] = [
 
 /// Spec section 15: an event is a final class whose parameters are its public get-only properties, and its header
 /// names the interfaces it gives. So its properties read by name and its interface types it, a write is refused, and
-/// `new` checks its arguments as a constructor's.
+/// `new` checks its arguments as a constructor's. A `.php` file keeps PHP's messages for both writes.
 #[test]
 fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
     let reader = (
@@ -10944,20 +11145,34 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
         "app/Shop/Writer.sharp",
         "namespace App.Shop;\n\npublic class Writer\n{\n    public void write(OrderPaid paid, OrderEvent event)\n    {\n        paid.orderId = 2;\n        event.orderId = 2;\n    }\n\n    public OrderPaid make() => new OrderPaid(\"one\");\n}\n",
     );
+    let php_writer = (
+        "src/Shop/PhpWriter.php",
+        "<?php\n\nnamespace App\\Shop;\n\nfinal class PhpWriter\n{\n    public function write(OrderPaid $paid, OrderEvent $event): void\n    {\n        $paid->orderId = 2;\n        $event->orderId = 2;\n    }\n}\n",
+    );
     let sub = ("app/Shop/Sub.sharp", "namespace App.Shop;\n\npublic class Sub : OrderPaid\n{\n}\n");
 
     assert_eq!(worded(reader, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(
+        messages(php_writer, &ORDER_EVENTS),
+        [
+            "Cannot initialize readonly property `App\\Shop\\OrderPaid::$orderId` from within `App\\Shop\\PhpWriter`.",
+            "Cannot write to read-only property `App\\Shop\\OrderEvent::$orderId` - property only has a get hook.",
+        ]
+    );
     assert_eq!(
         issues(writer, &ORDER_EVENTS),
         ["7:14 invalid-property-write", "8:15 invalid-property-write", "11:46 invalid-argument"]
     );
     assert_eq!(
-        messages(writer, &ORDER_EVENTS),
+        worded(writer, &ORDER_EVENTS)[..2],
         [
-            "Cannot initialize readonly property `OrderPaid.orderId` from within `Writer`.",
-            "Cannot write to read-only property `OrderEvent.orderId` - property only has a get hook.",
-            "Invalid argument type for argument #1 of `OrderPaid.__construct`: expected `int`, but found `string`."
+            "7:14 invalid-property-write Event `OrderPaid` sets `orderId` once, by `new`. | Written here. | An event's parameters are its properties, and nothing changes them after `new`. | Create a new event with the value instead.",
+            "8:15 invalid-property-write `orderId` of `OrderEvent` is get-only. | Written here. | Declared get-only here."
         ]
+    );
+    assert_eq!(
+        messages(writer, &ORDER_EVENTS)[2],
+        "Invalid argument type for argument #1 of `OrderPaid.__construct`: expected `int`, but found `string`."
     );
     assert_eq!(messages(sub, &ORDER_EVENTS), ["Class `Sub` cannot extend final class `OrderPaid`"]);
 }
@@ -10990,9 +11205,12 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 
 /// Spec section 15: the interface a family of events shares states the get-only properties each event gives, so an
 /// event or a class that names it and lacks one, or gives one that is not public, on each object and of its type, is
-/// refused, as the engine refuses the class it runs as. A get-only property may give a narrower type, and a PHP
-/// interface's property with `set` takes its type exactly. A class that names the interface answers for the property
-/// it inherits too, from a PHP# or a plain PHP base class, a base's `private` field included.
+/// refused, as the engine refuses the class it runs as. An event gives a property through a parameter, and a class
+/// through a property, as each help writes it. A get-only property may give a narrower type, and a PHP interface's
+/// property with `set` takes its type exactly. A class that names the interface answers for the property it inherits
+/// too, from a PHP# or a plain PHP base class, a base's `private` field included. A property stated with `set` needs
+/// one the class can set, reported once, naming what the class gives instead: get-only, `private set`, `protected set`
+/// or `init`. A class gives it with `{ get; set; }`, and an event, whose properties `new` sets once, cannot give it.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : OrderEvent;\n");
@@ -11020,7 +11238,7 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     );
     let given = (
         "app/Shop/Moved.sharp",
-        "namespace App.Shop;\n\npublic event Moved(int orderId) : OrderEvent;\n\npublic class Kept : OrderEvent\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n\npublic interface Priced\n{\n    public int? total { get; }\n}\n\npublic class Bill : Priced\n{\n    public int total { get; }\n\n    public Bill(int total)\n    {\n        this.total = total;\n    }\n}\n",
+        "namespace App.Shop;\n\npublic event Moved(int id, int orderId) : OrderEvent;\n\npublic class Kept : OrderEvent\n{\n    public int orderId { get; }\n\n    public Kept(int orderId)\n    {\n        this.orderId = orderId;\n    }\n}\n\npublic interface Priced\n{\n    int? total { get; }\n}\n\npublic class Bill : Priced\n{\n    public int total { get; }\n\n    public Bill(int total)\n    {\n        this.total = total;\n    }\n}\n",
     );
     let [order_event, order_paid] = ORDER_EVENTS;
     let string_base = (
@@ -11057,9 +11275,51 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         "namespace App.Shop;\n\npublic class WrongBase : OrderEvent\n{\n    public string orderId { get; } = \"x\";\n}\n",
     );
     let from_wrong = ("app/Shop/Child.sharp", "namespace App.Shop;\n\npublic class Child : WrongBase\n{\n}\n");
+    let settable_interface = (
+        "src/Shop/Settable.php",
+        "<?php\n\nnamespace App\\Shop;\n\ninterface Settable\n{\n    public int $total { get; set; }\n}\n",
+    );
+    let unset_class = ("app/Shop/Tally.sharp", "namespace App.Shop;\n\npublic class Tally : Settable\n{\n}\n");
+    let unset_event = ("app/Shop/Counted.sharp", "namespace App.Shop;\n\npublic event Counted(int id) : Settable;\n");
+    let get_only_class = (
+        "app/Shop/Fixed.sharp",
+        "namespace App.Shop;\n\npublic class Fixed : Settable\n{\n    public int total { get; }\n\n    public Fixed(int total)\n    {\n        this.total = total;\n    }\n}\n",
+    );
+    let get_only_event =
+        ("app/Shop/Totaled.sharp", "namespace App.Shop;\n\npublic event Totaled(int total) : Settable;\n");
+    let set_given = (
+        "app/Shop/Tally.sharp",
+        "namespace App.Shop;\n\npublic class Tally : Settable\n{\n    public int total { get; set; } = 0;\n}\n",
+    );
+    let private_set = (
+        "app/Shop/Guarded.sharp",
+        "namespace App.Shop;\n\npublic class Guarded : Settable\n{\n    public int total { get; private set; } = 0;\n\n    public void bump()\n    {\n        this.total = this.total + 1;\n    }\n}\n",
+    );
+    let protected_set = (
+        "app/Shop/Guarded.sharp",
+        "namespace App.Shop;\n\npublic class Guarded : Settable\n{\n    public int total { get; protected set; } = 0;\n\n    public void bump()\n    {\n        this.total = this.total + 1;\n    }\n}\n",
+    );
+    let computed = (
+        "app/Shop/Guarded.sharp",
+        "namespace App.Shop;\n\npublic class Guarded : Settable\n{\n    public int total => 7;\n}\n",
+    );
+    let init = (
+        "app/Shop/Guarded.sharp",
+        "namespace App.Shop;\n\npublic class Guarded : Settable\n{\n    public int total { get; init; }\n\n    public Guarded(int total)\n    {\n        this.total = total;\n    }\n}\n",
+    );
 
-    assert_eq!(issues(event, &ORDER_EVENTS), ["3:14 unimplemented-abstract-property-hook"]);
-    assert_eq!(issues(class, &ORDER_EVENTS), ["3:14 unimplemented-abstract-property-hook"]);
+    assert_eq!(
+        worded(event, &ORDER_EVENTS),
+        [
+            "3:14 unimplemented-abstract-property-hook `Moved` does not give `orderId`, which `OrderEvent` states. | Declared here. | Stated here. | Add the parameter `int orderId`."
+        ]
+    );
+    assert_eq!(
+        worded(class, &ORDER_EVENTS),
+        [
+            "3:14 unimplemented-abstract-property-hook `Moved` does not give `orderId`, which `OrderEvent` states. | Declared here. | Stated here. | Add the property `public int orderId { get; }`."
+        ]
+    );
     assert_eq!(
         worded(typed, &ORDER_EVENTS),
         [
@@ -11115,4 +11375,156 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         ["3:14 incompatible-property-type"]
     );
     assert_eq!(issues(from_wrong, &[order_event, order_paid, wrong_base]), Vec::<String>::new());
+    assert_eq!(
+        worded(unset_class, &[settable_interface]),
+        [
+            "3:14 unimplemented-abstract-property-hook `Tally` does not give `total`, which `Settable` states. | Declared here. | Stated here. | Add the property `public int total { get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(unset_event, &[settable_interface]),
+        [
+            "3:14 unimplemented-abstract-property-hook `Counted` cannot give `total`, which `Settable` states with `set`: an event's properties are set once, by `new`. | Declared here. | Stated here."
+        ]
+    );
+    assert_eq!(
+        worded(get_only_class, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Fixed` gives `total` get-only, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(get_only_event, &[settable_interface]),
+        [
+            "3:26 incompatible-property-access `Totaled` cannot give `total`, which `Settable` states with `set`: an event's properties are set once, by `new`. | Given here. | Stated here."
+        ]
+    );
+    assert_eq!(worded(set_given, &[settable_interface]), Vec::<String>::new());
+    assert_eq!(
+        worded(private_set, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Guarded` gives `total` with `private set`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(protected_set, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Guarded` gives `total` with `protected set`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(computed, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Guarded` gives `total` get-only, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    assert_eq!(
+        worded(init, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Guarded` gives `total` with `init`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+}
+
+/// An interface member is public, written bare: a class gives a bare property and a bare method as public ones, an
+/// event gives the property, and other code reads and calls them through the interface.
+#[test]
+fn a_bare_interface_member_is_public() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let named = (
+        "app/Shop/Named.sharp",
+        "namespace App.Shop;\n\npublic interface Named\n{\n    int orderId { get; }\n\n    string label();\n}\n",
+    );
+    let ticket = (
+        "app/Shop/Ticket.sharp",
+        "namespace App.Shop;\n\npublic class Ticket : Named\n{\n    public int orderId { get; }\n\n    public Ticket(int orderId)\n    {\n        this.orderId = orderId;\n    }\n\n    public string label() => \"ticket\";\n}\n",
+    );
+    let desk = (
+        "app/Shop/Desk.sharp",
+        "namespace App.Shop;\n\npublic class Desk\n{\n    public string read(Named named, OrderEvent paid) => `${named.label()} ${named.orderId} ${paid.orderId}`;\n}\n",
+    );
+
+    assert_eq!(worded(ticket, &[named]), Vec::<String>::new());
+    assert_eq!(worded(order_paid, &[order_event]), Vec::<String>::new());
+    assert_eq!(worded(desk, &[named, ticket, order_event, order_paid]), Vec::<String>::new());
+}
+
+/// Spec section 15: `emit` raises an event, one an `event` declares or a plain PHP class an `extern event` marks. Any
+/// other value is refused, an interface its events share included, and so is a union with a part that is not an event.
+/// `extern event` marks only a class. A refused value or a type that names no class reports only its own error.
+#[test]
+fn emit_takes_an_event() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let failed = (
+        "src/Queue/JobFailed.php",
+        "<?php\n\nnamespace Queue;\n\nclass JobFailed\n{\n}\n\nclass Ledger\n{\n}\n\ninterface Notice\n{\n}\n\ntrait Tracer\n{\n}\n\nenum Level\n{\n    case Low;\n}\n",
+    );
+    let money = ("app/Shop/Money.sharp", "namespace App.Shop;\n\npublic class Money\n{\n}\n");
+    let raiser = (
+        "app/Shop/Raiser.sharp",
+        "namespace App.Shop;\n\nimport Queue.JobFailed;\nimport Queue.Ledger;\n\nextern event JobFailed;\nextern Ledger;\n\npublic class Raiser\n{\n    public void raise(OrderPaid paid, JobFailed failed, OrderEvent family, Money amount, Ledger ledger, int count, Missing missing)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit failed;\n        emit family;\n        emit amount;\n        emit ledger;\n        emit count;\n        emit null;\n        emit new Missing(3);\n        emit missing;\n    }\n\n    public void choose(OrderPaid? maybe, OrderPaid|Money mixed, OrderPaid|OrderRefunded either)\n    {\n        emit maybe;\n        emit mixed;\n        emit either;\n    }\n}\n",
+    );
+    let refunded = (
+        "app/Shop/OrderRefunded.sharp",
+        "namespace App.Shop;\n\npublic event OrderRefunded(int orderId) : OrderEvent;\n",
+    );
+    let notice = (
+        "app/Stubs/Notices.sharp",
+        "namespace App.Stubs;\n\nimport Queue.Notice;\nimport Queue.Tracer;\nimport Queue.Level;\n\nextern event Notice;\nextern event Tracer;\nextern event Level;\n",
+    );
+    let noticed = (
+        "app/Shop/Noticed.sharp",
+        "namespace App.Shop;\n\nimport Queue.Notice;\n\npublic class Noticed\n{\n    public void raise(Notice notice)\n    {\n        emit notice;\n    }\n}\n",
+    );
+    let note = "An event is a class that `event` declares, or a plain PHP class that `extern event` marks.";
+
+    assert_eq!(
+        worded(notice, &[failed]),
+        [
+            "7:14 invalid-event `extern event` marks a class, and `Notice` is an interface.",
+            "8:14 invalid-event `extern event` marks a class, and `Tracer` is a trait.",
+            "9:14 invalid-event `extern event` marks a class, and `Level` is an enum.",
+        ]
+    );
+    assert_eq!(
+        worded(noticed, &[failed, notice]),
+        [format!("9:14 invalid-event `emit` takes an event, and `Notice` is not one. | Emitted here. | {note}")]
+    );
+    assert_eq!(
+        worded(raiser, &[order_event, order_paid, refunded, failed, money]),
+        [
+            "11:116 non-existent-class-like Cannot find type `Missing`. | `Missing` is not defined in the current codebase | This error occurs when a type is referenced but not found in any analyzed source files or stubs. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.".to_owned(),
+            format!("16:14 invalid-event `emit` takes an event, and `OrderEvent` is not one. | Emitted here. | {note}"),
+            format!("17:14 invalid-event `emit` takes an event, and `Money` is not one. | Emitted here. | {note}"),
+            format!("18:14 invalid-event `emit` takes an event, and `Ledger` is not one. | Emitted here. | {note}"),
+            format!("19:14 invalid-event `emit` takes an event, and `int` is not one. | Emitted here. | {note}"),
+            format!("20:14 invalid-event `emit` takes an event, and `null` is not one. | Emitted here. | {note}"),
+            "21:18 non-existent-class Class `Missing` not found. | `Missing` is not defined or cannot be autoloaded | Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.".to_owned(),
+            format!("27:14 invalid-event `emit` takes an event, and `OrderPaid?` is not one. | Emitted here. | {note}"),
+            format!("28:14 invalid-event `emit` takes an event, and `Money|OrderPaid` is not one. | Emitted here. | {note}"),
+        ]
+    );
+}
+
+/// Spec section 15: `emit` has the effect `Events`, whatever its listeners do, so a getter or a law that emits, or
+/// reaches a method that does, is refused naming the event, and a lambda that emits fits only a function type that
+/// lists `Events`.
+#[test]
+fn emit_has_the_effect_events() {
+    let [order_event, order_paid] = ORDER_EVENTS;
+    let checkout = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    private Function<void() uses Events> announce = () => { emit new OrderPaid(1); };\n\n    private Function<void()> silent = () => { emit new OrderPaid(2); };\n\n    public int paid\n    {\n        get\n        {\n            emit new OrderPaid(3);\n            return 3;\n        }\n    }\n\n    public int total => this.complete();\n\n    law completes(Checkout checkout) => checkout.complete() > 0;\n\n    public int complete()\n    {\n        emit new OrderPaid(4);\n        return 4;\n    }\n\n    public void run()\n    {\n        this.announce();\n        this.silent();\n    }\n}\n",
+    );
+
+    assert_eq!(issues(checkout, &ORDER_EVENTS), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[checkout, order_event, order_paid]),
+        [
+            "app/Shop/Checkout.sharp:13:13 impure-getter: Getter `paid` emits `OrderPaid`, which has the effect `Events`. Getters must be pure.",
+            "app/Shop/Checkout.sharp:18:25 impure-getter: Getter `total` reaches `Checkout.complete`, which emits `OrderPaid` with the effect `Events`. Getters must be pure.",
+            "app/Shop/Checkout.sharp:20:41 impure-law: Law `completes` reaches `Checkout.complete`, which emits `OrderPaid` with the effect `Events`. Laws hold only over pure code.",
+            "app/Shop/Checkout.sharp:7:39 invalid-property-default-value: This lambda emits `OrderPaid`, which has the effect `Events`, so a `Function<void()>` cannot hold it.",
+        ]
+    );
 }
