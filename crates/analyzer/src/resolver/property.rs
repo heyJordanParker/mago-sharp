@@ -142,8 +142,7 @@ where
 
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = property_selector
-        && let Some(extension) =
-            resolve_extension(context, block_context, artifacts, &object_type, name, MetadataFlags::EXTENSION_PROPERTY)
+        && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_PROPERTY)
     {
         match extension {
             Extension::Member(_) if for_assignment => {

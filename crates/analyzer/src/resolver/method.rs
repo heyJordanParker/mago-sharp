@@ -220,8 +220,7 @@ where
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = selector
         && let Some(object_type) = artifacts.get_expression_type(object).cloned()
-        && let Some(extension) =
-            resolve_extension(context, block_context, artifacts, &object_type, name, MetadataFlags::EXTENSION_METHOD)
+        && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_METHOD)
     {
         match extension {
             Extension::Member(method) => result.extension = Some(method),

@@ -1768,7 +1768,7 @@ mod tests {
 
     const WALLET: &str = "<?php\n\nnamespace Lib;\n\nclass Wallet\n{\n    public int $balance = 0;\n}\n";
     const WALLET_EXTENSIONS: &str = "namespace App.Wallets;\n\nimport Lib.Wallet;\n\npublic static class WalletExtensions\n{\n    extension(Wallet wallet)\n    {\n        public int total() => wallet.balance + 1;\n    }\n}\n";
-    const WALLET_REPORT: &str = "namespace App;\n\nimport App.Wallets.WalletExtensions;\nimport Lib.Wallet;\n\npublic class Report\n{\n    public int of(Wallet wallet)\n    {\n        return wallet.total();\n    }\n}\n";
+    const WALLET_REPORT: &str = "namespace App;\n\nimport App.Wallets.WalletExtensions;\nimport Lib.Purse;\n\npublic class Report\n{\n    public int of(Purse purse)\n    {\n        return purse.wallet().total();\n    }\n}\n";
 
     /// Spec section 26: an imported class's extensions apply to the whole file, so a file reads each class it imports
     /// though it names none of its members, and compiles again when the class gains an extension member.
@@ -1799,16 +1799,21 @@ mod tests {
 
     /// Spec section 26 refuses an extension member named like a real member its receiver's class declares or
     /// inherits, so a member of that name joining or leaving that class, or a class above it, changes whether the
-    /// unchanged file of the extension is refused, and gives the unchanged file that calls the member a new key. A
-    /// class below the receiver's competes with no extension, so its member changes neither. Each row edits only a PHP
-    /// file. The refusals match a clean analysis in a one-off compile and under `mago analyze --watch`, which analyzes
-    /// with `diff` and never compiles, and each compiled file matches a clean compile after its header.
+    /// unchanged file of the extension is refused, and gives the unchanged file that calls the member a new key, though
+    /// it reaches the wallet through `Purse.wallet()` and never names `Wallet`. A class below the receiver's competes
+    /// with no extension, so its member changes neither. Each row edits only a PHP file. The refusals match a clean
+    /// analysis in a one-off compile and under `mago analyze --watch`, which analyzes with `diff` and never compiles,
+    /// and each compiled file matches a clean compile after its header.
     #[test]
     fn a_compile_after_a_class_an_extension_receiver_is_gains_or_loses_its_member_matches_a_clean_compile() {
         let wallets = |wallet: &str, family: &str| {
             vec![
                 ("lib/Wallet.php", wallet.to_string()),
                 ("lib/Family.php", format!("<?php\n\nnamespace Lib;\n\n{family}")),
+                (
+                    "lib/Purse.php",
+                    "<?php\n\nnamespace Lib;\n\nclass Purse\n{\n    public function wallet(): Wallet\n    {\n        return new Wallet();\n    }\n}\n".to_string(),
+                ),
                 ("app/Wallets/WalletExtensions.sharp", WALLET_EXTENSIONS.to_string()),
                 ("app/Report.sharp", WALLET_REPORT.to_string()),
             ]

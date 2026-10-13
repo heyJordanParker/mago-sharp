@@ -16,12 +16,9 @@ use mago_span::HasSpan;
 use mago_syntax::cst::LocalIdentifier;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
-use mago_word::concat_word;
 
-use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
-use crate::context::block::BlockContext;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
@@ -48,8 +45,6 @@ pub(crate) enum Extension {
 /// the import to add. Either still reaches its member, so the access is checked as it would run.
 pub(crate) fn resolve_extension<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
-    block_context: &BlockContext<'ctx>,
-    artifacts: &mut AnalysisArtifacts,
     receiver: &TUnion,
     name: &LocalIdentifier<'_>,
     flag: MetadataFlags,
@@ -65,19 +60,8 @@ where
 
     let codebase = context.codebase;
     let extensions = codebase.extensions.get(&ascii_lowercase_word(name.value))?;
-    // A real member of the type the code shows wins over an extension, spec section 26, so the access reads the member
-    // of its name on each class of the type, and is analyzed again when one gains or loses it.
-    for class in receiver.types.iter().filter_map(|atomic| match atomic {
-        TAtomic::Object(object) => object.get_name(),
-        _ => None,
-    }) {
-        let references = &mut artifacts.symbol_references;
-        references.add_reference_for_method_call(
-            &block_context.scope,
-            &MethodIdentifier::new(class, ascii_lowercase_word(name.value)),
-        );
-        references.add_reference_for_property_read(&block_context.scope, class, concat_word!(b"$", name.value));
-    }
+    // A real member of the type the code shows wins over an extension, spec section 26. The access is analyzed again
+    // when a class of the type gains or loses one, because its type traces to a signature that names the class.
     if !codebase.get_classes_hidden_by_extension(receiver, name.value).is_empty() {
         return None;
     }
