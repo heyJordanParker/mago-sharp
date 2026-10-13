@@ -65,6 +65,23 @@ pub(crate) fn sharp_class_like_name(
     }
 }
 
+/// Returns the effect `effect` as a `uses` in a `.sharp` file with the `imported_names` of its imports writes it. A
+/// standard effect, one of the `Sharp` namespace, is the name the file's import of it gives it, as in `Post` for
+/// `import Sharp.Mail as Post;`, or else its own name, which is that effect in every `uses` whatever class the file
+/// imports or declares under it, spec section 29. Any other effect is named as [`sharp_class_like_name`] names a class.
+pub(crate) fn sharp_effect_name(
+    codebase: &CodebaseMetadata,
+    imported_names: &WordMap<Word>,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+    effect: Word,
+) -> String {
+    if !effect.as_bytes().get(..6).is_some_and(|namespace| namespace.eq_ignore_ascii_case(b"Sharp\\")) {
+        return sharp_class_like_name(codebase, imported_names, short_name_counts, effect);
+    }
+
+    imported_names.get(&ascii_lowercase_word(effect.as_bytes())).map_or_else(|| short_name(effect), ToString::to_string)
+}
+
 /// Whether another class-like of the project or its vendors has the short name of the class-like `name`, compared
 /// without case as PHP compares class names. PHP's built-in class-likes don't count: a `.sharp` file reaches one,
 /// like `Dom\Text`, only through an import, and one file can't import two classes of one short name without an
@@ -516,12 +533,7 @@ where
                 .iter()
                 .flatten()
                 .map(|effect| {
-                    sharp_class_like_name(
-                        context.codebase,
-                        &context.imported_names,
-                        &context.short_name_counts,
-                        *effect,
-                    )
+                    sharp_effect_name(context.codebase, &context.imported_names, &context.short_name_counts, *effect)
                 })
                 .collect();
             let uses = if effects.is_empty() { String::new() } else { format!(" uses {}", effects.join(", ")) };

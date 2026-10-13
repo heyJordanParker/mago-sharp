@@ -40,6 +40,7 @@ use crate::effects::is_effect;
 use crate::utils::names::display_member;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
+use crate::utils::names::sharp_effect_name;
 use crate::utils::names::sharp_missing_imports;
 
 /// Spec section 29: a getter reads, so it has no effect and changes nothing.
@@ -53,12 +54,13 @@ pub(crate) fn getters_must_be_pure(
         .filter(|(body, ..)| matches!(body, Body::Accessor(_, _, accessor) if accessor.as_bytes() == b"get"))
         .map(|(_, member, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
             impure(
                 IssueCode::ImpureGetter,
-                format!("Getter `{member}` {}. Getters must be pure.", impurity.describe(&class_name)),
+                format!("Getter `{member}` {}. Getters must be pure.", impurity.describe(&class_name, &effect_name)),
                 impurity.span,
                 "getter",
                 &impurity,
@@ -84,12 +86,16 @@ pub(crate) fn laws_must_be_pure(
         })
         .map(|(_, member, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
             impure(
                 IssueCode::ImpureLaw,
-                format!("Law `{member}` {}. Laws hold only over pure code.", impurity.describe(&class_name)),
+                format!(
+                    "Law `{member}` {}. Laws hold only over pure code.",
+                    impurity.describe(&class_name, &effect_name)
+                ),
                 impurity.span,
                 "law",
                 &impurity,
@@ -113,14 +119,17 @@ pub(crate) fn function_values_must_fit_their_types(
         .unfit_function_values()
         .map(|(value, name, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
             let method = || format!("`{}`", display_sharp_member(class_name(name.0), name.1));
             let reason = match (&value.runs, impurity.effect) {
-                (Runs::Body(Body::Lambda(_)), _) => format!("This lambda {}", impurity.describe(&class_name)),
-                (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name)),
+                (Runs::Body(Body::Lambda(_)), _) => {
+                    format!("This lambda {}", impurity.describe(&class_name, &effect_name))
+                }
+                (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name, &effect_name)),
                 (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
-                    format!("{} has the effect `{}`", method(), class_name(effect))
+                    format!("{} has the effect `{}`", method(), effect_name(effect))
                 }
                 (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
             };
@@ -156,6 +165,7 @@ pub(crate) fn implementations_must_fit_their_declarations(
         .unfit_implementations(codebase)
         .map(|((class, member), ancestor, declaration, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
             let ancestor =
@@ -164,7 +174,7 @@ pub(crate) fn implementations_must_fit_their_declarations(
             let allows = if declaration.uses.is_empty() {
                 format!("the pure `{declared}`")
             } else {
-                let uses: Vec<String> = declaration.uses.iter().map(|effect| class_name(*effect)).collect();
+                let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
 
                 format!("`uses {}` on `{declared}`", uses.join(", "))
             };
@@ -174,7 +184,7 @@ pub(crate) fn implementations_must_fit_their_declarations(
                 format!(
                     "`{}` {}, so {allows} cannot accept it.",
                     display_sharp_member(class_name(class), member),
-                    impurity.describe(&class_name)
+                    impurity.describe(&class_name, &effect_name)
                 ),
                 impurity.span,
                 "method",

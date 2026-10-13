@@ -6392,16 +6392,18 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
     );
 }
 
-/// A `.sharp` message writes a function type's effects inside its brackets, each named as the file names the class:
-/// a standard effect by its short name, and an imported one by its import's name.
+/// A `.sharp` message writes a function type's effects inside its brackets, as the file writes them: a standard effect
+/// by its short name or its import's name, and any other by the name the file gives its class.
 #[test]
 fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() {
-    let sharp = "namespace Demo;\n\nimport Sharp.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post> step) => `Step: ${step}`;\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Effects.Payments as Billing;\nimport Sharp.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post, Billing> step) => `Step: ${step}`;\n}\n";
+    let payments =
+        ("src/App/Effects/Payments.sharp", "namespace App.Effects;\n\npublic foreign class Payments\n{\n}\n");
 
     assert_eq!(
-        worded(("src/Demo/Receipt.sharp", sharp), &[]),
+        worded(("src/Demo/Receipt.sharp", sharp), &[payments]),
         [
-            "7:75 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post>` is none of them. | This is `Function<int(int) uses Http, Post>`. | Show a value taken from it instead, such as a property or the result of a method.",
+            "8:84 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post, Billing>` is none of them. | This is `Function<int(int) uses Http, Post, Billing>`. | Show a value taken from it instead, such as a property or the result of a method.",
         ]
     );
 }
@@ -8355,6 +8357,61 @@ fn a_plain_php_class_named_like_a_module_keeps_its_name() {
     for others in [[module, class], [class, module]] {
         assert_eq!(issues(uses, &others), Vec::<String>::new(), "{:?}", others.map(|(name, _)| name));
     }
+}
+
+/// Outside `uses`, an effect's name is an ordinary class name, spec section 23: a plain PHP class or a PHP# class the
+/// file imports under it is that class, as a type, a `new`, an `is` and a static call, and so is a class a file
+/// declares under it.
+#[test]
+fn an_effect_name_a_file_imports_or_declares_is_that_class() {
+    for name in sharp_effect_names() {
+        let store = leak(format!(
+            "namespace App.Shop;\n\nimport Lib.{name};\n\npublic class Store\n{{\n    public {name} make() => new {name}();\n\n    public bool holds(Any value) => value is {name};\n\n    public int size() => {name}.size();\n}}\n"
+        ));
+        let plain = (
+            leak(format!("src/Lib/{name}.php")),
+            leak(format!(
+                "<?php\n\ndeclare(strict_types=1);\n\nnamespace Lib;\n\nfinal class {name}\n{{\n    public static function size(): int\n    {{\n        return 1;\n    }}\n}}\n"
+            )),
+        );
+        let sharp = (
+            leak(format!("src/Lib/{name}.sharp")),
+            leak(format!(
+                "namespace Lib;\n\npublic class {name}\n{{\n    public static int size() => {name}.one();\n\n    public static int one() => 1;\n}}\n"
+            )),
+        );
+
+        assert_eq!(issues(("src/App/Shop/Store.sharp", store), &[plain]), Vec::<String>::new(), "plain PHP {name}");
+        assert_eq!(issues(("src/App/Shop/Store.sharp", store), &[sharp]), Vec::<String>::new(), "PHP# {name}");
+        assert_eq!(issues(sharp, &[]), Vec::<String>::new(), "declared {name}");
+    }
+}
+
+/// Spec section 29: a standard effect's name in a `uses` is that effect, even in a file that declares a class under the
+/// name, as it is in a file that imports one.
+#[test]
+fn a_uses_takes_a_standard_effect_in_a_file_that_declares_a_class_of_its_name() {
+    for name in sharp_effect_names() {
+        let declared = (
+            leak(format!("src/App/Shop/{name}.sharp")),
+            leak(format!(
+                "namespace App.Shop;\n\npublic class {name}\n{{\n    public int run(Function<int() uses {name}> tick) => tick();\n}}\n"
+            )),
+        );
+
+        assert_eq!(issues(declared, &[ENVIRONMENT]), Vec::<String>::new(), "{name}");
+    }
+}
+
+/// The names of the standard effects, short as a file writes them, spec section 29.
+fn sharp_effect_names() -> Vec<String> {
+    ["Database", "Http", "Files", "Console", "Process", "Clock", "Random", "Cache", "Mail", "Environment", "Events"]
+        .map(String::from)
+        .to_vec()
+}
+
+fn leak(code: String) -> &'static str {
+    Box::leak(code.into_boxed_str())
 }
 
 /// Semantics takes a well-formed `extern` method in any namespace, because the engine compiles the standard library
@@ -10574,6 +10631,60 @@ fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
             format!("app/Shop/Branch.sharp:13:21 {message}"),
         ]
     );
+}
+
+/// Spec section 29: a file that imports a plain PHP class named like a standard effect, as Laravel's `Http` facade,
+/// still writes the effect in `uses`, and a function type that lists it holds a lambda calling a class an `extern`
+/// gives that effect, the facade too, and refuses one calling a class with no `extern`.
+#[test]
+fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect() {
+    for name in sharp_effect_names() {
+        let checkout = (
+            "app/Shop/Checkout.sharp",
+            leak(format!(
+                "namespace App.Shop;\n\nimport Lib.Client;\nimport Lib.{name};\nimport Lib.Store;\n\npublic class Checkout\n{{\n    private Function<int(int) uses {name}> step;\n\n    public Checkout(private Client client)\n    {{\n        this.step = n => this.client.get(n);\n        this.step = n => {name}.post(n);\n        this.step = n => Store.get(n);\n    }}\n\n    public int size => this.client.get(1);\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => this.step(1) + Checkout.apply(this.client.get);\n\n    law positive(Client client) => client.get(1) > 0;\n}}\n"
+            )),
+        );
+        let services = (
+            "src/Lib/Services.php",
+            "<?php\n\nnamespace Lib;\n\nfinal class Client\n{\n    public function get(int $id): int\n    {\n        return $id;\n    }\n}\n\nfinal class Store\n{\n    public static function get(int $id): int\n    {\n        return $id;\n    }\n}\n",
+        );
+        let facade = (
+            leak(format!("src/Lib/{name}.php")),
+            leak(format!(
+                "<?php\n\nnamespace Lib;\n\nfinal class {name}\n{{\n    public static function post(int $id): int\n    {{\n        return $id;\n    }}\n}}\n"
+            )),
+        );
+        let client_stub = (
+            "app/Stubs/Client.sharp",
+            leak(format!("namespace App.Stubs;\n\nimport Lib.Client;\n\nextern Client uses {name};\n")),
+        );
+        let facade_stub = (
+            "app/Stubs/Facade.sharp",
+            leak(format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name} uses {name};\n")),
+        );
+        let files = [checkout, services, facade, client_stub, facade_stub, ENVIRONMENT];
+
+        assert_eq!(issues(checkout, &files[1..]), Vec::<String>::new(), "{name}");
+        assert_eq!(
+            effect_issues(&files),
+            [
+                format!(
+                    "app/Shop/Checkout.sharp:18:24 impure-getter: Getter `size` calls `Client.get`, which has the effect `{name}`. Getters must be pure."
+                ),
+                format!(
+                    "app/Shop/Checkout.sharp:24:36 impure-law: Law `positive` calls `Client.get`, which has the effect `{name}`. Laws hold only over pure code."
+                ),
+                format!(
+                    "app/Shop/Checkout.sharp:15:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses {name}>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`."
+                ),
+                format!(
+                    "app/Shop/Checkout.sharp:22:55 invalid-argument: `Client.get` has the effect `{name}`, so a `Function<int(int)>` cannot hold it."
+                ),
+            ],
+            "{name}"
+        );
+    }
 }
 
 /// `Client` is plain PHP that its `extern` gives the effect `Http`, `Cache` is plain PHP its `extern` declares pure, and
