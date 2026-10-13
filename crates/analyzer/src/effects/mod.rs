@@ -24,6 +24,7 @@ use mago_word::word;
 use crate::code::IssueCode;
 use crate::graph::strongly_connected_parts;
 use crate::utils::names::sharp_class_like_name;
+use crate::utils::names::sharp_effect_name;
 
 pub(crate) mod check;
 pub(crate) mod summary;
@@ -141,26 +142,26 @@ pub(crate) struct Impurity {
 
 impl Impurity {
     /// The reason as a sentence's predicate, such as "calls `getenv`, which has no `extern` declaration", with each
-    /// class named by `class_name`.
-    pub(crate) fn describe(&self, class_name: &dyn Fn(Word) -> String) -> String {
+    /// class named by `class_name` and each effect by `effect_name`.
+    pub(crate) fn describe(&self, class_name: &dyn Fn(Word) -> String, effect_name: &dyn Fn(Word) -> String) -> String {
         let cause = written(self.cause, class_name);
         match (self.path.last().map(|body| written(*body, class_name)), self.effect) {
             (None, Some(Effect::Foreign(effect))) => {
-                format!("calls `{cause}`, which has the effect `{}`", class_name(effect))
+                format!("calls `{cause}`, which has the effect `{}`", effect_name(effect))
             }
             (None, Some(Effect::Unknown(_))) => format!("calls `{cause}`, which has no `extern` declaration"),
             (None, Some(Effect::Emit)) => {
-                format!("emits `{cause}`, which has the effect `{}`", class_name(events()))
+                format!("emits `{cause}`, which has the effect `{}`", effect_name(events()))
             }
             (None, None) => format!("changes `{cause}`"),
             (Some(body), Some(Effect::Foreign(effect))) => {
-                format!("reaches `{body}`, which calls `{cause}` with the effect `{}`", class_name(effect))
+                format!("reaches `{body}`, which calls `{cause}` with the effect `{}`", effect_name(effect))
             }
             (Some(body), Some(Effect::Unknown(_))) => {
                 format!("reaches `{body}`, which calls `{cause}` with no `extern` declaration")
             }
             (Some(body), Some(Effect::Emit)) => {
-                format!("reaches `{body}`, which emits `{cause}` with the effect `{}`", class_name(events()))
+                format!("reaches `{body}`, which emits `{cause}` with the effect `{}`", effect_name(events()))
             }
             (Some(body), None) => format!("reaches `{body}`, which changes `{cause}`"),
         }
@@ -333,7 +334,9 @@ impl Effects {
         let short_name_counts = OnceCell::new();
 
         self.body_impurity(body).map(|impurity| {
-            impurity.describe(&|class| sharp_class_like_name(codebase, imports, &short_name_counts, class))
+            impurity.describe(&|class| sharp_class_like_name(codebase, imports, &short_name_counts, class), &|effect| {
+                sharp_effect_name(codebase, imports, &short_name_counts, effect)
+            })
         })
     }
 

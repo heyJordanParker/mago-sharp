@@ -16,6 +16,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
+use mago_names::STANDARD_EFFECTS;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -62,6 +63,24 @@ pub(crate) fn sharp_class_like_name(
         String::from_utf8_lossy(full_name).replace('\\', ".")
     } else {
         short_name(name)
+    }
+}
+
+/// Returns the effect `effect` as a `uses` in a `.sharp` file with the `imported_names` of its imports writes it. A
+/// standard effect is the name the file's import of it gives it, as in `Post` for `import Sharp.Mail as Post;`, or
+/// else its own name, which is that effect in every `uses` whatever class the file imports or declares under it, spec
+/// section 29. Any other effect is named as [`sharp_class_like_name`] names a class.
+pub(crate) fn sharp_effect_name(
+    codebase: &CodebaseMetadata,
+    imported_names: &WordMap<Word>,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+    effect: Word,
+) -> String {
+    match STANDARD_EFFECTS.iter().find(|standard| standard.as_bytes().eq_ignore_ascii_case(effect.as_bytes())) {
+        Some(standard) => imported_names
+            .get(&ascii_lowercase_word(standard.as_bytes()))
+            .map_or_else(|| short_name(standard), ToString::to_string),
+        None => sharp_class_like_name(codebase, imported_names, short_name_counts, effect),
     }
 }
 
@@ -516,12 +535,7 @@ where
                 .iter()
                 .flatten()
                 .map(|effect| {
-                    sharp_class_like_name(
-                        context.codebase,
-                        &context.imported_names,
-                        &context.short_name_counts,
-                        *effect,
-                    )
+                    sharp_effect_name(context.codebase, &context.imported_names, &context.short_name_counts, *effect)
                 })
                 .collect();
             let uses = if effects.is_empty() { String::new() } else { format!(" uses {}", effects.join(", ")) };
