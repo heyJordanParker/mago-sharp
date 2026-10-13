@@ -877,6 +877,68 @@ fn a_test_module_hands_its_bindings_to_the_container_for_each_class_its_file_dec
     }
 }
 
+/// Spec section 32: PHPUnit runs the methods `Before` and `After` mark in its own process and in a child one, so
+/// each class of a test file starts its tests with the file's module before every other `Before` method and `setUp`,
+/// and ends them after every other `After` method and `tearDown`, by priority. A test module with no bindings still
+/// applies, so its tests run without the environment modules. A class of any other file gets neither method.
+#[test]
+fn a_test_files_class_starts_each_test_with_the_test_module_and_ends_it_after() {
+    let library = [
+        ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+        ("app/Mail/FakeMailer.sharp", "namespace App.Mail;\n\npublic class FakeMailer : Mailer\n{\n}\n"),
+    ];
+    let file = |members: &str| {
+        format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\n\nmodule : App.Shop\n{{\n{members}}}\n\npublic class CheckoutTest\n{{\n}}\n"
+        )
+    };
+    let hook = |name: &str, function: &str, argument: &str, attribute: &str, priority: i64| {
+        format!(
+            "METHOD [1] {name:?} @{{line}}-{{end}}\n  PARAM_LIST\n  null\n  STMT_LIST\n    CALL\n      ZVAL {function:?}\n      ARG_LIST\n{argument}  ZVAL [1] \"void\"\n  ATTRIBUTE_LIST\n    ATTRIBUTE_GROUP\n      ATTRIBUTE\n        ZVAL {attribute:?}\n        ARG_LIST\n          ZVAL {priority}\n"
+        )
+    };
+    let start = hook(
+        "__sharpStartTest",
+        "Sharp\\Internal\\startTest",
+        "        CLASS_NAME\n          ZVAL [1] \"static\"\n",
+        "PHPUnit\\Framework\\Attributes\\Before",
+        i64::MAX,
+    );
+    let end = hook("__sharpEndTest", "Sharp\\Internal\\endTest", "", "PHPUnit\\Framework\\Attributes\\After", i64::MIN);
+
+    for (members, line, table) in
+        [("    singleton Mailer = FakeMailer;\n", 11, "ARRAY [3]\n  ARRAY_ELEM\n"), ("", 10, "ARRAY [3]\n")]
+    {
+        let lowered = Lowered(common::checked("tests/Shop/CheckoutTest.sharp", &file(members), &library, lower));
+        let at = |hook: &str| hook.replace("{line}", &line.to_string()).replace("{end}", &(line + 2).to_string());
+
+        assert_eq!(lowered.declared("__sharpStartTest"), at(&start), "{members:?}");
+        assert_eq!(lowered.declared("__sharpEndTest"), at(&end), "{members:?}");
+        let call = (0..lowered.nodes().len() as u32)
+            .find(|&node| {
+                lowered.nodes()[node as usize].kind == sharp_kind::SHARP_AST_CALL
+                    && lowered.render(lowered.child(node, 0)) == "ZVAL \"Sharp\\\\Internal\\\\testModule\"\n"
+            })
+            .unwrap_or_else(|| panic!("{members:?}: the file calls testModule"));
+        let bindings = lowered.render(lowered.child(lowered.child(call, 1), 1));
+        assert!(bindings.starts_with(table), "{members:?}: {bindings}");
+    }
+
+    let base = Lowered(common::checked(
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n}\n",
+        &library,
+        lower,
+    ));
+    let methods: Vec<String> = base
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
+        .map(|node| base.text(node.text))
+        .collect();
+    assert_eq!(methods, Vec::<String>::new());
+}
+
 /// Spec section 32: the container fills a class's main constructor, and reads each parameter's service from its PHP
 /// type. A `List` runs as `array`, so a constructor's collection of objects names its service in an attribute, and no
 /// other parameter does: a collection of values is no service. Each row is a parameter and the attributes the PHP of

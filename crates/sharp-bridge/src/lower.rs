@@ -385,6 +385,8 @@ struct Lowering<'lowering, 'arena> {
     property: Vec<u8>,
     /// Each inline form the lowering copied, with its fingerprint, as often as it copied it.
     inlined: Vec<Read>,
+    /// Whether the file declares a test module, so each of its classes starts and ends its tests.
+    tested: bool,
 }
 
 impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
@@ -409,6 +411,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             loop_depth: 0,
             property: Vec::new(),
             inlined: Vec::new(),
+            tested: false,
         }
     }
 
@@ -427,24 +430,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         }
 
-        let mut statements = vec![self.strict_types()];
-        for statement in &checked.program().statements {
-            self.file_statement(statement, &mut statements);
-        }
         let modules = Node::Program(checked.program()).filter_map(|node| match *node {
             Node::Module(module) => Some(module),
             _ => None,
         });
+        self.tested = modules.first().is_some_and(|first| self.types.module(first.span()).kind == ModuleKind::Test);
+        let mut statements = vec![self.strict_types()];
+        for statement in &checked.program().statements {
+            self.file_statement(statement, &mut statements);
+        }
         let mut bindings = Vec::new();
         for module in &modules {
             self.module_bindings(module, &mut bindings);
         }
+        // A test module applies with no bindings too, so its tests run without the environment modules.
         if let Some(first) = modules.first()
-            && !bindings.is_empty()
+            && (self.tested || !bindings.is_empty())
         {
             let line = self.line(*first);
             let table = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &bindings);
-            let statement = if self.types.module(first.span()).kind == ModuleKind::Test {
+            let statement = if self.tested {
                 self.test_module(checked, line, table)
             } else {
                 self.node(SHARP_AST_RETURN, 0, line, &[table])
@@ -511,6 +516,69 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[classes, table]);
 
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// Spec section 32: each test of a class a test file declares runs with the file's module, in PHPUnit's own
+    /// process or a child one, because PHPUnit runs the methods `Before` and `After` mark wherever it runs the test.
+    /// The class gets `__sharpStartTest`, which calls `\Sharp\Internal\startTest(static::class)` before every other
+    /// `Before` method and `setUp`, and `__sharpEndTest`, which calls `\Sharp\Internal\endTest()` after every other
+    /// `After` method and `tearDown`, by their priorities. PHP# refuses a member name that starts with `__`, so no
+    /// member of the class can take them.
+    fn test_hooks(&mut self, class: &Class) -> [u32; 2] {
+        let line = self.line(class.class.span);
+        let test_class = self.string(ZEND_NAME_NOT_FQ, line, b"static");
+        let test_class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[test_class]);
+        let start = self.test_hook(
+            class,
+            b"__sharpStartTest",
+            (b"PHPUnit\\Framework\\Attributes\\Before", i64::MAX),
+            b"Sharp\\Internal\\startTest",
+            &[test_class],
+        );
+        let end = self.test_hook(
+            class,
+            b"__sharpEndTest",
+            (b"PHPUnit\\Framework\\Attributes\\After", i64::MIN),
+            b"Sharp\\Internal\\endTest",
+            &[],
+        );
+
+        [start, end]
+    }
+
+    /// A public `void` method of `class` named `name`, which PHPUnit's attribute runs at the priority `marked` gives,
+    /// and which calls the function `function` with `arguments`.
+    fn test_hook(
+        &mut self,
+        class: &Class,
+        name: &[u8],
+        marked: (&[u8], i64),
+        function: &[u8],
+        arguments: &[u32],
+    ) -> u32 {
+        let line = self.line(class.class.span);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
+        let function = self.string(ZEND_NAME_FQ, line, function);
+        let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[call]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"void");
+        let (attribute, priority) = marked;
+        let attribute = self.string(ZEND_NAME_FQ, line, attribute);
+        let priority = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = priority);
+        let priority = self.node(SHARP_AST_ARG_LIST, 0, line, &[priority]);
+        let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[attribute, priority]);
+        let group = self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute]);
+        let attributes = self.node(SHARP_AST_ATTRIBUTE_LIST, 0, line, &[group]);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            class.class.span,
+            class.right_brace,
+            name,
+            &[parameters, NULL, body, return_type, attributes],
+        )
     }
 
     /// Spec section 32: a file whose base or environment modules bind services returns their bindings, which
@@ -655,6 +723,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 b"__construct",
                 &[parameters, NULL, body, NULL, NULL],
             ));
+        }
+        if self.tested {
+            members.extend(self.test_hooks(class));
         }
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);

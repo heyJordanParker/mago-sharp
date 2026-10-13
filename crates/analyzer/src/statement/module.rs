@@ -93,7 +93,7 @@ where
         match &binding_metadata.value {
             BindingValueMetadata::Class(class, span) => {
                 if check_class_value(context, service, *class, *span) {
-                    check_constructor_services(context, &services, *class, *span);
+                    check_constructor_services(context, &services, *class, *span, binding_metadata.lifetime);
                 }
             }
             BindingValueMetadata::Classes(classes) => {
@@ -111,7 +111,7 @@ where
                 };
                 for (class, span) in classes {
                     if check_class_value(context, element, *class, *span) {
-                        check_constructor_services(context, &services, *class, *span);
+                        check_constructor_services(context, &services, *class, *span, binding_metadata.lifetime);
                     }
                 }
             }
@@ -159,8 +159,9 @@ where
         }
     }
 
-    // An environment or test module also changes what the base modules' bindings reach, so each base binding it
+    // An environment or test module also changes what the base modules' bindings reach, so each base binding its set
     // leaves in place is walked again over its services.
+    let own = (metadata.kind != ModuleKind::Base).then_some(metadata);
     let base = context
         .codebase
         .modules
@@ -177,7 +178,7 @@ where
         });
     let mut reported: Vec<(IssueCode, *const BindingMetadata)> = Vec::new();
     for (module, binding) in starts {
-        let mut walk = Walk::new(&services, binding);
+        let mut walk = Walk::new(&services, own, binding);
         walk.dependencies_of((module, binding));
         for class in &walk.classes {
             artifacts.symbol_references.add_reference(origin, (*class, empty_word()), true);
@@ -207,12 +208,17 @@ where
 /// Spec section 32: PHP# creates the classes a module binds, so the bound `class` is built through its main
 /// constructor, and each parameter needs a binding in the module of the class's namespace or of a namespace above it.
 /// A problem is reported at the binding's class value, `bound`, with a note at the parameter.
-fn check_constructor_services<A>(context: &mut Context<'_, '_, A>, services: &Services<'_>, class: Word, bound: Span)
-where
+fn check_constructor_services<A>(
+    context: &mut Context<'_, '_, A>,
+    services: &Services<'_>,
+    class: Word,
+    bound: Span,
+    lifetime: Lifetime,
+) where
     A: Arena,
 {
     if let Some(metadata) = context.codebase.get_class_like(class.as_bytes()) {
-        check_class_services(context, services, metadata, Builds::Bound(metadata.original_name, bound));
+        check_class_services(context, services, metadata, Builds::Bound(metadata.original_name, bound, lifetime));
     }
 }
 
@@ -223,7 +229,7 @@ pub(crate) fn check_listener_services<A>(context: &mut Context<'_, '_, A>, class
 where
     A: Arena,
 {
-    let services = Services { codebase: context.codebase, overrides: None };
+    let services = Services { codebase: context.codebase, overrides: Vec::new() };
 
     check_class_services(context, &services, class, Builds::Listener(class.original_name, event));
 }
@@ -250,10 +256,11 @@ fn check_class_services<A>(
 }
 
 /// What the container builds when it fills a parameter: a class a binding binds, with the span of the binding's
-/// class value, the service of a binding's expression, or a listener's class, with the first event it listens to.
+/// class value and its lifetime, the service of a binding's expression, or a listener's class, with the first event
+/// it listens to.
 #[derive(Clone, Copy)]
 enum Builds<'ctx> {
-    Bound(Word, Span),
+    Bound(Word, Span, Lifetime),
     Binding(&'ctx TUnion),
     Listener(Word, Word),
 }
@@ -276,7 +283,7 @@ fn report_missing_service<A>(
     A: Arena,
 {
     let (name, subject) = match builds {
-        Builds::Bound(class, _) => {
+        Builds::Bound(class, ..) => {
             let name = display_class_like_name(context, class).to_string();
             (name.clone(), format!("`{name}`"))
         }
@@ -316,8 +323,9 @@ fn report_missing_service<A>(
                 None => format!("`{}` with no type", display_variable_name(context, parameter.name.0)),
             };
             let help = match builds {
-                Builds::Bound(..) => format!(
-                    "Bind `{name}` to an expression that creates it, as in `singleton {name}(…) = new {name}(…);`."
+                Builds::Bound(_, _, lifetime) => format!(
+                    "Bind `{name}` to an expression that creates it, as in `{} {name}(…) = new {name}(…);`.",
+                    lifetime.as_str()
                 ),
                 Builds::Binding(_) | Builds::Listener(..) => {
                     "Take a service that gives the value, such as `Environment`, and read the value from it.".to_owned()
@@ -330,7 +338,7 @@ fn report_missing_service<A>(
         }
     };
     let issue = match builds {
-        Builds::Bound(_, bound) => issue
+        Builds::Bound(_, bound, _) => issue
             .with_annotation(Annotation::primary(bound).with_message("Bound here."))
             .with_annotation(Annotation::secondary(parameter.span).with_message("Needed here.")),
         Builds::Binding(_) | Builds::Listener(..) => {
@@ -341,11 +349,11 @@ fn report_missing_service<A>(
     context.collector.report_with_code(IssueCode::MissingService, issue);
 }
 
-/// The modules one set of services reads: every folder's base module, and the environment or test module whose
-/// bindings win over them.
+/// The modules one set of services reads: every folder's base module, and the modules whose bindings win over them,
+/// every module of one environment or one test module.
 struct Services<'ctx> {
     codebase: &'ctx CodebaseMetadata,
-    overrides: Option<&'ctx ModuleMetadata>,
+    overrides: Vec<&'ctx ModuleMetadata>,
 }
 
 impl<'ctx> Services<'ctx> {
@@ -369,10 +377,17 @@ impl<'ctx> Services<'ctx> {
         self.binding_for(namespace, service, requester).is_none().then_some(Missing::Unbound(service))
     }
 
-    /// The set of services `module` belongs to: the base set for a base module, and the base set under `module`'s own
-    /// bindings for an environment or test module.
+    /// The set of services `module` belongs to: the base set for a base module, the base set under every module of
+    /// its environment for an environment module, as the container reads each `Module.<SHARP_ENV>.sharp` on a class's
+    /// folders, and the base set under its own bindings for a test module.
     fn new(codebase: &'ctx CodebaseMetadata, module: &'ctx ModuleMetadata) -> Self {
-        Self { codebase, overrides: (module.kind != ModuleKind::Base).then_some(module) }
+        let overrides = match module.kind {
+            ModuleKind::Base => Vec::new(),
+            ModuleKind::Environment(_) => codebase.modules.iter().filter(|other| other.kind == module.kind).collect(),
+            ModuleKind::Test => vec![module],
+        };
+
+        Self { codebase, overrides }
     }
 
     /// The binding that serves `service` to `requester`, a class of `namespace`: the nearest namespace's module first,
@@ -388,7 +403,8 @@ impl<'ctx> Services<'ctx> {
         loop {
             let modules = self
                 .overrides
-                .into_iter()
+                .iter()
+                .copied()
                 .chain(self.codebase.modules.iter().filter(|module| module.kind == ModuleKind::Base));
             for module in modules.filter(|module| module.namespace.as_bytes() == namespace) {
                 let serves = |binding: &&BindingMetadata| service_id(&binding.service.type_union) == key;
@@ -418,10 +434,11 @@ type Node<'ctx> = (&'ctx ModuleMetadata, &'ctx BindingMetadata);
 
 /// A walk of the services one binding needs, which records every class it reads, the first cycle back to that
 /// binding, and the first `scoped` service a `singleton` binding reaches without passing another `singleton`. Each
-/// problem carries the binding it is reported at: the start for a base module, and the last binding of the
-/// environment or test module on the way for an override, whose walks of base bindings report only what it changed.
+/// problem carries the binding it is reported at: the start for a base module, and for an environment or test module,
+/// `own`, the last of its bindings on the way, so its walks of base bindings report only what it changed.
 struct Walk<'services, 'ctx> {
     services: &'services Services<'ctx>,
+    own: Option<&'ctx ModuleMetadata>,
     start: &'ctx BindingMetadata,
     path: Vec<Word>,
     bindings: Vec<&'ctx BindingMetadata>,
@@ -432,9 +449,14 @@ struct Walk<'services, 'ctx> {
 }
 
 impl<'services, 'ctx> Walk<'services, 'ctx> {
-    fn new(services: &'services Services<'ctx>, start: &'ctx BindingMetadata) -> Self {
+    fn new(
+        services: &'services Services<'ctx>,
+        own: Option<&'ctx ModuleMetadata>,
+        start: &'ctx BindingMetadata,
+    ) -> Self {
         Self {
             services,
+            own,
             start,
             path: Vec::new(),
             bindings: vec![start],
@@ -454,14 +476,14 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
 
     /// The binding a problem the walk finds now is reported at, after `reached` when it reaches one.
     fn reported_at(&self, reached: Option<&'ctx BindingMetadata>) -> Option<&'ctx BindingMetadata> {
-        let Some(overrides) = self.services.overrides else {
+        let Some(own) = self.own else {
             return Some(self.start);
         };
 
         reached
             .into_iter()
             .chain(self.bindings.iter().rev().copied())
-            .find(|binding| overrides.bindings.iter().any(|own| std::ptr::eq(own, *binding)))
+            .find(|binding| own.bindings.iter().any(|written| std::ptr::eq(written, *binding)))
     }
 
     /// Visits the services each class `node` builds takes, with that class on the path a cycle names.

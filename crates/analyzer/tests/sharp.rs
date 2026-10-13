@@ -11947,7 +11947,7 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     let rules = "13:22 missing-service `Cart` needs a `List<PriceRule>`, and no module binds one: the container can't build `Cart`. | Bind `List<PriceRule>` in a module of `Cart`'s namespace or one above it, as in `singleton List<PriceRule> = …;`.";
     let smtp = "13:22 missing-service `Mailer` needs a `SmtpMailer`, and no module binds one: the container can't build `Mailer`. | Bind `SmtpMailer` in a module of this namespace or one above it, as in `transient SmtpMailer = SmtpMailer;`.";
     let environment = "13:26 missing-service `RedisStore` needs an `Environment`, and no module binds one: the container can't build `RedisStore`. | Bind `Environment` in a module of this namespace or one above it, as in `transient Environment = Environment;`.";
-    let url = "13:28 missing-service `RedisStore` takes a `string`, which no binding can give: the container can't build `RedisStore`. | Bind `RedisStore` to an expression that creates it, as in `singleton RedisStore(…) = new RedisStore(…);`.";
+    let url = "13:28 missing-service `RedisStore` takes a `string`, which no binding can give: the container can't build `RedisStore`. | Bind `RedisStore` to an expression that creates it, as in `transient RedisStore(…) = new RedisStore(…);`.";
     let value = "13:22 missing-service `Mailer` takes a `string`, which no binding can give: the container can't build `Mailer`. | Take a service that gives the value, such as `Environment`, and read the value from it.";
     let store =
         "    singleton RedisStore(Environment environment) = new RedisStore(environment.require(\"REDIS_URL\"));";
@@ -11997,7 +11997,8 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
 }
 
 /// Spec section 32, as .NET's scope validation and Dagger's graph check refuse them: a service that needs itself, at
-/// each binding on the cycle, and a `scoped` service a `singleton` holds, directly or through `transient` services.
+/// each binding on the cycle, and a `scoped` service a `singleton` holds, directly or through `transient` services. A
+/// `singleton` that holds another `singleton` leaves that one's services to its own binding, which is refused once.
 /// Each row is a module's bindings, from line 12, and the refusals they get.
 #[test]
 fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refused() {
@@ -12023,6 +12024,7 @@ fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refus
 
     let through = "13:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
     let looped = "12:5 service-cycle `LoopMailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let inner = "13:5 captive-service The singleton `FlaggedMailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `FlaggedMailer` scoped too, or make `Flags` a singleton.";
 
     for (members, expected) in [
         ("    singleton Mailer = LoopMailer;", vec![cycle.to_owned()]),
@@ -12047,6 +12049,10 @@ fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refus
         (
             "    singleton Flags = Flags;\n    singleton Mailer = Wrapper;\n    transient FlaggedMailer = FlaggedMailer;",
             vec![],
+        ),
+        (
+            "    scoped Flags = Flags;\n    singleton FlaggedMailer = FlaggedMailer;\n    singleton Mailer = Wrapper;",
+            vec![inner.to_owned()],
         ),
     ] {
         // The module of `App` serves the classes of `App.Mail` and `App.Shop` below it.
@@ -12100,5 +12106,63 @@ fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() 
             )),
         );
         assert_eq!(refusals(module, &others), expected, "{path}: {members}");
+    }
+
+    // The container applies every `Module.<SHARP_ENV>.sharp` on a class's folders at once, so an environment is
+    // checked as one set: the base modules under all of its modules. `QueueMailer` in `App.Mail` takes a `Queue`, and
+    // `MailQueue` takes a `Mailer`. Each row is the base modules, the environment's modules, and the refusals each
+    // environment module gets.
+    let mail = [
+        BOUND_SERVICES[0],
+        BOUND_SERVICES[1],
+        ("app/Mail/Queue.sharp", "namespace App.Mail;\n\npublic interface Queue\n{\n}\n"),
+        ("app/Mail/MemoryQueue.sharp", "namespace App.Mail;\n\npublic class MemoryQueue : Queue\n{\n}\n"),
+        (
+            "app/Mail/MailQueue.sharp",
+            "namespace App.Mail;\n\npublic class MailQueue : Queue\n{\n    public MailQueue(private Mailer mailer) { }\n}\n",
+        ),
+        (
+            "app/Mail/QueueMailer.sharp",
+            "namespace App.Mail;\n\npublic class QueueMailer : Mailer\n{\n    public QueueMailer(private Queue queue) { }\n}\n",
+        ),
+        (
+            "app/Checkout.sharp",
+            "namespace App;\n\nimport App.Mail.Mailer;\n\npublic class Checkout\n{\n    public Checkout(private Mailer mailer) { }\n}\n",
+        ),
+    ];
+    let module = |path: &'static str, namespace: &str, header: &str, members: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.QueueMailer;\nimport App.Mail.Queue;\nimport App.Mail.MemoryQueue;\nimport App.Mail.MailQueue;\n\nmodule{header}\n{{\n{members}\n}}\n"
+            )),
+        )
+    };
+    let app =
+        module("app/Module.sharp", "App", "", "    singleton Mailer = SmtpMailer;\n    transient Checkout = Checkout;");
+    let mail_base = module("app/Mail/Module.sharp", "App.Mail", "", "    singleton Queue = MemoryQueue;");
+    let app_production = module("app/Module.Production.sharp", "App", " : App", "    singleton Mailer = QueueMailer;");
+    let memory_production =
+        module("app/Mail/Module.Production.sharp", "App.Mail", " : App.Mail", "    singleton Queue = MemoryQueue;");
+    let mail_production =
+        module("app/Mail/Module.Production.sharp", "App.Mail", " : App.Mail", "    singleton Queue = MailQueue;");
+    let no_queue = "12:24 missing-service `QueueMailer` needs a `Queue`, and no module binds one: the container can't build `QueueMailer`. | Bind `Queue` in a module of `QueueMailer`'s namespace or one above it, as in `singleton Queue = …;`.";
+    let mailer_cycle = "12:5 service-cycle `Mailer` needs itself through `QueueMailer`, then `MailQueue`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let queue_cycle = "12:5 service-cycle `Queue` needs itself through `MailQueue`, then `QueueMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+
+    for (base, environment, expected) in [
+        (vec![app], vec![app_production], vec![vec![no_queue]]),
+        (vec![app], vec![app_production, memory_production], vec![vec![], vec![]]),
+        (vec![app, mail_base], vec![app_production, mail_production], vec![vec![mailer_cycle], vec![queue_cycle]]),
+    ] {
+        for (analyzed, expected) in environment.iter().zip(expected) {
+            let others: Vec<_> = mail
+                .iter()
+                .chain(&base)
+                .chain(environment.iter().filter(|other| other.0 != analyzed.0))
+                .copied()
+                .collect();
+            assert_eq!(refusals(*analyzed, &others), expected, "{}", analyzed.0);
+        }
     }
 }
