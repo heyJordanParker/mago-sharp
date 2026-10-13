@@ -257,7 +257,15 @@ pub(crate) fn check(
         translations.iter().map(|translation| String::from_utf8_lossy(&translation.name).into_owned()).collect();
     let facts: Vec<(&str, &Facts)> =
         names.iter().zip(translations).map(|(name, translation)| (name.as_str(), &translation.facts)).collect();
-    for broken in runner::rules(library, package, &modules, &facts)? {
+    // A `Module.lean` names the attribute `rule` for each rule it holds, so the words `rule` in them bound the rules.
+    let mut count = 0;
+    for rules in &built {
+        count += fs::read_to_string(root.join(&rules.path))?
+            .split(|character: char| !(character.is_alphanumeric() || character == '_' || character == '\''))
+            .filter(|word| *word == "rule")
+            .count();
+    }
+    for broken in runner::rules(library, package, &modules, &facts, count)? {
         let rules = built[broken.module];
         if let Some(refused) = &broken.refused {
             for translation in translations.iter().filter(|translation| judges(rules, translation)) {

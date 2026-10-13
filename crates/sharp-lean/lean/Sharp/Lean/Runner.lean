@@ -212,13 +212,13 @@ structure RulesModule where
 
 /-- A request: the rules modules, the facts of every `.sharp` file, the rules an earlier runner judged, which this runner
 skips, the rules an earlier runner was judging when it stopped at its processor-time limit, which this runner refuses
-without judging them, and the processor milliseconds after which this runner judges no more rules. -/
+without judging them, and the processor milliseconds each rule may use. -/
 structure Rules where
   modules : Array RulesModule
   files : Array (Array Fact)
   judged : Array String
   stopped : Array String
-  yieldAfter : Nat
+  limit : Nat
 
 def location (file : String) : Decode Location :=
   return ⟨file, (← u32).toNat, (← u32).toNat, (← u32).toNat, (← u32).toNat⟩
@@ -243,7 +243,7 @@ def file : Decode (Array Fact) := do
 def rules : Decode Rules := do
   let modules ← many do return { module := (← string).toName, namespace_ := ← string }
   let files ← many file
-  return { modules, files, judged := ← many string, stopped := ← many string, yieldAfter := (← u32).toNat }
+  return { modules, files, judged := ← many string, stopped := ← many string, limit := (← u32).toNat }
 
 /-- Why the runner does not run a rule: it trusts more than Lean's kernel checks, or it builds a namespace from a string
 instead of naming one `Code` declares, so a misspelled name would never fire. -/
@@ -343,14 +343,25 @@ def processorTime : IO Int := do
   let usage ← Std.IO.Process.getResourceUsage
   return usage.cpuUserTime.toInt + usage.cpuSystemTime.toInt
 
-/-- How the runner exits when it leaves the rules it did not judge to a new runner: `YIELDED` in `src/runner.rs`. -/
-def yielded : UInt8 := 75
+/-- How the runner exits when a rule runs past its limit: the status `lake env` reports for a process `SIGXCPU` ended, 128
+plus the signal, so Mago takes the same path for both. -/
+def stoppedStatus : UInt8 := 152
+
+/-- Runs `act` on a thread of its own while this thread reads the processor time every 50 milliseconds, and ends the
+runner as `stoppedStatus` once `act` has used `limit` processor milliseconds. Lean holds no global lock, so evaluated code
+never keeps this thread from reading. -/
+def watched {α : Type} (limit : Nat) (act : IO α) : IO α := do
+  let started ← processorTime
+  let task ← IO.asTask act (prio := .dedicated)
+  while !(← IO.hasFinished task) do
+    if (← processorTime) - started ≥ limit then IO.Process.exit stoppedStatus
+    IO.sleep 50
+  IO.ofExcept task.get
 
 /-- Writes the answer's header, then the `entry` of each rule of each rules module an earlier runner did not judge, in
 request order, each as soon as it is judged, so the rules it judged survive a stop at the processor-time limit. Before
-it judges a rule, it writes `judging` and the rule's name on standard error, so Mago knows which rule ran when it
-stopped this runner. Once the rules it judged used `yieldAfter` processor milliseconds, it exits as `yielded` before
-the next rule, so every rule it starts gets nearly the whole limit, and it judges at least one rule first. -/
+it judges a rule, it writes `judging` and the rule's name on standard error, so Mago knows which rule ran when the
+runner stopped. Each rule gets the request's `limit` of its own, which `watched` keeps. -/
 unsafe def judge (env : Environment) (request : Rules) : IO Unit := do
   let stdout ← IO.getStdout
   let stderr ← IO.getStderr
@@ -362,37 +373,33 @@ unsafe def judge (env : Environment) (request : Rules) : IO Unit := do
   let graph := Graph.ofEdges edges
   stdout.write (header brokenResponse)
   stdout.flush
-  let started ← processorTime
-  let mut judgedOne := false
   let mut index : UInt32 := 0
   for rulesModule in request.modules do
     let some moduleIndex := env.getModuleIdx? rulesModule.module
       | throw <| IO.userError s!"module {rulesModule.module} was not imported"
     for name in ruleAttribute.ext.getModuleEntries env moduleIndex do
       if request.judged.contains name.toString then continue
-      let stopped := request.stopped.contains name.toString
-      if !stopped then
-        if judgedOne && (← processorTime) - started ≥ request.yieldAfter then IO.Process.exit yielded
-        judgedOne := true
-        stderr.putStrLn s!"judging {name}"
-        stderr.flush
-      let evaluated : Except Refusal Rule ← if stopped then pure (.error .stopped) else
-        match ← refusalOf env name with
-        | some refusal => pure (.error refusal)
-        | none => pure <| (env.evalConst Rule {} name).mapError Refusal.unevaluable
-      let judged : Except (Refusal × Nat × Nat) (Array (UInt32 × UInt32)) ← match evaluated with
-        | .error refusal => pure (.error (refusal, ← placeOf env name))
-        | .ok rule => do
-          let mut broken := #[]
-          let mut fileIndex : UInt32 := 0
-          for facts in request.files do
-            let mut factIndex : UInt32 := 0
-            for fact in facts do
-              if rule.breaks rulesModule.namespace_ graph fact then
-                broken := broken.push (fileIndex, factIndex)
-              factIndex := factIndex + 1
-            fileIndex := fileIndex + 1
-          pure (.ok broken)
+      let judged : Except (Refusal × Nat × Nat) (Array (UInt32 × UInt32)) ←
+        if request.stopped.contains name.toString then pure (.error (.stopped, ← placeOf env name)) else do
+          stderr.putStrLn s!"judging {name}"
+          stderr.flush
+          watched request.limit do
+            let evaluated : Except Refusal Rule ← match ← refusalOf env name with
+              | some refusal => pure (.error refusal)
+              | none => pure <| (env.evalConst Rule {} name).mapError Refusal.unevaluable
+            match evaluated with
+            | .error refusal => pure (.error (refusal, ← placeOf env name))
+            | .ok rule => do
+              let mut broken := #[]
+              let mut fileIndex : UInt32 := 0
+              for facts in request.files do
+                let mut factIndex : UInt32 := 0
+                for fact in facts do
+                  if rule.breaks rulesModule.namespace_ graph fact then
+                    broken := broken.push (fileIndex, factIndex)
+                  factIndex := factIndex + 1
+                fileIndex := fileIndex + 1
+              pure (.ok broken)
       stdout.write (entry index name judged)
       stdout.flush
     index := index + 1

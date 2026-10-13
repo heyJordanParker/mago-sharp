@@ -26,12 +26,6 @@ const BROKEN_RESPONSE: u16 = 4;
 /// What the runner writes on its standard error before the name of each rule it judges.
 const JUDGING: &str = "judging ";
 
-/// How a runner exits when it leaves the rules it did not judge to a new runner: `EX_TEMPFAIL`, "try again".
-const YIELDED: i32 = 75;
-
-/// The part of `library::processor_seconds()` a runner spends on rules before it yields: a hundredth.
-const YIELD_AFTER: u64 = 100;
-
 /// One law a request asks about.
 pub(crate) struct Question<'question> {
     /// The Lean name of the law's statement.
@@ -115,35 +109,39 @@ pub(crate) fn check(
     proof_module: &str,
     questions: &[Question<'_>],
 ) -> io::Result<Vec<Answer>> {
-    let output = run(library, package, &encode(module, proof_module, questions)?)?;
+    let output = run(library, package, &encode(module, proof_module, questions)?, library::processor_seconds())?;
 
     decode(&answer(output)?, questions.len()).map_err(io::Error::other)
 }
 
 /// Runs the runner of `library` on the modules Lake built in `package`, which imports every rules module, each named
 /// with the namespace its rules constrain, and answers with each rule and the facts of `files` that break it, or why it
-/// did not run the rule.
+/// did not run the rule. `rules` is at least the number of rules the modules hold.
 ///
-/// The runner names each rule on its standard error before it judges it, and writes each judged rule as soon as it has
-/// one. Once the rules it judged used a hundredth of `library::processor_seconds()`, it starts no rule and exits as
-/// `YIELDED`, so each rule it starts gets nearly that limit of its own. A rule the limit stops is refused as
-/// `Refusal::Stopped`, and a new runner judges the rules no runner judged, so every other rule still runs.
+/// The runner names each rule on its standard error before it judges it, writes each judged rule as soon as it has one,
+/// and gives each rule `library::processor_seconds()` of its own: it watches the processor time each rule uses, and
+/// exits as `SIGXCPU` would once a rule passes the limit. That rule is refused as `Refusal::Stopped`, and a new runner
+/// judges the rules no runner judged, so every other rule still runs. The runner's own processor-time limit is the limit
+/// of every rule and one more, so a runner whose watch failed still ends.
 pub(crate) fn rules(
     library: &Path,
     package: &Package,
     modules: &[(&str, &str)],
     files: &[(&str, &Facts)],
+    rules: usize,
 ) -> io::Result<Vec<Broken>> {
-    let yield_after =
-        u32::try_from(library::processor_seconds().saturating_mul(1000) / YIELD_AFTER).unwrap_or(u32::MAX);
+    let seconds = library::processor_seconds();
+    let limit = u32::try_from(seconds.saturating_mul(1000)).unwrap_or(u32::MAX);
+    let backstop = seconds.saturating_mul(u64::try_from(rules).unwrap_or(u64::MAX).saturating_add(1));
     let mut judged: Vec<Broken> = Vec::new();
     let mut stopped: Vec<String> = Vec::new();
     loop {
-        let output = run(library, package, &encode_rules(modules, files, &judged, &stopped, yield_after)?)?;
-        let stopped_rule = if library::stopped(output.status) { judging(&output.stderr) } else { None };
-        if stopped_rule.is_some() || output.status.code() == Some(YIELDED) {
+        let output = run(library, package, &encode_rules(modules, files, &judged, &stopped, limit)?, backstop)?;
+        if library::stopped(output.status)
+            && let Some(rule) = judging(&output.stderr)
+        {
             judged.extend(decode_broken(&output.stdout, modules.len(), files).map_err(io::Error::other)?);
-            stopped.extend(stopped_rule);
+            stopped.push(rule);
             continue;
         }
 
@@ -174,15 +172,16 @@ fn answer(output: Output) -> io::Result<Vec<u8>> {
     Err(io::Error::other(format!("the Lean runner {failure}: {}", message.join("\n").trim())))
 }
 
-/// Runs the runner on one request and returns how it exited and what it wrote.
+/// Runs the runner on one request, under a limit of `seconds` of processor time, and returns how it exited and what it
+/// wrote.
 ///
 /// Each call runs its own runner, since Lean cannot free an imported environment in a process that elaborated with
 /// it. `lake env` gives the runner the package's search path, and on Windows the folder of Lean's shared libraries,
 /// which an executable that interprets Lean links to there.
-fn run(library: &Path, package: &Package, request: &[u8]) -> io::Result<Output> {
+fn run(library: &Path, package: &Package, request: &[u8], seconds: u64) -> io::Result<Output> {
     let mut runner = package
         .lake
-        .command()
+        .command_within(seconds)
         .arg("env")
         .arg(library::runner(library))
         .current_dir(&package.directory)
@@ -288,13 +287,13 @@ fn decode(payload: &[u8], questions: usize) -> Result<Vec<Answer>, String> {
 
 /// A `Rules` request: each module and its namespace, then each file's path and facts, then each rule an earlier runner
 /// judged, which the runner skips, then each rule it refuses as `Refusal::Stopped` without judging it, then the
-/// processor milliseconds after which it yields.
+/// processor milliseconds each rule may use.
 fn encode_rules(
     modules: &[(&str, &str)],
     files: &[(&str, &Facts)],
     judged: &[Broken],
     stopped: &[String],
-    yield_after: u32,
+    limit: u32,
 ) -> io::Result<Vec<u8>> {
     let mut writer = header(RULES_REQUEST);
     writer.write_length(modules.len()).map_err(io::Error::other)?;
@@ -338,7 +337,7 @@ fn encode_rules(
     for rule in stopped {
         writer.write_string(rule).map_err(io::Error::other)?;
     }
-    writer.write_u32(yield_after);
+    writer.write_u32(limit);
 
     Ok(writer.finish())
 }

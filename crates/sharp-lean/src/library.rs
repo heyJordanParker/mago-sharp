@@ -102,6 +102,11 @@ impl Lake {
     /// A command that runs this `lake`. On Unix it may use `processor_seconds()`, as may each Lean process it starts,
     /// which inherits the limit.
     pub(crate) fn command(&self) -> Command {
+        self.command_within(processor_seconds())
+    }
+
+    /// A command that runs this `lake`, which on Unix may use `seconds`, kept under the hard limit Mago inherits.
+    pub(crate) fn command_within(&self, seconds: u64) -> Command {
         let mut command = Command::new(&self.program);
         if let Some(home) = &self.home {
             command.env("ELAN_HOME", home);
@@ -110,10 +115,11 @@ impl Lake {
         {
             use std::os::unix::process::CommandExt;
 
-            let seconds = processor_seconds();
             // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
             unsafe { command.pre_exec(move || limit_processor_time(seconds)) };
         }
+        #[cfg(not(unix))]
+        let _ = seconds;
 
         command
     }
@@ -127,15 +133,29 @@ pub(crate) fn processor_seconds() -> u64 {
         let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         // SAFETY: `limit` is a valid `rlimit` for `getrlimit` to fill.
         if unsafe { libc::getrlimit(libc::RLIMIT_CPU, &raw mut limit) } == 0 {
-            return PROCESSOR_SECONDS.min(limit.rlim_cur);
+            return processor_seconds_within(&limit);
         }
     }
 
     PROCESSOR_SECONDS
 }
 
-/// Lowers the soft processor-time limit of the process about to start to `seconds`, which it reaches as `SIGXCPU`, and
-/// its core-file limit to none, so a Lean stopped that way leaves no core file of gigabytes in the project.
+/// The processor seconds each Lean process may use under the inherited processor-time `limit`: `PROCESSOR_SECONDS`, or
+/// its soft limit when lower, kept a second under a finite hard limit.
+#[cfg(unix)]
+fn processor_seconds_within(limit: &libc::rlimit) -> u64 {
+    PROCESSOR_SECONDS.min(limit.rlim_cur).min(below_hard(limit))
+}
+
+/// The highest soft limit under `limit` that a process reaches as `SIGXCPU`: a second under a finite hard limit, since
+/// Linux sends `SIGKILL`, which the out-of-memory killer sends too, once the soft limit meets the hard one.
+#[cfg(unix)]
+fn below_hard(limit: &libc::rlimit) -> u64 {
+    if limit.rlim_max == libc::RLIM_INFINITY { u64::MAX } else { limit.rlim_max.saturating_sub(1) }
+}
+
+/// Sets the soft processor-time limit of the process about to start to `seconds`, kept under its hard limit, and its
+/// core-file limit to none, so a Lean stopped that way leaves no core file of gigabytes in the project.
 #[cfg(unix)]
 fn limit_processor_time(seconds: u64) -> io::Result<()> {
     for (resource, soft) in [(libc::RLIMIT_CPU, seconds), (libc::RLIMIT_CORE, 0)] {
@@ -144,7 +164,7 @@ fn limit_processor_time(seconds: u64) -> io::Result<()> {
         if unsafe { libc::getrlimit(resource, &raw mut limit) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        limit.rlim_cur = limit.rlim_cur.min(soft);
+        limit.rlim_cur = soft.min(below_hard(&limit));
         // SAFETY: as above.
         if unsafe { libc::setrlimit(resource, &raw const limit) } != 0 {
             return Err(io::Error::last_os_error());
@@ -439,8 +459,22 @@ mod tests {
         let lake = Lake { program: PathBuf::from("/bin/sh"), home: None };
 
         let output = lake.command().args(["-c", "ulimit -t; ulimit -c"]).output().unwrap();
+        let within = lake.command_within(360).args(["-c", "ulimit -t"]).output().unwrap();
 
         assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
+        assert_eq!(String::from_utf8_lossy(&within.stdout), "360\n");
+    }
+
+    /// Linux ends a process whose soft limit meets its hard limit with `SIGKILL`, which Mago can't tell from the
+    /// out-of-memory killer's, so the soft limit stays a second under a finite hard limit, as a `ulimit -t 60` sets.
+    #[test]
+    fn the_processor_time_limit_stays_a_second_under_a_finite_hard_limit() {
+        let limit = |rlim_cur, rlim_max| libc::rlimit { rlim_cur, rlim_max };
+
+        assert_eq!(processor_seconds_within(&limit(60, 60)), 59);
+        assert_eq!(processor_seconds_within(&limit(10, libc::RLIM_INFINITY)), 10);
+        assert_eq!(processor_seconds_within(&limit(libc::RLIM_INFINITY, 200)), 120);
+        assert_eq!(processor_seconds_within(&limit(libc::RLIM_INFINITY, libc::RLIM_INFINITY)), 120);
     }
 
     /// An `elan-init` that installs an `elan` whose `toolchain install` appends the toolchain to `$ELAN_HOME/installed`
