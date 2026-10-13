@@ -368,6 +368,7 @@ final class AnalyzerCodeModuleGenerator
         'broken-rule',
         'missing-super-call',
         'named-constructor-without-new',
+        'named-constructor-clash',
         'invalid-event',
         'invalid-struct',
         'missing-required-property',

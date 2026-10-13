@@ -26,7 +26,11 @@ pub fn populate_function_like_metadata(
     }
 
     for attribute_metadata in metadata.get_attributes() {
-        add_attribute_reference(symbol_references, reference_source, attribute_metadata.name, Some(true));
+        add_class_reference(symbol_references, reference_source, attribute_metadata.name, Some(true));
+    }
+
+    for event in &metadata.listens {
+        add_class_reference(symbol_references, reference_source, *event, Some(true));
     }
 
     for return_type in
@@ -62,7 +66,7 @@ pub fn populate_function_like_metadata(
         }
 
         for attribute_metadata in &parameter_metadata.attributes {
-            add_attribute_reference(symbol_references, reference_source, attribute_metadata.name, None);
+            add_class_reference(symbol_references, reference_source, attribute_metadata.name, None);
         }
     }
 
@@ -141,7 +145,8 @@ pub fn populate_function_like_metadata(
     metadata.flags |= MetadataFlags::POPULATED;
 }
 
-fn add_attribute_reference(
+/// Records that the function-like names the class `name`, as an attribute or in an `on` clause.
+fn add_class_reference(
     symbol_references: &mut SymbolReferences,
     reference_source: &ReferenceSource,
     name: Word,

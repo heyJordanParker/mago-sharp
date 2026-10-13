@@ -53,6 +53,7 @@ use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullSafePropertyAccess;
+use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatchPatternArm;
@@ -1118,6 +1119,14 @@ where
             let (parent_classlike, imported) = self.resolve_class(context, parent.value());
 
             self.resolved_names.insert_at(parent.span(), parent_classlike, imported);
+        }
+    }
+
+    fn walk_in_on(&mut self, on: &'ast On<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        for event in &on.events {
+            let (event_classlike, imported) = self.resolve_class(context, event.value);
+
+            self.resolved_names.insert_at(event.span, event_classlike, imported);
         }
     }
 

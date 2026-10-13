@@ -26,6 +26,7 @@ use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::NamedConstructor;
+use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
@@ -628,10 +629,28 @@ impl Fingerprintable for Method<'_> {
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.on.fingerprint_with_hasher(hasher, resolved_names, options);
 
         if !options.signature_only {
             self.initializer.fingerprint_with_hasher(hasher, resolved_names, options);
             self.body.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for On<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "on".hash(hasher);
+        for event in &self.events {
+            event.fingerprint_with_hasher(hasher, resolved_names, options);
         }
     }
 }

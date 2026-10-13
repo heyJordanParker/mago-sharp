@@ -296,7 +296,7 @@ where
         context,
         scope,
     )?;
-    class_like_metadata.flags |= MetadataFlags::FINAL;
+    class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::EVENT;
 
     let constructor = scan_event_constructor(event, &class_like_metadata, context, scope);
     for parameter in &constructor.parameters {
@@ -1793,6 +1793,7 @@ fn create_static_method(
             where_constraints: WordMap::default(),
             assigned_properties: WordSet::default(),
         }),
+        listens: vec![],
         type_resolution_context: None,
         thrown_types,
         issues: Vec::default(),

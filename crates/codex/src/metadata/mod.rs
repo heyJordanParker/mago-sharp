@@ -2032,7 +2032,7 @@ mod should_replace_metadata_tests {
         assert!(class.methods.contains(&method_existing));
         assert!(class.flags.is_user_defined());
         // No issues should be emitted.
-        assert!(class.issues.is_empty());
+        assert!(class.issues.is_empty(), "{:?}", class.issues);
     }
 }
 

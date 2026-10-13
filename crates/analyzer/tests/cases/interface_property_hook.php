@@ -20,3 +20,9 @@ class Migration2 implements MigratesUp
 {
     public string $name = 'migration2';
 }
+
+// This must fail - the class provides no property
+/** @mago-expect analysis:unimplemented-abstract-property-hook */
+class Migration3 implements MigratesUp
+{
+}

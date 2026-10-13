@@ -227,6 +227,8 @@ where
                     break;
                 }
 
+                self.stream.read_as(0, kind);
+
                 if let Expression::Binary(binary) = left
                     && matches!(binary.rhs, Expression::Assignment(_))
                     && infix_precedence > binary.operator.precedence().in_dialect(self.dialect)
@@ -249,6 +251,7 @@ where
 
     #[inline]
     fn parse_lhs_expression(&mut self, precedence: Precedence) -> Result<&'arena Expression<'arena>, ParseError> {
+        self.read_php_expression()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let next = self.stream.peek_kind(1)?;
 
@@ -284,15 +287,19 @@ where
         }
 
         // `new Report.fromJson(…)` calls a named constructor, spec section 9.1: in PHP# a name after `new` is a class,
-        // so a `.` after it names the constructor.
+        // so a `.` after it names the constructor. `new Self.of(…)` parses too, so the checker can refuse it by name.
         if self.dialect.is_sharp()
             && token.kind == T!["new"]
-            && next == Some(T![Identifier])
+            && matches!(next, Some(T![Identifier] | T!["self"]))
             && self.stream.peek_kind(2)? == Some(T!["."])
             && self.stream.peek_kind(3)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
         {
             let new = self.expect_keyword(T!["new"])?;
-            let class = Expression::Identifier(Identifier::Local(self.parse_local_identifier()?));
+            let class = if next == Some(T!["self"]) {
+                Expression::Self_(self.expect_any_keyword()?)
+            } else {
+                Expression::Identifier(Identifier::Local(self.parse_local_identifier()?))
+            };
 
             return Ok(self.arena.alloc(Expression::Instantiation(Instantiation {
                 new,
@@ -426,7 +433,8 @@ where
     /// Returns the operator the next token stands for in the current dialect.
     ///
     /// In PHP#, `.` is member access, which PHP writes `->`, and `?` written right before `.` is null-safe member
-    /// access, which PHP writes `?->`.
+    /// access, which PHP writes `?->`. A name that spells one of PHP's word operators, such as `xor`, stands for that
+    /// operator after an operand, where no name can follow.
     fn operator_kind(&mut self, token: Token<'_>) -> Result<TokenKind, ParseError> {
         Ok(match (self.dialect, token.kind) {
             (Dialect::Sharp, T!["."]) => T!["->"],
@@ -437,6 +445,9 @@ where
                     .is_some_and(|next| next.kind == T!["."] && next.start.offset == token.start.offset + 1) =>
             {
                 T!["?->"]
+            }
+            (Dialect::Sharp, T![Identifier]) => {
+                self.php_keyword(token).filter(TokenKind::is_infix).unwrap_or(token.kind)
             }
             _ => token.kind,
         })

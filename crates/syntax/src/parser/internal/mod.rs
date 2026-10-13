@@ -14,6 +14,7 @@ pub(crate) mod construct;
 pub(crate) mod control_flow;
 pub(crate) mod declare;
 pub(crate) mod echo;
+pub(crate) mod emit;
 pub(crate) mod event;
 pub(crate) mod expression;
 pub(crate) mod r#extern;

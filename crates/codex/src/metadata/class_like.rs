@@ -1098,7 +1098,7 @@ mod tests {
         assert!(vendored.inheritable_method_ids.contains_key(&method_override));
 
         // No warning: patch overrides of inherited methods are expected and intentional.
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1126,7 +1126,7 @@ mod tests {
         assert!(!vendored.methods.contains(&pseudo));
 
         // No issues.
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1144,7 +1144,7 @@ mod tests {
 
         assert!(vendored.magic_properties.contains_key(&prop_magic));
         assert_eq!(vendored.magic_property_ids.get(&prop_magic), Some(&vendored.name));
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1166,7 +1166,7 @@ mod tests {
         assert!(vendored.initialized_properties.contains(&prop));
         // overridden_property_ids must not be cleared by the patch
         assert!(vendored.overridden_property_ids.contains_key(&prop));
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1186,7 +1186,7 @@ mod tests {
         assert!(vendored.template_types.contains_key(&t));
         assert_eq!(vendored.template_variance.first().copied(), Some(Variance::Covariant));
         assert!(vendored.template_readonly.contains(&t));
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1219,7 +1219,7 @@ mod tests {
         assert_eq!(vendored.template_types.keys().copied().collect::<Vec<_>>(), [t, u, v]);
         assert_eq!(vendored.template_variance, [Variance::Contravariant, Variance::Covariant, Variance::Invariant]);
 
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1246,7 +1246,7 @@ mod tests {
 
         assert!(vendored.template_readonly.contains(&t), "T should remain readonly after patch");
         assert!(!vendored.template_readonly.contains(&u), "U was not declared readonly by the patch");
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]

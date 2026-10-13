@@ -1764,25 +1764,33 @@ where
             continue;
         };
 
-        let issue = if context.dialect.is_sharp() {
-            let name = display_class_like_name(context, *name);
-            Issue::error(format!("Cannot find type `{name}`."))
-                .with_annotation(
-                    Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
-                )
-                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
-        } else {
-            Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
-                .with_annotation(
-                    Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
-                )
-                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-                .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
-                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.")
-        };
-        context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
+        report_undefined_type(context, *name, span);
     }
+}
+
+/// Reports the type `name`, written at `span`, as not found in the codebase.
+pub(crate) fn report_undefined_type<A>(context: &mut Context<'_, '_, A>, name: Word, span: Span)
+where
+    A: Arena,
+{
+    let issue = if context.dialect.is_sharp() {
+        let name = display_class_like_name(context, name);
+        Issue::error(format!("Cannot find type `{name}`."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+            )
+            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
+    } else {
+        Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+            )
+            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+            .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
+            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.")
+    };
+    context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
 }
 
 /// `declared`, a type a PHP# declaration writes, or an error when it names a type no analyzed file or stub declares.

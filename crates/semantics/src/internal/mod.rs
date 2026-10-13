@@ -114,7 +114,10 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
 
     #[inline]
     fn walk_in_declare(&self, declare: &Declare<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
-        checker::statement::check_declare(declare, context);
+        // A `.sharp` file has no `declare`, and the PHP# checker refuses it whole.
+        if !context.program.dialect.is_sharp() {
+            checker::statement::check_declare(declare, context);
+        }
     }
 
     #[inline]
@@ -174,7 +177,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
 
     #[inline]
     fn walk_in_event(&self, event: &'ast Event<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
-        checker::sharp::check_event_name(event, context);
+        checker::sharp::check_class_name(&event.name, context);
     }
 
     #[inline]

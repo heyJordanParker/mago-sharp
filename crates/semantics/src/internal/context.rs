@@ -110,14 +110,14 @@ impl<'ctx, 'ast, 'arena> Context<'ctx, 'ast, 'arena> {
 
     /// Reports a semantic issue with the given `Issue`.
     ///
-    /// This method adds the issue to the context's issue collection,
-    /// appending the `ISSUE_CODE` to the issue for identification.
+    /// This method adds the issue to the context's issue collection, with the `ISSUE_CODE` unless the issue carries the
+    /// code the analyzer reports the same rule with.
     ///
     /// # Arguments
     ///
     /// `issue`: The `Issue` to report, which contains details about the semantic violation.
     pub fn report(&mut self, issue: Issue) {
-        self.issues.push(issue.with_code(ISSUE_CODE));
+        self.issues.push(if issue.code.is_some() { issue } else { issue.with_code(ISSUE_CODE) });
     }
 
     /// Finalizes the context and returns the collected issues.

@@ -63,12 +63,14 @@ impl MetadataFlags {
     /// A PHP# property declared with `init`, spec section 6.1: it is set only while the object is created, and runs as
     /// PHP's `set` hook or set visibility.
     pub const INIT: MetadataFlags = MetadataFlags(1 << 47);
+    /// A PHP# event, spec section 15: the final class an `event` declaration runs as.
+    pub const EVENT: MetadataFlags = MetadataFlags(1 << 48);
     /// A PHP# struct, spec section 10: a final class whose object never changes and compares by value.
-    pub const STRUCT: MetadataFlags = MetadataFlags(1 << 48);
+    pub const STRUCT: MetadataFlags = MetadataFlags(1 << 49);
     /// A PHP# property each creation of its object must set, spec sections 6.1 and 10: one written `required`, or a
-    /// struct's property with no initial value that its main constructor does not take. What a constructor assigns is
-    /// its own `MethodMetadata::assigned_properties`.
-    pub const REQUIRED: MetadataFlags = MetadataFlags(1 << 49);
+    /// struct's public `init` property with no initial value that its main constructor does not take. What a
+    /// constructor assigns is its own `MethodMetadata::assigned_properties`.
+    pub const REQUIRED: MetadataFlags = MetadataFlags(1 << 50);
 }
 
 impl MetadataFlags {
@@ -151,6 +153,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_init(self) -> bool {
         self.contains(Self::INIT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_event(self) -> bool {
+        self.contains(Self::EVENT)
     }
 
     #[inline]

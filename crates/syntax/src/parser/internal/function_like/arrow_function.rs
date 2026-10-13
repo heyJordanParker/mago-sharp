@@ -51,7 +51,7 @@ where
 
         Ok(match self.stream.peek_kind(0)? {
             Some(T![Identifier]) => self.stream.peek_kind(1)? == Some(T!["=>"]),
-            Some(T!["("]) => self.stream.peek_kind_after_parentheses()? == Some(T!["=>"]),
+            Some(T!["("]) => self.stream.peek_after_parentheses()?.is_some_and(|token| token.kind == T!["=>"]),
             _ => false,
         })
     }

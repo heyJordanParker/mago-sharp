@@ -15,6 +15,7 @@ use crate::cst::cst::control_flow::switch::Switch;
 use crate::cst::cst::declare::Declare;
 use crate::cst::cst::echo::Echo;
 use crate::cst::cst::echo::EchoTag;
+use crate::cst::cst::emit::Emit;
 use crate::cst::cst::event::Event;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::r#extern::Extern;
@@ -94,6 +95,7 @@ pub enum Statement<'arena> {
     Switch(Switch<'arena>),
     If(If<'arena>),
     Return(Return<'arena>),
+    Emit(Emit<'arena>),
     Expression(ExpressionStatement<'arena>),
     Echo(Echo<'arena>),
     EchoTag(EchoTag<'arena>),
@@ -147,6 +149,7 @@ impl Statement<'_> {
             },
             Statement::If(If { body: IfBody::ColonDelimited(body), .. }) => body.terminator.is_closing_tag(),
             Statement::Return(ret) => ret.terminator.is_closing_tag(),
+            Statement::Emit(emit) => emit.terminator.is_closing_tag(),
             Statement::Expression(expression_statement) => expression_statement.terminator.is_closing_tag(),
             Statement::Echo(echo) => echo.terminator.is_closing_tag(),
             Statement::EchoTag(echo) => echo.terminator.is_closing_tag(),
@@ -249,6 +252,7 @@ impl HasSpan for Statement<'_> {
             Statement::Switch(statement) => statement.span(),
             Statement::If(statement) => statement.span(),
             Statement::Return(statement) => statement.span(),
+            Statement::Emit(statement) => statement.span(),
             Statement::Expression(statement) => statement.span(),
             Statement::Echo(statement) => statement.span(),
             Statement::EchoTag(statement) => statement.span(),

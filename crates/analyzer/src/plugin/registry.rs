@@ -2059,7 +2059,7 @@ mod tests {
         assert_eq!(indices.len(), 1);
 
         let indices = registry.get_function_provider_indices(b"other_func");
-        assert!(indices.is_empty());
+        assert!(indices.is_empty(), "expected no provider for another function");
     }
 
     #[test]

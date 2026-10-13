@@ -20,6 +20,7 @@ use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::resolve_declared_property;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::names::display_property_name;
 use mago_bytes::BytesDisplay;
 
 /// Checks if a method is visible from the current scope and reports a detailed
@@ -312,6 +313,28 @@ where
         && !property_metadata.hooks.contains_key(&word(b"set"))
         && property_metadata.flags.is_virtual_property()
     {
+        // PHP# states a property get-only with `{ get; }`, and names it as it reads: `orderId` of `OrderEvent`.
+        if context.dialect.is_sharp() {
+            let class = display_class_like_name(context, declaring_class_metadata.original_name);
+            let property = display_property_name(context, property_name);
+
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(format!("`{property}` of `{class}` is get-only."))
+                    .with_annotation(
+                        Annotation::primary(member_span.unwrap_or(access_span)).with_message("Written here."),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(
+                            property_metadata.span.or(property_metadata.name_span).unwrap_or(access_span),
+                        )
+                        .with_message("Declared get-only here."),
+                    ),
+            );
+
+            return false;
+        }
+
         let property = display_member(context, declaring_class_metadata.original_name, property_name);
 
         context.collector.report_with_code(
@@ -347,7 +370,20 @@ where
         block_context.scope.get_class_like_name(),
     );
     if !is_visible {
-        if property_metadata.flags.is_readonly() {
+        if context.dialect.is_sharp() && declaring_class_metadata.flags.is_event() {
+            let event = display_class_like_name(context, declaring_class_metadata.original_name);
+            let property = display_property_name(context, property_name);
+
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(format!("Event `{event}` sets `{property}` once, by `new`."))
+                    .with_annotation(
+                        Annotation::primary(member_span.unwrap_or(access_span)).with_message("Written here."),
+                    )
+                    .with_note("An event's parameters are its properties, and nothing changes them after `new`.")
+                    .with_help("Create a new event with the value instead."),
+            );
+        } else if property_metadata.flags.is_readonly() {
             report_readonly_write_scope_issue(
                 context,
                 block_context.scope.get_class_like_name(),

@@ -2192,6 +2192,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
             }
+            // `emit e;` is `\Sharp\Internal\emit($e);`, which runs every listener of the event before it returns.
+            Statement::Emit(emit) => {
+                let line = self.line(emit);
+                let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\emit");
+                let event = self.expression(emit.value);
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[event]);
+
+                self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+            }
             Statement::LocalDeclaration(local) => self.local(local),
             Statement::If(r#if) => self.r#if(r#if),
             Statement::For(r#for) => self.r#for(r#for),
@@ -4518,7 +4527,8 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
             | Modifier::PrivateSet(_)
-            | Modifier::Lazy(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
         };
     }
 
@@ -4544,7 +4554,8 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Extern(_)
-            | Modifier::Lazy(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
         };
     }
 

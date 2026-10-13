@@ -99,6 +99,9 @@ pub enum ParseError {
     /// A type other than an interface name in a PHP# struct's header, as in `struct Username : string`, at the type.
     /// Spec section 10: a struct implements interfaces, and keys a `Map` by its whole value.
     StructHeaderTypeInSharp(Span),
+    /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
+    /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
+    MiscasedKeywordInSharp(&'static str, Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -138,7 +141,8 @@ impl HasFileId for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::StructHeaderTypeInSharp(span) => span.file_id,
+            | ParseError::StructHeaderTypeInSharp(span)
+            | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
         }
     }
 }
@@ -182,7 +186,8 @@ impl HasSpan for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::StructHeaderTypeInSharp(span) => *span,
+            | ParseError::StructHeaderTypeInSharp(span)
+            | ParseError::MiscasedKeywordInSharp(_, span) => *span,
         }
     }
 }
@@ -311,6 +316,7 @@ impl std::fmt::Display for ParseError {
                 "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
                     .to_string()
             }
+            ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
         };
 
         write!(f, "{message}")
@@ -366,7 +372,8 @@ impl From<&ParseError> for Issue {
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
-            | ParseError::StructHeaderTypeInSharp(..) => Issue::error(error.to_string())
+            | ParseError::StructHeaderTypeInSharp(..)
+            | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())

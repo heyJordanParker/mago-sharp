@@ -1,4 +1,5 @@
 use mago_names::ResolvedNames;
+use mago_syntax::cst::Emit;
 use mago_syntax::cst::ExpressionStatement;
 use mago_syntax::cst::Statement;
 use mago_syntax_core::stack::ensure_sufficient_stack;
@@ -45,6 +46,7 @@ impl Fingerprintable for Statement<'_> {
             Statement::Switch(switch) => switch.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::If(r#if) => r#if.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Return(r#return) => r#return.fingerprint_with_hasher(hasher, resolved_names, options),
+            Statement::Emit(emit) => emit.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Expression(expr_stmt) => expr_stmt.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::Echo(echo) => echo.fingerprint_with_hasher(hasher, resolved_names, options),
             Statement::EchoTag(echo_tag) => echo_tag.fingerprint_with_hasher(hasher, resolved_names, options),
@@ -76,5 +78,20 @@ impl Fingerprintable for ExpressionStatement<'_> {
     {
         self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
         self.terminator.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for Emit<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        hasher.write(b"emit");
+        self.value.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }
