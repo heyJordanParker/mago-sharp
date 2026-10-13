@@ -619,13 +619,8 @@ impl<'body, 'program> Body<'body, 'program> {
         let target = self.checked.types().call_target(expression);
         match target.kind {
             DeclarationKind::Method { overridable: false } => {}
-            DeclarationKind::Method { overridable: true } if self.is_interface(class) => {}
             DeclarationKind::Method { overridable: true } => {
-                return self.unmodeled(
-                    expression.span(),
-                    format!("a call to the overridable method {}.{}", names::short_name(class), target.name),
-                    issues::OVERRIDABLE,
-                );
+                return self.overridable(expression, class, target.name.as_bytes());
             }
             _ => return self.unmodeled(expression.span(), "a call of a function value".to_owned(), issues::LAMBDA),
         }
@@ -646,16 +641,8 @@ impl<'body, 'program> Body<'body, 'program> {
             return "default".to_owned();
         };
         let target = self.checked.types().call_target(expression);
-        let translated = match target.kind {
-            DeclarationKind::Method { overridable } => !overridable || self.is_interface(class),
-            _ => false,
-        };
-        if !translated {
-            return self.unmodeled(
-                expression.span(),
-                format!("a call to the overridable method {}.{}", names::short_name(class), target.name),
-                issues::OVERRIDABLE,
-            );
+        if target.kind != (DeclarationKind::Method { overridable: false }) {
+            return self.overridable(expression, class, target.name.as_bytes());
         }
 
         let receiver = self.value(call.object);
@@ -941,13 +928,23 @@ impl<'body, 'program> Body<'body, 'program> {
         true
     }
 
-    /// Whether `class` is an interface, whose methods Lean calls as `opaque` functions.
-    fn is_interface(&self, class: &[u8]) -> bool {
-        self.checked.types().class_declaration(class).kind == DeclarationKind::Interface
+    /// A call of `class`'s method `method`, which a subclass or, on an interface, each implementation gives its own body,
+    /// so Lean cannot see which body runs, nor whether it has effects.
+    fn overridable(&mut self, expression: &Expression, class: &[u8], method: &[u8]) -> String {
+        let place = format!("{}.{}", names::short_name(class), String::from_utf8_lossy(method));
+        if self.checked.types().class_declaration(class).kind == DeclarationKind::Interface {
+            return self.unmodeled(
+                expression.span(),
+                format!("the interface method {place}"),
+                issues::INTERFACE_METHOD,
+            );
+        }
+
+        self.unmodeled(expression.span(), format!("a call to the overridable method {place}"), issues::OVERRIDABLE)
     }
 
     /// The Lean type of the class `class` a hint names.
-    fn class_type(&mut self, span: Span, class: &[u8]) -> String {
+    pub(crate) fn class_type(&mut self, span: Span, class: &[u8]) -> String {
         if !self.is_translated_class(span, class) {
             return "default".to_owned();
         }

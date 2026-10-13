@@ -419,6 +419,17 @@ mod tests {
 
     use super::*;
 
+    /// Each process a `Lake` starts, `lake` itself or anything run in its place, runs under the processor-time limit,
+    /// which the Lean processes it starts inherit.
+    #[test]
+    fn each_process_a_lake_starts_runs_under_the_processor_time_limit() {
+        let lake = Lake { program: PathBuf::from("/bin/sh"), home: None };
+
+        let output = lake.command().args(["-c", "ulimit -t; ulimit -c"]).output().unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
+    }
+
     /// An `elan-init` that installs an `elan` whose `toolchain install` appends the toolchain to `$ELAN_HOME/installed`
     /// and whose `toolchain list` prints that file. When the cache holds `broken-init`, it fails after it installed.
     const ELAN_INIT: &str = r#"#!/bin/sh

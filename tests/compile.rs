@@ -881,16 +881,16 @@ fn compile_proves_spec_section_28_1_s_state_machine_law_over_an_enum_match() {
     assert!(compiled(root, "app/Shop/Status.sharp").exists());
 }
 
-/// Spec section 28's `state-machine-law` example as it stands, whose `Payment` is an interface: the law holds for every
-/// class that implements it.
+/// Spec section 28's `state-machine-law` example as it stands.
+const STATE_MACHINE: &str = "namespace App.Shop;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n    case Paid = \"paid\";\n    case Refunded = \"refunded\";\n\n    public Status after(Payment e) => match (this) {                               // pure: the next status for every status and event\n        Status.Open => Status.Paid,\n        Status.Paid => Status.Refunded,\n        Status.Refunded => Status.Refunded,\n    };\n    law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;\n}\n";
+
+/// Spec section 28's `state-machine-law` example, whose `Payment` is an interface: the law holds for every class that
+/// implements it.
 #[test]
 fn compile_proves_spec_section_28_s_state_machine_law_over_an_interface() {
     let directory = lawful_project(&[
         ("app/Shop/Payment.sharp", "namespace App.Shop;\n\npublic interface Payment\n{\n}\n"),
-        (
-            "app/Shop/Status.sharp",
-            "namespace App.Shop;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n    case Paid = \"paid\";\n    case Refunded = \"refunded\";\n\n    public Status after(Payment e) => match (this) {                               // pure: the next status for every status and event\n        Status.Open => Status.Paid,\n        Status.Paid => Status.Refunded,\n        Status.Refunded => Status.Refunded,\n    };\n    law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;\n}\n",
-        ),
+        ("app/Shop/Status.sharp", STATE_MACHINE),
     ]);
     let root = directory.path();
 
@@ -903,15 +903,16 @@ fn compile_proves_spec_section_28_s_state_machine_law_over_an_interface() {
     assert!(compiled(root, "app/Shop/Status.sharp").exists());
 }
 
-/// A class can hold an interface's value and call its methods, directly and through `?.`, and a law over it still
-/// proves: each method is a function Lean knows nothing about, so the law holds whatever each implementation returns.
+/// Spec section 28's `state-machine-law` example, called with a class that implements `Payment` as its event: Lean
+/// takes the class's value as a `Payment` it knows nothing about, so the law proves for every event.
 #[test]
-fn compile_proves_a_law_over_a_class_that_holds_an_interface_and_calls_its_methods() {
+fn compile_proves_spec_section_28_s_state_machine_law_with_a_class_as_its_event() {
     let directory = lawful_project(&[
-        ("app/Shop/Payment.sharp", "namespace App.Shop;\n\npublic interface Payment\n{\n    int amount();\n}\n"),
+        ("app/Shop/Payment.sharp", "namespace App.Shop;\n\npublic interface Payment\n{\n}\n"),
+        ("app/Shop/Status.sharp", STATE_MACHINE),
         (
-            "app/Shop/Refund.sharp",
-            "namespace App.Shop;\n\npublic class Refund\n{\n    public Refund(public Payment payment { get; }, public Payment? fee { get; }, public bool settled { get; }) { }\n\n    public int owed()\n    {\n        if (this.settled) {\n            return 0;\n        }\n        return this.payment.amount() - (this.fee?.amount() ?? 0);\n    }\n\n    law settledOwesNothing(Payment payment) => new Refund(payment, null, true).owed() == 0;\n}\n",
+            "app/Shop/Card.sharp",
+            "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    law cardRefundIsFinal(int cents) => Status.Refunded.after(new Card(cents)) == Status.Refunded;\n}\n",
         ),
     ]);
     let root = directory.path();
@@ -920,16 +921,41 @@ fn compile_proves_a_law_over_a_class_that_holds_an_interface_and_calls_its_metho
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(
-        read(root, "app/Shop/Refund.lean")
-            .contains("theorem settledOwesNothing : App.Shop.Refund.settledOwesNothing := by")
+        read(root, "app/Shop/Card.lean").contains("theorem cardRefundIsFinal : App.Shop.Card.cardRefundIsFinal := by")
     );
-    let payment = read(root, ".sharp/.lean/Code/App/Shop/Payment.lean");
-    assert!(
-        payment.ends_with(
-            "open Sharp\n\nabbrev App.Shop.Payment : Type := Interface \"App.Shop.Payment\"\n\nopaque App.Shop.Payment.amount (this : App.Shop.Payment) : M int\n"
+}
+
+/// A law never calls an interface's method, since an implementation can have effects: `Card.amount` returns a random
+/// number, so `Card.same` is false on almost every run, and a law must not prove it. A call through `?.` is refused too.
+#[test]
+fn a_law_that_calls_an_interface_method_is_refused() {
+    let payment = "namespace App.Shop;\n\npublic interface Payment\n{\n    int amount();\n}\n";
+    for (file, source, law, calls) in [
+        (
+            "app/Shop/Card.sharp",
+            "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    public int amount() => random_int(1, 1000000);\n\n    public static bool same(Payment p) => p.amount() == p.amount();\n\n    law alwaysSame(Payment p) => Card.same(p);\n}\n",
+            "alwaysSame reaches the interface method Payment.amount in Card.same",
+            ["9:43", "9:57"],
         ),
-        "{payment}"
-    );
+        (
+            "app/Shop/Refund.sharp",
+            "namespace App.Shop;\n\npublic class Refund\n{\n    public Refund(public Payment payment { get; }, public Payment? fee { get; }) { }\n\n    public int owed() => this.payment.amount() - (this.fee?.amount() ?? 0);\n\n    law owedIsNumber(Refund r) => r.owed() == r.owed();\n}\n",
+            "owedIsNumber reaches the interface method Payment.amount in Refund.owed",
+            ["7:26", "7:51"],
+        ),
+    ] {
+        let directory = lawful_project(&[("app/Shop/Payment.sharp", payment), (file, source)]);
+        let root = directory.path();
+        let expected: Vec<String> = calls
+            .iter()
+            .map(|at| format!("{file}:{at}:error - unmodeled-construct: Law {law}. Mago does not translate interface methods to Lean, because an implementation can have effects."))
+            .collect();
+
+        let output = compile_without_lean(root);
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        assert_eq!(issue_lines(&output), expected, "{}", printed(&output));
+    }
 }
 
 /// Spec section 28's `app/Tenant/Store/Module.sharp`, whose law spans `Receipts` and `Refunds`.
@@ -2016,7 +2042,9 @@ fn compile_checks_a_structure_rule_over_thousands_of_imports() {
 }
 
 /// `mago compile` with each issue on one line, as `compile_lines` runs it, under a processor-time limit of `seconds`,
-/// which Mago passes on to each Lean process it starts, so a row reaches Mago's limit long before its 120 seconds.
+/// which each Lean process it starts inherits, so a row reaches the limit long before 120 seconds. Mago's own limit on
+/// each Lean process is `library.rs`'s `each_process_a_lake_starts_runs_under_the_processor_time_limit`'s to prove:
+/// Mago takes the lower of 120 seconds and this limit, so no compile can tell the two apart.
 #[cfg(unix)]
 fn compile_lines_within(root: &Path, seconds: u64) -> Output {
     use std::os::unix::process::CommandExt;
@@ -2050,9 +2078,9 @@ fn slow(length: u64) -> String {
     ENDLESS.replace("1000000000000", &(30_000_000 + length).to_string())
 }
 
-/// Each Lean process Mago starts may use 120 processor seconds, so Lean work that never ends stops there instead of
-/// holding the compile, and is reported where it sits while every other rule runs. Each row runs under a limit of 10
-/// seconds, after a compile that built the runtime library: a rule that never ends is refused at its name, and the
+/// Lean work that runs past the processor-time limit stops there instead of holding the compile, and is reported where
+/// it sits while every other rule runs. Each row runs under a limit of 10 seconds, after a compile that built the
+/// runtime library: a rule that never ends is refused at its name, and the
 /// other rule of its `Module.lean` still judges `StoreService.sharp`; a slow rule that ends within the limit runs; ten
 /// slow rules that together run past the limit all run, since each rule gets the limit of its own; a
 /// `#eval` that never ends refuses each file its `Module.lean` judges; and a proof that never ends under

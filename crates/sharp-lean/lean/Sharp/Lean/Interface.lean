@@ -2,8 +2,8 @@
 A PHP# interface: the type of the objects that implement it.
 
 A law that reaches an interface holds for every class that implements it, today's and every later one, so Lean knows
-nothing about the interface's values. Each method of the interface a law calls is an `opaque` function of them, as
-`App.Shop.Payment.amount : App.Shop.Payment → M int`, so a proof holds whatever each implementation returns.
+nothing about the interface's values. A law passes them along and passes a class's value where the interface is
+expected, through `upcast`. It never calls their methods, since an implementation can have effects.
 -/
 
 namespace Sharp
@@ -18,7 +18,7 @@ structure Values where
 instance : Inhabited Values := ⟨⟨Unit⟩⟩
 
 /-- The values of the interface whose Lean name is `name`. Lean's kernel never unfolds an `opaque`, so no proof learns
-what they are, and two interfaces' values are never the same type. -/
+what they are, nor whether two interfaces' values are the same type. -/
 opaque values (name : String) : Values
 
 /-- The PHP# interface whose Lean name is `name`. -/
@@ -27,5 +27,9 @@ abbrev Interface (name : String) : Type := (values name).type
 instance : Inhabited (Interface name) := (values name).inhabited
 instance : DecidableEq (Interface name) := (values name).decidableEq
 instance : Repr (Interface name) := (values name).repr
+
+/-- A class's value as a value of an interface it implements, which each translated class declares as a `Coe`. Lean
+knows nothing about the interface value it gives, as about every interface value. -/
+opaque upcast {α β : Type} [Inhabited β] : α → β
 
 end Sharp
