@@ -28,6 +28,7 @@ use crate::metadata::enum_case::EnumCaseMetadata;
 use crate::metadata::r#extern::ExternMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::metadata::module::ModuleMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::reference::SymbolReferences;
@@ -48,6 +49,7 @@ pub mod enum_case;
 pub mod r#extern;
 pub mod flags;
 pub mod function_like;
+pub mod module;
 pub mod parameter;
 pub mod property;
 pub mod property_hook;
@@ -109,6 +111,9 @@ pub struct CodebaseMetadata {
     /// duplicate.
     #[cfg_attr(feature = "serde", serde(default))]
     pub externs: HashMap<(Word, Word), Vec<ExternMetadata>>,
+    /// Every PHP# module, spec section 32, in the order [`ModuleMetadata`] sorts them.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub modules: Vec<ModuleMetadata>,
     /// Map from class/interface FQCN to the set of all its descendants (recursive).
     pub all_class_like_descendants: WordMap<WordSet>,
     /// Map from class/interface FQCN to the set of its direct descendants (children).
@@ -1184,6 +1189,7 @@ impl CodebaseMetadata {
         self.symbols.extend(other.symbols);
         self.merge_wrapped_functions(other.wrapped_functions);
         self.merge_externs(other.externs);
+        self.merge_modules(other.modules);
 
         for (k, v) in other.all_class_like_descendants {
             self.all_class_like_descendants.entry(k).or_default().extend(v);
@@ -1273,6 +1279,7 @@ impl CodebaseMetadata {
             other.wrapped_functions.iter().map(|(function, wrappers)| (*function, wrappers.clone())),
         );
         self.merge_externs(other.externs.iter().map(|(target, declarations)| (*target, declarations.clone())));
+        self.merge_modules(other.modules.iter().cloned());
 
         for (k, v) in &other.all_class_like_descendants {
             self.all_class_like_descendants.entry(*k).or_default().extend(v.iter().copied());
@@ -1325,6 +1332,14 @@ impl CodebaseMetadata {
             merged.sort_unstable();
             merged.dedup();
         }
+    }
+
+    /// Adds another codebase's modules, keeping them in the order [`ModuleMetadata`] sorts them, whatever order the
+    /// files merge in.
+    fn merge_modules(&mut self, incoming: impl IntoIterator<Item = ModuleMetadata>) {
+        self.modules.extend(incoming);
+        self.modules.sort_by_key(|module| (module.file, module.span.start.offset));
+        self.modules.dedup();
     }
 
     /// Merges patch class-likes from another codebase, diagnosing collisions.
@@ -1602,6 +1617,7 @@ impl CodebaseMetadata {
             declarations.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
         }
         self.externs.retain(|_, declarations| !declarations.is_empty());
+        self.modules.retain(|module| !removed_files.contains(&module.span.file_id));
     }
 
     /// Takes all issues from the codebase metadata.

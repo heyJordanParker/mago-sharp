@@ -3132,64 +3132,131 @@ fn a_module_is_its_keyword_and_its_laws_in_braces() {
     );
 }
 
-/// Spec section 32's service bindings and parent header wait for the container. Each one is a single error where it
-/// starts, and the module around it still parses its laws.
+/// Spec section 32: a binding is its lifetime, its service, the services it needs as parameters, the one class it
+/// serves after `for`, and its value. The value is a class when it is a bare name, or a list of bare names, that names
+/// no parameter, and one expression otherwise. A law after the binding still parses.
 #[test]
-fn a_module_service_or_parent_is_one_not_supported_error_and_the_module_parses_on() {
-    for (header, member, message, start) in [
-        ("", "singleton Mailer = SmtpMailer;", "A `singleton` service is not supported yet in PHP#.", "singleton"),
+fn a_module_binding_is_its_lifetime_service_parameters_target_and_value() {
+    for (member, lifetime, service, parameters, target, value) in [
+        ("singleton Mailer = SmtpMailer;", Lifetime::Singleton, "Mailer", None, None, "class SmtpMailer"),
         (
-            "",
             "singleton Mailer for SendReceipt = QueueMailer;",
-            "A `singleton` service is not supported yet in PHP#.",
-            "singleton",
+            Lifetime::Singleton,
+            "Mailer",
+            None,
+            Some("SendReceipt"),
+            "class QueueMailer",
         ),
         (
-            "",
             "singleton List<PriceRule> = [TaxRule, DiscountRule];",
-            "A `singleton` service is not supported yet in PHP#.",
-            "singleton",
+            Lifetime::Singleton,
+            "List<PriceRule>",
+            None,
+            None,
+            "classes TaxRule, DiscountRule",
         ),
         (
-            "",
-            "singleton RedisStore = new RedisStore(Environment.require(\"REDIS_URL\"));",
-            "A `singleton` service is not supported yet in PHP#.",
-            "singleton",
+            "singleton RedisStore(Environment environment) = new RedisStore(environment.require(\"REDIS_URL\"));",
+            Lifetime::Singleton,
+            "RedisStore",
+            Some("(Environment environment)"),
+            None,
+            "expression new RedisStore(environment.require(\"REDIS_URL\"))",
         ),
-        ("", "scoped Mailer = MailerFactory;", "A `scoped` service is not supported yet in PHP#.", "scoped"),
-        ("", "transient Mailer = SmtpMailer;", "A `transient` service is not supported yet in PHP#.", "transient"),
-        (" : App.Shop", "", "A module that overrides another is not supported yet in PHP#.", ": App.Shop"),
+        (
+            "scoped Mailer(FeatureFlags flags, QueueMailer queue, SmtpMailer smtp) = flags.enabled(\"queue-mail\") ? queue : smtp;",
+            Lifetime::Scoped,
+            "Mailer",
+            Some("(FeatureFlags flags, QueueMailer queue, SmtpMailer smtp)"),
+            None,
+            "expression flags.enabled(\"queue-mail\") ? queue : smtp",
+        ),
+        (
+            "transient Mailer(QueueMailer queue) for SendReceipt = queue;",
+            Lifetime::Transient,
+            "Mailer",
+            Some("(QueueMailer queue)"),
+            Some("SendReceipt"),
+            "expression queue",
+        ),
+        (
+            "transient List<PriceRule>(TaxRule tax) = [tax, DiscountRule];",
+            Lifetime::Transient,
+            "List<PriceRule>",
+            Some("(TaxRule tax)"),
+            None,
+            "expression [tax, DiscountRule]",
+        ),
     ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
-            format!("namespace App.Shop;\n\nmodule{header}\n{{\n    {member}\n    law same(int a) => a == a;\n}}\n")
+            format!("namespace App.Shop;\n\nmodule\n{{\n    {member}\n    law same(int a) => a == a;\n}}\n")
                 .into_boxed_str(),
         );
         let program = parse(&arena, "app/Shop/Module.sharp", code);
 
-        let [error] = program.errors else {
-            panic!("expected one error for `{header}{member}`, got {:#?}", program.errors);
-        };
-        assert_eq!(error.to_string(), message, "{header}{member}");
-        assert_eq!(source(code, error), start, "{header}{member}");
+        assert!(program.errors.is_empty(), "{member}: {:#?}", program.errors);
         let Some(Statement::Namespace(namespace)) = program.statements.first() else {
-            panic!("expected a namespace for `{header}{member}`, got {:#?}", program.statements);
+            panic!("expected a namespace for `{member}`, got {:#?}", program.statements);
         };
         let [Statement::Module(module)] = namespace.statements().as_slice() else {
-            panic!("expected one module for `{header}{member}`, got {:#?}", namespace.statements());
+            panic!("expected one module for `{member}`, got {:#?}", namespace.statements());
         };
-        assert!(
-            matches!(module.members.as_slice(), [ModuleMember::Law(law)] if law.name.value == b"same"),
-            "the module keeps parsing after `{header}{member}`"
-        );
+        let [ModuleMember::Binding(binding), ModuleMember::Law(law)] = module.members.as_slice() else {
+            panic!("expected a binding and a law for `{member}`, got {:#?}", module.members);
+        };
+        assert_eq!(law.name.value, b"same", "{member}");
+        assert_eq!(source(code, binding), member);
+        assert_eq!(binding.lifetime(), lifetime, "{member}");
+        assert_eq!(source(code, &binding.service), service, "{member}");
+        assert_eq!(binding.parameter_list.as_ref().map(|list| source(code, list)), parameters, "{member}");
+        assert_eq!(binding.target.as_ref().map(|target| source(code, &target.class)), target, "{member}");
+        let read = match &binding.value {
+            BindingValue::Class(class) => format!("class {}", source(code, class)),
+            BindingValue::Classes(classes) => format!(
+                "classes {}",
+                classes.classes.iter().map(|class| source(code, class)).collect::<Vec<_>>().join(", ")
+            ),
+            BindingValue::Expression(expression) => format!("expression {}", source(code, *expression)),
+        };
+        assert_eq!(read, value, "{member}");
     }
 }
 
-/// Spec section 32: a module holds no statements, branches, loops or methods. Any member but a law is one error at the
-/// member, and the law after it still parses.
+/// Spec section 32: an environment or test module names the module it overrides after `:`, as a `namespace` line
+/// names its namespace.
 #[test]
-fn a_module_member_other_than_a_law_is_one_error_and_the_module_parses_on() {
-    for member in ["public int total(int a) => a + 1;", "private int count = 0;", "public const int LIMIT = 3;"] {
+fn a_module_names_the_module_it_overrides_after_a_colon() {
+    const CODE: &str = "namespace App.Shop;\n\nmodule : App.Shop\n{\n    singleton Mailer = QueueMailer;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Shop/Module.Production.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let [Statement::Module(module)] = namespace.statements().as_slice() else {
+        panic!("expected one module, got {:#?}", namespace.statements());
+    };
+    let Some(parent) = &module.parent else {
+        panic!("expected a parent, got {module:#?}");
+    };
+    assert_eq!(source(CODE, parent), ": App.Shop");
+    assert_eq!(parent.name.value(), b"App.Shop");
+    assert!(matches!(module.members.as_slice(), [ModuleMember::Binding(_)]), "{:#?}", module.members);
+}
+
+/// Spec section 32: a module holds no statements, branches, loops or methods. Any member but a binding or a law is one
+/// error at the member, and the law after it still parses.
+#[test]
+fn a_module_member_other_than_a_binding_or_a_law_is_one_error_and_the_module_parses_on() {
+    for member in [
+        "public int total(int a) => a + 1;",
+        "private int count = 0;",
+        "public const int LIMIT = 3;",
+        "let fallback = new SmtpMailer();",
+        "const int retries = 3;",
+    ] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
             format!("namespace App.Shop;\n\nmodule\n{{\n    {member}\n    law same(int a) => a == a;\n}}\n")
@@ -3200,7 +3267,11 @@ fn a_module_member_other_than_a_law_is_one_error_and_the_module_parses_on() {
         let [error] = program.errors else {
             panic!("expected one error for `{member}`, got {:#?}", program.errors);
         };
-        assert_eq!(error.to_string(), "A module states only laws.", "{member}");
+        assert_eq!(
+            error.to_string(),
+            "A module holds only service bindings and laws: give each binding one expression.",
+            "{member}"
+        );
         assert_eq!(source(code, error), member, "{member}");
         let Some(Statement::Namespace(namespace)) = program.statements.first() else {
             panic!("expected a namespace for `{member}`, got {:#?}", program.statements);

@@ -153,15 +153,22 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// A module's laws, named by its class-like `<Namespace>.Module`, as a class's laws are named by the class.
+    /// A module's laws, named by its class-like `<Namespace>.Module`, as a class's laws are named by the class. Only a
+    /// folder's base module states laws, so a module that overrides another has none to translate.
     fn module(&mut self, module: &Module) {
+        if module.parent.is_some() {
+            return;
+        }
+
         let full = self.checked.names().get(&module.module);
         self.name_module(full, module.module.span);
 
         let lean = names::full_name(full);
         let short = names::short_name(full);
-        for ModuleMember::Law(law) in &module.members {
-            self.law(full, &lean, &short, law);
+        for member in &module.members {
+            if let ModuleMember::Law(law) = member {
+                self.law(full, &lean, &short, law);
+            }
         }
     }
 

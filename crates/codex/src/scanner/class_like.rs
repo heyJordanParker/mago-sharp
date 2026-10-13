@@ -12,6 +12,8 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::AnonymousClass;
 use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::Binding;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
@@ -19,6 +21,7 @@ use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
@@ -34,8 +37,10 @@ use mago_syntax::cst::TraitUseSpecification;
 use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
+use mago_word::empty_word;
 use mago_word::word;
 
+use crate::build_synthetic_name;
 use crate::consts::MAX_ENUM_CASES_FOR_ANALYSIS;
 use crate::get_anonymous_class_name;
 use crate::identifier::method::MethodIdentifier;
@@ -47,6 +52,11 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::function_like::MethodMetadata;
+use crate::metadata::module::BindingMetadata;
+use crate::metadata::module::BindingValueMetadata;
+use crate::metadata::module::Lifetime;
+use crate::metadata::module::ModuleKind;
+use crate::metadata::module::ModuleMetadata;
 use crate::metadata::parameter::FunctionLikeParameterMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
@@ -61,9 +71,11 @@ use crate::scanner::docblock::apply_common_metadata_flag;
 use crate::scanner::docblock::parse_docblock;
 use crate::scanner::docblock::parse_docblock_trivia;
 use crate::scanner::enum_case::scan_enum_case;
+use crate::scanner::function_like::scan_binding_expression;
 use crate::scanner::function_like::scan_event_constructor;
 use crate::scanner::function_like::scan_law;
 use crate::scanner::property::scan_properties;
+use crate::scanner::ttype::get_type_metadata_from_hint;
 use crate::scanner::ttype::get_type_metadata_from_type;
 use crate::scanner::typing_error_issue;
 use crate::scanner::version_claim::evaluate_version_attributes;
@@ -318,9 +330,10 @@ where
     finish_registration(codebase, class_like_metadata)
 }
 
-/// Registers a PHP# module, spec sections 28 and 32, as the class-like `<Namespace>\Module` flagged as a module,
-/// holding only its laws, so every class-law path serves a module law. Only its folder's `Module.sharp` declares it:
-/// semantics refuses a module in any other file.
+/// Registers a PHP# module, spec sections 28 and 32. Every module adds its bindings to `CodebaseMetadata::modules`. A
+/// folder's `Module.sharp` also registers as the class-like `<Namespace>\Module` flagged as a module, holding only its
+/// laws, so every class-law path serves a module law. A module its file can't hold registers as nothing: semantics
+/// refuses it.
 #[inline]
 pub fn register_module<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -331,7 +344,33 @@ pub fn register_module<'arena, A>(
 where
     A: Arena,
 {
-    if !Module::is_declared_in(context.file) {
+    let kind = match (&module.parent, Module::environment_of(context.file)) {
+        (None, None) if Module::is_declared_in(context.file) => ModuleKind::Base,
+        (Some(_), Some(environment)) => ModuleKind::Environment(word(environment)),
+        (Some(_), None) if !Module::is_declared_in(context.file) => ModuleKind::Test,
+        _ => return None,
+    };
+    let namespace = match &module.parent {
+        Some(parent) => context.resolved_names.get(&parent.name),
+        None => scope.namespace_name().unwrap_or_default(),
+    };
+    let bindings = module
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            ModuleMember::Binding(binding) => Some(scan_binding(codebase, binding, context, scope)),
+            ModuleMember::Law(_) => None,
+        })
+        .collect();
+    codebase.modules.push(ModuleMetadata {
+        file: word(&context.file.name),
+        span: module.span(),
+        namespace: ascii_lowercase_word(namespace),
+        kind,
+        bindings,
+    });
+
+    if kind != ModuleKind::Base {
         return None;
     }
 
@@ -350,14 +389,56 @@ where
     codebase.symbols.add_symbol_name(name, SymbolKind::Class);
 
     let type_context = TypeResolutionContext::new();
-    for ModuleMember::Law(law) in &module.members {
-        let law_metadata = scan_law(law, &metadata, context, scope, &type_context);
-        metadata.laws.entry(law_metadata.name).or_insert(law_metadata);
+    for member in &module.members {
+        if let ModuleMember::Law(law) = member {
+            let law_metadata = scan_law(law, &metadata, context, scope, &type_context);
+            metadata.laws.entry(law_metadata.name).or_insert(law_metadata);
+        }
     }
 
     codebase.class_likes.insert(name, metadata);
 
     Some(name)
+}
+
+/// Scans one service binding, spec section 32. A class value is its full name, and an expression value registers as
+/// the lambda it runs as, which takes the binding's parameters and returns its service.
+fn scan_binding<'arena, A>(
+    codebase: &mut CodebaseMetadata,
+    binding: &'arena Binding<'arena>,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) -> BindingMetadata
+where
+    A: Arena,
+{
+    let class = |identifier: &Identifier<'arena>| (word(context.resolved_names.get(identifier)), identifier.span());
+    let service = get_type_metadata_from_hint(&binding.service, None, context);
+    let value = match &binding.value {
+        BindingValue::Class(identifier) => {
+            let (name, span) = class(identifier);
+            BindingValueMetadata::Class(name, span)
+        }
+        BindingValue::Classes(classes) => BindingValueMetadata::Classes(classes.classes.iter().map(class).collect()),
+        BindingValue::Expression(_) => {
+            let name = build_synthetic_name("closure", context.file, binding.span());
+            let lambda = scan_binding_expression(name, binding, service.clone(), context, scope);
+            codebase.function_likes.entry((empty_word(), name)).or_insert(lambda);
+            BindingValueMetadata::Expression(name)
+        }
+    };
+
+    BindingMetadata {
+        span: binding.span(),
+        lifetime: match binding.lifetime() {
+            mago_syntax::cst::Lifetime::Singleton => Lifetime::Singleton,
+            mago_syntax::cst::Lifetime::Scoped => Lifetime::Scoped,
+            mago_syntax::cst::Lifetime::Transient => Lifetime::Transient,
+        },
+        service,
+        target: binding.target.as_ref().map(|target| class(&target.class).0),
+        value,
+    }
 }
 
 fn finish_registration(

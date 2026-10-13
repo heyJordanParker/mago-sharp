@@ -80,9 +80,9 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
-    /// A member other than a law written in a PHP# module, such as a method, at the member. Spec section 32: a module
-    /// holds no statements, branches, loops or methods.
-    NonLawInSharpModule(Span),
+    /// A member other than a binding or a law written in a PHP# module, such as a method or a statement, at the
+    /// member. Spec section 32: a module holds no statements, branches, loops or methods.
+    OtherMemberInSharpModule(Span),
     /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
     /// property has no incoming value to receive.
     ComputedParameterInSharp(Span),
@@ -133,7 +133,7 @@ impl HasFileId for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
-            | ParseError::NonLawInSharpModule(span)
+            | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
@@ -177,7 +177,7 @@ impl HasSpan for ParseError {
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
-            | ParseError::NonLawInSharpModule(span)
+            | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
@@ -293,7 +293,9 @@ impl std::fmt::Display for ParseError {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
-            ParseError::NonLawInSharpModule(_) => "A module states only laws.".to_string(),
+            ParseError::OtherMemberInSharpModule(_) => {
+                "A module holds only service bindings and laws: give each binding one expression.".to_string()
+            }
             ParseError::ComputedParameterInSharp(_) => {
                 "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
             }
@@ -358,7 +360,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
-            | ParseError::NonLawInSharpModule(..)
+            | ParseError::OtherMemberInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)

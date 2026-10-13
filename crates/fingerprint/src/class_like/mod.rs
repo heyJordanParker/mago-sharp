@@ -4,6 +4,8 @@ use mago_names::ResolvedNames;
 use mago_span::HasSpan;
 use mago_syntax::comments::docblock::PrecedingDocblocks;
 use mago_syntax::cst::AnonymousClass;
+use mago_syntax::cst::Binding;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::ClassLikeConstantItem;
@@ -742,8 +744,62 @@ impl Fingerprintable for Module<'_> {
     {
         "module".hash(hasher);
 
-        for ModuleMember::Law(law) in &self.members {
-            law.fingerprint_with_hasher(hasher, resolved_names, options);
+        if let Some(parent) = &self.parent {
+            "module_parent".hash(hasher);
+            parent.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+
+        for member in &self.members {
+            match member {
+                ModuleMember::Law(law) => law.fingerprint_with_hasher(hasher, resolved_names, options),
+                ModuleMember::Binding(binding) => binding.fingerprint_with_hasher(hasher, resolved_names, options),
+            }
+        }
+    }
+}
+
+/// A binding's lifetime, service, parameters, target and classes decide which services every class gets, so they
+/// stay in a signature fingerprint. An expression value is the binding's own body.
+impl Fingerprintable for Binding<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "binding".hash(hasher);
+        self.lifetime.value.hash(hasher);
+        self.service.fingerprint_with_hasher(hasher, resolved_names, options);
+
+        if let Some(parameter_list) = &self.parameter_list {
+            parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+
+        if let Some(target) = &self.target {
+            "binding_target".hash(hasher);
+            target.class.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+
+        match &self.value {
+            BindingValue::Class(class) => {
+                "binding_class".hash(hasher);
+                class.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            BindingValue::Classes(classes) => {
+                "binding_classes".hash(hasher);
+                for class in &classes.classes {
+                    class.fingerprint_with_hasher(hasher, resolved_names, options);
+                }
+            }
+            BindingValue::Expression(expression) => {
+                "binding_expression".hash(hasher);
+                if !options.signature_only {
+                    expression.fingerprint_with_hasher(hasher, resolved_names, options);
+                }
+            }
         }
     }
 }

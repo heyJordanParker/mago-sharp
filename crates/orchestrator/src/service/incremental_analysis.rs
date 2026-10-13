@@ -36,6 +36,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseEntryKeys;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
 use mago_codex::reference::SymbolReferences;
@@ -915,6 +916,18 @@ impl IncrementalAnalysisService {
                 .any(|file_id| !current_file_ids.contains(file_id) && !externs_in(&self.codebase, *file_id).is_empty());
 
         if externs_changed {
+            return self.analyze();
+        }
+
+        let modules_changed = new_file_scans
+            .iter()
+            .any(|(file_id, metadata)| modules_in(metadata, *file_id) != modules_in(&self.codebase, *file_id))
+            || self
+                .file_states
+                .keys()
+                .any(|file_id| !current_file_ids.contains(file_id) && !modules_in(&self.codebase, *file_id).is_empty());
+
+        if modules_changed {
             return self.analyze();
         }
 
@@ -1912,6 +1925,12 @@ fn externs_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ExternMetada
         codebase.externs.values().flatten().filter(|declaration| declaration.span.file_id == file_id).collect();
     externs.sort();
     externs
+}
+
+/// The modules `file_id` declares, spec section 32. Every class takes its services from the modules of its namespace
+/// and the namespaces above it, so a change to them changes files that the signature diff cannot see.
+fn modules_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ModuleMetadata> {
+    codebase.modules.iter().filter(|module| module.span.file_id == file_id).collect()
 }
 
 /// The functions `file_id`'s `[Replaces]` attributes wrap, each with its wrapping methods in the codebase's order. A

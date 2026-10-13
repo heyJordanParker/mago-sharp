@@ -491,10 +491,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
     match (node, place) {
         (Node::Statement(statement), File) if !is_module_file_statement(statement, context) => {
+            let path: &[u8] = &context.source_file.name;
+            let file = BytesDisplay(path.rsplit(|&byte| byte == b'/').next().unwrap_or(path));
             context.report(
-                Issue::error("Module.sharp holds only its folder's module.")
-                    .with_annotation(Annotation::primary(statement.span()).with_message("Declared in Module.sharp."))
-                    .with_note("A namespace's `Module.sharp` holds its namespace, its imports and one `module { … }`."),
+                Issue::error(format!("{file} holds only its folder's module."))
+                    .with_annotation(Annotation::primary(statement.span()).with_message(format!("Declared in {file}.")))
+                    .with_note(format!("A namespace's `{file}` holds its namespace, its imports and one `module {{ … }}`.")),
             );
 
             None
@@ -600,7 +602,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::FunctionLikeParameter(parameter), Place::Event) => check_event_parameter(parameter, context),
         (Node::Module(module), File) => check_module_file_name(module, context),
-        (Node::ModuleMember(ModuleMember::Law(_)), Place::Module) => Some(Place::Module),
+        (Node::ModuleMember(_), Place::Module) => Some(Place::Module),
+        // The header names the module it overrides, which `check_module_file_name` checked.
+        (Node::ModuleParent(_), Place::Module) => None,
+        // A binding's parameters and value are checked as a method's, and the analyzer checks its value as the
+        // lambda it runs as.
+        (Node::Binding(_), Place::Module) => Some(Method),
+        (Node::BindingTarget(_) | Node::BindingValue(_) | Node::BindingClasses(_), Method) => Some(Method),
         (Node::FunctionLikeParameterList(parameters), Method | Signature | Place::Event) => {
             report_optional_before_required(parameters, context);
 
@@ -3527,7 +3535,7 @@ const fn supported(place: Place) -> &'static str {
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
-        Place::Module => "A PHP# module states laws.",
+        Place::Module => "A PHP# module holds service bindings and laws.",
         Place::FieldOrProperty => {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
@@ -3857,11 +3865,22 @@ pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) 
 }
 
 /// Checks a module's laws, spec section 28: each law's parameters as a class law's, and no two laws of one name,
-/// compared ignoring case, as a class's methods and laws are.
+/// compared ignoring case, as a class's methods and laws are. Only a folder's `Module.sharp` states laws, because an
+/// environment or test module only overrides services, spec section 32.
 #[inline]
 pub fn check_module(module: &Module, context: &mut Context<'_, '_, '_>) {
     let mut stated: Vec<&LocalIdentifier> = Vec::new();
-    for ModuleMember::Law(law) in &module.members {
+    for member in &module.members {
+        let ModuleMember::Law(law) = member else {
+            continue;
+        };
+        if module.parent.is_some() {
+            context.report(
+                Issue::error("A module that overrides another states no laws: state it in its folder's Module.sharp.")
+                    .with_annotation(Annotation::primary(law.span()).with_message("Stated here.")),
+            );
+            continue;
+        }
         check_law_parameters(law, context);
 
         if let Some(earlier) = stated.iter().find(|earlier| earlier.value.eq_ignore_ascii_case(law.name.value)) {
@@ -3877,31 +3896,58 @@ pub fn check_module(module: &Module, context: &mut Context<'_, '_, '_>) {
     }
 }
 
-/// Decides a module by its file's name, spec section 32: the module of a folder is declared in its `Module.sharp`. An
-/// environment module, in `Module.<Environment>.sharp`, is not supported yet.
+/// Decides a module by its file and its header, spec section 32:
+/// - a folder's `Module.sharp` holds its base module, which overrides nothing;
+/// - a `Module.<Environment>.sharp` holds an environment module, which overrides its own folder's module;
+/// - any other file holds a test module, which names the module it overrides.
 fn check_module_file_name(module: &Module, context: &mut Context<'_, '_, '_>) -> Option<Place> {
-    if Module::is_declared_in(context.source_file) {
-        return Some(Place::Module);
-    }
-
-    let path: &[u8] = &context.source_file.name;
-    let name = path.rsplit(|&byte| byte == b'/').next().unwrap_or(path);
-    let issue = if name.starts_with(b"Module.") && name.ends_with(b".sharp") {
-        Issue::error("An environment module is not supported yet in PHP#.")
-            .with_annotation(Annotation::primary(module.module.span).with_message("Not supported yet."))
-    } else {
-        Issue::error("A module is declared in its folder's Module.sharp.")
+    let issue = match (
+        &module.parent,
+        Module::is_declared_in(context.source_file),
+        Module::environment_of(context.source_file),
+    ) {
+        (None, true, _) => return Some(Place::Module),
+        (Some(parent), true, _) => {
+            Issue::error("A folder's Module.sharp overrides no other module: remove its header.")
+                .with_annotation(Annotation::primary(parent.span()).with_message("Written here."))
+        }
+        (None, false, Some(_)) => {
+            let namespace = first_namespace(context.program).and_then(|namespace| namespace.name.as_ref());
+            let header = namespace.map_or_else(String::new, |name| format!(" : {}", BytesDisplay(name.value())));
+            Issue::error(format!("An environment module overrides its folder's module: write `module{header}`."))
+                .with_annotation(Annotation::primary(module.module.span).with_message("Declared here."))
+        }
+        (Some(parent), false, Some(_)) => {
+            let namespace = first_namespace(context.program).and_then(|namespace| namespace.name.as_ref());
+            match namespace {
+                Some(namespace) if context.names.get(namespace) == context.names.get(&parent.name) => {
+                    return Some(Place::Module);
+                }
+                Some(namespace) => Issue::error(format!(
+                    "An environment module overrides its own folder's module: write `module : {}`.",
+                    BytesDisplay(namespace.value())
+                ))
+                .with_annotation(Annotation::primary(parent.name.span()).with_message("Names another module.")),
+                None => Issue::error(
+                    "An environment module overrides its own folder's module, so its file needs a namespace.",
+                )
+                .with_annotation(Annotation::primary(parent.name.span()).with_message("Names a module here.")),
+            }
+        }
+        (Some(_), false, None) => return Some(Place::Module),
+        (None, false, None) => Issue::error("A module is declared in its folder's Module.sharp.")
             .with_annotation(Annotation::primary(module.module.span).with_message("Declared here."))
+            .with_help("A test module names the module it overrides, as in `module : App.Shop`."),
     };
     context.report(issue);
 
     None
 }
 
-/// Whether `statement` may stand at the top of the checked file: any statement outside `Module.sharp`, and in
-/// `Module.sharp` its namespace, its imports and its first module, spec section 32.
+/// Whether `statement` may stand at the top of the checked file: any statement outside a module file, and in
+/// `Module.sharp` or `Module.<Environment>.sharp` its namespace, its imports and its first module, spec section 32.
 fn is_module_file_statement(statement: &Statement, context: &Context<'_, '_, '_>) -> bool {
-    if !Module::is_declared_in(context.source_file) {
+    if !Module::is_declared_in(context.source_file) && Module::environment_of(context.source_file).is_none() {
         return true;
     }
 

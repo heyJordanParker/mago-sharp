@@ -586,12 +586,17 @@ pub fn handle_return_value<'ctx, A>(
             }
         } else {
             // Spec section 28: a law is a static function-like the class keeps apart from its methods, and it has no
-            // return type to update.
+            // return type to update. Spec section 32: a binding's value runs as a lambda that returns its service.
             let (kind, function_name, help) = match block_context.scope.get_class_like() {
                 Some(class) if class.laws.values().any(|law| std::ptr::eq(law, function_like_metadata)) => (
                     "law",
                     display_member(context, class.original_name, function_like_metadata.original_name),
                     "A law states a fact, so its body is a `bool`.".to_owned(),
+                ),
+                _ if crate::statement::module::is_binding_value(context.codebase, function_like_metadata) => (
+                    "binding",
+                    expected_return_type_str.clone(),
+                    format!("A binding's value is the service it binds, so it must be a `{expected_return_type_str}`."),
                 ),
                 _ => (
                     kind,

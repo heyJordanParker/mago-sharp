@@ -809,21 +809,21 @@ where
         finalize_class_like(self, context);
     }
 
-    /// A PHP# module registers as its namespace's class-like `Module`, which encloses the lambdas of its laws as a
-    /// class encloses its methods' lambdas.
+    /// A PHP# module registers its bindings, spec section 32. A folder's `Module.sharp` also registers as its
+    /// namespace's class-like `Module`, which encloses the lambdas of its laws as a class encloses its methods' lambdas.
     #[inline]
     fn walk_module(&mut self, module: &'arena Module<'arena>, context: &mut Context<'ctx, 'arena, A>) {
-        if let Some(id) = register_module(&mut self.codebase, module, context, &self.scope) {
+        let class_like = register_module(&mut self.codebase, module, context, &self.scope);
+        if let Some(id) = class_like {
             self.stack.push(id);
-            self.template_constraints.push(vec![]);
-
-            walk_module_mut(self, module, context);
         }
-    }
+        self.template_constraints.push(vec![]);
 
-    #[inline]
-    fn walk_out_module(&mut self, _module: &'arena Module<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
-        self.stack.pop().expect("Expected class stack to be non-empty");
+        walk_module_mut(self, module, context);
+
+        if class_like.is_some() {
+            self.stack.pop().expect("Expected class stack to be non-empty");
+        }
         self.template_constraints.pop().expect("Expected template stack to be non-empty");
     }
 

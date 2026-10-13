@@ -92,6 +92,7 @@ pub mod function_like;
 pub mod global;
 pub mod r#if;
 pub mod r#loop;
+pub mod module;
 pub mod r#return;
 pub mod r#static;
 pub mod switch;

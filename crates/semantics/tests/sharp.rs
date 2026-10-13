@@ -228,13 +228,49 @@ fn a_law_parameter_with_a_default_or_a_spread_is_refused() {
 /// `Module.<Environment>.sharp`, waits for the container.
 #[test]
 fn a_module_is_declared_only_in_its_folders_module_sharp() {
-    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n";
-
-    for (path, expected) in [
-        ("app/Shop/Module.sharp", None),
-        ("app/Shop/Checkout.sharp", Some("3:1 A module is declared in its folder's Module.sharp.")),
-        ("app/Shop/Module.Production.sharp", Some("3:1 An environment module is not supported yet in PHP#.")),
+    for (path, header, expected) in [
+        ("app/Shop/Module.sharp", "", None),
+        (
+            "app/Shop/Module.sharp",
+            " : App.Shop",
+            Some("3:8 A folder's Module.sharp overrides no other module: remove its header."),
+        ),
+        (
+            "app/Shop/Module.Production.sharp",
+            "",
+            Some("3:1 An environment module overrides its folder's module: write `module : App.Shop`."),
+        ),
+        ("app/Shop/Module.Production.sharp", " : App.Shop", None),
+        (
+            "app/Shop/Module.Production.sharp",
+            " : App",
+            Some("3:10 An environment module overrides its own folder's module: write `module : App.Shop`."),
+        ),
+        ("app/Shop/Checkout.sharp", "", Some("3:1 A module is declared in its folder's Module.sharp.")),
+        ("app/Shop/CheckoutTest.sharp", " : App.Shop", None),
+        ("tests/Shop/CheckoutTest.sharp", " : App", None),
     ] {
+        let code = leak(format!("namespace App.Shop;\n\nmodule{header}\n{{\n    singleton Mailer = SmtpMailer;\n}}\n"));
+
+        assert_eq!(issues_in(path, code), Vec::from_iter(expected), "{path}{header}");
+    }
+}
+
+/// Spec section 32: an environment or test module only overrides services, so the laws that span a namespace's
+/// classes are stated in its folder's `Module.sharp`.
+#[test]
+fn a_module_that_overrides_another_states_no_laws() {
+    let law = "    law same(int a) => a == a;";
+    let refusal = "6:5 A module that overrides another states no laws: state it in its folder's Module.sharp.";
+
+    for (path, header, expected) in [
+        ("app/Shop/Module.sharp", "", None),
+        ("app/Shop/Module.Production.sharp", " : App.Shop", Some(refusal)),
+        ("app/Shop/CheckoutTest.sharp", " : App.Shop", Some(refusal)),
+    ] {
+        let code =
+            leak(format!("namespace App.Shop;\n\nmodule{header}\n{{\n    singleton Mailer = SmtpMailer;\n{law}\n}}\n"));
+
         assert_eq!(issues_in(path, code), Vec::from_iter(expected), "{path}");
     }
 }
@@ -259,6 +295,12 @@ fn module_sharp_holds_only_its_folders_module() {
             "{declaration}"
         );
     }
+
+    let environment = "namespace App.Shop;\n\nmodule : App.Shop\n{\n    singleton Mailer = SmtpMailer;\n}\n\npublic class Module\n{\n}\n";
+    assert_eq!(
+        issues_in("app/Shop/Module.Production.sharp", environment),
+        ["8:1 Module.Production.sharp holds only its folder's module."]
+    );
 }
 
 /// A module's laws are named by the module and their own names, compared ignoring case, so each name is stated once.

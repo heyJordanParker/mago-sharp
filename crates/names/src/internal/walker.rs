@@ -12,6 +12,8 @@ use mago_syntax::cst::Assignment;
 use mago_syntax::cst::Attribute;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::BindingTarget;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassConstantAccess;
@@ -48,6 +50,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
 use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleParent;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
@@ -646,6 +649,63 @@ where
         let classlike = context.qualify_name(b"Module");
 
         self.resolved_names.insert_at(module.module.span, classlike, false);
+    }
+
+    /// The module an environment or test module overrides is named by its full namespace, spec section 32, as a
+    /// `namespace` line names its own.
+    fn walk_in_module_parent(
+        &mut self,
+        module_parent: &'ast ModuleParent<'arena>,
+        context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.resolved_names.insert_at(module_parent.name.span(), arena_name(context, &module_parent.name), false);
+    }
+
+    /// A service binding's parameters are locals of its value alone, spec section 32, as a law's are. The crate's own
+    /// `Binding` is what a resolved name binds to, so the service binding goes by its full path.
+    fn walk_in_binding(
+        &mut self,
+        _binding: &'ast mago_syntax::cst::Binding<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_method();
+    }
+
+    fn walk_out_binding(
+        &mut self,
+        _binding: &'ast mago_syntax::cst::Binding<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.exit_method();
+    }
+
+    /// The class after a binding's `for` is a class name, resolved as an `extends` names its parent.
+    fn walk_in_binding_target(
+        &mut self,
+        binding_target: &'ast BindingTarget<'arena>,
+        context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        let (class, imported) = self.resolve_class(context, binding_target.class.value());
+
+        self.resolved_names.insert_at(binding_target.class.span(), class, imported);
+    }
+
+    /// A binding's class value, or each class of its list, is a class name.
+    fn walk_in_binding_value(
+        &mut self,
+        binding_value: &'ast BindingValue<'arena>,
+        context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        let classes = match binding_value {
+            BindingValue::Class(class) => std::slice::from_ref(class),
+            BindingValue::Classes(classes) => classes.classes.as_slice(),
+            BindingValue::Expression(_) => return,
+        };
+        for class in classes {
+            let (name, imported) = self.resolve_class(context, class.value());
+
+            self.resolved_names.insert_at(class.span(), name, imported);
+        }
     }
 
     /// A law binds as a static method does, spec section 28: its parameters are locals of the law alone.

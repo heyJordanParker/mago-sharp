@@ -11747,3 +11747,242 @@ fn emit_has_the_effect_events() {
         ]
     );
 }
+
+/// The services spec section 32's examples bind: two interfaces, their classes, a class that takes a `Mailer`, and
+/// classes a binding expression takes.
+const BOUND_SERVICES: [(&str, &str); 11] = [
+    ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+    ("app/Mail/SmtpMailer.sharp", "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n"),
+    ("app/Mail/QueueMailer.sharp", "namespace App.Mail;\n\npublic class QueueMailer : Mailer\n{\n}\n"),
+    ("app/Pricing/PriceRule.sharp", "namespace App.Pricing;\n\npublic interface PriceRule\n{\n}\n"),
+    ("app/Pricing/TaxRule.sharp", "namespace App.Pricing;\n\npublic class TaxRule : PriceRule\n{\n}\n"),
+    ("app/Pricing/DiscountRule.sharp", "namespace App.Pricing;\n\npublic class DiscountRule : PriceRule\n{\n}\n"),
+    (
+        "app/Cache/RedisStore.sharp",
+        "namespace App.Cache;\n\npublic class RedisStore\n{\n    public RedisStore(private string url) { }\n}\n",
+    ),
+    ("app/Config.sharp", "namespace App;\n\npublic class Config\n{\n    public string url => \"redis://\";\n}\n"),
+    (
+        "app/Flags.sharp",
+        "namespace App;\n\npublic class Flags\n{\n    public bool enabled(string name) => name == \"queue\";\n}\n",
+    ),
+    (
+        "app/Shop/SendReceipt.sharp",
+        "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class SendReceipt\n{\n    public SendReceipt(private Mailer mailer) { }\n}\n",
+    ),
+    (
+        "app/Shop/Cart.sharp",
+        "namespace App.Shop;\n\nimport App.Pricing.PriceRule;\n\npublic class Cart\n{\n    public Cart(private List<PriceRule> rules) { }\n}\n",
+    ),
+];
+
+/// `app/Shop/Module.sharp` binding `members`, with the imports the binding rows use.
+fn shop_module(members: &str) -> (&'static str, &'static str) {
+    (
+        "app/Shop/Module.sharp",
+        leak(format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.QueueMailer;\nimport App.Pricing.PriceRule;\nimport App.Pricing.TaxRule;\nimport App.Pricing.DiscountRule;\nimport App.Cache.RedisStore;\nimport App.Config;\nimport App.Flags;\n\nmodule\n{{\n{members}\n}}\n"
+        )),
+    )
+}
+
+/// Spec section 32: a binding's value is a class the container can build that is its service, a list of such classes
+/// for a `List` service, or one expression over its parameters whose value is its service. Each row is a module's
+/// bindings, from line 15, and the refusals they get.
+#[test]
+fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_that_service() {
+    for (members, expected) in [
+        (
+            "    singleton Mailer = SmtpMailer;\n    singleton Mailer for SendReceipt = QueueMailer;\n    singleton List<PriceRule> = [TaxRule, DiscountRule];\n    singleton RedisStore(Config config) = new RedisStore(config.url);\n    scoped QueueMailer = QueueMailer;\n    transient SmtpMailer = SmtpMailer;",
+            vec![],
+        ),
+        (
+            "    singleton Mailer = TaxRule;",
+            vec!["15:24 invalid-binding `TaxRule` is not a `Mailer`. | Bind `Mailer` to a class that implements it."],
+        ),
+        (
+            "    singleton Mailer = Mailer;",
+            vec![
+                "15:24 invalid-binding `Mailer` is an interface, so the container can't build it. | Bind `Mailer` to a class that the container can build.",
+            ],
+        ),
+        (
+            "    singleton Mailer = [SmtpMailer];",
+            vec![
+                "15:24 invalid-binding A list of classes binds a `List` service, and `Mailer` is no `List`. | Bind the service to one class, or bind a `List` of it.",
+            ],
+        ),
+        (
+            "    singleton List<PriceRule> = [TaxRule, SmtpMailer];",
+            vec![
+                "15:43 invalid-binding `SmtpMailer` is not a `PriceRule`. | Bind `PriceRule` to a class that implements it.",
+            ],
+        ),
+        (
+            "    singleton Mailer = new TaxRule();",
+            vec![
+                "15:24 invalid-return-statement Invalid return type for binding `Mailer`: expected `Mailer`, but found `TaxRule`. | A binding's value is the service it binds, so it must be a `Mailer`.",
+            ],
+        ),
+        (
+            "    singleton Mailer = Missing;",
+            vec![
+                "15:24 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            ],
+        ),
+        (
+            "    singleton Missing = SmtpMailer;",
+            vec![
+                "15:15 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            ],
+        ),
+        (
+            "    singleton Mailer for Missing = SmtpMailer;",
+            vec![
+                "15:26 non-existent-class-like Cannot find type `Missing`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
+            ],
+        ),
+        (
+            "    singleton Mailer = SmtpMailer;\n    singleton Mailer = QueueMailer;",
+            vec!["16:5 invalid-binding This module already binds `Mailer`: bind each service once. | "],
+        ),
+        (
+            "    singleton Mailer for SendReceipt = SmtpMailer;\n    singleton Mailer for SendReceipt = QueueMailer;",
+            vec![
+                "16:5 invalid-binding This module already binds `Mailer` for `SendReceipt`: bind each service once. | ",
+            ],
+        ),
+    ] {
+        let module = shop_module(members);
+        assert_eq!(refusals(module, &BOUND_SERVICES), expected, "{members}");
+    }
+}
+
+/// Spec section 32: the container builds a class through its main constructor, so each interface or abstract class
+/// it takes needs a binding in the module of its namespace or of a namespace above it, the nearest one winning and a
+/// binding `for` it before any other. Each row is the modules of the project and the refusals `SendReceipt` gets.
+#[test]
+fn a_constructor_parameter_only_a_binding_can_build_needs_one_in_its_namespace_or_above() {
+    let send_receipt = BOUND_SERVICES[9];
+    let others: Vec<_> = BOUND_SERVICES.iter().filter(|file| file.0 != send_receipt.0).copied().collect();
+    let missing = "7:24 missing-service `SendReceipt` needs a `Mailer`, and no module binds one: the container can't build `SendReceipt`. | Bind `Mailer` in a module of `SendReceipt`'s namespace or one above it, as in `singleton Mailer = …;`.";
+    let module = |path: &'static str, namespace: &str, members: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Shop.Cart;\n\nmodule\n{{\n{members}\n}}\n"
+            )),
+        )
+    };
+
+    for (modules, expected) in [
+        (vec![], vec![missing]),
+        (vec![module("app/Shop/Module.sharp", "App.Shop", "    singleton Mailer = SmtpMailer;")], vec![]),
+        (vec![module("app/Module.sharp", "App", "    singleton Mailer = SmtpMailer;")], vec![]),
+        (vec![module("app/Mail/Module.sharp", "App.Mail", "    singleton Mailer = SmtpMailer;")], vec![missing]),
+        (
+            vec![module("app/Shop/Module.sharp", "App.Shop", "    singleton Mailer for Cart = SmtpMailer;")],
+            vec![missing],
+        ),
+        (
+            vec![module("app/Shop/Module.sharp", "App.Shop", "    singleton Mailer for SendReceipt = SmtpMailer;")],
+            vec![],
+        ),
+    ] {
+        let files: Vec<_> = others.iter().copied().chain(modules.iter().copied()).collect();
+        let refused: Vec<_> = refusals(send_receipt, &files)
+            .into_iter()
+            .filter(|refusal| refusal.contains(" missing-service "))
+            .collect();
+        assert_eq!(refused, expected, "{modules:?}");
+    }
+}
+
+/// Spec section 32, as .NET's scope validation and Dagger's graph check refuse them: a service that needs itself, and
+/// a `scoped` service a `singleton` holds, directly or through services built each time. Each row is a module's
+/// bindings, from line 12, and the refusals they get.
+#[test]
+fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refused() {
+    let looping = (
+        "app/Mail/LoopMailer.sharp",
+        "namespace App.Mail;\n\npublic class LoopMailer : Mailer\n{\n    public LoopMailer(private Mailer inner) { }\n}\n",
+    );
+    let flagged = (
+        "app/Mail/FlaggedMailer.sharp",
+        "namespace App.Mail;\n\nimport App.Flags;\n\npublic class FlaggedMailer : Mailer\n{\n    public FlaggedMailer(private Flags flags) { }\n}\n",
+    );
+    let wrapper = (
+        "app/Mail/Wrapper.sharp",
+        "namespace App.Mail;\n\npublic class Wrapper : Mailer\n{\n    public Wrapper(private FlaggedMailer flagged) { }\n}\n",
+    );
+    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper]).collect();
+    let cycle = "12:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let captive = |line: u32| {
+        format!(
+            "{line}:5 captive-service The singleton `Mailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `Mailer` scoped too, or make `Flags` a singleton."
+        )
+    };
+
+    for (members, expected) in [
+        ("    singleton Mailer = LoopMailer;", vec![cycle.to_owned()]),
+        ("    transient Mailer(LoopMailer loop) = loop;", vec![cycle.to_owned()]),
+        ("    singleton Mailer = SmtpMailer;\n    singleton LoopMailer = LoopMailer;", vec![]),
+        ("    scoped Flags = Flags;\n    singleton Mailer(Flags flags, SmtpMailer smtp) = smtp;", vec![captive(13)]),
+        ("    scoped Flags = Flags;\n    singleton Mailer = FlaggedMailer;", vec![captive(13)]),
+        ("    scoped Flags = Flags;\n    singleton Mailer = Wrapper;", vec![captive(13)]),
+        ("    scoped Flags = Flags;\n    scoped Mailer = Wrapper;", vec![]),
+        ("    singleton Flags = Flags;\n    singleton Mailer = Wrapper;", vec![]),
+    ] {
+        // The module of `App` serves the classes of `App.Mail` and `App.Shop` below it.
+        let module = (
+            "app/Module.sharp",
+            leak(format!(
+                "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.LoopMailer;\nimport App.Mail.FlaggedMailer;\nimport App.Mail.Wrapper;\nimport App.Flags;\n\nmodule\n{{\n{members}\n}}\n"
+            )),
+        );
+        assert_eq!(refusals(module, &others), expected, "{members}");
+    }
+}
+
+/// Spec section 32: an environment or test module overrides the base modules' bindings, so the services it changes
+/// are checked with the base bindings that reach them, and a problem it causes is reported at its own binding. Each
+/// row is the overriding file, its bindings from line 10, and the refusals it gets over a base module that binds
+/// `singleton Mailer = Wrapper;` and `singleton Flags = Flags;`.
+#[test]
+fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() {
+    let looping = (
+        "app/Mail/LoopMailer.sharp",
+        "namespace App.Mail;\n\npublic class LoopMailer : Mailer\n{\n    public LoopMailer(private Mailer inner) { }\n}\n",
+    );
+    let flagged = (
+        "app/Mail/FlaggedMailer.sharp",
+        "namespace App.Mail;\n\nimport App.Flags;\n\npublic class FlaggedMailer : Mailer\n{\n    public FlaggedMailer(private Flags flags) { }\n}\n",
+    );
+    let wrapper = (
+        "app/Mail/Wrapper.sharp",
+        "namespace App.Mail;\n\npublic class Wrapper : Mailer\n{\n    public Wrapper(private FlaggedMailer flagged) { }\n}\n",
+    );
+    let base = (
+        "app/Module.sharp",
+        "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.Wrapper;\n\nmodule\n{\n    singleton Mailer = Wrapper;\n    singleton Flags = Flags;\n}\n",
+    );
+    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper, base]).collect();
+    let captive = "10:5 captive-service The singleton `Mailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `Mailer` scoped too, or make `Flags` a singleton.";
+    let cycle = "10:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+
+    for (path, members, expected) in [
+        ("app/Module.Production.sharp", "    singleton Flags = Flags;", vec![]),
+        ("app/Module.Production.sharp", "    scoped Flags = Flags;", vec![captive]),
+        ("app/Module.Production.sharp", "    scoped Flags = Flags;\n    transient Mailer = SmtpMailer;", vec![]),
+        ("app/Module.Production.sharp", "    transient Mailer = LoopMailer;", vec![cycle]),
+        ("tests/Mail/WrapperTest.sharp", "    scoped Flags = Flags;", vec![captive]),
+    ] {
+        let module = (
+            path,
+            leak(format!(
+                "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Mail.LoopMailer;\n\n\nmodule : App\n{{\n{members}\n}}\n"
+            )),
+        );
+        assert_eq!(refusals(module, &others), expected, "{path}: {members}");
+    }
+}
