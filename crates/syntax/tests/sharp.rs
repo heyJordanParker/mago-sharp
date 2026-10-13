@@ -3046,6 +3046,55 @@ fn law_after_a_modifier_or_before_a_parenthesis_stays_a_name_in_php_sharp() {
     assert_eq!(source(CODE, call.function), "law");
 }
 
+/// Spec section 26: an extension block in a static class is `extension`, its receiver in parentheses and the members
+/// it adds in braces, a method and a computed property among them.
+#[test]
+fn an_extension_is_its_receiver_and_its_members_in_braces() {
+    const CODE: &str = "public static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug() => Str.slug(value);\n        public bool isBlank => value.trim() == \"\";\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Shared/Text/TextExtensions.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Extension(extension)] = class_members(program).as_slice() else {
+        panic!("expected an extension, got {:#?}", class_members(program));
+    };
+    let receivers: Vec<&str> =
+        extension.parameter_list.parameters.iter().map(|parameter| source(CODE, parameter)).collect();
+    let [ClassLikeMember::Method(slug), ClassLikeMember::Property(Property::Computed(is_blank))] =
+        extension.members.as_slice()
+    else {
+        panic!("expected a method and a computed property, got {:#?}", extension.members);
+    };
+    assert_eq!(extension.extension.value, b"extension");
+    assert_eq!(receivers, ["string value"]);
+    assert_eq!(source(CODE, slug), "public string slug() => Str.slug(value);");
+    assert_eq!(source(CODE, is_blank), "public bool isBlank => value.trim() == \"\";");
+    assert_eq!(
+        source(CODE, extension),
+        "extension(string value)\n    {\n        public string slug() => Str.slug(value);\n        public bool isBlank => value.trim() == \"\";\n    }"
+    );
+}
+
+/// `extension` starts an extension only at the start of a member, before `(`. After a modifier it is a return type,
+/// before a name a member's type, and in a body a call.
+#[test]
+fn extension_after_a_modifier_or_in_a_body_stays_a_name() {
+    const CODE: &str = "class Files\n{\n    public extension make(int x) => extension(x);\n    extension name;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Files.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(make), ClassLikeMember::Property(name)] = class_members(program).as_slice() else {
+        panic!("expected a method and a field, got {:#?}", class_members(program));
+    };
+    assert_eq!(make.return_type_hint.as_ref().map(|hint| source(CODE, hint)), Some("extension"));
+    let MethodBody::Expression(body) = &make.body else {
+        panic!("expected an expression body, got {:#?}", make.body);
+    };
+    assert!(matches!(body.expression, Expression::Call(Call::Function(_))), "{:#?}", body.expression);
+    assert_eq!(name.hint().map(|hint| source(CODE, hint)), Some("extension"));
+}
+
 /// The lexer reads `Self` and `self` as one keyword. The checker tells them apart by how the keyword is written.
 #[test]
 fn self_is_a_return_type_an_instantiated_class_and_the_class_of_a_static_call() {

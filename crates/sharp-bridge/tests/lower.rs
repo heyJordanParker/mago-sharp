@@ -12626,3 +12626,307 @@ fn every_operand_shape_the_checker_accepts_calls_the_class_that_declares_the_ope
         "#}
     );
 }
+
+/// ```php
+/// public static function slug(string $value, string $separator): string
+/// {
+///     return $value . $separator;
+/// }
+///
+/// public static function isBlank(string $value): bool
+/// {
+///     return $value === '';
+/// }
+/// ```
+///
+/// Spec section 26: an extension's method is the public static method of its static class that takes the receiver
+/// first, and a computed property is the one that takes only the receiver and returns its expression.
+#[test]
+fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n\n        public bool isBlank => value == \"\";\n    }\n}\n",
+    );
+
+    assert_eq!(
+        (lowered.declared("slug"), lowered.declared("isBlank")),
+        (
+            indoc! {r#"
+                METHOD [17] "slug" @7-7
+                  PARAM_LIST
+                    PARAM
+                      ZVAL [1] "string"
+                      ZVAL "value"
+                      null
+                      null
+                      null
+                      null
+                    PARAM
+                      ZVAL [1] "string"
+                      ZVAL "separator"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  STMT_LIST
+                    RETURN
+                      BINARY_OP [8]
+                        VAR
+                          ZVAL "value"
+                        VAR
+                          ZVAL "separator"
+                  ZVAL [1] "string"
+                  null
+            "#}
+            .to_owned(),
+            indoc! {r#"
+                METHOD [17] "isBlank" @9-9
+                  PARAM_LIST
+                    PARAM
+                      ZVAL [1] "string"
+                      ZVAL "value"
+                      null
+                      null
+                      null
+                      null
+                  null
+                  STMT_LIST
+                    RETURN
+                      BINARY_OP [16]
+                        VAR
+                          ZVAL "value"
+                        ZVAL ""
+                  ZVAL [1] "bool"
+                  null
+            "#}
+            .to_owned()
+        )
+    );
+}
+
+/// `App\Order`, a PHP class a plain PHP subclass can extend, and `App\Receipt`, a final one.
+const ORDERS: (&str, &str) = (
+    "src/App/Order.php",
+    "<?php namespace App; class Order { public int $amount = 0; } final class Receipt { public int $amount = 0; }",
+);
+
+/// `App\Text\Extensions`, a project's extensions on `string`, on `App\Order` and on `App\Receipt`.
+const EXTENSIONS: (&str, &str) = (
+    "src/App/Text/Extensions.sharp",
+    "namespace App.Text;\n\nimport App.Order;\nimport App.Receipt;\n\npublic static class Extensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n\n        public bool isBlank => value == \"\";\n    }\n\n    extension(Order order)\n    {\n        public int total(int extra) => order.amount + extra;\n\n        public bool isEmpty => order.amount == 0;\n    }\n\n    extension(Receipt receipt)\n    {\n        public int paid() => receipt.amount;\n    }\n}\n",
+);
+
+/// The statements of `run`, declared with `signature` and holding `statements`, in a class that imports `Order`,
+/// `Receipt` and the extensions on them, lowered beside them.
+fn extension_body(signature: &str, statements: &str) -> String {
+    let code = format!(
+        "namespace App.Tenant;\n\nimport App.Order;\nimport App.Receipt;\nimport App.Text.Extensions;\n\nclass Report\n{{\n    public {signature}\n    {{\n{statements}    }}\n}}\n"
+    );
+
+    Lowered::with(&code, &[ORDERS, EXTENSIONS]).body()
+}
+
+/// ```php
+/// return \App\Text\Extensions::slug($title, '-') . \App\Text\Extensions::isBlank($title)
+///     . \App\Text\Extensions::paid($receipt);
+/// ```
+///
+/// Spec section 26: a member an extension adds runs as the static call of its method with the receiver first, for a
+/// method and a computed property alike, when no class beyond the ones the checker saw can hold the receiver: a
+/// `string`, and an object of a final class.
+#[test]
+fn an_extension_member_on_a_closed_receiver_is_the_static_call_of_its_method() {
+    assert_eq!(
+        extension_body(
+            "string run(string title, Receipt receipt)",
+            "        return title.slug(\"-\") + (title.isBlank ? \"y\" : \"n\") + (string) receipt.paid();\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  BINARY_OP [8]
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "slug"
+                      ARG_LIST
+                        VAR
+                          ZVAL "title"
+                        ZVAL "-"
+                    CONDITIONAL [1]
+                      STATIC_CALL
+                        ZVAL "App\\Text\\Extensions"
+                        ZVAL "isBlank"
+                        ARG_LIST
+                          VAR
+                            ZVAL "title"
+                      ZVAL "y"
+                      ZVAL "n"
+                  CAST [6]
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "paid"
+                      ARG_LIST
+                        VAR
+                          ZVAL "receipt"
+        "#}
+    );
+}
+
+/// ```php
+/// return \Sharp\Internal\extension($order, 'App\Text\Extensions', 'total', false, 2)
+///     + (\Sharp\Internal\extension($order, 'App\Text\Extensions', 'isEmpty', true) ? 1 : 0);
+/// ```
+///
+/// Spec section 26: a member an extension adds to a class a plain PHP subclass can extend runs through the engine,
+/// which runs the subclass's own public member of that name instead when it declares one.
+#[test]
+fn an_extension_member_on_an_open_receiver_is_picked_by_the_engine() {
+    assert_eq!(
+        extension_body("int run(Order order)", "        return order.total(2) + (order.isEmpty ? 1 : 0);\n"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  CALL
+                    ZVAL "Sharp\\Internal\\extension"
+                    ARG_LIST
+                      VAR
+                        ZVAL "order"
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "total"
+                      ZVAL false
+                      ZVAL 2
+                  CONDITIONAL [1]
+                    CALL
+                      ZVAL "Sharp\\Internal\\extension"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                        ZVAL "App\\Text\\Extensions"
+                        ZVAL "isEmpty"
+                        ZVAL true
+                    ZVAL 1
+                    ZVAL 0
+        "#}
+    );
+}
+
+/// `Sharp\Text\TextExtensions` at the standard library's path: its extension on `string` wraps `trim` with a method
+/// and `strlen` with a computed property.
+const TEXT_EXTENSIONS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/TextExtensions.sharp",
+    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    extension(string text)\n    {\n        public string trim() => trim(text);\n\n        public int length => strlen(text);\n    }\n}\n",
+);
+
+/// ```php
+/// return trim($name) . strlen(trim($name));
+/// ```
+///
+/// Spec section 8: a standard library extension member whose body is one call inlines as that call, so `name.trim()`
+/// runs as `trim($name)`, with no call of the library's method. Every file has the library's extensions.
+#[test]
+fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return name.trim() + (string) name.trim().length;\n    }\n}\n";
+
+    assert_eq!(
+        Lowered::inlining(code, &[], &[TEXT_EXTENSIONS]).body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  CALL
+                    ZVAL "trim"
+                    ARG_LIST
+                      VAR
+                        ZVAL "name"
+                  CAST [6]
+                    CALL
+                      ZVAL "strlen"
+                      ARG_LIST
+                        CALL
+                          ZVAL "trim"
+                          ARG_LIST
+                            VAR
+                              ZVAL "name"
+        "#}
+    );
+}
+
+/// ```php
+/// $total = ($order === null ? null : \Sharp\Internal\extension($order, 'App\Text\Extensions', 'total', false, 2)) ?? 0;
+/// $blank = ($title === null ? null : \App\Text\Extensions::isBlank($title)) ?? false;
+/// return $blank ? ($title === null ? null : \App\Text\Extensions::slug($title, '-')) : (string) $total;
+/// ```
+///
+/// Spec section 26: `?.` reaches an extension's member only when the receiver is not null, as it does any member, so
+/// the call runs under the conditional that tests the receiver.
+#[test]
+fn a_null_safe_extension_member_runs_only_on_a_receiver_that_is_not_null() {
+    assert_eq!(
+        extension_body(
+            "string? run(string? title, Order? order)",
+            "        const total = order?.total(2) ?? 0;\n        const blank = title?.isBlank ?? false;\n        return blank ? title?.slug(\"-\") : (string) total;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "total"
+                COALESCE
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "order"
+                      ZVAL null
+                    ZVAL null
+                    CALL
+                      ZVAL "Sharp\\Internal\\extension"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                        ZVAL "App\\Text\\Extensions"
+                        ZVAL "total"
+                        ZVAL false
+                        ZVAL 2
+                  ZVAL 0
+              ASSIGN
+                VAR
+                  ZVAL "blank"
+                COALESCE
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "title"
+                      ZVAL null
+                    ZVAL null
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "isBlank"
+                      ARG_LIST
+                        VAR
+                          ZVAL "title"
+                  ZVAL false
+              RETURN
+                CONDITIONAL
+                  VAR
+                    ZVAL "blank"
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "title"
+                      ZVAL null
+                    ZVAL null
+                    STATIC_CALL
+                      ZVAL "App\\Text\\Extensions"
+                      ZVAL "slug"
+                      ARG_LIST
+                        VAR
+                          ZVAL "title"
+                        ZVAL "-"
+                  CAST [6]
+                    VAR
+                      ZVAL "total"
+        "#}
+    );
+}

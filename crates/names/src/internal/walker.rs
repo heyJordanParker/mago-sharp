@@ -18,6 +18,7 @@ use mago_syntax::cst::ClassConstantAccess;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
+use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::ConstantAccess;
@@ -25,6 +26,7 @@ use mago_syntax::cst::Enum;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForOf;
@@ -126,6 +128,16 @@ pub struct NameWalker<'arena> {
     accessors: Option<Span>,
     /// The names of the class-likes the file declares, compared as PHP compares class names.
     declared_classes: foldhash::HashSet<IgnoringCase<'arena>>,
+    /// The extension block being walked in PHP#, whose receiver each of its members declares as a parameter.
+    extension: Option<ExtensionReceiver<'arena>>,
+}
+
+/// An extension block's receiver, spec section 26: its name, its declaration, and the members that declare it.
+#[derive(Debug)]
+struct ExtensionReceiver<'arena> {
+    name: &'arena [u8],
+    declaration: Span,
+    members: std::vec::Vec<Span>,
 }
 
 /// The member names of one class, compared as PHP compares them: method names ignoring case, and property and
@@ -174,6 +186,22 @@ impl<'arena> NameWalker<'arena> {
         }
 
         self.resolved_names.bind(declaration, Binding::Local(local));
+    }
+
+    /// Whether `member` is a member of the extension block being walked.
+    fn is_extension_member(&self, member: Span) -> bool {
+        self.extension.as_ref().is_some_and(|receiver| receiver.members.contains(&member))
+    }
+
+    /// Declares the receiver of the extension block being walked in the frame of `member`, one of the block's members,
+    /// as the static method the member runs as takes the receiver as its first parameter.
+    fn declare_receiver(&mut self, member: Span) {
+        if let Some(receiver) = &self.extension
+            && receiver.members.contains(&member)
+        {
+            let (name, declaration) = (receiver.name, receiver.declaration);
+            self.declare(name, declaration, LocalKind::Parameter);
+        }
     }
 
     /// Binds a bare name to a local, which each lambda declared after the local captures. `field`, which the accessor
@@ -588,9 +616,10 @@ where
         self.locals.exit_method();
     }
 
-    fn walk_in_method(&mut self, _method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+    fn walk_in_method(&mut self, method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.locals.enter_method();
+            self.declare_receiver(method.span());
         }
     }
 
@@ -645,6 +674,52 @@ where
 
     fn walk_out_law(&mut self, _law: &'ast Law<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         self.locals.exit_method();
+    }
+
+    /// An extension block's receiver is the first parameter of each member, spec section 26. The block's own frame
+    /// holds the receiver while its parameter list is walked, so no other member sees it.
+    fn walk_in_extension(
+        &mut self,
+        extension: &'ast Extension<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_method();
+        self.extension = extension.parameter_list.parameters.first().map(|receiver| ExtensionReceiver {
+            name: receiver.variable.name,
+            declaration: receiver.variable.span,
+            members: extension.members.iter().map(HasSpan::span).collect(),
+        });
+    }
+
+    fn walk_out_extension(
+        &mut self,
+        _extension: &'ast Extension<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.extension = None;
+        self.locals.exit_method();
+    }
+
+    /// An extension's computed property runs as a static method too, so its expression sees the receiver.
+    fn walk_in_computed_property(
+        &mut self,
+        property: &'ast ComputedProperty<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        if self.is_extension_member(property.span()) {
+            self.locals.enter_method();
+            self.declare_receiver(property.span());
+        }
+    }
+
+    fn walk_out_computed_property(
+        &mut self,
+        property: &'ast ComputedProperty<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        if self.is_extension_member(property.span()) {
+            self.locals.exit_method();
+        }
     }
 
     fn walk_out_function(

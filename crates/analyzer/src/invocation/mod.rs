@@ -162,6 +162,10 @@ pub enum InvocationArgumentsSource<'ast, 'arena> {
     PartialArgumentList(&'ast PartialArgumentList<'arena>),
     /// Constructor arguments supplied to an attribute.
     AttributeArgumentList(&'ast PartialArgumentList<'arena>),
+    /// The receiver of a PHP# extension member, spec section 26, then the call's arguments: `title.slug("-")` runs as
+    /// the static method `slug($title, '-')`, and the computed property `title.isBlank`, with no arguments, as
+    /// `isBlank($title)`. The receiver is already analyzed, as the object of the access.
+    ExtensionReceiver(&'ast Expression<'arena>, Option<&'ast ArgumentList<'arena>>),
 }
 
 /// Represents a single argument passed during an invocation, abstracting whether
@@ -170,7 +174,8 @@ pub enum InvocationArgumentsSource<'ast, 'arena> {
 /// This allows iteration over "effective arguments" regardless of how they were supplied.
 #[derive(Debug, Clone, Copy)]
 pub enum InvocationArgument<'ast, 'arena> {
-    /// The value provided as input via the pipe operator. This is treated as the first positional argument.
+    /// The value provided as input via the pipe operator, or the receiver of a PHP# extension member. This is treated
+    /// as the first positional argument.
     PipedValue(&'ast Expression<'arena>),
     /// A positional argument.
     Positional(&'ast PositionalArgument<'arena>),
@@ -534,6 +539,9 @@ impl<'ast, 'arena> InvocationArgumentsSource<'ast, 'arena> {
         match self {
             InvocationArgumentsSource::ArgumentList(argument_list) => argument_list.arguments.len(),
             InvocationArgumentsSource::PipeInput(_) => 1,
+            InvocationArgumentsSource::ExtensionReceiver(_, arguments) => {
+                1 + arguments.map_or(0, |argument_list| argument_list.arguments.len())
+            }
             InvocationArgumentsSource::None(_) => 0,
             InvocationArgumentsSource::PartialArgumentList(partial_argument_list)
             | InvocationArgumentsSource::AttributeArgumentList(partial_argument_list) => {
@@ -558,6 +566,10 @@ impl<'ast, 'arena> InvocationArgumentsSource<'ast, 'arena> {
                     Argument::Named(named_argument) => InvocationArgument::Named(named_argument),
                 })
             }
+            InvocationArgumentsSource::ExtensionReceiver(receiver, arguments) => match index.checked_sub(1) {
+                None => Some(InvocationArgument::PipedValue(receiver)),
+                Some(index) => InvocationArgumentsSource::ArgumentList((*arguments)?).get_argument(index),
+            },
             InvocationArgumentsSource::PipeInput(pipe) => {
                 if index == 0 {
                     Some(InvocationArgument::PipedValue(pipe.input))
@@ -731,6 +743,9 @@ impl HasSpan for InvocationArgumentsSource<'_, '_> {
         match self {
             InvocationArgumentsSource::ArgumentList(arg_list) => arg_list.span(),
             InvocationArgumentsSource::PipeInput(pipe) => pipe.span(),
+            InvocationArgumentsSource::ExtensionReceiver(receiver, arguments) => {
+                arguments.map_or_else(|| receiver.span(), |argument_list| receiver.span().join(argument_list.span()))
+            }
             InvocationArgumentsSource::None(span) => *span,
             InvocationArgumentsSource::PartialArgumentList(partial_arg_list)
             | InvocationArgumentsSource::AttributeArgumentList(partial_arg_list) => partial_arg_list.span(),

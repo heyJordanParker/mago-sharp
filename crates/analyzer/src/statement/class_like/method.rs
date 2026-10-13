@@ -10,6 +10,8 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::union::TUnion;
 
 use mago_names::binding::MethodParts;
@@ -24,6 +26,7 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::LocalIdentifier;
@@ -33,6 +36,7 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Operator;
+use mago_syntax::cst::Property;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -54,6 +58,8 @@ use crate::statement::function_like::unused_parameter;
 use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
 use crate::utils::missing_type_hints;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_member;
+use crate::utils::names::sharp_collection_name;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
     fn analyze<'ctx, A>(
@@ -116,6 +122,63 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NamedConstructor<'arena> {
 
         analyze_method(&method, self.initializer.as_ref(), word(self.name.value), context, block_context, artifacts)
             .map(|_| ())
+    }
+}
+
+/// A PHP# extension's methods and computed properties analyze as the static methods they run as, spec section 26, each
+/// with the extension's receiver as its first parameter. Semantics refuses every other member.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Extension<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        for member in &self.members {
+            let method = match member {
+                ClassLikeMember::Method(method) => MethodParts::of_extension_method(context.arena, self, method),
+                ClassLikeMember::Property(Property::Computed(property)) => {
+                    MethodParts::of_extension_property(context.arena, self, property)
+                }
+                _ => None,
+            };
+
+            if let Some(method) = method
+                && let Some(class) =
+                    analyze_method(&method, None, word(method.name), context, block_context, artifacts)?
+            {
+                check_hidden_member(context, class, &method);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Reports an extension member named like a real member of its receiver's class or of any class derived from it, or
+/// like a method its `List`, `Map` or `Set` receiver has, spec section 26, as
+/// [`mago_codex::metadata::CodebaseMetadata::get_classes_hidden_by_extension`] finds them. A class's `__call` and
+/// `__get` declare no member, so the extension runs in their place.
+fn check_hidden_member<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, member: &MethodParts<'_, '_>)
+where
+    A: Arena,
+{
+    let extension = MethodIdentifier::new(class.name, ascii_lowercase_word(member.name));
+    if let Some(&declaring_class) = context.codebase.get_classes_hidden_by_extension(&extension).first() {
+        let name = mago_bytes::BytesDisplay(member.name);
+        let real_member = match sharp_collection_name(&TObject::Named(TNamedObject::new(declaring_class))) {
+            Some(collection) => display_sharp_member(collection, name),
+            None => display_member(context, declaring_class, name),
+        };
+        context.collector.report_with_code(
+            IssueCode::DuplicateDefinition,
+            Issue::error(format!("An extension cannot hide the real member `{real_member}`."))
+                .with_annotation(Annotation::primary(member.name_span).with_message("Declared here."))
+                .with_help("Rename the extension member."),
+        );
     }
 }
 

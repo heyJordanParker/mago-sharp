@@ -50,6 +50,7 @@ pub use crate::cst::cst::class_like::enum_case::EnumCase;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseBackedItem;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseItem;
 pub use crate::cst::cst::class_like::enum_case::EnumCaseUnitItem;
+pub use crate::cst::cst::class_like::extension::Extension;
 pub use crate::cst::cst::class_like::inheritance::Extends;
 pub use crate::cst::cst::class_like::inheritance::Implements;
 pub use crate::cst::cst::class_like::inheritance::Inheritance;

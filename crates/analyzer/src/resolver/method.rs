@@ -5,6 +5,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -48,6 +49,8 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::constant_access::field_storage;
 use crate::resolver::class_name::report_non_existent_class_like;
+use crate::resolver::extension::Extension;
+use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
@@ -173,6 +176,8 @@ pub struct MethodResolutionResult {
     pub unresolved_methods: Vec<UnresolvedMethod>,
     /// The properties a PHP# call runs in place of a missing method, see [`resolve_called_property`].
     pub called_properties: Vec<CalledProperty>,
+    /// The static method of the extension a PHP# call runs, spec section 26, which leaves the other targets empty.
+    pub extension: Option<MethodIdentifier>,
     /// True if any selector was dynamic (e.g., from a generic string), making the method name unknown.
     pub has_dynamic_selector: bool,
     /// True if any resolution path involved an object with an ambiguous type (e.g., `mixed`, generic `object`).
@@ -211,6 +216,23 @@ where
     analyze_member_object(context, block_context, artifacts, object, is_null_safe)?;
 
     let resolved_selectors = resolve_member_selector(context, block_context, artifacts, selector, false)?;
+
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(name) = selector
+        && let Some(object_type) = artifacts.get_expression_type(object).cloned()
+        && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_METHOD)
+    {
+        match extension {
+            Extension::Member(method) => result.extension = Some(method),
+            Extension::Refused => result.has_invalid_target = true,
+        }
+        if object_type.is_nullable() && !is_null_safe {
+            report_method_access_on_null(context, object, &object_type);
+        }
+
+        return Ok(result);
+    }
+
     let mut method_names = Vec::new();
 
     for resolved_selector in resolved_selectors {
@@ -251,24 +273,8 @@ where
 
             if object_atomic.is_null() {
                 result.encountered_null = true;
-                if !object_type.ignore_nullable_issues() && !is_null_safe && !object_type.has_nullsafe_null() {
-                    result.has_invalid_target = true;
-                    let nullsafe = if context.dialect.is_sharp() { "?." } else { "?->" };
-
-                    context.collector.report_with_code(
-                        if object_type.is_null() {
-                            IssueCode::MethodAccessOnNull
-                        } else {
-                            IssueCode::PossibleMethodAccessOnNull
-                        },
-                        Issue::error("Attempting to call a method on `null`.")
-                            .with_annotation(
-                                Annotation::primary(object.span()).with_message("This expression can be `null`"),
-                            )
-                            .with_help(format!(
-                                "Use the nullsafe operator (`{nullsafe}`) if `null` is an expected value."
-                            )),
-                    );
+                if !is_null_safe {
+                    result.has_invalid_target |= report_method_access_on_null(context, object, object_type);
                 }
 
                 continue;
@@ -1298,6 +1304,31 @@ fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> TObjec
         TArray::Keyed(_) => TNamedObject::new_with_type_parameters(word("Sharp\\MapMethods"), Some(vec![key, value])),
         TArray::Set(_) => TNamedObject::new_with_type_parameters(word("Sharp\\SetMethods"), Some(vec![value])),
     })
+}
+
+/// Reports a method called with `->`, or `.` in PHP#, on `object`, whose type `object_type` holds `null`, unless the
+/// type says its `null` is expected or came from an earlier `?->`. Returns whether it reported.
+fn report_method_access_on_null<A>(
+    context: &mut Context<'_, '_, A>,
+    object: &Expression<'_>,
+    object_type: &TUnion,
+) -> bool
+where
+    A: Arena,
+{
+    if object_type.ignore_nullable_issues() || object_type.has_nullsafe_null() {
+        return false;
+    }
+
+    let nullsafe = if context.dialect.is_sharp() { "?." } else { "?->" };
+    context.collector.report_with_code(
+        if object_type.is_null() { IssueCode::MethodAccessOnNull } else { IssueCode::PossibleMethodAccessOnNull },
+        Issue::error("Attempting to call a method on `null`.")
+            .with_annotation(Annotation::primary(object.span()).with_message("This expression can be `null`"))
+            .with_help(format!("Use the nullsafe operator (`{nullsafe}`) if `null` is an expected value.")),
+    );
+
+    true
 }
 
 fn report_call_on_non_object<A>(

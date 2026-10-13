@@ -2275,6 +2275,130 @@ fn a_static_class_has_no_constructor() {
     assert_eq!(issues(code), ["5:12 A static class has no constructor."]);
 }
 
+/// Spec section 26: a static class declares extension blocks, each with one receiver and the methods and computed
+/// properties it adds to the receiver's type. They are instance members of the receiver, so they are not `static`.
+#[test]
+fn an_extension_in_a_static_class_adds_methods_and_computed_properties() {
+    let code = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug() => value;\n        public bool isBlank => value == \"\";\n        private string first(int count) => value;\n    }\n\n    extension(List<string> values)\n    {\n        public int size() => count(values);\n    }\n\n    public static string plain(string title) => title;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// An extension adds members to a type from outside it, so only a static class declares one.
+#[test]
+fn an_extension_outside_a_static_class_is_an_error() {
+    for (owner, code) in [
+        (
+            "class",
+            "namespace App.Shared;\n\npublic class Text\n{\n    extension(string value)\n    {\n        public string slug() => value;\n    }\n}\n",
+        ),
+        (
+            "enum",
+            "namespace App.Shared;\n\npublic enum Size\n{\n    case Small;\n\n    extension(string value)\n    {\n        public string slug() => value;\n    }\n}\n",
+        ),
+        (
+            "interface",
+            "namespace App.Shared;\n\npublic interface Named\n{\n    extension(string value)\n    {\n        public string slug() => value;\n    }\n}\n",
+        ),
+    ] {
+        let line = if owner == "enum" { 7 } else { 5 };
+
+        assert_eq!(
+            issues(code),
+            [format!("{line}:5 An extension belongs in a static class, as in `public static class StringExtensions`.")],
+            "{owner}"
+        );
+    }
+}
+
+/// An extension's receiver is the one value every call has, so it is one parameter, with no modifier, no default and
+/// no `...`.
+#[test]
+fn an_extension_receiver_is_one_plain_parameter() {
+    let refusal = "An extension's receiver is one parameter, with no modifier, default or `...`, as in `extension(string value)`.";
+    for (receiver, column) in [
+        ("", 14),
+        ("string value, int count", 14),
+        ("string value = \"\"", 15),
+        ("string ...values", 15),
+        ("public string value", 15),
+    ] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class TextExtensions\n{{\n    extension({receiver})\n    {{\n        public int size() => 0;\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), [format!("5:{column} {refusal}")], "`{receiver}`");
+    }
+}
+
+/// An extension adds methods and computed properties to its receiver's type. A value of that type has no storage of
+/// the extension's, and the static class holds its constants, operators, laws and constructors.
+#[test]
+fn an_extension_holds_only_methods_and_computed_properties() {
+    let refusal =
+        "An extension adds only methods and computed properties, as in `public bool isBlank => value == \"\";`.";
+    for member in [
+        "private int count = 0;",
+        "public int size { get; } = 0;",
+        "public const int LIMIT = 80;",
+        "public static bool operator ==(string a, string b) => true;",
+        "law sameSize(string a) => a == a;",
+        "extension(int count) { }",
+    ] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class TextExtensions\n{{\n    extension(string value)\n    {{\n        {member}\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), [format!("7:9 {refusal}")], "`{member}`");
+    }
+}
+
+/// An extension member is an instance member of its receiver: it takes only an access modifier.
+#[test]
+fn an_extension_member_takes_only_an_access_modifier() {
+    for (modifier, column) in [("static", 16), ("abstract", 16), ("virtual", 16), ("override", 16)] {
+        let code = format!(
+            "namespace App.Shared;\n\npublic static class TextExtensions\n{{\n    extension(string value)\n    {{\n        public {modifier} string slug() => value;\n    }}\n}}\n"
+        );
+
+        assert_eq!(
+            issues(code.leak()),
+            [format!("7:{column} An extension member takes only an access modifier: remove `{modifier}`.")],
+            "`{modifier}`"
+        );
+    }
+}
+
+/// An extension member runs as a static method that takes its receiver, so it names the receiver, never `this`.
+#[test]
+fn this_in_an_extension_member_is_an_error() {
+    let code = "namespace App.Shared;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug() => this.trim();\n        public bool isBlank => this == \"\";\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:33 An extension member names its receiver: write `value`, not `this`.",
+            "8:32 An extension member names its receiver: write `value`, not `this`.",
+        ]
+    );
+}
+
+/// A static class runs each extension member as a static method of its name, so two members, in its extensions or
+/// its own, cannot share a name.
+#[test]
+fn two_members_of_one_static_class_cannot_share_a_name_across_its_extensions() {
+    let code = "namespace App.Shared;\n\npublic static class Sizes\n{\n    extension(string value)\n    {\n        public int size() => 0;\n        public bool blank => value == \"\";\n    }\n\n    extension(List<int> values)\n    {\n        public int size() => 0;\n        public bool blank() => false;\n    }\n\n    public static int size(int count) => count;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "13:20 class method `Sizes.size` has already been defined",
+            "14:21 class method `Sizes.blank` has already been defined",
+            "17:23 class method `Sizes.size` has already been defined",
+        ]
+    );
+}
+
 #[test]
 fn a_static_class_cannot_extend_a_class_or_implement_an_interface() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Named;\n\npublic static class Text : Calc, Named\n{\n}\n";
@@ -4123,7 +4247,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     for (code, note) in [
         (
             class,
-            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`.",
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`.",
         ),
         (
             body,

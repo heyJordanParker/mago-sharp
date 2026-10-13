@@ -753,9 +753,12 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     context,
                 );
             }
-            // Only a PHP# file declares an operator, a law or a named constructor, and `check_slice` refuses each in an
-            // interface.
-            ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) | ClassLikeMember::NamedConstructor(_) => {}
+            // Only a PHP# file declares an operator, a law, a named constructor or an extension, and `check_slice`
+            // refuses each in an interface.
+            ClassLikeMember::Operator(_)
+            | ClassLikeMember::Law(_)
+            | ClassLikeMember::NamedConstructor(_)
+            | ClassLikeMember::Extension(_) => {}
         }
     }
 }
@@ -1294,16 +1297,29 @@ pub fn check_members<'ast, 'arena>(
     let mut property_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
 
     for member in members {
-        // A law and a named constructor share their class's method names, as the static method a named constructor
-        // lowers to does, so either and a method of one name are declared twice.
-        let callable_name = match member {
-            ClassLikeMember::Method(method) => Some(&method.name),
-            ClassLikeMember::Law(law) => Some(&law.name),
-            ClassLikeMember::NamedConstructor(named_constructor) => Some(&named_constructor.name),
-            _ => None,
+        // A law, a named constructor and an extension's method or computed property share their class's method names,
+        // as the static method each lowers to does, so any two of one name are declared twice.
+        let callable_names: Vec<(&[u8], Span)> = match member {
+            ClassLikeMember::Method(method) => vec![(method.name.value, method.name.span())],
+            ClassLikeMember::Law(law) => vec![(law.name.value, law.name.span())],
+            ClassLikeMember::NamedConstructor(named_constructor) => {
+                vec![(named_constructor.name.value, named_constructor.name.span())]
+            }
+            ClassLikeMember::Extension(extension) => extension
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    ClassLikeMember::Method(method) => Some((method.name.value, method.name.span())),
+                    ClassLikeMember::Property(Property::Computed(property)) => {
+                        Some((property.variable.name, property.variable.span()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         };
-        if let Some(name) = callable_name {
-            let lowercase_name = name.value.to_ascii_lowercase();
+        for (name, name_span) in callable_names {
+            let lowercase_name = name.to_ascii_lowercase();
             let is_sharp_constructor = matches!(member, ClassLikeMember::Method(method)
                 if context.program.dialect.is_sharp()
                     && method.return_type_hint.is_none()
@@ -1311,7 +1327,7 @@ pub fn check_members<'ast, 'arena>(
             if is_sharp_constructor && let Some(main) = main_constructor {
                 context.report(
                     Issue::error("A class has one main constructor: PHP# has no overloading by argument types.")
-                        .with_annotation(Annotation::primary(name.span()).with_message("A second constructor."))
+                        .with_annotation(Annotation::primary(name_span).with_message("A second constructor."))
                         .with_annotation(Annotation::secondary(main).with_message("The main constructor."))
                         .with_help(format!(
                             "Give it a name that passes control to the main constructor, as in `public {}.fromName(…) : this(…) {{ }}`.",
@@ -1321,12 +1337,12 @@ pub fn check_members<'ast, 'arena>(
             } else if is_sharp_constructor {
                 // The constructor is PHP's `__construct`, so it shares no name with a method, and a method named after
                 // its class has only its own error.
-                main_constructor = Some(name.span());
+                main_constructor = Some(name_span);
             } else if let Some(previous) = method_names.get(&lowercase_name) {
-                let method_display = context.display_member(class_like_name, BytesDisplay(name.value));
+                let method_display = context.display_member(class_like_name, BytesDisplay(name));
                 context.report(
                     Issue::error(format!("{class_like_kind} method `{method_display}` has already been defined"))
-                        .with_annotation(Annotation::primary(name.span()))
+                        .with_annotation(Annotation::primary(name_span))
                         .with_annotations([
                             Annotation::secondary(*previous).with_message("previous definition"),
                             Annotation::secondary(class_like_span.span())
@@ -1334,7 +1350,7 @@ pub fn check_members<'ast, 'arena>(
                         ]),
                 );
             } else {
-                method_names.insert(lowercase_name, name.span());
+                method_names.insert(lowercase_name, name_span);
             }
         }
 

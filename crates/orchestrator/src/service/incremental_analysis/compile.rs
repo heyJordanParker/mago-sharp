@@ -11,6 +11,7 @@ use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
@@ -370,7 +371,13 @@ impl IncrementalAnalysisService {
                 }
                 ReferenceOrigin::File(name) => Some(FileId::new(name.as_bytes())),
             };
-            let (Some(origin), Some((target, target_file, hash))) = (origin, declared(target)) else {
+            let Some(origin) = origin else {
+                return;
+            };
+            if let Some(hidden) = self.hidden_members(target) {
+                reads.entry(origin).or_default().0.listed.push(hidden);
+            }
+            let Some((target, target_file, hash)) = declared(target) else {
                 return;
             };
             if origin == target_file {
@@ -412,6 +419,26 @@ impl IncrementalAnalysisService {
         }
 
         reads
+    }
+
+    /// For `member` when it is a member an extension adds, spec section 26, the classes that declare a real member it
+    /// would hide, as [`mago_codex::metadata::CodebaseMetadata::get_classes_hidden_by_extension`] lists them. Each file
+    /// that runs the member reads them, so it compiles again when the receiver's class or a class below it gains or
+    /// loses a member of that name. The file that declares the extension is refused while the list holds a class.
+    fn hidden_members(&self, member: SymbolIdentifier) -> Option<Read> {
+        let extension = MethodIdentifier::new(member.0, member.1);
+        let flags = self.codebase.get_method_by_id(&extension)?.flags;
+        if !flags.is_extension_method() && !flags.is_extension_property() {
+            return None;
+        }
+
+        let classes = self.codebase.get_classes_hidden_by_extension(&extension);
+        let listed: Vec<&[u8]> = classes.iter().map(Word::as_bytes).collect();
+
+        Some(Read {
+            name: [b"classes hidden by ", member.0.as_bytes(), b"::", member.1.as_bytes()].concat(),
+            fingerprint: xxh3_64(&listed.join(&b'\n')),
+        })
     }
 
     /// `name` and, when it names a class-like, every class, interface and trait it inherits from, since an extension
@@ -1743,6 +1770,128 @@ mod tests {
                 let row = format!("diff {diff}: {} to {}", names(before), names(after));
                 assert_eq!(named_like_a_namespace(&clean), expected, "{row}");
                 assert_eq!(named_like_a_namespace(&warm), expected, "{row}");
+                assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
+            }
+        }
+    }
+
+    /// Each spec section 26 refusal of `service`, as `file: message`.
+    fn hidden_members(service: &IncrementalAnalysisService) -> Vec<String> {
+        let mut refusals: Vec<String> = service
+            .collect_all_issues()
+            .iter()
+            .filter(|issue| issue.message.starts_with("An extension cannot hide"))
+            .map(|issue| {
+                let file = service.database().get(&issue.primary_span().expect("a primary span").file_id);
+                format!("{}: {}", String::from_utf8_lossy(&file.expect("the file exists").name), issue.message)
+            })
+            .collect();
+        refusals.sort_unstable();
+        refusals
+    }
+
+    const WALLET: &str = "<?php\n\nnamespace Lib;\n\nclass Wallet\n{\n    public int $balance = 0;\n}\n";
+    const WALLET_EXTENSIONS: &str = "namespace App.Wallets;\n\nimport Lib.Wallet;\n\npublic static class WalletExtensions\n{\n    extension(Wallet wallet)\n    {\n        public int total() => wallet.balance + 1;\n    }\n}\n";
+    const WALLET_REPORT: &str = "namespace App;\n\nimport App.Wallets.WalletExtensions;\nimport Lib.Wallet;\n\npublic class Report\n{\n    public int of(Wallet wallet)\n    {\n        return wallet.total();\n    }\n}\n";
+
+    /// Spec section 26: an imported class's extensions apply to the whole file, so a file reads each class it imports
+    /// though it names none of its members, and compiles again when the class gains an extension member.
+    #[test]
+    fn a_file_reads_each_class_it_imports() {
+        let reader = "namespace App;\n\nimport App.Wallets.WalletExtensions;\n\npublic class Reader\n{\n    public int one() => 1;\n}\n";
+        let files = |extensions: &str| {
+            vec![
+                ("lib/Wallet.php", WALLET.to_string()),
+                ("app/Wallets/WalletExtensions.sharp", extensions.to_string()),
+                ("app/Reader.sharp", reader.to_string()),
+            ]
+        };
+        let gained =
+            WALLET_EXTENSIONS.replace("public int total()", "public int count() => 0;\n\n        public int total()");
+
+        let before = compile(&mut analyzed(&shop_project(&files(WALLET_EXTENSIONS))), empty_stamp);
+        let after = compile(&mut analyzed(&shop_project(&files(&gained))), empty_stamp);
+
+        let reader = accepted(&before, "app/Reader.sharp");
+        assert!(
+            input_paths(reader).contains(&"app/Wallets/WalletExtensions.sharp".to_string()),
+            "{:?}",
+            input_paths(reader)
+        );
+        assert_ne!(compiled_key(reader), compiled_key(accepted(&after, "app/Reader.sharp")));
+    }
+
+    /// Spec section 26 refuses an extension member named like a real member of a class its receiver can be, or of a
+    /// class below one, so a member of that name joining or leaving such a class changes whether the unchanged file of
+    /// the extension is refused, and gives the unchanged file that calls the member a new key. Each row edits only a
+    /// PHP file. The refusal matches a clean analysis in a one-off compile and under `mago analyze --watch`, which
+    /// analyzes with `diff` and never compiles.
+    #[test]
+    fn a_compile_after_a_class_below_an_extension_receiver_gains_or_loses_its_member_matches_a_clean_compile() {
+        let wallets = |wallet: &str, audited: &str| {
+            vec![
+                ("lib/Wallet.php", wallet.to_string()),
+                ("lib/Audited.php", format!("<?php\n\nnamespace Lib;\n\n{audited}")),
+                ("app/Wallets/WalletExtensions.sharp", WALLET_EXTENSIONS.to_string()),
+                ("app/Report.sharp", WALLET_REPORT.to_string()),
+            ]
+        };
+        let plain = "class Audited extends Wallet\n{\n}\n";
+        let method = WALLET.replace(
+            "public int $balance = 0;",
+            "public int $balance = 0;\n\n    public function total(): int\n    {\n        return 9;\n    }",
+        );
+
+        // Each row: the files without the member, the files with it, and the refusal the member brings.
+        let rows = [
+            (
+                wallets(WALLET, plain),
+                wallets(
+                    WALLET,
+                    "class Audited extends Wallet\n{\n    public function total(): int\n    {\n        return 2;\n    }\n}\n",
+                ),
+                "An extension cannot hide the real member `Audited.total`.",
+            ),
+            (
+                wallets(WALLET, plain),
+                wallets(WALLET, "/** @method int total() */\nclass Audited extends Wallet\n{\n}\n"),
+                "An extension cannot hide the real member `Audited.total`.",
+            ),
+            (
+                wallets(WALLET, plain),
+                wallets(&method, plain),
+                "An extension cannot hide the real member `Wallet.total`.",
+            ),
+        ];
+
+        for (without, with, refusal) in &rows {
+            for (before, after) in [(without, with), (with, without)] {
+                let (base, edited) = (shop_project(before), shop_project(after));
+                let row = format!("{refusal} {}", if after == with { "added" } else { "removed" });
+                let expected =
+                    if after == with { vec![format!("app/Wallets/WalletExtensions.sharp: {refusal}")] } else { vec![] };
+
+                for diff in [false, true] {
+                    let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                    warm.update_database(edited.read_only());
+                    warm.analyze_incremental(None).expect("the warm path runs");
+                    assert_eq!(hidden_members(&warm), expected, "diff {diff}: {row}");
+                }
+
+                let mut warm = analyzed(&base);
+                let base_compiled = compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let mut clean = analyzed(&edited);
+                let clean_compiled = compile(&mut clean, empty_stamp);
+
+                assert_eq!(hidden_members(&clean), expected, "{row}");
+                assert_ne!(
+                    compiled_key(accepted(&base_compiled, "app/Report.sharp")),
+                    compiled_key(accepted(&clean_compiled, "app/Report.sharp")),
+                    "{row}: the caller compiles again"
+                );
                 assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
             }
         }

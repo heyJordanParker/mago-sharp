@@ -848,6 +848,36 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
 }
 
 #[test]
+fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_as() {
+    let directory = lawful_project(&[
+        (
+            "app/Shared/Shape.sharp",
+            "namespace App.Shared;\n\nimport App.Shared.ShapeMath;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    public static int doubledOr(Shape? s) => s?.doubled() ?? 0;\n    public static bool flatOr(Shape? s) => s?.isFlat ?? true;\n\n    law doubles(Shape s) => s.doubled() == s.sides + s.sides;\n    law flat(Shape s) => s.isFlat == (s.sides < 3);\n    law twice(int n) => n.twice() == n + n;\n    law absent(int unused) => Shape.doubledOr(null) == 0 && Shape.flatOr(null);\n}\n",
+        ),
+        (
+            "app/Shared/ShapeMath.sharp",
+            "namespace App.Shared;\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int doubled() => shape.sides + shape.sides;\n        public bool isFlat => shape.sides < 3;\n    }\n\n    extension(int n)\n    {\n        public int twice() => n + n;\n    }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let laws = read(root, ".sharp/.lean/Code/App/Shared/Shape.lean");
+    for call in [
+        "App.Shared.ShapeMath.doubled s",
+        "App.Shared.ShapeMath.isFlat s",
+        "App.Shared.ShapeMath.twice n",
+        "App.Shared.ShapeMath.doubled (s.getD default)",
+        "App.Shared.ShapeMath.isFlat (s.getD default)",
+    ] {
+        assert!(laws.contains(call), "{call}:\n{laws}");
+    }
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
+}
+
+#[test]
 fn compile_proves_spec_section_28_1_s_state_machine_law_over_an_enum_match() {
     let directory = lawful_project(&[
         (
@@ -2119,5 +2149,17 @@ fn a_law_reaching_a_named_constructor_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n    public Shape.triangle() : this(3) { }\n\n    law threeSides(int unused) => new Shape.triangle().sides == 3;\n}\n",
         "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. Mago does not translate constructor bodies to Lean.",
+    );
+}
+
+#[test]
+fn a_law_reaching_an_extension_member_lean_cannot_see_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law grows(Shape s) => s.doubled() >= s.sides;\n}\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int doubled() => shape.sides + shape.sides;\n    }\n}\n",
+        "Law grows reaches the extension member ShapeMath.doubled on a value of the type `App\\Shared\\Shape` in Shape.grows. Lean cannot see which implementation runs.",
+    );
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic final class Shape\n{\n    public Shape(public int sides { get; }) { }\n\n    law summed(Shape s) => s.sum() >= 0;\n}\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
+        "Law summed reaches a loop in ShapeMath.sum. Mago does not translate loops to Lean.",
     );
 }

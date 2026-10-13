@@ -74,6 +74,7 @@ use crate::cst::cst::ExitConstruct;
 use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
+use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
@@ -923,6 +924,18 @@ generate_ast_walker! {
             ClassLikeMember::NamedConstructor(named_constructor) => {
                 walker.walk_named_constructor(named_constructor, context);
             }
+            ClassLikeMember::Extension(extension) => {
+                walker.walk_extension(extension, context);
+            }
+        }
+    }
+
+    'arena Extension as extension => {
+        walker.walk_keyword(&extension.extension, context);
+        walker.walk_function_like_parameter_list(&extension.parameter_list, context);
+
+        for member in &extension.members {
+            walker.walk_class_like_member(member, context);
         }
     }
 

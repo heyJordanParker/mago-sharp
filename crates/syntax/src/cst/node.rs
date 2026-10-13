@@ -80,6 +80,7 @@ use crate::cst::cst::ExitConstruct;
 use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
+use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
@@ -337,6 +338,7 @@ pub enum NodeKind {
     On,
     Operator,
     Law,
+    Extension,
     ConstructorInitializer,
     NamedConstructor,
     ConstructorName,
@@ -616,6 +618,7 @@ pub enum Node<'ast, 'arena> {
     On(&'ast On<'arena>),
     Operator(&'ast Operator<'arena>),
     Law(&'ast Law<'arena>),
+    Extension(&'ast Extension<'arena>),
     ConstructorInitializer(&'ast ConstructorInitializer<'arena>),
     NamedConstructor(&'ast NamedConstructor<'arena>),
     ConstructorName(&'ast ConstructorName<'arena>),
@@ -981,6 +984,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::On(_) => NodeKind::On,
             Self::Operator(_) => NodeKind::Operator,
             Self::Law(_) => NodeKind::Law,
+            Self::Extension(_) => NodeKind::Extension,
             Self::ConstructorInitializer(_) => NodeKind::ConstructorInitializer,
             Self::NamedConstructor(_) => NodeKind::NamedConstructor,
             Self::ConstructorName(_) => NodeKind::ConstructorName,
@@ -1427,6 +1431,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 ClassLikeMember::Operator(node) => f(Node::Operator(node)),
                 ClassLikeMember::Law(node) => f(Node::Law(node)),
                 ClassLikeMember::NamedConstructor(node) => f(Node::NamedConstructor(node)),
+                ClassLikeMember::Extension(node) => f(Node::Extension(node)),
             },
             Node::ClassLikeMemberExpressionSelector(node) => f(Node::Expression(node.expression)),
             Node::ClassLikeMemberSelector(node) => match node {
@@ -1519,6 +1524,13 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
                 f(Node::MethodExpressionBody(&node.body));
+            }
+            Node::Extension(node) => {
+                f(Node::Keyword(&node.extension));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+                for item in node.members.iter() {
+                    f(Node::ClassLikeMember(item));
+                }
             }
             Node::Event(node) => {
                 for item in node.attribute_lists.iter() {
@@ -2965,6 +2977,7 @@ impl HasSpan for Node<'_, '_> {
             Self::On(node) => node.span(),
             Self::Operator(node) => node.span(),
             Self::Law(node) => node.span(),
+            Self::Extension(node) => node.span(),
             Self::ConstructorInitializer(node) => node.span(),
             Self::NamedConstructor(node) => node.span(),
             Self::ConstructorName(node) => node.span(),

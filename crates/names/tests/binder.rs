@@ -497,6 +497,34 @@ fn a_law_binds_its_parameters_as_its_own_locals_and_their_types_through_the_impo
     assert_eq!(names.binding_errors(), []);
 }
 
+/// An extension's receiver is the first parameter of each of its members, spec section 26: a method and a computed
+/// property bind it as a parameter, a lambda in a member captures it, a member's own parameter of its name redeclares
+/// it, and outside the block, in the static class's other members, it is a constant.
+#[test]
+fn an_extension_member_binds_its_receiver_as_a_parameter() {
+    const CODE: &str = "namespace App.Shared;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug() => Str.slug(value);\n        public bool isBlank => value == \"\";\n        public List<string> words(List<string> all) => all.filter(word => word == value);\n        public string twice(string value) => value;\n    }\n\n    public static string first() => value;\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+    let receiver = local(CODE, "value", 0, LocalKind::Parameter);
+
+    assert_eq!(binding(&names, CODE, "value", 1), Some(receiver));
+    assert_eq!(binding(&names, CODE, "value", 2), Some(receiver));
+    assert_eq!(binding(&names, CODE, "value", 3), Some(receiver));
+    assert_eq!(
+        names.captures(&span(CODE, "word =>", 0)),
+        [(&b"value"[..], declared(CODE, "value", 0, LocalKind::Parameter))]
+    );
+    assert_eq!(binding(&names, CODE, "value", 5), Some(local(CODE, "value", 4, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "value", 6), Some(Binding::Constant));
+    assert_eq!(
+        names.binding_errors(),
+        [BindingError::Redeclared {
+            name: span(CODE, "value", 4),
+            earlier: declared(CODE, "value", 0, LocalKind::Parameter)
+        }]
+    );
+}
+
 /// A named constructor binds as a constructor does, spec section 9.1: its parameters are locals of that constructor
 /// alone, in its `: this(…)` as in its body, its body reads `this`, and `new` names its class as any class name.
 #[test]

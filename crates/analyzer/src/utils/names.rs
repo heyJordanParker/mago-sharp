@@ -205,18 +205,24 @@ fn binds_short_name(
 
 /// Whether a `.sharp` file with the `imported_names` and `scope` of its imports and namespace binds a name to the
 /// class-like `name`, as spec section 23 binds a name: by an import, under its short name or the name after `as`, by
-/// declaring it, or by sharing its namespace. A class-like directly in `Sharp` is imported by default, unless the file
-/// imports or declares another class-like of its short name.
+/// declaring it, by sharing its namespace, or by the [default import](imports_by_default) of `Sharp`.
 fn binds_class_like(imported_names: &WordMap<Word>, scope: &NamespaceScope, name: Word) -> bool {
-    let name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
-    if imported_names.contains_key(&ascii_lowercase_word(name)) {
+    let full_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
+    if imported_names.contains_key(&ascii_lowercase_word(full_name)) {
         return true;
     }
 
-    let (bound, imported) = scope.resolve(NameKind::Default, short_name(name));
-    if bound.eq_ignore_ascii_case(name) {
-        return true;
-    }
+    let (bound, _) = scope.resolve(NameKind::Default, short_name(full_name));
+
+    bound.eq_ignore_ascii_case(full_name) || imports_by_default(scope, name)
+}
+
+/// Whether spec section 23's default import of `Sharp` binds the class-like `name` in a `.sharp` file with the `scope`
+/// of its imports and namespace: `name` is directly in `Sharp`, and the file imports or declares no other class-like
+/// of its short name.
+pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
+    let name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
+    let (_, imported) = scope.resolve(NameKind::Default, short_name(name));
 
     !imported
         && name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))

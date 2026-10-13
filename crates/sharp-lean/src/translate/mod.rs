@@ -18,8 +18,11 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Extension;
+use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::Method;
@@ -347,15 +350,16 @@ impl Translator<'_, '_> {
         self.members(full, &lean, &short, &r#enum.members);
     }
 
-    /// The reached methods and constants, and every law, of a class-like.
+    /// The reached methods, extension members and constants, and every law, of a class-like.
     fn members(&mut self, full: &[u8], lean: &str, short: &str, members: &Sequence<'_, ClassLikeMember<'_>>) {
         for member in members {
             match member {
                 ClassLikeMember::Method(method)
                     if php_method_name(method) != b"__construct" && self.reach.reaches(full, method.name.value) =>
                 {
-                    self.method(full, lean, short, method);
+                    self.method(full, lean, short, method, None);
                 }
+                ClassLikeMember::Extension(extension) => self.extension(full, lean, short, extension),
                 ClassLikeMember::Constant(constant) => {
                     for item in constant.items.iter().filter(|item| self.reach.reaches(full, item.name.value)) {
                         let key = names::member(lean, item.name.value);
@@ -380,8 +384,15 @@ impl Translator<'_, '_> {
         }
     }
 
-    fn method(&mut self, full: &[u8], lean: &str, short: &str, method: &Method) {
-        let key = names::member(lean, method.name.value);
+    /// A method, or an extension's method, spec section 26, which runs as a static method that takes `receiver` first.
+    fn method(
+        &mut self,
+        full: &[u8],
+        lean: &str,
+        short: &str,
+        method: &Method,
+        receiver: Option<&FunctionLikeParameter>,
+    ) {
         let place = format!("{short}.{}", String::from_utf8_lossy(method.name.value));
         let mut body = Body::new(self.checked, self.reach, full, place.clone());
         if names::RESERVED.contains(&String::from_utf8_lossy(method.name.value).as_ref()) {
@@ -392,22 +403,17 @@ impl Translator<'_, '_> {
         }
 
         let mut parameters = Vec::new();
-        if !method.is_static() {
+        if receiver.is_none() && !method.is_static() {
             parameters.push(format!("(this : {lean})"));
         }
-        for parameter in method.parameter_list.parameters.iter() {
-            let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
-            if matches!(parameter.hint, Some(Hint::Nullable(_))) {
-                body.nullable_parameter(parameter.variable.span.start.offset);
-            }
-            let name = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
-            parameters.push(format!("({} : {type})", names::identifier(name)));
+        for parameter in receiver.into_iter().chain(method.parameter_list.parameters.iter()) {
+            parameters.push(binder(&mut body, parameter));
         }
         let void = method.return_type_hint.as_ref().is_none_or(|hint| matches!(hint.hint, Hint::Void(_)));
         let returns =
             method.return_type_hint.as_ref().map_or_else(|| "Unit".to_owned(), |hint| body.r#type(&hint.hint));
 
-        let (lines, uses, unmodeled) = match &method.body {
+        let translated = match &method.body {
             MethodBody::Concrete(block) => body.block_body(block, void),
             MethodBody::Expression(expression) => body.expression_body(expression.expression),
             MethodBody::Abstract(abstract_body) => {
@@ -415,19 +421,68 @@ impl Translator<'_, '_> {
                 body.finish()
             }
         };
+        self.define(names::member(lean, method.name.value), method.name.span, &parameters, &returns, translated);
+    }
+
+    /// The reached members of an extension, spec section 26, each the static method it runs as.
+    fn extension(&mut self, full: &[u8], lean: &str, short: &str, extension: &Extension) {
+        let [receiver] = extension.parameter_list.parameters.as_slice() else {
+            unreachable!("semantics refuses an extension without exactly one receiver");
+        };
+
+        for member in &extension.members {
+            match member {
+                ClassLikeMember::Method(method) if self.reach.reaches(full, method.name.value) => {
+                    self.method(full, lean, short, method, Some(receiver));
+                }
+                ClassLikeMember::Property(Property::Computed(property))
+                    if self.reach.reaches(full, property.variable.name) =>
+                {
+                    self.extension_property(full, lean, short, receiver, property);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// An extension's computed property, spec section 26, which runs as a static method that takes only `receiver`
+    /// and returns the property's expression.
+    fn extension_property(
+        &mut self,
+        full: &[u8],
+        lean: &str,
+        short: &str,
+        receiver: &FunctionLikeParameter,
+        property: &ComputedProperty,
+    ) {
+        let name = property.variable.name;
+        let place = format!("{short}.{}", String::from_utf8_lossy(name));
+        let mut body = Body::new(self.checked, self.reach, full, place.clone());
+        if names::RESERVED.contains(&String::from_utf8_lossy(name).as_ref()) {
+            body.unmodeled(property.variable.span, format!("the property {place}"), issues::RESERVED_NAME);
+        }
+
+        let parameter = binder(&mut body, receiver);
+        let returns = body.declared_type(property.hint.as_ref(), property.variable.span);
+        let translated = body.expression_body(property.body.expression);
+        self.define(names::member(lean, name), property.variable.span, &[parameter], &returns, translated);
+    }
+
+    /// `def Class.m (parameters) : M returns := do …`, a definition a law unfolds, from its translated body.
+    fn define(
+        &mut self,
+        key: String,
+        span: Span,
+        parameters: &[String],
+        returns: &str,
+        (lines, uses, unmodeled): (Vec<String>, Vec<Use>, Vec<Unmodeled>),
+    ) {
         let text = format!(
             "def {key} {} : M {returns} := do\n{}",
             parameters.join(" "),
             indented(&lines, 2).collect::<Vec<_>>().join("\n")
         );
-        self.translation.declarations.push(Declaration {
-            key,
-            span: method.name.span,
-            text,
-            uses,
-            unmodeled,
-            unfolds: true,
-        });
+        self.translation.declarations.push(Declaration { key, span, text, uses, unmodeled, unfolds: true });
     }
 
     /// `@[law] def Class.law : Prop := ∀ (a : A), holds do …`: the law holds unless its body finishes with `false`.
@@ -435,15 +490,8 @@ impl Translator<'_, '_> {
         let name = String::from_utf8_lossy(law.name.value).into_owned();
         let key = names::member(lean, law.name.value);
         let mut body = Body::new(self.checked, self.reach, full, format!("{short}.{name}"));
-        let mut binders = Vec::new();
-        for parameter in law.parameter_list.parameters.iter() {
-            let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
-            if matches!(parameter.hint, Some(Hint::Nullable(_))) {
-                body.nullable_parameter(parameter.variable.span.start.offset);
-            }
-            let parameter = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
-            binders.push(format!("({} : {type})", names::identifier(parameter)));
-        }
+        let binders: Vec<String> =
+            law.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)).collect();
 
         let (lines, uses, unmodeled) = body.expression_body(law.body.expression);
         let statement =
@@ -493,4 +541,15 @@ fn is_stored(property: &Property) -> bool {
         }
         Property::Computed(_) => false,
     }
+}
+
+/// `parameter` as the binder `(name : Type)`, which `body` reads as a local.
+fn binder(body: &mut Body<'_, '_>, parameter: &FunctionLikeParameter) -> String {
+    let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
+    if matches!(parameter.hint, Some(Hint::Nullable(_))) {
+        body.nullable_parameter(parameter.variable.span.start.offset);
+    }
+    let name = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
+
+    format!("({} : {type})", names::identifier(name))
 }

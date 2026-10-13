@@ -26,6 +26,8 @@ pub(crate) struct ReachedClass {
 pub(crate) struct ReachedMethod {
     /// The method's name as its declaration spells it.
     pub(crate) name: Word,
+    /// The arguments a call passes. An extension member's receiver, spec section 26, is written before the dot, as an
+    /// object is, and is not one.
     pub(crate) parameters: usize,
     /// Whether its declared return type takes `null`.
     pub(crate) returns_nullable: bool,
@@ -138,7 +140,8 @@ impl Reach {
                 (class, member),
                 ReachedMethod {
                     name: metadata.original_name,
-                    parameters: metadata.parameters.len(),
+                    parameters: metadata.parameters.len()
+                        - usize::from(metadata.flags.is_extension_method() || metadata.flags.is_extension_property()),
                     returns_nullable: metadata
                         .return_type_declaration_metadata
                         .as_ref()

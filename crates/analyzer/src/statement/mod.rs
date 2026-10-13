@@ -172,7 +172,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                                 .alias
                                 .as_ref()
                                 .map_or_else(|| item.name.last_segment(), |alias| alias.identifier.value);
-                            imported_names.insert(ascii_lowercase_word(&php_name(&item.name)), word(imported_name));
+                            let imported = ascii_lowercase_word(&php_name(&item.name));
+                            imported_names.insert(imported, word(imported_name));
+                            // Spec section 26: an imported class's extensions apply to the whole file, so the file
+                            // reads the class even where it names none of its members.
+                            artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, imported, false);
                         }
                     }
                     if context.settings.check_use_statements {

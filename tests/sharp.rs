@@ -316,8 +316,10 @@ const TYPE_CLASSES: [(&str, &str); 3] = [
 
 /// The standard library's `Replaces` attribute, decision 040, and the library classes whose methods wrap PHP functions:
 /// `Date.format` wraps `date` and `gmdate`, `Regex.matches` and `Regex.match` both wrap `preg_match`, and
-/// `Email.isValid`, `Ip.isValid` and `Url.isValid` wrap `filter_var`, as `Bool.tryParse` does.
-const WRAPPERS: [(&str, &str); 6] = [
+/// `Email.isValid`, `Ip.isValid` and `Url.isValid` wrap `filter_var`, as `Bool.tryParse` does. The extension on
+/// `string` of `TextExtensions`, spec section 26, wraps `ucfirst` with its method `capital` and `strlen` with its
+/// computed property `length`, and the extension on `bool` of `Flags` wraps `boolval` with its method `truthy`.
+const WRAPPERS: [(&str, &str); 8] = [
     (
         "Replaces",
         "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\npublic class Replaces\n{\n    public Replaces(string ...functions)\n    {\n    }\n}\n",
@@ -341,6 +343,14 @@ const WRAPPERS: [(&str, &str); 6] = [
     (
         "Net/Url",
         "namespace Sharp.Net;\n\npublic static class Url\n{\n    [Replaces(\"filter_var\")]\n    public static bool isValid(string url) => filter_var(url, FILTER_VALIDATE_URL) is string;\n}\n",
+    ),
+    (
+        "Text/TextExtensions",
+        "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    extension(string text)\n    {\n        [Replaces(\"ucfirst\")]\n        public string capital() => ucfirst(text);\n\n        [Replaces(\"strlen\")]\n        public int length => strlen(text);\n    }\n}\n",
+    ),
+    (
+        "Data/Flags",
+        "namespace Sharp.Data;\n\npublic static class Flags\n{\n    extension(bool flag)\n    {\n        [Replaces(\"boolval\")]\n        public bool truthy() => boolval(flag);\n    }\n}\n",
     ),
 ];
 
@@ -462,7 +472,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 11 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 13 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Text/Text.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
     assert!(title.windows(b"strtoupper".len()).any(|window| window == b"strtoupper"), "the form is inlined");
@@ -672,6 +682,23 @@ fn analyze_names_the_import_a_wrapped_function_call_needs_and_reports_nothing_in
         "{stdout}"
     );
     assert_eq!(issues_in(&stdout, "src/App/Finder.php"), Vec::<String>::new(), "{stdout}");
+}
+
+/// Spec section 8: a PHP function the standard library wraps with an extension, spec section 26, is written as the
+/// extension's member of its first argument. Every file has the extensions on `string` with no import, spec section
+/// 23, and the message names the import an extension on another type needs.
+#[test]
+fn analyze_names_the_extension_member_that_replaces_a_wrapped_function() {
+    assert_eq!(
+        page_errors(
+            "namespace App;\n\npublic class Page\n{\n    public string label(string name) => ucfirst(name);\n\n    public int size(string name) => strlen(name);\n\n    public string clean(string name) => name.capital();\n\n    public int count(string name) => name.length;\n\n    public bool on(bool ready) => boolval(ready);\n}\n"
+        ),
+        [
+            "src/App/Page.sharp:5:41:error - wrapped-function: `ucfirst` is wrapped by the standard library: write `name.capital()`.",
+            "src/App/Page.sharp:7:37:error - wrapped-function: `strlen` is wrapped by the standard library: write `name.length`.",
+            "src/App/Page.sharp:13:35:error - wrapped-function: `boolval` is wrapped by the standard library: write `ready.truthy()`. Add `import Sharp.Data.Flags;` to the file.",
+        ]
+    );
 }
 
 /// A file that already imports the wrapping class is told only the method to write.

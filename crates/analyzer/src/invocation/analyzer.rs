@@ -199,6 +199,14 @@ where
     let arg_count = invocation.arguments_source.argument_count();
     let mut analyzed_argument_types = HashMap::default();
 
+    // A PHP# extension's receiver was analyzed as the object of its access, so it is the first argument as it is, less
+    // the `null` that `?.` skips.
+    if let InvocationArgumentsSource::ExtensionReceiver(receiver, _) = invocation.arguments_source
+        && let Some(receiver_type) = artifacts.get_expression_type(receiver)
+    {
+        analyzed_argument_types.insert(0, (receiver_type.to_non_nullable(), receiver.span()));
+    }
+
     let mut non_closure_arguments = Vec::with_capacity(arg_count);
     let mut closure_arguments = Vec::with_capacity(arg_count);
     let mut unpacked_arguments = Vec::new();
@@ -1221,6 +1229,7 @@ where
 
         issue = match invocation.arguments_source {
             InvocationArgumentsSource::ArgumentList(_)
+            | InvocationArgumentsSource::ExtensionReceiver(..)
             | InvocationArgumentsSource::PartialArgumentList(_)
             | InvocationArgumentsSource::AttributeArgumentList(_) => issue.with_annotation(
                 Annotation::secondary(invocation.target.span())

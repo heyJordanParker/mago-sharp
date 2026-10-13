@@ -16,7 +16,9 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
+use mago_syntax::cst::Expression;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
@@ -365,6 +367,59 @@ where
     artifacts.set_expression_type(&call_span, resulting_type);
 
     Ok(())
+}
+
+/// Analyzes a member a PHP# extension adds to its receiver's type, spec section 26, as the call of the static method
+/// `extension` it runs as with `arguments`, whose first argument is the receiver. Through `?.`, a `null` receiver
+/// skips the call, so the result may be `null` too.
+#[allow(clippy::expect_used)]
+pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    extension: MethodIdentifier,
+    receiver: &'ast Expression<'arena>,
+    arguments: Option<&'ast ArgumentList<'arena>>,
+    is_null_safe: bool,
+    span: Span,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let class = extension.get_class_name();
+    let metadata = context.codebase.get_method_by_id(&extension).expect("an extension is a method of its class");
+    let class_like_metadata =
+        context.codebase.get_class_like(class.as_bytes()).expect("an extension's class is a class-like");
+    let target = InvocationTarget::FunctionLike {
+        identifier: FunctionLikeIdentifier::Method(class, extension.get_method_name()),
+        metadata,
+        inferred_return_type: None,
+        effective_signature: None,
+        method_context: Some(MethodTargetContext {
+            invocation_kind: MethodInvocationKind::Static,
+            declaring_method_id: Some(extension),
+            class_like_metadata,
+            class_type: StaticClassType::Name(class),
+            declaring_object_type: None,
+        }),
+        span,
+    };
+    let skips_null = is_null_safe && artifacts.get_expression_type(receiver).is_some_and(TUnion::is_nullable);
+
+    analyze_invocation_targets(
+        context,
+        block_context,
+        artifacts,
+        TemplateResult::default(),
+        vec![target],
+        InvocationArgumentsSource::ExtensionReceiver(receiver, arguments),
+        span,
+        None,
+        false,
+        false,
+        skips_null,
+        false,
+    )
 }
 
 /// Applies active method call assertions to narrow the return type.

@@ -6,6 +6,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -50,6 +51,8 @@ use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::external::PropertyAccessKind;
 use crate::resolver::class_name::report_non_existent_class_like;
+use crate::resolver::extension::Extension;
+use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
 use crate::statement::function_like::known_type_or_error;
@@ -102,6 +105,9 @@ pub struct PropertyResolutionResult {
     /// When combined with `encountered_null` and nullsafe access, indicates
     /// the null in the result type came ONLY from nullsafe short-circuit.
     pub all_properties_non_nullable: bool,
+    /// The static method of the extension's computed property a PHP# read runs, spec section 26, which leaves the
+    /// other properties empty.
+    pub extension: Option<MethodIdentifier>,
 }
 
 /// Resolves all possible instance properties from an object expression and a member selector.
@@ -132,6 +138,32 @@ where
 
     if is_null_safe && !for_assignment {
         check_redundant_nullsafe(context, operator_span, object_expression, &object_type);
+    }
+
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(name) = property_selector
+        && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_PROPERTY)
+    {
+        match extension {
+            Extension::Member(_) if for_assignment => {
+                result.has_error_path = true;
+                context.collector.report_with_code(
+                    IssueCode::InvalidPropertyWrite,
+                    Issue::error(format!(
+                        "`{}` is a computed property an extension adds: it is read, never written.",
+                        String::from_utf8_lossy(name.value)
+                    ))
+                    .with_annotation(Annotation::primary(name.span()).with_message("Written here.")),
+                );
+            }
+            Extension::Member(method) => result.extension = Some(method),
+            Extension::Refused => result.has_error_path = true,
+        }
+        if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {
+            report_access_on_null(context, block_context, object_expression.span(), operator_span, false, false);
+        }
+
+        return Ok(result);
     }
 
     let mut property_names = Vec::new();

@@ -473,6 +473,10 @@ fn get_argument<'ast, 'arena>(
                 None
             }
         }
+        InvocationArgumentsSource::ExtensionReceiver(receiver, arguments) => match index.checked_sub(1) {
+            None => Some(receiver),
+            Some(index) => get_argument(InvocationArgumentsSource::ArgumentList(arguments?), index, names),
+        },
         InvocationArgumentsSource::None(_) => None,
     }
 }
