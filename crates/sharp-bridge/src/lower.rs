@@ -4173,7 +4173,7 @@ fn static_type_text(text: &str, count: usize) -> String {
     let mut rest = text;
     while let Some(at) = rest.find(['$', '#']) {
         written.push_str(&rest[..at]);
-        let digits = rest[at + 1..].find(|c: char| !c.is_ascii_digit()).map_or(rest.len() - at - 1, |end| end);
+        let digits = rest[at + 1..].find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len() - at - 1);
         let index: usize = rest[at + 1..at + 1 + digits]
             .parse()
             .unwrap_or_else(|_| unreachable!("an index follows `{}`", &rest[at..=at]));
