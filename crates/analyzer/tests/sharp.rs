@@ -10483,6 +10483,29 @@ fn an_implementation_has_only_the_effects_its_declaration_allows() {
     );
 }
 
+/// An implementation that calls plain PHP with no `extern` is refused like a getter that does: the help names the
+/// `extern` to write, and the import its file lacks.
+#[test]
+fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write() {
+    let gauge = (
+        "app/Shop/Gauge.sharp",
+        "namespace App.Shop;\n\nimport Lib.Meter;\n\npublic class Gauge\n{\n    public Gauge(private Meter source) { }\n\n    public Meter meter() => this.source;\n}\n",
+    );
+    let rates =
+        ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n");
+    let implementation = (
+        "app/Shop/MeterRates.sharp",
+        "namespace App.Shop;\n\npublic class MeterRates : Rates\n{\n    public MeterRates(private Gauge gauge) { }\n\n    public int rate(int id) => this.gauge.meter().read();\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[implementation, rates, gauge, METER]),
+        [
+            "app/Shop/MeterRates.sharp:7:32 incompatible-effects: `MeterRates.rate` calls `Meter.read`, which has no `extern` declaration, so the pure `Rates.rate` cannot accept it. Help: Declare it in a .sharp file: `extern Meter.read;` when it has no effect, or name its effects after `uses`. Add `import Lib.Meter;` to the file."
+        ]
+    );
+}
+
 /// A call of a method without a body has the effects its `uses` lists, which every implementation is held to, so a
 /// getter calling it through an interface is refused naming them.
 #[test]
@@ -10615,6 +10638,41 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
             "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
         ]
     );
+}
+
+/// A method value of a method without a body has the effects its `uses` lists, as a call of it does, so a function
+/// type holds it only when it lists them.
+#[test]
+fn a_method_value_of_a_method_without_a_body_is_held_to_its_uses() {
+    let rates = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id) uses Http;\n\n    int fixed(int id);\n}\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public Pricing(private Rates rates) { }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => Pricing.apply(this.rates.rate) + Pricing.apply(this.rates.fixed);\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[rates]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, rates]),
+        [
+            "app/Shop/Pricing.sharp:9:39 invalid-argument: `Rates.rate` has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+        ]
+    );
+}
+
+/// A method value of a standard library method the prelude declares, as `List.wrap`, has no effect, so a pure function
+/// type holds it.
+#[test]
+fn a_method_value_of_a_prelude_method_is_pure() {
+    let shelf = (
+        "app/Shop/Shelf.sharp",
+        "namespace App.Shop;\n\npublic class Shelf\n{\n    public static List<Any?> make(Function<List<Any?>(Any?)> wrap) => wrap(1);\n\n    public List<Any?> run() => Shelf.make(List.wrap);\n}\n",
+    );
+
+    assert_eq!(issues(shelf, &[]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[shelf]), Vec::<String>::new());
 }
 
 /// A conditional may give either branch, so each lambda in it is held to the place's function type, whichever branch
@@ -11053,6 +11111,10 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
         "app/Shop/Checkout.sharp",
         "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.fee;\n}\n",
     );
+    let named_at_run_time = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n}\n",
+    );
 
     for (form, refused) in [
         (
@@ -11067,13 +11129,18 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
             read,
             "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments.fee`, which has the effect `Payments`. Getters must be pure.",
         ),
+        (
+            named_at_run_time,
+            "app/Shop/Checkout.sharp:9:25 impure-getter: Getter `total` calls `Payments`, which has the effect `Payments`. Getters must be pure.",
+        ),
     ] {
         assert_eq!(effect_issues(&[form, payments]), [refused], "{}", form.1);
     }
 }
 
 /// Spec section 29: a `foreign` object reaches code only through constructors, so a static field holds none, alone or
-/// inside a collection.
+/// inside a collection. A static field written without its type holds nothing the check can name, so only the parser
+/// reports it.
 #[test]
 fn a_static_field_holding_a_foreign_object_is_refused() {
     let store = ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore\n{\n}\n");
@@ -11095,6 +11162,13 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
             "{field}"
         );
     }
+    assert_eq!(
+        worded(
+            ("app/Cache/Cache.sharp", "namespace App.Cache;\n\npublic class Cache\n{\n    public static store;\n}\n"),
+            &[store]
+        ),
+        ["5:19 parse A PHP# field needs a type, as in `private int count = 0;`. | Written here."]
+    );
 }
 
 /// Two methods that call each other form one strongly connected part, which the solve iterates to a fixpoint instead

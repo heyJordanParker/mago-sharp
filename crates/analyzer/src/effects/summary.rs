@@ -166,7 +166,7 @@ pub(crate) fn record_function_values<A>(
                     }
                 } else if declaring.flags.is_sharp() {
                     Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
-                } else if is_prelude_stub(declaring_class) || is_prelude_stub(class) {
+                } else if is_prelude_stub(declaring_class) {
                     Runs::Foreign { callee, effects: Vec::new() }
                 } else {
                     Runs::Foreign {
@@ -483,14 +483,16 @@ where
     }
 
     fn read_property(&mut self, object: &Expression<'arena>, property: &ClassLikeMemberSelector<'arena>, span: Span) {
-        if let ClassLikeMemberSelector::Identifier(name) = property {
-            let codebase = self.codebase();
-            for class in self.object_classes(object) {
-                if let Some(effect) = foreign_class(codebase, class) {
-                    let class =
-                        codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-                    self.summary.effects.push((Effect::Foreign(effect), span, (class, word(name.value))));
-                }
+        // A member named at run time, as `payments.{name}`, still reaches the object.
+        let member = match property {
+            ClassLikeMemberSelector::Identifier(name) => word(name.value),
+            _ => empty_word(),
+        };
+        let codebase = self.codebase();
+        for class in self.object_classes(object) {
+            if let Some(effect) = foreign_class(codebase, class) {
+                let class = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+                self.summary.effects.push((Effect::Foreign(effect), span, (class, member)));
             }
         }
 
@@ -783,7 +785,7 @@ where
             return;
         }
 
-        if is_prelude_stub(declaring_class) || is_prelude_stub(class) {
+        if is_prelude_stub(declaring_class) {
             self.prelude_stub_call(metadata, span, receiver, arguments);
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
