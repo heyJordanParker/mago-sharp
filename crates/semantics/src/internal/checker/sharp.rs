@@ -1774,18 +1774,44 @@ fn is_extern(method: &Method) -> bool {
     method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)))
 }
 
-/// Refuses `uses` on a method with a body, spec section 29: the checker works a body's effects out from its code, so
-/// only a method without a body states the effects its implementations may have.
+/// Refuses every name but a function parameter in the `uses` of a method with a body, spec section 29: the checker
+/// works a body's effects out from its code, so only a method without a body states the effects its implementations
+/// may have. A function parameter in `uses`, as `charge(…) uses prepare => …` writes it, belongs to function effects,
+/// so it passes.
 fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
-    if let Some(uses) = &method.uses
-        && !method.is_abstract()
-    {
+    let Some(uses) = &method.uses else {
+        return;
+    };
+    if method.is_abstract() {
+        return;
+    }
+
+    for name in &uses.names {
+        if is_function_parameter(method, name.value) {
+            continue;
+        }
+
         context.report(
-            Issue::error("A method with a body takes no `uses`: its effects come from its code.")
-                .with_annotation(Annotation::primary(uses.span()).with_message("Written here."))
-                .with_help("Remove the `uses` clause, or declare the method without a body."),
+            Issue::error(format!(
+                "A method with a body takes no effect in `uses`, and `{}` is not one of its function parameters.",
+                BytesDisplay(name.value)
+            ))
+            .with_annotation(Annotation::primary(name.span).with_message("Written here."))
+            .with_note("Its effects come from its code, so its `uses` names only its function parameters.")
+            .with_help("Remove it from `uses`, or declare the method without a body."),
         );
     }
+}
+
+/// Whether `name` is a parameter of `method` whose type is a function type, nullable or not.
+fn is_function_parameter(method: &Method, name: &[u8]) -> bool {
+    method.parameter_list.parameters.iter().any(|parameter| {
+        parameter.variable.name == name
+            && matches!(
+                parameter.hint,
+                Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
+            )
+    })
 }
 
 /// The place of a method's parts, refusing an `extern` method that is not `static`, in a static or `foreign` class,

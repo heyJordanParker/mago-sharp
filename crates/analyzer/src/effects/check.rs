@@ -19,6 +19,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::Method;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Uses;
 use mago_syntax::walker::Walker;
@@ -333,10 +334,10 @@ pub(crate) fn check_uses<A>(
 ) where
     A: Arena,
 {
-    let mut names = Vec::new();
-    UsesWalker.walk_program(program, &mut names);
+    let mut found = UsesNames::default();
+    UsesWalker.walk_program(program, &mut found);
 
-    for name in names {
+    for name in found.names {
         let effect = context.resolved_names.get(name);
         artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, ascii_lowercase_word(effect), false);
         if is_effect(context.codebase, effect) {
@@ -374,12 +375,30 @@ pub(crate) fn check_uses<A>(
     }
 }
 
-/// The names every `uses` of a program writes.
+/// The names every effect `uses` of a program writes. A method with a body names only its function parameters in
+/// `uses`, as the semantics checker holds it to, so its `uses` names no effect.
 struct UsesWalker;
 
-impl<'ast, 'arena> Walker<'ast, 'arena, Vec<&'ast LocalIdentifier<'arena>>> for UsesWalker {
-    fn walk_in_uses(&self, uses: &'ast Uses<'arena>, names: &mut Vec<&'ast LocalIdentifier<'arena>>) {
-        names.extend(uses.names.iter());
+/// The names [`UsesWalker`] collects, and the `uses` of the methods with a body it skips.
+#[derive(Default)]
+struct UsesNames<'ast, 'arena> {
+    names: Vec<&'ast LocalIdentifier<'arena>>,
+    parameters: Vec<Span>,
+}
+
+impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker {
+    fn walk_in_method(&self, method: &'ast Method<'arena>, found: &mut UsesNames<'ast, 'arena>) {
+        if let Some(uses) = method.uses
+            && !method.is_abstract()
+        {
+            found.parameters.push(uses.span());
+        }
+    }
+
+    fn walk_in_uses(&self, uses: &'ast Uses<'arena>, found: &mut UsesNames<'ast, 'arena>) {
+        if !found.parameters.contains(&uses.span()) {
+            found.names.extend(uses.names.iter());
+        }
     }
 }
 

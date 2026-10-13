@@ -2885,7 +2885,7 @@ const LIBRARY_TYPE_CLASSES: [(&str, &str); 2] = [
 /// `vendor/`.
 const ENVIRONMENT: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
-    "namespace Sharp;\n\nimport Error;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public string currentDirectory { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n        this.currentDirectory = getcwd() is string directory ? directory : throw new Error(\"Environment: the current directory cannot be read\");\n    }\n\n    public string? variable(string name) => getenv(name) is string value ? value : null;\n\n    public static string require(string name)\n        => getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n",
+    "namespace Sharp;\n\nimport RuntimeException;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n    }\n\n    public string? variable(string name) => getenv(name) is string value ? value : null;\n\n    public string currentDirectory()\n        => getcwd() is string directory ? directory : throw new RuntimeException(\"Environment.currentDirectory: the current directory cannot be read\");\n\n    public void changeDirectory(string path)\n    {\n        if (!@chdir(path)) {\n            throw new RuntimeException(`Environment.changeDirectory: the directory \"${path}\" cannot be entered`);\n        }\n    }\n\n    public static string require(string name)\n        => getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n",
 );
 
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,
@@ -3039,30 +3039,25 @@ fn an_environment_variable_is_a_nullable_string() {
     assert_eq!(issues(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT]), ["11:27 invalid-return-statement"]);
 }
 
-/// `arguments` and `currentDirectory` are `{ get; }` properties, so the process environment is read, never written.
+/// `arguments` is a `{ get; }` property, because a process's arguments never change, so it is read, never written.
+/// The current directory changes, so `currentDirectory()` and `changeDirectory(path)` are methods.
 #[test]
-fn the_environment_arguments_and_current_directory_are_read_only() {
-    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public List<string> arguments() => this.environment.arguments;\n\n    public string folder() => this.environment.currentDirectory;\n\n    public List<int> numbers() => this.environment.arguments;\n\n    public void change()\n    {\n        this.environment.arguments = [\"deploy\"];\n        this.environment.currentDirectory = \"/tmp\";\n    }\n}\n";
+fn the_environment_arguments_are_read_only_and_the_current_directory_is_a_method() {
+    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public List<string> arguments() => this.environment.arguments;\n\n    public string folder() => this.environment.currentDirectory();\n\n    public List<int> numbers() => this.environment.arguments;\n\n    public void change()\n    {\n        this.environment.changeDirectory(\"/tmp\");\n        this.environment.arguments = [\"deploy\"];\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT]),
-        ["11:35 invalid-return-statement", "15:26 invalid-property-write", "16:26 invalid-property-write"]
+        ["11:35 invalid-return-statement", "16:26 invalid-property-write"]
     );
     assert_eq!(
         messages(("src/Demo/Deploy.sharp", sharp), &[ENVIRONMENT])[1..],
-        [
-            "Cannot initialize readonly property `Environment.arguments` from within `Deploy`.",
-            "Cannot initialize readonly property `Environment.currentDirectory` from within `Deploy`.",
-        ]
+        ["Cannot initialize readonly property `Environment.arguments` from within `Deploy`."]
     );
 
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n        $this->environment->currentDirectory = '/tmp';\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n    }\n}\n";
     assert_eq!(
         messages(("src/Demo/Deploy.php", php), &[ENVIRONMENT]),
-        [
-            "Cannot initialize readonly property `Sharp\\Environment::$arguments` from within `Demo\\Deploy`.",
-            "Cannot initialize readonly property `Sharp\\Environment::$currentDirectory` from within `Demo\\Deploy`.",
-        ]
+        ["Cannot initialize readonly property `Sharp\\Environment::$arguments` from within `Demo\\Deploy`."]
     );
 }
 
@@ -10099,6 +10094,18 @@ fn a_uses_takes_a_foreign_class_and_refuses_any_other_class() {
         assert_eq!(issues(form, &[foreign, STRIPE]), Vec::<String>::new(), "{}", form.0);
         assert_eq!(issues(form, &[plain, STRIPE]), [refused], "{}", form.0);
     }
+}
+
+/// Spec section 29: a method with a body names a function parameter in `uses`, as `charge(…) uses prepare => …` does,
+/// so the effect check reads no name of its `uses`.
+#[test]
+fn a_method_with_a_body_names_a_function_parameter_in_uses() {
+    let checkout = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+    );
+
+    assert_eq!(issues(checkout, &[]), Vec::<String>::new());
 }
 
 /// A name in `uses` that is no effect is refused with every effect the project has: the named standard effects in the

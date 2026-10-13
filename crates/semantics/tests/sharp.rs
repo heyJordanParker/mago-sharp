@@ -2666,19 +2666,34 @@ fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_n
     }
 }
 
-/// Spec section 29 works a body's effects out from its code, so only a method without a body says `uses`: an
-/// interface's and an abstract class's.
+/// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
+/// abstract class's, names effects in `uses`. A method with a body names only its function parameters there, as in
+/// `charge(…) uses prepare => …`.
 #[test]
-fn a_method_with_a_body_takes_no_uses() {
-    let refused = "A method with a body takes no `uses`: its effects come from its code.";
+fn a_method_with_a_body_names_only_its_function_parameters_in_uses() {
+    let refused = |name: &str| {
+        format!("A method with a body takes no effect in `uses`, and `{name}` is not one of its function parameters.")
+    };
     for (code, expected) in [
         (
             "public class Gateway\n{\n    public int charge(int cents) uses Http => cents;\n}\n",
-            vec![format!("5:34 {refused}")],
+            vec![format!("5:39 {}", refused("Http"))],
         ),
         (
             "public class Gateway\n{\n    public int charge(int cents) uses Http\n    {\n        return cents;\n    }\n}\n",
-            vec![format!("5:34 {refused}")],
+            vec![format!("5:39 {}", refused("Http"))],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare => prepare(cents);\n}\n",
+            vec![],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)>? prepare) uses prepare => cents;\n}\n",
+            vec![],
+        ),
+        (
+            "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses prepare, cents, Http => cents;\n}\n",
+            vec![format!("5:76 {}", refused("cents")), format!("5:83 {}", refused("Http"))],
         ),
         ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
         ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),
