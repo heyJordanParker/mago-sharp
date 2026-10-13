@@ -46,6 +46,7 @@ use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::ExitConstruct;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOfTarget;
@@ -210,6 +211,7 @@ pub(crate) mod checked;
 pub(crate) mod inline;
 pub(crate) mod types;
 
+use types::Declaration;
 use types::DeclarationKind;
 use types::Types;
 use types::agreed_kind;
@@ -560,6 +562,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ) => self.named_constructor(constructor, initializer),
                 ClassLikeMember::Property(property) => self.property(property, parent_name),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::Extension(extension) => {
+                    for member in &extension.members {
+                        members.push(self.extension_member(extension, member));
+                    }
+
+                    continue;
+                }
                 _ => unreachable!("check_slice refuses the class member `{member}`"),
             };
             members.push(member);
@@ -869,7 +878,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut statements = if matches!(method.body, MethodBody::Abstract(_)) && first_statements.is_empty() {
             Vec::new()
         } else {
-            self.set_parameters(&method.parameter_list)
+            self.set_parameters(&method.parameter_list.parameters)
         };
         statements.extend_from_slice(first_statements);
         if let Some(initializer) = &method.initializer
@@ -976,7 +985,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let metadata = self.types.method_metadata(self.class, name);
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-        let mut prologue = self.set_parameters(&operator.parameter_list);
+        let mut prologue = self.set_parameters(&operator.parameter_list.parameters);
         if lifted {
             prologue.push(self.null_lifting(&operator.parameter_list));
         }
@@ -992,6 +1001,85 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             name,
             &[parameters, NULL, body, return_type, attributes],
         )
+    }
+
+    /// An extension's member is the public static method it runs as, spec section 26, which takes the receiver first:
+    /// `public string slug(string separator)` in `extension(string value)` runs as php-src's grammar builds
+    /// `public static function slug(string $value, string $separator): string`. A computed property is the one that
+    /// takes only the receiver and returns its expression: `public bool isBlank => …;` runs as
+    /// `public static function isBlank(string $value): bool { return …; }`.
+    fn extension_member(&mut self, extension: &Extension, member: &ClassLikeMember) -> u32 {
+        let [receiver] = extension.parameter_list.parameters.as_slice() else {
+            unreachable!("semantics refuses an extension without exactly one receiver");
+        };
+
+        match member {
+            ClassLikeMember::Method(method) => {
+                self.enter(method.name.value);
+                let (parameters, statements) =
+                    self.extension_parameters(std::iter::once(receiver).chain(&method.parameter_list.parameters));
+                let body = self.method_body(&method.body, method.returns_value(), statements);
+                let (start, return_type) = match &method.return_type_hint {
+                    Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
+                    None => unreachable!("semantics refuses an extension method without a return type"),
+                };
+                let attributes = self.attributes(&method.attribute_lists, None);
+
+                self.declaration(
+                    SHARP_AST_METHOD,
+                    modifier_flags(&method.modifiers) | ZEND_ACC_STATIC,
+                    start,
+                    method.body.span(),
+                    method.name.value,
+                    &[parameters, NULL, body, return_type, attributes],
+                )
+            }
+            ClassLikeMember::Property(Property::Computed(property)) => {
+                let Some(hint) = &property.hint else {
+                    unreachable!("semantics refuses a computed property without a type");
+                };
+                self.enter(property.variable.name);
+                let (parameters, mut statements) = self.extension_parameters([receiver]);
+                let line = self.line(&property.body);
+                let value = self.expression(property.body.expression);
+                statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
+                let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+                let return_type = self.hint(hint);
+                let attributes = self.attributes(&property.attribute_lists, None);
+
+                self.declaration(
+                    SHARP_AST_METHOD,
+                    modifier_flags(&property.modifiers) | ZEND_ACC_STATIC,
+                    hint,
+                    &property.body,
+                    property.variable.name,
+                    &[parameters, NULL, body, return_type, attributes],
+                )
+            }
+            _ => unreachable!("semantics refuses the extension member `{member}`"),
+        }
+    }
+
+    /// The parameter list of an extension's member, the receiver first, with the statements that make each `Set`
+    /// parameter a `Set`, as a method's body starts with.
+    fn extension_parameters<'parameter, 'ast>(
+        &mut self,
+        parameters: impl IntoIterator<Item = &'parameter FunctionLikeParameter<'ast>> + Clone,
+    ) -> (u32, Vec<u32>)
+    where
+        'ast: 'parameter,
+    {
+        let mut lowered = Vec::new();
+        let mut line = None;
+        for parameter in parameters.clone() {
+            line.get_or_insert(self.line(parameter));
+            lowered.push(self.parameter(parameter));
+        }
+        let Some(line) = line else {
+            unreachable!("an extension's member takes its receiver");
+        };
+
+        (self.node(SHARP_AST_PARAM_LIST, 0, line, &lowered), self.set_parameters(parameters))
     }
 
     /// A named constructor is the static method it runs as, spec section 9.1, as php-src's grammar builds
@@ -1011,7 +1099,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let metadata = self.types.method_metadata(self.class, constructor.name.value);
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-        let mut statements = self.set_parameters(&constructor.parameter_list);
+        let mut statements = self.set_parameters(&constructor.parameter_list.parameters);
         let line = self.line(initializer);
         let object = self.variable(initializer.keyword.span, b"this#1");
         let class = self.string(ZEND_NAME_FQ, line, self.class);
@@ -2180,6 +2268,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     self.static_member(expression, class, &classes, &access.property)
                 }
+                None if let Some(extension) = self.types.extension(expression) => {
+                    self.extension_access(expression, &extension, access.object, None)
+                }
                 None => match self.class_value(access.object) {
                     Some((class, classes)) => self.static_member(expression, class, &classes, &access.property),
                     None => {
@@ -2196,13 +2287,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 },
             },
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static call
-            // through a class value, the property call, or the plain method call.
+            // through a class value, the extension's member, the property call, or the plain method call.
             Expression::Call(Call::NullSafeMethod(call)) => {
                 if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, true) {
                     return lowered;
                 }
 
                 let tested = self.tested_links.contains(&expression.span());
+                if tested && let Some(extension) = self.types.extension(expression) {
+                    return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
+                }
                 if tested && let Some((class, _)) = self.class_value(call.object) {
                     let method = self.member(&call.method);
                     let arguments = self.call_arguments(&call.argument_list, expression, &[]);
@@ -2227,9 +2321,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             }
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static member
-            // read through a class value, the method value, or the plain property read.
+            // read through a class value, the extension's member, the method value, or the plain property read.
             Expression::Access(Access::NullSafeProperty(access)) => {
                 let tested = self.tested_links.contains(&expression.span());
+                if tested && let Some(extension) = self.types.extension(expression) {
+                    return self.extension_access(expression, &extension, access.object, None);
+                }
                 if tested && let Some((class, classes)) = self.class_value(access.object) {
                     return self.static_member(expression, class, &classes, &access.property);
                 }
@@ -2684,7 +2781,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// `\Class::name(arguments)`, the static method `class` declares to run an operator.
+    /// `\Class::name(arguments)`, the static method `class` declares to run an operator or an extension's member.
     fn operator_call(&mut self, line: u32, class: Word, name: &[u8], arguments: &[u32]) -> u32 {
         let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
         let method = self.string(0, line, name);
@@ -2759,8 +2856,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.declaration(SHARP_AST_CLOSURE, 0, &span, &span, b"", &[parameters, uses, body, NULL, NULL])
     }
 
-    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, or any
-    /// link below a collection method call that runs as PHP on the array, with its receiver, when `chain` is a member
+    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, an
+    /// extension's member, or any link below a collection method call that runs as PHP on the array or below an
+    /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
     /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
     /// holds, whose links its own conditional tests.
@@ -2776,9 +2874,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
 
             link = match link {
-                Expression::Access(Access::Property(access)) => access.object,
+                Expression::Access(Access::Property(access)) => {
+                    below_php_call = below_php_call || self.types.extension(link).is_some();
+
+                    access.object
+                }
                 Expression::Call(Call::Method(call)) => {
-                    below_php_call = below_php_call || self.php_collection_method(link).is_some();
+                    below_php_call = below_php_call
+                        || self.php_collection_method(link).is_some()
+                        || self.types.extension(link).is_some();
 
                     call.object
                 }
@@ -2787,6 +2891,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Expression::Access(Access::NullSafeProperty(access)) => {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
+                            || self.types.extension(link).is_some()
                             || self.is_class_value(access.object)
                             || self.is_method_value(access.object, &access.property))
                     {
@@ -2798,6 +2903,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Expression::Call(Call::NullSafeMethod(call)) => {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
+                            || self.types.extension(link).is_some()
                             || self.is_class_value(call.object)
                             || self.is_property_call(link, call.object))
                     {
@@ -2876,7 +2982,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let lambda = arrow_function.span();
         let parameters = self.lambda_parameters(lambda, &arrow_function.parameter_list);
         let ((mut statements, value), captures_type_arguments) = self.lambda_body(|lowering| {
-            (lowering.set_parameters(&arrow_function.parameter_list), lowering.expression(arrow_function.expression))
+            (
+                lowering.set_parameters(&arrow_function.parameter_list.parameters),
+                lowering.expression(arrow_function.expression),
+            )
         });
         if statements.is_empty()
             && !captures_type_arguments
@@ -2906,7 +3015,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let lambda = closure.span();
         let parameters = self.lambda_parameters(lambda, &closure.parameter_list);
         let (body, captures_type_arguments) = self.lambda_body(|lowering| {
-            let mut statements = lowering.set_parameters(&closure.parameter_list);
+            let mut statements = lowering.set_parameters(&closure.parameter_list.parameters);
             for statement in &closure.body.statements {
                 statements.push(lowering.statement(statement));
             }
@@ -3143,9 +3252,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// the elements, and `$p = \array_map(\Sharp\Set::from(...), $p);` for a variadic one, which keeps each element's
     /// position or name. A promoted one is the property its constructor declares, `$this->p = \Sharp\Set::from($p);`.
     /// A nullable one stays null.
-    fn set_parameters(&mut self, parameters: &FunctionLikeParameterList) -> Vec<u32> {
+    fn set_parameters<'parameter, 'ast>(
+        &mut self,
+        parameters: impl IntoIterator<Item = &'parameter FunctionLikeParameter<'ast>>,
+    ) -> Vec<u32>
+    where
+        'ast: 'parameter,
+    {
         let mut statements = Vec::new();
-        for parameter in &parameters.parameters {
+        for parameter in parameters {
             let Some(nullable) = set_parameter(parameter) else {
                 continue;
             };
@@ -3817,6 +3932,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, false) {
             return lowered;
         }
+        if let Some(extension) = self.types.extension(expression) {
+            return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
+        }
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;
         }
@@ -3885,6 +4003,33 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let full_name = self.names.get(&class.name);
 
         (self.string(ZEND_NAME_FQ, line, full_name), vec![full_name])
+    }
+
+    /// The member `extension`, which an extension adds, spec section 26, called with `arguments` or read on `receiver`:
+    /// the call of the static method it runs as, `\App\TextExtensions::slug($title, '-')`, or the library's inline
+    /// form of it, as `trim($name)` for `name.trim()`. The checker chose it from the type the code shows, so it runs
+    /// on any value of that type, an object of a subclass with its own member of that name too.
+    fn extension_access(
+        &mut self,
+        access: &Expression,
+        extension: &Declaration,
+        receiver: &Expression,
+        arguments: Option<&ArgumentList>,
+    ) -> u32 {
+        let line = self.line(access);
+        if let Some(inlined) = self.inlined(extension, Some(receiver), arguments, line) {
+            return inlined;
+        }
+
+        let mut values = vec![self.expression(receiver)];
+        for argument in arguments.into_iter().flat_map(|list| list.arguments.iter()) {
+            values.push(match argument {
+                Argument::Positional(positional) => self.positional_argument(positional),
+                Argument::Named(named) => self.named_argument(named, false),
+            });
+        }
+
+        self.operator_call(line, extension.class, extension.name.as_bytes(), &values)
     }
 
     /// Spec section 27: `Position.current()` in a body is the position where it is written, a new `Position` of the

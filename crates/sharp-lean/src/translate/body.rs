@@ -596,7 +596,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 return "default".to_owned();
             };
 
-            return self.call(expression, target.class.as_bytes(), class, method, None, &call.argument_list);
+            return self.call(expression, target.class.as_bytes(), class, method, None, Some(&call.argument_list));
         }
         match call.object {
             Expression::Self_(_) => {
@@ -608,7 +608,14 @@ impl<'body, 'program> Body<'body, 'program> {
                     return self.unmodeled(expression.span(), "a call through `Self`".to_owned(), issues::OVERRIDABLE);
                 }
 
-                return self.call(expression, target.class.as_bytes(), self.class, method, None, &call.argument_list);
+                return self.call(
+                    expression,
+                    target.class.as_bytes(),
+                    self.class,
+                    method,
+                    None,
+                    Some(&call.argument_list),
+                );
             }
             Expression::Parent(_) | Expression::Static(_) => {
                 return self.unmodeled(
@@ -620,6 +627,22 @@ impl<'body, 'program> Body<'body, 'program> {
             _ => {}
         }
 
+        if let Some(extension) = self.checked.types().extension(expression) {
+            if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
+                return "default".to_owned();
+            }
+
+            let class = extension.class.as_bytes();
+            let receiver = self.value(call.object);
+            return self.call(
+                expression,
+                class,
+                class,
+                extension.name.as_bytes(),
+                Some(receiver),
+                Some(&call.argument_list),
+            );
+        }
         let Some(class) = self.receiver_class(call.object) else {
             return "default".to_owned();
         };
@@ -636,11 +659,20 @@ impl<'body, 'program> Body<'body, 'program> {
             return "default".to_owned();
         };
         let receiver = self.value(call.object);
-        self.call(expression, target.class.as_bytes(), class, method, Some(receiver), &call.argument_list)
+        self.call(expression, target.class.as_bytes(), class, method, Some(receiver), Some(&call.argument_list))
     }
 
     /// `object?.m(…)`, which calls `m` only when `object` is not null.
     fn null_safe_call(&mut self, expression: &Expression, call: &NullSafeMethodCall) -> String {
+        if let Some(extension) = self.checked.types().extension(expression) {
+            if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
+                return "default".to_owned();
+            }
+
+            let class = extension.class.as_bytes();
+            let method = extension.name.as_bytes();
+            return self.null_safe(expression, class, class, method, call.object, Some(&call.argument_list));
+        }
         let Some(class) = self.receiver_class(call.object) else {
             return "default".to_owned();
         };
@@ -652,20 +684,25 @@ impl<'body, 'program> Body<'body, 'program> {
             return self.overridable(expression, class, target.name.as_bytes());
         }
 
-        let receiver = self.value(call.object);
-        let returns_null = self
-            .reach
-            .method(target.class.as_bytes(), target.name.as_bytes())
-            .is_some_and(|method| method.returns_nullable);
+        self.null_safe(expression, target.class.as_bytes(), class, method, call.object, Some(&call.argument_list))
+    }
+
+    /// The call of `class`'s method `method`, which `declaring` declares, on the value of `object`, made only when that
+    /// value is not null.
+    fn null_safe(
+        &mut self,
+        expression: &Expression,
+        declaring: &[u8],
+        class: &[u8],
+        method: &[u8],
+        object: &Expression,
+        arguments: Option<&ArgumentList>,
+    ) -> String {
+        let receiver = self.value(object);
+        let returns_null = self.reach.method(declaring, method).is_some_and(|method| method.returns_nullable);
         let present = self.nested_lines(|body| {
-            let called = body.call(
-                expression,
-                target.class.as_bytes(),
-                class,
-                method,
-                Some(format!("({receiver}.getD default)")),
-                &call.argument_list,
-            );
+            let called =
+                body.call(expression, declaring, class, method, Some(format!("({receiver}.getD default)")), arguments);
             if returns_null { called } else { format!("(some {called})") }
         });
 
@@ -683,7 +720,7 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// A call of `class`'s method `method`, which `declaring` declares, on `receiver`, or of the static method when
-    /// `receiver` is `None`.
+    /// `receiver` is `None`. A computed property's read passes no `arguments`.
     fn call(
         &mut self,
         expression: &Expression,
@@ -691,7 +728,7 @@ impl<'body, 'program> Body<'body, 'program> {
         class: &[u8],
         method: &[u8],
         receiver: Option<String>,
-        arguments: &ArgumentList,
+        arguments: Option<&ArgumentList>,
     ) -> String {
         if ascii_lowercase_word(declaring) != ascii_lowercase_word(class) {
             return self.unmodeled(
@@ -712,7 +749,8 @@ impl<'body, 'program> Body<'body, 'program> {
         let key = names::member(&names::full_name(&class_name), facts.name.as_bytes());
         let mut parts = vec![key.clone()];
         parts.extend(receiver);
-        let Some(arguments) = self.arguments(arguments, facts.parameters) else {
+        let Some(arguments) = arguments.map_or_else(|| Some(Vec::new()), |list| self.arguments(list, facts.parameters))
+        else {
             return "default".to_owned();
         };
         parts.extend(arguments);
@@ -819,6 +857,15 @@ impl<'body, 'program> Body<'body, 'program> {
             };
         }
 
+        if let Some(extension) = self.checked.types().extension(expression) {
+            if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
+                return "default".to_owned();
+            }
+
+            let class = extension.class.as_bytes();
+            let receiver = self.value(access.object);
+            return self.call(expression, class, class, extension.name.as_bytes(), Some(receiver), None);
+        }
         let Some(class) = self.receiver_class(access.object) else {
             return "default".to_owned();
         };
@@ -867,6 +914,14 @@ impl<'body, 'program> Body<'body, 'program> {
         let ClassLikeMemberSelector::Identifier(member) = &access.property else {
             return self.unmodeled(access.property.span(), "a dynamic member name".to_owned(), issues::NOT_TRANSLATED);
         };
+        if let Some(extension) = self.checked.types().extension(expression) {
+            if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
+                return "default".to_owned();
+            }
+
+            let class = extension.class.as_bytes();
+            return self.null_safe(expression, class, class, extension.name.as_bytes(), access.object, None);
+        }
         let Some(class) = self.receiver_class(access.object) else {
             return "default".to_owned();
         };

@@ -18,6 +18,7 @@ use mago_allocator::prelude::*;
 
 pub mod constant;
 pub mod enum_case;
+pub mod extension;
 pub mod inheritance;
 pub mod law;
 pub mod member;

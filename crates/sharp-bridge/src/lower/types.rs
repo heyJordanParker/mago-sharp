@@ -491,6 +491,34 @@ impl<'analysis> Types<'analysis> {
         declaration
     }
 
+    /// The extension member, spec section 26, that the method call or property read `access` runs, as the analysis
+    /// resolved it: the public static method of its static class, which takes the receiver first. None for any other
+    /// call or read, and for a call through the class, as `WalletExtensions.total(wallet)`, which is that static call
+    /// already, as in C#.
+    #[must_use]
+    pub fn extension(&self, access: &Expression) -> Option<Declaration> {
+        if let Expression::Call(Call::Method(call)) = access
+            && self.names.static_call_class(call).is_some()
+        {
+            return None;
+        }
+
+        let mut callees = self.artifacts.get_callees(access);
+        let (Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }), None) =
+            (callees.next(), callees.next())
+        else {
+            return None;
+        };
+        let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+
+        (metadata.flags.is_extension_method() || metadata.flags.is_extension_property()).then(|| Declaration {
+            kind: DeclarationKind::StaticMethod,
+            class: self.class_declaration(class.as_bytes()).name,
+            name: metadata.original_name,
+            public: true,
+        })
+    }
+
     /// The full name of the constant the read `constant` reaches, as the analysis found it: the constant of that name
     /// in the file's namespace, or else the global one.
     #[must_use]

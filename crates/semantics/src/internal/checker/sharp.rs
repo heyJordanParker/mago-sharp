@@ -40,6 +40,7 @@ use mago_syntax::cst::Continue;
 use mago_syntax::cst::DeclareBody;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
@@ -133,9 +134,11 @@ const ANY: &[u8] = b"Any";
 /// - At file level: `namespace`, `import`, `class`, `interface` and `enum`. A file has at most one namespace, named
 ///   and written without braces.
 /// - A class: attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters, an optional
-///   `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no
-///   other modifiers, `extends` or `implements`. The engine tells the base class from the interfaces when it links the
-///   class.
+///   `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a
+///   static class, extensions, with no other modifiers, `extends` or `implements`. The engine tells the base class from
+///   the interfaces when it links the class.
+/// - An extension, spec section 26: one receiver parameter and the methods and computed properties it adds, each with
+///   only an access modifier. `check_extension` holds its rules.
 /// - A named constructor, spec section 9.1: an access modifier, its class's name, a `.` and its own name, parameters
 ///   that declare no property, `: this(…)` without `this` in its arguments, and a body. `check_named_constructor`
 ///   decides each part, and an interface, an enum and a static class declare none.
@@ -434,6 +437,8 @@ pub enum Place {
     Event,
     /// A module and its members.
     Module,
+    /// An extension block of a static class: its receiver and its members.
+    Extension,
     /// A field or a property, both of which the CST calls a property: its modifiers, type and name.
     FieldOrProperty,
     /// A class constant: its modifiers, type and name.
@@ -783,6 +788,28 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::NamedArgument(_), Attribute) => Some(Constant),
 
         (Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Law(_)), Class | Enum) => Some(place),
+        (Node::ClassLikeMember(ClassLikeMember::Extension(extension)), Class | Interface | Enum) => {
+            if place == Class && enclosing_class(context.program, extension.span()).is_some_and(|class| class.is_static) {
+                check_extension(extension, context);
+
+                return Some(Class);
+            }
+            context.report(
+                Issue::error("An extension belongs in a static class, as in `public static class StringExtensions`.")
+                    .with_annotation(Annotation::primary(extension.extension.span).with_message("Declared here.")),
+            );
+
+            None
+        }
+        // The receiver is checked as a method's parameter, and a method or a computed property as a member of the
+        // static class. `check_extension` reported every other member.
+        (Node::Extension(_), Class) => Some(Place::Extension),
+        (Node::FunctionLikeParameterList(_), Place::Extension) => Some(Method),
+        (
+            Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Property(Property::Computed(_))),
+            Place::Extension,
+        ) => enter(node, Class, context),
+        (Node::ClassLikeMember(_), Place::Extension) => None,
         // A law's parameters and body are checked as a method's. `check_members` refuses a default and a variadic one.
         (Node::Law(_), Class | Enum | Place::Module) => Some(Method),
         (Node::ClassLikeMember(ClassLikeMember::Operator(_) | ClassLikeMember::NamedConstructor(_)), Class) => {
@@ -1912,6 +1939,74 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
             }
             _ => {}
         }
+    }
+}
+
+/// Checks an extension block of a static class, spec section 26: one receiver, a parameter with no modifier, default
+/// or `...`, and members that are methods or computed properties of the receiver, each with only an access modifier,
+/// naming the receiver and never `this`. A static class has no constructor, in an extension either.
+fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
+    let receivers = &extension.parameter_list.parameters;
+    let refused_receiver = match receivers.as_slice() {
+        [receiver] => {
+            (!receiver.modifiers.is_empty() || receiver.default_value.is_some() || receiver.ellipsis.is_some())
+                .then(|| receiver.span())
+        }
+        _ => Some(extension.parameter_list.span()),
+    };
+    if let Some(span) = refused_receiver {
+        context.report(
+            Issue::error(
+                "An extension's receiver is one parameter, with no modifier, default or `...`, as in `extension(string value)`.",
+            )
+            .with_annotation(Annotation::primary(span).with_message("Written here.")),
+        );
+    }
+
+    let receiver = receivers.first().map_or(b"value".as_slice(), |receiver| receiver.variable.name);
+    let this = format!("An extension member names its receiver: write `{}`, not `this`.", BytesDisplay(receiver));
+    let class = enclosing_class(context.program, extension.span()).map(|class| class.name.value);
+    for member in &extension.members {
+        let (modifiers, body) = match member {
+            ClassLikeMember::Method(method)
+                if method.return_type_hint.is_none() && class == Some(method.name.value) =>
+            {
+                context.report(
+                    Issue::error("A static class has no constructor.")
+                        .with_annotation(Annotation::primary(method.name.span).with_message("Declared here.")),
+                );
+
+                continue;
+            }
+            ClassLikeMember::Method(method) => (&method.modifiers, Node::MethodBody(&method.body)),
+            ClassLikeMember::Property(Property::Computed(property)) => {
+                (&property.modifiers, Node::PropertyHookConcreteExpressionBody(&property.body))
+            }
+            member => {
+                context.report(
+                    Issue::error(
+                        "An extension adds only methods and computed properties, as in `public bool isBlank => value == \"\";`.",
+                    )
+                    .with_annotation(Annotation::primary(member.span()).with_message("Declared here.")),
+                );
+
+                continue;
+            }
+        };
+        // Spec section 5's `internal` is an access modifier, which the walk refuses as not supported yet.
+        for modifier in modifiers
+            .iter()
+            .filter(|modifier| !modifier.is_read_visibility() && !matches!(modifier, Modifier::Internal(_)))
+        {
+            context.report(
+                Issue::error(format!(
+                    "An extension member takes only an access modifier: remove `{}`.",
+                    BytesDisplay(modifier.get_keyword().value)
+                ))
+                .with_annotation(Annotation::primary(modifier.span()).with_message("Written here.")),
+            );
+        }
+        report_this(body, &this, None, context);
     }
 }
 
@@ -3947,37 +4042,55 @@ fn check_declared_name(name: &[u8], span: Span, context: &mut Context<'_, '_, '_
 
 /// Reports a PHP superglobal, written with `$` or bare, which spec section 29 removes.
 fn report_superglobal(span: Span, context: &mut Context<'_, '_, '_>) {
+    let (environment, after) = standard_class("Environment", context);
+
     context.report(
         Issue::error("PHP# has no superglobals; take a Request")
             .with_annotation(Annotation::primary(span).with_message("Written here."))
-            .with_note(
-                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `Environment`.",
-            ),
+            .with_note(format!(
+                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `{environment}`{after}."
+            )),
     );
 }
 
 /// Reports a PHP magic constant, or another `__Something__` name when `constant` is `None`, which spec section 27
 /// replaces with `Position`. The error names it as written.
 fn report_magic_constant(name: &[u8], span: Span, constant: Option<&MagicConstant>, context: &mut Context<'_, '_, '_>) {
+    let (position, after) = standard_class("Position", context);
     let instead = match constant {
-        Some(MagicConstant::Directory(_)) => "write `Position.current().directory`.",
-        Some(MagicConstant::File(_)) => "write `Position.current().file`.",
-        Some(MagicConstant::Line(_)) => "write `Position.current().line`.",
-        Some(MagicConstant::Function(_) | MagicConstant::Method(_)) => "write `Position.current().function`.",
-        Some(MagicConstant::Class(_)) => "write `typeof(Class)` with the class's name.",
-        Some(MagicConstant::Namespace(_)) => "write `Position.current().function`, which starts with the namespace.",
+        Some(MagicConstant::Directory(_)) => format!("write `{position}.current().directory`{after}."),
+        Some(MagicConstant::File(_)) => format!("write `{position}.current().file`{after}."),
+        Some(MagicConstant::Line(_)) => format!("write `{position}.current().line`{after}."),
+        Some(MagicConstant::Function(_) | MagicConstant::Method(_)) => {
+            format!("write `{position}.current().function`{after}.")
+        }
+        Some(MagicConstant::Class(_)) => "write `typeof(Class)` with the class's name.".to_owned(),
+        Some(MagicConstant::Namespace(_)) => {
+            format!("write `{position}.current().function`{after}, which starts with the namespace.")
+        }
         Some(MagicConstant::Trait(_) | MagicConstant::Property(_)) | None => {
-            "`Position.current()` gives the file, directory, line, column and function."
+            format!("`{position}.current()`{after} gives the file, directory, line, column and function.")
         }
     };
 
     report_removed(
         span,
         name,
-        instead,
-        "PHP# removes PHP's magic constants and every other `__Something__` name: `Position` says where code sits in its source.",
+        &instead,
+        "PHP# removes PHP's magic constants and every other `__Something__` name: `Sharp.Position` says where code sits in its source.",
         context,
     );
+}
+
+/// How the file writes the standard library's class-like `short`, as `Position` for `Sharp.Position`, and the import
+/// that form needs, as a help names them. A class-like the file imports or declares under the short name, or one of its
+/// namespace, wins over the default one, spec section 23, so the file then imports the standard one under an alias.
+fn standard_class(short: &str, context: &Context<'_, '_, '_>) -> (String, String) {
+    if context.names.shadows_default_class(format!("Sharp\\{short}").as_bytes()) {
+        (format!("Sharp{short}"), format!(" after `import Sharp.{short} as Sharp{short};`"))
+    } else {
+        (short.to_owned(), String::new())
+    }
 }
 
 /// Whether the slice has an assignment operator. Every operator is named, so a new one does not compile until it
@@ -4027,7 +4140,7 @@ fn supported(place: Place) -> &'static str {
     match place {
         Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
         Place::Class => {
-            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`."
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
             "A PHP# interface has an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
@@ -4048,6 +4161,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
         Place::Module => unreachable!("a module holds only laws, and `enter` takes each one"),
+        Place::Extension => unreachable!("`enter` places an extension's keyword, receiver and every member of it"),
         Place::FieldOrProperty => {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
