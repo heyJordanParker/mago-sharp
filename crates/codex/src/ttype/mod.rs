@@ -1415,9 +1415,11 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
     None
 }
 
-/// Returns `key_type` with each backed enum in it replaced by its backing type and each struct by `string`.
+/// Returns `key_type` with each backed enum in it replaced by its backing type, and each struct and each class that
+/// declares or inherits `operator ==` by `string`.
 ///
-/// A PHP# `Map` keeps each backed enum and struct key as itself and finds it by its `==` and `hash()`. Its key type is
+/// A PHP# `Map` keeps each such key as itself and finds it by its `==` and `hash()`, which a struct has with nothing
+/// declared and a class has when it declares `operator ==`, as the checker requires `hash()` beside it. Its key type is
 /// one a `Map` takes when this result is always `int` or `string`. A plain PHP array that crosses into a `Map` keyed by a
 /// backed enum holds each case's backing value, which this result types.
 #[must_use]
@@ -1426,10 +1428,12 @@ pub fn get_backing_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMet
         TAtomic::Object(TObject::Enum(enum_object)) => {
             codebase.get_class_like(enum_object.name.as_bytes())?.enum_type.clone()
         }
-        TAtomic::Object(TObject::Named(named_object)) => codebase
-            .get_class_like(named_object.name.as_bytes())
-            .is_some_and(|class_like| class_like.flags.is_struct())
-            .then(|| STRING_ATOMIC.clone()),
+        TAtomic::Object(TObject::Named(named_object)) => {
+            let name = named_object.name.as_bytes();
+            let is_struct = codebase.get_class_like(name).is_some_and(|class_like| class_like.flags.is_struct());
+
+            (is_struct || codebase.get_declaring_method(name, b"op_Equality").is_some()).then(|| STRING_ATOMIC.clone())
+        }
         _ => None,
     };
 

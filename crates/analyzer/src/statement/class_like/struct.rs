@@ -203,8 +203,8 @@ pub(crate) fn check_struct_parse<A>(
     }
 }
 
-/// Whether the struct `name` declares `operator ==`, which replaces the `==` that compares it property by property and,
-/// with the `hash()` it then declares, keys a `Map` and joins a `Set`.
+/// Whether the struct or class `name` declares `operator ==`, which replaces the `==` that compares a struct property by
+/// property and, with the `hash()` it then declares, keys a `Map` and joins a `Set`.
 pub(crate) fn declares_equality(codebase: &CodebaseMetadata, name: Word) -> bool {
     // The `op_Equality` the codex writes for a struct that declares none spans the whole struct.
     let Some(r#struct) = codebase.get_class_like(name.as_bytes()) else {
@@ -214,12 +214,12 @@ pub(crate) fn declares_equality(codebase: &CodebaseMetadata, name: Word) -> bool
     codebase.get_method(name.as_bytes(), b"op_Equality").is_some_and(|equality| equality.span != r#struct.span)
 }
 
-/// Reports each struct in `key_type` that holds a class instance at any depth, spec section 10: a `Map` finds a struct
-/// key, and a `Set` a struct element, by a hash of its fields and their `==`, and a class instance has neither unless
-/// its class declares them. A struct that declares `operator ==` is held through it and its `hash()`, so it holds what
-/// it likes. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's `Dictionary` needs `Hashable`. Each
-/// class `key_type` names is a struct, since only a struct keys a `Map` among classes. `in_set` names a `Set` element.
-/// Returns whether it reported one.
+/// Reports each struct in `key_type` that holds a class instance without `==` and `hash()` at any depth, spec section
+/// 10: a `Map` finds a struct key, and a `Set` a struct element, by a hash of its fields and their `==`, and a class
+/// instance has neither unless its class declares `operator ==`. A struct that declares `operator ==` is held through it
+/// and its `hash()`, so it holds what it likes. A class key is `map_key_error`'s to report. Precedent: Rust's `HashMap`
+/// needs `Hash` on every field, and Swift's `Dictionary` needs `Hashable`. `in_set` names a `Set` element. Returns
+/// whether it reported one.
 pub(crate) fn report_class_held_by_key<A>(
     context: &mut Context<'_, '_, A>,
     key_type: &TUnion,
@@ -232,7 +232,7 @@ where
     let codebase = context.codebase;
     let structs = key_type.types.iter().filter_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) if !declares_equality(codebase, object.name) => {
-            codebase.get_class_like(object.name.as_bytes())
+            codebase.get_class_like(object.name.as_bytes()).filter(|class_like| class_like.flags.is_struct())
         }
         _ => None,
     });
@@ -277,7 +277,7 @@ where
                     format!("`{class}` keys this `Map`.")
                 }))
                 .with_note(
-                    "A struct key is stored as text built from its values, and a class instance compares through its own `==`, which no text matches.",
+                    "A struct key is found by a hash of its fields and their `==`, and a class instance has neither unless its class declares `operator ==` with `hash()`.",
                 ),
         );
         reported = true;
@@ -310,15 +310,18 @@ fn held_class(
     })
 }
 
-/// The part of `r#type` that can be a class instance, or none when every value of it is a value. A struct that
-/// declares `operator ==` is a value whatever it holds.
+/// The part of `r#type` that can be a class instance without `==` and `hash()`, or none when every value of it has
+/// them. A struct that declares `operator ==` has them whatever it holds, and so does a class that declares or inherits
+/// `operator ==`, which the checker requires `hash()` beside.
 fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {
     r#type.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) => {
             // A type that names no class is reported where it is written.
             let class_like = codebase.get_class_like(object.name.as_bytes())?;
             if !class_like.flags.is_struct() {
-                return Some(atomic.clone());
+                let has_equality = codebase.get_declaring_method(object.name.as_bytes(), b"op_Equality").is_some();
+
+                return (!has_equality).then(|| atomic.clone());
             }
             if visiting.contains(&class_like.name) || declares_equality(codebase, class_like.name) {
                 return None;

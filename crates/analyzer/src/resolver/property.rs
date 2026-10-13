@@ -451,6 +451,7 @@ where
         if for_assignment { PropertyAccessKind::Write } else { PropertyAccessKind::Read },
         &receiver_type,
         span,
+        context.dialect,
         context.external_analysis_session,
     ) else {
         return Ok(None);

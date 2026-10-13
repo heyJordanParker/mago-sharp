@@ -51,7 +51,7 @@ final class List
 {
     /**
      * The list itself, or a list holding the one value. PHP# writes this instead of PHP's `(array)` cast. The analyzer
-     * refuses a `.sharp` call when `T` could itself be a list, because a `List` and a `Map` both run as PHP arrays.
+     * refuses a `.sharp` call when `T` could itself be a list, because a `List` is returned as it is.
      *
      * @template T
      *

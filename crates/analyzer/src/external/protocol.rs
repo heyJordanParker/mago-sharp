@@ -67,7 +67,7 @@ use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
-use mago_codex::ttype::get_backing_key_type;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_bool;
 use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_float;
@@ -95,6 +95,7 @@ use mago_reporting::Issue;
 use mago_reporting::Level;
 use mago_span::HasSpan;
 use mago_syntax::cst::NodeKind;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::Safety;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -965,6 +966,7 @@ pub(super) fn encode_property_type_request<'type_info>(
     receiver_type: &'type_info TUnion,
     span: mago_span::Span,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     generation: u64,
     trace_enabled: bool,
 ) -> Result<PropertyTypeRequest<'type_info>, ExternalAnalyzerError> {
@@ -985,7 +987,7 @@ pub(super) fn encode_property_type_request<'type_info>(
     });
     let snapshot_start = trace_enabled.then(Instant::now);
     let mut types = Vec::new();
-    encode_union_snapshot(&mut writer, receiver_type, &mut types, codebase, 0)?;
+    encode_union_snapshot(&mut writer, receiver_type, &mut types, codebase, dialect, 0)?;
     let type_snapshot_duration = snapshot_start.map_or(Duration::ZERO, |start| start.elapsed());
     writer.write_u32(span.start.offset);
     writer.write_u32(span.end.offset);
@@ -1028,6 +1030,7 @@ pub(super) fn encode_call_forwarding_request<'type_info>(
     property: bool,
     receiver_type: &'type_info TUnion,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     generation: u64,
     trace_enabled: bool,
 ) -> Result<PropertyTypeRequest<'type_info>, ExternalAnalyzerError> {
@@ -1045,7 +1048,7 @@ pub(super) fn encode_call_forwarding_request<'type_info>(
     writer.write_bool(property);
     let snapshot_start = trace_enabled.then(Instant::now);
     let mut types = Vec::new();
-    encode_union_snapshot(&mut writer, receiver_type, &mut types, codebase, 0)?;
+    encode_union_snapshot(&mut writer, receiver_type, &mut types, codebase, dialect, 0)?;
     let type_snapshot_duration = snapshot_start.map_or(Duration::ZERO, |start| start.elapsed());
 
     Ok(PropertyTypeRequest { payload: writer.finish(), snapshotted_types: types.len(), types, type_snapshot_duration })
@@ -1335,7 +1338,14 @@ fn encode_return_type_request<'type_info>(
             writer.write_bytes(name)?;
             let snapshot_start = trace_enabled.then(Instant::now);
             let mut receiver_type_references = Vec::new();
-            encode_union_snapshot(&mut writer, receiver_type, &mut receiver_type_references, codebase, 0)?;
+            encode_union_snapshot(
+                &mut writer,
+                receiver_type,
+                &mut receiver_type_references,
+                codebase,
+                Dialect::of(source_file),
+                0,
+            )?;
             if let Some(start) = snapshot_start {
                 type_snapshot_duration = type_snapshot_duration.saturating_add(start.elapsed());
             }
@@ -1427,6 +1437,7 @@ fn encode_return_type_arguments<'type_info>(
                 argument_type,
                 &mut argument_types,
                 codebase,
+                Dialect::of(source_file),
                 receiver_type_count,
                 0,
             )?;
@@ -1471,14 +1482,17 @@ fn get_method_receiver_type(method_context: &MethodTargetContext<'_>) -> Result<
     Ok(TUnion::from_atomic(atomic))
 }
 
+/// Encodes `union` as the code of `dialect` sees it: a keyed array in PHP# code is a `Sharp\Map`, the object it runs
+/// as, and in plain PHP code a PHP array.
 pub(super) fn encode_union_snapshot<'type_info>(
     writer: &mut PayloadWriter,
     union: &'type_info TUnion,
     types: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     depth: usize,
 ) -> Result<(), ExternalAnalyzerError> {
-    encode_union_snapshot_with_offset(writer, union, types, codebase, 0, depth)
+    encode_union_snapshot_with_offset(writer, union, types, codebase, dialect, 0, depth)
 }
 
 fn encode_union_snapshot_with_offset<'type_info>(
@@ -1486,24 +1500,30 @@ fn encode_union_snapshot_with_offset<'type_info>(
     union: &'type_info TUnion,
     types: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     offset: usize,
     depth: usize,
 ) -> Result<(), ExternalAnalyzerError> {
-    let mut table = SnapshotTypeTable { offset, types, codebase };
+    let mut table = SnapshotTypeTable { offset, types, codebase, dialect };
     encode_union_snapshot_inner(writer, union, &mut table, depth)
 }
 
-/// Encodes a type the snapshot makes rather than borrows. Its handles own it and every type in it, numbered on from
+/// Encodes an atomic type the snapshot makes rather than borrows. Its handles own every type in it, numbered on from
 /// the handles before them.
-fn encode_owned_union_snapshot(
+fn encode_owned_atomic_snapshot(
     writer: &mut PayloadWriter,
-    union: &TUnion,
+    atomic: &TAtomic,
     types: &mut SnapshotTypeTable<'_, '_>,
     depth: usize,
 ) -> Result<(), ExternalAnalyzerError> {
     let mut owned = Vec::new();
-    let offset = types.offset + types.types.len();
-    encode_union_snapshot_with_offset(writer, union, &mut owned, types.codebase, offset, depth)?;
+    let mut table = SnapshotTypeTable {
+        offset: types.offset + types.types.len(),
+        types: &mut owned,
+        codebase: types.codebase,
+        dialect: types.dialect,
+    };
+    encode_atomic_snapshot(writer, atomic, &mut table, depth)?;
     types.types.extend(owned.into_iter().map(|union| Cow::Owned(union.into_owned())));
     Ok(())
 }
@@ -1512,6 +1532,7 @@ struct SnapshotTypeTable<'table, 'type_info> {
     offset: usize,
     types: &'table mut Vec<Cow<'type_info, TUnion>>,
     codebase: &'table CodebaseMetadata,
+    dialect: Dialect,
 }
 
 impl<'type_info> SnapshotTypeTable<'_, 'type_info> {
@@ -1590,10 +1611,13 @@ fn encode_atomic_snapshot<'type_info>(
             writer.write_u8(SNAPSHOT_OBJECT);
             encode_object_snapshot(writer, object, types, depth + 1)?;
         }
-        TAtomic::Array(array) => {
-            writer.write_u8(SNAPSHOT_ARRAY);
-            encode_array_snapshot(writer, array, types, depth + 1)?;
-        }
+        TAtomic::Array(array) => match collection_object(array, types) {
+            Some(object) => encode_owned_atomic_snapshot(writer, &object, types, depth)?,
+            None => {
+                writer.write_u8(SNAPSHOT_ARRAY);
+                encode_array_snapshot(writer, array, types, depth + 1)?;
+            }
+        },
         TAtomic::Iterable(iterable) => {
             writer.write_u8(SNAPSHOT_ITERABLE);
             encode_union_snapshot_inner(writer, &iterable.key_type, types, depth + 1)?;
@@ -1909,39 +1933,36 @@ fn encode_array_snapshot<'type_info>(
 
             writer.write_bool(keyed.parameters.is_some());
             if let Some((key_type, value_type)) = &keyed.parameters {
-                encode_backing_key_snapshot(writer, key_type, types, depth + 1)?;
+                encode_union_snapshot_inner(writer, key_type, types, depth + 1)?;
                 encode_union_snapshot_inner(writer, value_type, types, depth + 1)?;
             }
 
             writer.write_bool(keyed.non_empty);
         }
-        // An external analyzer is plain PHP, which sees a `Set` as the array it runs as: a `Map` of the element type,
-        // keyed by each element's key.
-        TArray::Set(element_type) => {
-            writer.write_u8(2);
-            writer.write_bool(false);
-            writer.write_bool(true);
-            encode_backing_key_snapshot(writer, element_type, types, depth + 1)?;
-            encode_union_snapshot_inner(writer, element_type, types, depth + 1)?;
-            writer.write_bool(false);
-        }
+        TArray::Set(_) => unreachable!("a `Set` is sent as the `Sharp\\Set` object it runs as"),
     }
 
     Ok(())
 }
 
-/// Encodes `key_type` as the key of the array it runs as: an external analyzer is plain PHP, which keys a PHP# `Map`
-/// or `Set` of a backed enum by the case's backing value.
-fn encode_backing_key_snapshot<'type_info>(
-    writer: &mut PayloadWriter,
-    key_type: &'type_info TUnion,
-    types: &mut SnapshotTypeTable<'_, 'type_info>,
-    depth: usize,
-) -> Result<(), ExternalAnalyzerError> {
-    match get_backing_key_type(key_type, types.codebase) {
-        Cow::Borrowed(key_type) => encode_union_snapshot_inner(writer, key_type, types, depth),
-        Cow::Owned(key_type) => encode_owned_union_snapshot(writer, &key_type, types, depth),
-    }
+/// The object a PHP# collection runs as, which an external analyzer receives in place of its array type: a `Set` is
+/// always a `Sharp\Set<T>`, and a keyed array is a `Sharp\Map<K, V>` in PHP# code, or wherever its keys can be objects,
+/// which no PHP array holds. A `List` runs as a PHP array, and so does a keyed array in plain PHP code.
+fn collection_object(array: &TArray, types: &SnapshotTypeTable<'_, '_>) -> Option<TAtomic> {
+    let (class, parameters) = match array {
+        TArray::List(_) => return None,
+        TArray::Set(element_type) => ("Sharp\\Set", vec![element_type.as_ref().clone()]),
+        TArray::Keyed(_) => {
+            let (key_type, value_type) = get_array_parameters(array, types.codebase);
+            if !types.dialect.is_sharp() && !key_type.types.iter().any(TAtomic::is_object_type) {
+                return None;
+            }
+
+            ("Sharp\\Map", vec![key_type, value_type])
+        }
+    };
+
+    Some(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(word(class), Some(parameters)))))
 }
 
 fn encode_reference_snapshot<'type_info>(
@@ -2734,7 +2755,7 @@ fn decode_complete_atomic(reader: &mut PayloadReader<'_>, depth: usize) -> Resul
 
             TAtomic::Mixed(mixed)
         }
-        SNAPSHOT_OBJECT => TAtomic::Object(decode_complete_object(reader, depth + 1)?),
+        SNAPSHOT_OBJECT => into_collection(decode_complete_object(reader, depth + 1)?),
         SNAPSHOT_ARRAY => TAtomic::Array(decode_complete_array(reader, depth + 1)?),
         SNAPSHOT_ITERABLE => {
             let key_type = Arc::new(decode_complete_union(reader, depth + 1)?);
@@ -2944,6 +2965,29 @@ fn decode_complete_callable(reader: &mut PayloadReader<'_>, depth: usize) -> Res
             .with_source(source)
             .with_constraints(constraints),
     ))
+}
+
+/// The PHP# collection a `Sharp\Map<K, V>` or `Sharp\Set<T>` object is, as `collection_object` sends it, so a type an
+/// external analyzer returns names a `Map` or a `Set` as the analyzer types one. Any other object stays as it is.
+fn into_collection(object: TObject) -> TAtomic {
+    if let TObject::Named(named) = &object
+        && let Some(parameters) = named.type_parameters.as_deref()
+    {
+        match parameters {
+            [key_type, value_type] if named.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Map") => {
+                return TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                    Arc::new(key_type.clone()),
+                    Arc::new(value_type.clone()),
+                )));
+            }
+            [element_type] if named.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Set") => {
+                return TAtomic::Array(TArray::Set(Arc::new(element_type.clone())));
+            }
+            _ => {}
+        }
+    }
+
+    TAtomic::Object(object)
 }
 
 fn decode_complete_object(reader: &mut PayloadReader<'_>, depth: usize) -> Result<TObject, ExternalAnalyzerError> {
@@ -3385,7 +3429,7 @@ pub(super) mod testing {
 
         let mut writer = PayloadWriter::new();
         let mut types = Vec::new();
-        encode_union_snapshot(&mut writer, &ty, &mut types, &CodebaseMetadata::new(), 0).unwrap();
+        encode_union_snapshot(&mut writer, &ty, &mut types, &CodebaseMetadata::new(), Dialect::Php, 0).unwrap();
 
         assert_eq!(types.len(), 73);
         assert!(!writer.finish().is_empty(), "expected an encoded payload");
@@ -3411,36 +3455,64 @@ pub(super) mod testing {
         codebase
     }
 
-    /// The key and value types an external analyzer receives for `array`, written as their ids.
-    fn snapshot_key_and_value(array: TArray, codebase: &CodebaseMetadata) -> Vec<String> {
+    /// What an external analyzer receives for `array` in code of `dialect`: the class of the object it is sent as, or
+    /// `array`, then the ids of the types inside it.
+    fn sent_as(array: TArray, codebase: &CodebaseMetadata, dialect: Dialect) -> String {
         let array = TUnion::from_atomic(TAtomic::Array(array));
         let mut types = Vec::new();
-        encode_union_snapshot(&mut PayloadWriter::new(), &array, &mut types, codebase, 0).unwrap();
+        let mut writer = PayloadWriter::new();
+        encode_union_snapshot(&mut writer, &array, &mut types, codebase, dialect, 0).unwrap();
+        let payload = writer.finish();
+        let mut reader = PayloadReader::new(&payload);
+        reader.read_u32("union handle").unwrap();
+        reader.read_u16("union flags").unwrap();
+        reader.read_u32("union atomic types").unwrap();
+        let class = if reader.read_u8("atomic kind").unwrap() == SNAPSHOT_OBJECT {
+            reader.read_u8("object kind").unwrap();
+            String::from_utf8_lossy(reader.read_bytes("object name").unwrap()).into_owned()
+        } else {
+            "array".to_owned()
+        };
+        let parameters = types[1..].iter().map(|ty| ty.get_id().to_string()).collect::<Vec<_>>();
 
-        types[1..].iter().map(|ty| ty.get_id().to_string()).collect()
+        format!("{class}<{}>", parameters.join(", "))
     }
 
-    /// A `Set` runs as an array that keys each element by its key, which for a backed enum is its backing value, so an
-    /// external analyzer sees a `Set` of a string-backed enum as a `Map` keyed by `string`.
+    /// A `Set` and a `Map` run as the objects `Sharp\Set` and `Sharp\Map`, so an external analyzer receives them as
+    /// those objects, each key as itself. A keyed array is a `Map` in PHP# code, and in plain PHP code where its keys
+    /// are objects, which no PHP array holds. A `List` and a plain PHP array stay arrays.
     #[test]
-    fn a_set_of_a_backed_enum_is_keyed_by_the_backing_type() {
+    fn a_map_and_a_set_are_sent_as_the_objects_they_run_as() {
         let codebase = string_backed_status();
-        let status = TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status"))));
+        let status = || Arc::new(TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status")))));
+        let keyed = |key_type| TArray::Keyed(TKeyedArray::new_with_parameters(key_type, Arc::new(get_int())));
+        let list = TArray::List(TList::new(Arc::new(get_int())));
 
-        assert_eq!(snapshot_key_and_value(TArray::Set(Arc::new(status)), &codebase), ["string", "enum(Status)"]);
+        assert_eq!(sent_as(TArray::Set(status()), &codebase, Dialect::Php), "Sharp\\Set<enum(Status)>");
+        assert_eq!(sent_as(keyed(status()), &codebase, Dialect::Php), "Sharp\\Map<enum(Status), int>");
+        assert_eq!(sent_as(keyed(Arc::new(get_string())), &codebase, Dialect::Sharp), "Sharp\\Map<string, int>");
+        assert_eq!(sent_as(keyed(Arc::new(get_string())), &codebase, Dialect::Php), "array<string, int>");
+        assert_eq!(sent_as(list, &codebase, Dialect::Sharp), "array<int>");
     }
 
-    /// A `Map` keyed by a backed enum runs as an array keyed by each case's backing value, so an external analyzer sees
-    /// a `Map<Status, int>` of a string-backed `Status` keyed by `string`. A PHP array keeps the key type it declares.
+    /// A type an external analyzer returns that names `Sharp\Map<K, V>` or `Sharp\Set<T>` is that `Map` or `Set`, as
+    /// the analyzer types one. A `Sharp\Map` without its two type parameters stays the object it names.
     #[test]
-    fn a_map_keyed_by_a_backed_enum_is_keyed_by_the_backing_type() {
-        let codebase = string_backed_status();
-        let status = TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status"))));
-        let map = TKeyedArray::new_with_parameters(Arc::new(status), Arc::new(get_int()));
-        let array = TKeyedArray::new_with_parameters(Arc::new(get_int()), Arc::new(get_int()));
+    fn a_returned_map_or_set_object_is_the_collection() {
+        let object = |class: &[u8], parameters: Option<Vec<TUnion>>| {
+            TObject::Named(TNamedObject::new_with_type_parameters(word(class), parameters))
+        };
 
-        assert_eq!(snapshot_key_and_value(TArray::Keyed(map), &codebase), ["string", "int"]);
-        assert_eq!(snapshot_key_and_value(TArray::Keyed(array), &codebase), ["int", "int"]);
+        assert!(matches!(
+            into_collection(object(b"Sharp\\Map", Some(vec![get_string(), get_int()]))),
+            TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, value)), .. }))
+                if key.is_string() && value.is_int()
+        ));
+        assert!(matches!(
+            into_collection(object(b"Sharp\\Set", Some(vec![get_int()]))),
+            TAtomic::Array(TArray::Set(element)) if element.is_int()
+        ));
+        assert!(matches!(into_collection(object(b"Sharp\\Map", None)), TAtomic::Object(TObject::Named(_))));
     }
 
     #[test]

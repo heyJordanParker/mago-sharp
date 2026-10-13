@@ -2534,7 +2534,7 @@ fn a_literal_keyed_by_a_value_that_cannot_key_a_map_names_the_map_key_rule() {
     assert_eq!(
         keys(("src/Demo/Report.sharp", sharp)),
         [
-            "7:44 invalid-array-element-key A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Object` is none of them. | `Object` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "7:44 invalid-array-element-key A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Object` is none of them. | `Object` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }
@@ -2550,9 +2550,9 @@ fn a_literal_keyed_by_a_float_a_bool_or_null_names_the_map_key_rule() {
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "5:46 invalid-array-element-key A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `float` is none of them. | `float` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
-            "7:45 invalid-array-element-key A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `bool` is none of them. | `bool` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
-            "9:48 invalid-array-element-key A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `null` is none of them. | `null` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "5:46 invalid-array-element-key A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `float` is none of them. | `float` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "7:45 invalid-array-element-key A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `bool` is none of them. | `bool` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "9:48 invalid-array-element-key A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `null` is none of them. | `null` keys this `Map`. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }
@@ -3111,22 +3111,19 @@ fn the_php_sharp_stub_states_its_reasons_without_a_spec_section() {
     assert_eq!(contents.lines().filter(|line| line.contains("section")).collect::<Vec<_>>(), Vec::<&str>::new());
 }
 
-/// A `Map` runs as a PHP array too, so `wrap` would return it as the list it was asked to build.
+/// A `Map` and a `Set` are one object each, so `wrap` holds one in a one-element `List`, as any other value: `T` is the
+/// `Map` or the `Set`. Only a `List` is returned as it is, so a list of lists and a value that can be a list are refused.
 #[test]
-fn list_wrap_of_a_map_or_a_list_of_lists_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Rows\n{\n    public void read(Map<string, int> counts, List<List<int>> rows, string|Map<string, int> either)\n    {\n        List.wrap(counts);\n        List.wrap(rows);\n        List.wrap(either);\n    }\n}\n";
+fn list_wrap_holds_a_map_or_a_set_and_refuses_a_value_that_can_be_a_list() {
+    let sharp = "namespace Demo;\n\nclass Rows\n{\n    public List<Map<string, int>> counts(Map<string, int> counts) => List.wrap(counts);\n\n    public List<Set<string>> tags(Set<string> tags) => List.wrap(tags);\n\n    public List<string|Map<string, int>> either(string|Map<string, int> either) => List.wrap(either);\n\n    public List<int> wrong(Map<string, int> counts) => List.wrap(counts);\n\n    public void read(List<List<int>> rows, string|List<int> one)\n    {\n        List.wrap(rows);\n        List.wrap(one);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Rows.sharp", sharp), &[]),
-        ["7:19 invalid-argument", "8:19 invalid-argument", "9:19 invalid-argument"]
+        ["11:56 invalid-return-statement", "15:19 invalid-argument"]
     );
     assert_eq!(
-        messages(("src/Demo/Rows.sharp", sharp), &[]),
-        [
-            "T is Map<string, int>, itself a map; write `counts is Map<string, int> one ? [one] : counts`",
-            "T is List<List<int>>, itself a list; write `rows is List<List<int>> one ? [one] : rows`",
-            "T is string|Map<string, int>, which can be a map; write `either is Map<string, int> one ? [one] : either`",
-        ]
+        messages(("src/Demo/Rows.sharp", sharp), &[])[1],
+        "T is List<List<int>>, itself a list; write `rows is List<List<int>> one ? [one] : rows`"
     );
 }
 
@@ -6718,22 +6715,13 @@ fn a_map_literal_set_into_a_list_of_lists_is_an_error() {
     );
 }
 
-/// `List.wrap`'s value is `T|List<T>`, so `[:]` may be the `T` it wraps, and `wrap` itself refuses every value that can
-/// be a collection. A `Map` literal passed to it is refused once, by `wrap`, and not again as a literal of the wrong
-/// collection.
+/// `List.wrap`'s value is `T|List<T>`, so `[:]` is the `T` it wraps, a `Map` held in a one-element `List`, and not a
+/// literal of the wrong collection.
 #[test]
-fn list_wrap_of_a_map_literal_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<List<int>> rows() => List.wrap([:]);\n}\n";
+fn list_wrap_of_a_map_literal_holds_the_map() {
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<Map<string, int>> rows() => List.wrap([:]);\n}\n";
 
-    assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Grid.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
-        [
-            "5:48 invalid-argument T is Map<never, never>, itself a map; write `[:] is Map<never, never> one ? [one] : [:]`"
-        ]
-    );
+    assert_eq!(issues(("src/Demo/Grid.sharp", sharp), &[]), Vec::<String>::new());
 }
 
 /// A return or a parameter that declares both a `List` and a `Map` takes a literal of either collection.
@@ -7358,7 +7346,7 @@ fn a_plain_php_caller_passes_the_backing_values_where_php_sharp_takes_a_map_keye
 fn a_struct_keys_a_map_unless_it_holds_a_class_instance() {
     let sharp = "namespace Demo;\n\ninterface Labeled\n{\n    string label();\n}\n\nclass Plan\n{\n    public Plan() { }\n}\n\nenum Size\n{\n    case Small;\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public Size size { get; }) { }\n\n    public Plan owner { get => new Plan(); }\n}\n\nstruct Route\n{\n    public Route(public List<Spot> stops { get; }, public Map<string, Spot?> named { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public int id { get; }, public Plan plan { get; }) { }\n}\n\nstruct Leg\n{\n    public Leg(public List<Order> orders { get; }) { }\n}\n\nstruct Tagged\n{\n    public Tagged(public Labeled label { get; }) { }\n}\n\nstruct Bag\n{\n    public Bag(public Any data { get; }) { }\n}\n\nstruct Hook\n{\n    public Hook(public Function<int(int)> run { get; }) { }\n}\n\nstruct Mood\n{\n    public Mood(public List<Size> sizes { get; }, public Mood? before { get; }) { }\n}\n\nclass Shop\n{\n    public Map<Spot, int> spots = [:];\n    public Map<Route, int> routes = [:];\n    public Set<Spot> seen = [];\n    public Map<Order, int> orders = [:];\n    public Map<Leg, int> legs = [:];\n    public Map<Tagged, int> tags = [:];\n    public Map<Bag, int> bags = [:];\n    public Map<Hook, int> hooks = [:];\n    public Set<Order> pending = [];\n    public Map<Mood, int> moods = [:];\n\n    public int count(Spot spot)\n    {\n        this.spots[spot] = 1;\n        const placed = [new Spot(1, Size.Small): 2];\n        const ordered = [new Order(1, new Plan()): 3];\n\n        return (this.spots[spot] ?? 0) + (placed[spot] ?? 0);\n    }\n\n    public void group(List<Order> all, List<Spot> spots)\n    {\n        const byOrder = all.groupBy(order => order);\n        const bySpot = spots.groupBy(spot => spot);\n    }\n}\n";
 
-    let note = "A struct key is stored as text built from its values, and a class instance compares through its own `==`, which no text matches.";
+    let note = "A struct key is found by a hash of its fields and their `==`, and a class instance has neither unless its class declares `operator ==` with `hash()`.";
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shop.sharp", sharp), &[])
             .iter()
@@ -7616,8 +7604,33 @@ fn a_sharp_class_cannot_implement_the_struct_marker() {
     assert_eq!(messages(("src/Demo/Fake.sharp", sharp), &[]), ["Class `Fake` cannot implement unknown type `Struct`"]);
 }
 
-/// Spec section 12 keys a `Map` by an `int`, a `string` or a backed enum, and section 10 by a struct, so a class, a pure
-/// enum or a `float` is refused where a `Map` type is written, and where `groupBy` or `associateBy` keys one by what its
+/// Spec section 12 keys a `Map` by anything with `==` and `hash()`, so a class that declares `operator ==` with
+/// `hash()`, or inherits them, keys a `Map`, joins a `Set`, keys a literal and keys a `groupBy`, whatever it holds, and
+/// a struct that holds one keys a `Map` too. A class without the pair stays refused once, with the rule's words.
+#[test]
+fn a_class_that_declares_equality_and_hash_keys_a_map() {
+    let ticket = "namespace App;\n\npublic class Ticket\n{\n    public Ticket(public int id { get; }, public Seat? seat { get; }) { }\n\n    public int hash() => this.id;\n\n    public static bool operator ==(Ticket a, Ticket b) => a.id == b.id;\n}\n";
+    let late = "namespace App;\n\npublic class LateTicket : Ticket\n{\n    public Seat? gate { get; set; }\n}\n";
+    let entry = "namespace App;\n\npublic struct Entry\n{\n    public Entry(public Ticket ticket { get; }) { }\n}\n";
+    let seat = "namespace App;\n\npublic class Seat\n{\n    public Seat(public Seat? next { get; }) { }\n}\n";
+    let desk = "namespace App;\n\nclass Desk\n{\n    public int count(Map<Seat, int> seats, Map<Ticket, int> sold, Set<Ticket> seen, List<Ticket> all, Map<LateTicket, int> late, Set<Entry> entries)\n    {\n        Map<Ticket, int> local = [new Ticket(1, null): 1];\n        const byTicket = all.groupBy(t => t);\n        return sold.count() + seen.count() + local.count() + byTicket.count() + late.count() + entries.count() + seats.count();\n    }\n}\n";
+    let others = [
+        ("src/App/Ticket.sharp", ticket),
+        ("src/App/LateTicket.sharp", late),
+        ("src/App/Entry.sharp", entry),
+        ("src/App/Seat.sharp", seat),
+    ];
+
+    assert_eq!(
+        refusals(("src/App/Desk.sharp", desk), &others),
+        [
+            "5:22 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Seat` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`."
+        ]
+    );
+}
+
+/// Spec section 12 keys a `Map` by an `int`, a `string`, a backed enum, a struct or a class with `==` and `hash()`, so
+/// a class without them, a pure enum or a `float` is refused where a `Map` type is written, and where `groupBy` or `associateBy` keys one by what its
 /// function returns. A key that may be null is refused for its `null`, and a key type that names no type is refused
 /// once, as a type that cannot be found.
 #[test]
@@ -7627,16 +7640,16 @@ fn a_map_key_type_that_is_no_value_is_an_error() {
     assert_eq!(
         refusals(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "9:12 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Line` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
-            "11:12 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Pure` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
-            "11:33 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Line` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "9:12 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "11:12 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Pure` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "11:33 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
             "11:56 non-existent-class-like Cannot find type `Username`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
-            "13:9 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Pure` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "13:9 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Pure` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
             "14:9 non-existent-class-like Cannot find type `Username`. | Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.",
-            "20:36 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Line` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
-            "21:44 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `float` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
-            "22:36 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Pure` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
-            "23:40 template-constraint-violation A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `Status?` may be null. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.",
+            "20:36 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Line` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "21:44 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `float` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "22:36 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Pure` is none of them. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+            "23:40 template-constraint-violation A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `Status?` may be null. | Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
         ]
     );
 }

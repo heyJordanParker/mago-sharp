@@ -31,6 +31,7 @@ use mago_reporting::IssueCollection;
 use mago_span::Span;
 use mago_syntax::cst::NodeKind;
 use mago_syntax::cst::Program;
+use mago_syntax::dialect::Dialect;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
@@ -181,6 +182,12 @@ impl ExternalAnalysisSession {
 
     fn source_file(&self, file_id: FileId) -> Option<&File> {
         self.sources.get(&file_id).map(AsRef::as_ref)
+    }
+
+    /// The dialect of the file `span` lies in, so a type written there reaches an external analyzer as that file's
+    /// code sees it. A file outside this run is plain PHP, as every file but a `.sharp` file is.
+    fn dialect(&self, span: Span) -> Dialect {
+        self.source_file(span.file_id).map_or(Dialect::Php, Dialect::of)
     }
 }
 
@@ -2864,6 +2871,7 @@ where
         receiver_type: &TUnion,
         span: Span,
         codebase: &CodebaseMetadata,
+        dialect: Dialect,
         session: &ExternalAnalysisSession,
     ) -> Result<Option<EffectivePropertyType>, ExternalAnalyzerError> {
         let _lookup_trace =
@@ -2905,6 +2913,7 @@ where
                 receiver_type,
                 span,
                 codebase,
+                dialect,
                 session.generation(),
                 self.trace_enabled,
             )
@@ -2993,6 +3002,7 @@ where
                 property,
                 receiver_type,
                 codebase,
+                Dialect::of(source_file),
                 session.generation(),
                 self.trace_enabled,
             )

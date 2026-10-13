@@ -1913,10 +1913,10 @@ where
     }
 }
 
-/// Reports each PHP# `Map` written in `type_union` whose key type is a class, an enum without a backing value, or a
-/// struct that holds a class instance. Spec section 12 keys a `Map` by an `int`, a `string` or a backed enum, and
-/// section 10 by a struct, each found by its `==` and `hash()`. A key type that names no type is reported as a type that
-/// cannot be found.
+/// Reports each PHP# `Map` written in `type_union` whose key type is a class without `operator ==`, an enum without a
+/// backing value, or a struct that holds a class instance. Spec section 12 keys a `Map` by anything with `==` and
+/// `hash()`: an `int`, a `string`, a backed enum, a struct (section 10), or a class that declares `operator ==` with
+/// `hash()` (section 19). A key type that names no type is reported as a type that cannot be found.
 pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -1988,7 +1988,11 @@ where
         "is none of them"
     };
 
-    Issue::error(format!("A `Map`'s keys are `int`, `string`, a backed enum or a struct, and `{key_id}` {reason}."))
-        .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
-        .with_help("Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, or a struct.")
+    Issue::error(format!(
+        "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`, and `{key_id}` {reason}."
+    ))
+    .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
+    .with_help(
+        "Key the `Map` by an `int`, a `string`, a backed enum such as `enum Status : string`, a struct, or a class that declares `public static bool operator ==` with `public int hash()`.",
+    )
 }

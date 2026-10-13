@@ -103,10 +103,10 @@ where
 }
 
 /// Gives PHP#'s `List.wrap(value)` its type `List<T>`, and refuses it when `T` could itself be a list, as spec section
-/// 24 decides. `wrap` returns an array as the list it was asked for, and a `List` and a `Map` both run as PHP arrays,
-/// so it cannot tell a value that is a list from a list of values. `T` is the value's parts that are not lists plus the
-/// elements of its lists, or the value's whole type when every part of it is an array. A refused call keeps `List<T>`,
-/// so the code around it adds no second issue.
+/// 24 decides. `wrap` returns a `List` as it is, so it cannot tell a value that is a list from a list of values. A `Map`
+/// or a `Set` is one object, which `wrap` holds in a one-element `List` as any other value. `T` is the value's parts that
+/// are not lists plus the elements of its lists, or the value's whole type when every part of it is a list. A refused
+/// call keeps `List<T>`, so the code around it adds no second issue.
 fn fetch_list_wrap_return_type<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
@@ -123,7 +123,8 @@ where
     let value_type = artifacts.get_expression_type(value)?;
     let codebase = context.codebase;
 
-    let element_type = if value_type.types.iter().all(TAtomic::is_array) {
+    let is_list = |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(_)));
+    let element_type = if value_type.types.iter().all(is_list) {
         value_type.clone()
     } else {
         value_type.types.iter().fold(None, |element_type: Option<TUnion>, atomic| {
@@ -150,21 +151,16 @@ where
     let message = if value_type.has_mixed() {
         format!("T is {value_text}, which could itself be a list; check what `{source}` is with `is` first")
     } else {
-        let collections: Vec<TAtomic> = element_type.types.iter().filter(|atomic| atomic.is_array()).cloned().collect();
-        if collections.is_empty() {
+        let lists: Vec<TAtomic> = element_type.types.iter().filter(|atomic| is_list(atomic)).cloned().collect();
+        if lists.is_empty() {
             return Some(get_list(element_type));
         }
 
-        let kind = if collections.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)))) {
-            "list"
-        } else {
-            "map"
-        };
-        let reason = if collections.len() == element_type.types.len() { "itself a" } else { "which can be a" };
-        let collection_type = display_sharp_type(context, &TUnion::from_vec(collections));
+        let reason = if lists.len() == element_type.types.len() { "itself a" } else { "which can be a" };
+        let list_type = display_sharp_type(context, &TUnion::from_vec(lists));
 
         format!(
-            "T is {}, {reason} {kind}; write `{source} is {collection_type} one ? [one] : {source}`",
+            "T is {}, {reason} list; write `{source} is {list_type} one ? [one] : {source}`",
             display_sharp_type(context, &element_type)
         )
     };
@@ -173,7 +169,7 @@ where
         IssueCode::InvalidArgument,
         Issue::error(message)
             .with_annotation(Annotation::primary(value.span()).with_message(format!("This is `{value_text}`.")))
-            .with_note("`wrap` returns a `List` or a `Map` as it is, because both run as PHP arrays."),
+            .with_note("`wrap` returns a `List` as it is."),
     );
 
     Some(get_list(element_type))

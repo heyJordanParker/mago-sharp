@@ -28,6 +28,7 @@ use mago_span::Span;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NodeKind;
 use mago_syntax::cst::Program;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
 use mago_text_edit::TextRange;
@@ -397,7 +398,14 @@ impl FileAnalysisSnapshot {
                     ))
                 })?;
                 let mut target_analysis_writer = PayloadWriter::new();
-                write_target_analysis(&mut target_analysis_writer, artifacts, codebase, plan, target_count)?;
+                write_target_analysis(
+                    &mut target_analysis_writer,
+                    artifacts,
+                    codebase,
+                    program.dialect,
+                    plan,
+                    target_count,
+                )?;
                 (
                     target_source_writer.finish().into_boxed_slice(),
                     target_analysis_writer.finish().into_boxed_slice(),
@@ -417,14 +425,16 @@ impl FileAnalysisSnapshot {
         for (span, union) in &artifacts.expression_types {
             expression_types.insert(
                 *span,
-                encode_snapshot_type(&mut writer, union, &mut type_handles, codebase).map_err(|error| {
-                    protocol(format!(
-                        "failed to retain expression type at {}:{} in `{}`: {error}",
-                        span.0,
-                        span.1,
-                        String::from_utf8_lossy(&file.name)
-                    ))
-                })?,
+                encode_snapshot_type(&mut writer, union, &mut type_handles, codebase, program.dialect).map_err(
+                    |error| {
+                        protocol(format!(
+                            "failed to retain expression type at {}:{} in `{}`: {error}",
+                            span.0,
+                            span.1,
+                            String::from_utf8_lossy(&file.name)
+                        ))
+                    },
+                )?,
             );
         }
 
@@ -433,11 +443,22 @@ impl FileAnalysisSnapshot {
             artifacts.inferred_return_types.iter().map(AsRef::as_ref),
             &mut type_handles,
             codebase,
+            program.dialect,
         )?;
-        let inferred_yield_key_types =
-            encode_snapshot_types(&mut writer, &artifacts.inferred_yield_key_types, &mut type_handles, codebase)?;
-        let inferred_yield_value_types =
-            encode_snapshot_types(&mut writer, &artifacts.inferred_yield_value_types, &mut type_handles, codebase)?;
+        let inferred_yield_key_types = encode_snapshot_types(
+            &mut writer,
+            &artifacts.inferred_yield_key_types,
+            &mut type_handles,
+            codebase,
+            program.dialect,
+        )?;
+        let inferred_yield_value_types = encode_snapshot_types(
+            &mut writer,
+            &artifacts.inferred_yield_value_types,
+            &mut type_handles,
+            codebase,
+            program.dialect,
+        )?;
 
         Ok(Self {
             file_id: file.id,
@@ -490,8 +511,9 @@ fn encode_snapshot_types<'type_info>(
     types: impl IntoIterator<Item = &'type_info TUnion>,
     handles: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<Vec<Range<usize>>, ExternalAnalyzerError> {
-    types.into_iter().map(|ty| encode_snapshot_type(writer, ty, handles, codebase)).collect()
+    types.into_iter().map(|ty| encode_snapshot_type(writer, ty, handles, codebase, dialect)).collect()
 }
 
 fn encode_snapshot_type<'type_info>(
@@ -499,10 +521,11 @@ fn encode_snapshot_type<'type_info>(
     ty: &'type_info TUnion,
     handles: &mut Vec<Cow<'type_info, TUnion>>,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<Range<usize>, ExternalAnalyzerError> {
     handles.clear();
     let start = writer.len();
-    protocol::encode_union_snapshot(writer, ty, handles, codebase, 0)?;
+    protocol::encode_union_snapshot(writer, ty, handles, codebase, dialect, 0)?;
     Ok(start..writer.len())
 }
 
@@ -510,6 +533,7 @@ fn write_target_analysis(
     writer: &mut PayloadWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     plan: &NodeAnalysisPlan<'_, '_>,
     expected_count: usize,
 ) -> Result<(), ExternalAnalyzerError> {
@@ -524,13 +548,13 @@ fn write_target_analysis(
         let requested = target.requirements;
         writer.write_u8(requested);
         if requested & NODE_REQUIREMENT_TARGET_EXPRESSION_TYPES != 0 {
-            write_optional_expression_type(writer, artifacts, codebase, Some(target.node.span()))?;
+            write_optional_expression_type(writer, artifacts, codebase, dialect, Some(target.node.span()))?;
         }
         if requested & NODE_REQUIREMENT_RECEIVER_TYPE != 0 {
-            write_optional_expression_type(writer, artifacts, codebase, receiver_span(target.node))?;
+            write_optional_expression_type(writer, artifacts, codebase, dialect, receiver_span(target.node))?;
         }
         if requested & NODE_REQUIREMENT_ARGUMENT_TYPES != 0 {
-            write_argument_types(writer, artifacts, codebase, target.node)?;
+            write_argument_types(writer, artifacts, codebase, dialect, target.node)?;
         }
         if requested & NODE_REQUIREMENT_VARIABLE_DEFINEDNESS != 0 {
             write_variable_definedness(writer, artifacts, target.node.span())?;
@@ -574,12 +598,13 @@ fn write_optional_expression_type(
     writer: &mut PayloadWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     span: Option<Span>,
 ) -> Result<(), ExternalAnalyzerError> {
     let ty = span.and_then(|span| artifacts.expression_types.get(&(span.start.offset, span.end.offset)));
     writer.write_bool(ty.is_some());
     if let Some(ty) = ty {
-        write_type(writer, ty, codebase)?;
+        write_type(writer, ty, codebase, dialect)?;
     }
     Ok(())
 }
@@ -597,6 +622,7 @@ fn write_argument_types(
     writer: &mut PayloadWriter,
     artifacts: &AnalysisArtifacts,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
     node: Node<'_, '_>,
 ) -> Result<(), ExternalAnalyzerError> {
     let arguments = match node {
@@ -613,7 +639,7 @@ fn write_argument_types(
 
     writer.write_u32(u32::try_from(arguments.len()).map_err(|_| protocol("too many call arguments"))?);
     for argument in arguments.iter() {
-        write_optional_expression_type(writer, artifacts, codebase, Some(argument.value().span()))?;
+        write_optional_expression_type(writer, artifacts, codebase, dialect, Some(argument.value().span()))?;
     }
     Ok(())
 }
@@ -659,14 +685,14 @@ enum FileView<'analysis> {
 }
 
 enum TypeView<'analysis> {
-    Union(&'analysis TUnion, &'analysis CodebaseMetadata),
+    Union(&'analysis TUnion, &'analysis CodebaseMetadata, Dialect),
     Encoded(&'analysis [u8]),
 }
 
 impl TypeView<'_> {
     fn write_to(self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Union(ty, codebase) => write_type(writer, ty, codebase),
+            Self::Union(ty, codebase, dialect) => write_type(writer, ty, codebase, dialect),
             Self::Encoded(bytes) => {
                 writer.write_raw(bytes);
                 Ok(())
@@ -699,8 +725,8 @@ impl FileView<'_> {
 
     fn expression_type(&self, span: &(u32, u32)) -> Option<TypeView<'_>> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
-                artifacts.expression_types.get(span).map(|ty| TypeView::Union(ty, codebase))
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
+                artifacts.expression_types.get(span).map(|ty| TypeView::Union(ty, codebase, program.dialect))
             }
             Self::Snapshot(file) => file
                 .expression_types
@@ -770,7 +796,7 @@ impl FileView<'_> {
 
     fn write_expression_type_snapshot(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
                 let mut spans = artifacts.expression_types.keys().copied().collect::<Vec<_>>();
                 spans.sort_unstable();
                 let mut encoded = PayloadWriter::new();
@@ -781,7 +807,7 @@ impl FileView<'_> {
                         .expression_types
                         .get(&span)
                         .ok_or_else(|| protocol("expression type disappeared while snapshotting analysis artifacts"))?;
-                    let range = encode_snapshot_type(&mut encoded, ty, &mut handles, codebase)?;
+                    let range = encode_snapshot_type(&mut encoded, ty, &mut handles, codebase, program.dialect)?;
                     records.push((span, range));
                 }
                 write_expression_type_records(writer, &records, &encoded.finish())
@@ -802,13 +828,13 @@ impl FileView<'_> {
 
     fn write_inferred_return_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
                 writer.write_u32(
                     u32::try_from(artifacts.inferred_return_types.len())
                         .map_err(|_| protocol("too many inferred types"))?,
                 );
                 for ty in &artifacts.inferred_return_types {
-                    write_type(writer, ty, codebase)?;
+                    write_type(writer, ty, codebase, program.dialect)?;
                 }
             }
             Self::Snapshot(file) => {
@@ -834,8 +860,8 @@ impl FileView<'_> {
 
     fn write_inferred_yield_key_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
-                write_types(writer, &artifacts.inferred_yield_key_types, codebase)
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
+                write_types(writer, &artifacts.inferred_yield_key_types, codebase, program.dialect)
             }
             Self::Snapshot(file) => write_encoded_types(writer, &file.encoded_types, &file.inferred_yield_key_types),
         }
@@ -843,8 +869,8 @@ impl FileView<'_> {
 
     fn write_inferred_yield_value_types(&self, writer: &mut PayloadWriter) -> Result<(), ExternalAnalyzerError> {
         match self {
-            Self::Artifacts(_, _, _, artifacts, codebase, _) => {
-                write_types(writer, &artifacts.inferred_yield_value_types, codebase)
+            Self::Artifacts(_, program, _, artifacts, codebase, _) => {
+                write_types(writer, &artifacts.inferred_yield_value_types, codebase, program.dialect)
             }
             Self::Snapshot(file) => write_encoded_types(writer, &file.encoded_types, &file.inferred_yield_value_types),
         }
@@ -914,7 +940,7 @@ impl FileView<'_> {
                         String::from_utf8_lossy(&file.name)
                     ))
                 })?;
-                write_target_analysis(writer, artifacts, codebase, plan, snapshot.target_count())
+                write_target_analysis(writer, artifacts, codebase, program.dialect, plan, snapshot.target_count())
             }
             Self::Snapshot(file) => {
                 writer.write_raw(&file.encoded_target_source);
@@ -1671,10 +1697,11 @@ fn write_types(
     writer: &mut PayloadWriter,
     types: &[TUnion],
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
     writer.write_u32(u32::try_from(types.len()).map_err(|_| protocol("too many inferred types"))?);
     for ty in types {
-        write_type(writer, ty, codebase)?;
+        write_type(writer, ty, codebase, dialect)?;
     }
 
     Ok(())
@@ -1700,8 +1727,9 @@ fn write_type(
     writer: &mut PayloadWriter,
     ty: &TUnion,
     codebase: &CodebaseMetadata,
+    dialect: Dialect,
 ) -> Result<(), ExternalAnalyzerError> {
-    protocol::encode_union_snapshot(writer, ty, &mut Vec::new(), codebase, 0)
+    protocol::encode_union_snapshot(writer, ty, &mut Vec::new(), codebase, dialect, 0)
 }
 
 fn read_level(reader: &mut PayloadReader<'_>) -> Result<Level, ExternalAnalyzerError> {

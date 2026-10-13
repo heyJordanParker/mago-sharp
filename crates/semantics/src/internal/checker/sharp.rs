@@ -881,8 +881,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::GenericHint(generic), FieldOrProperty | Method | Signature | Parameter | Body) => {
-            // The analyzer refuses a named key type without an `int` or `string` backing value. A key type outside the
-            // slice, nullable or not, is refused once, by the walk, as that type.
+            // The analyzer refuses a named key type without `==` and `hash()`. A key type outside the slice, nullable or
+            // not, is refused once, by the walk, as that type.
             if let [key, _] = generic.arguments.as_slice()
                 && !matches!(key, Hint::Integer(_) | Hint::String(_) | Hint::Identifier(_))
                 && is_slice_type(match key {
@@ -892,7 +892,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             {
                 return report_refusal(
                     Issue::error(
-                        "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+                        "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.",
                     )
                     .with_annotation(Annotation::primary(key.span()).with_message("Key type written here.")),
                     generic.span(),

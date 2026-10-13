@@ -2269,7 +2269,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "23:45 A by-reference parameter is not supported yet in PHP#.".to_owned(),
             format!("23:54 PHP# has no `__LINE__`: {line}"),
             "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
-            "29:13 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.".to_owned(),
+            "29:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.".to_owned(),
             "29:20 This type is not supported yet in PHP#.".to_owned(),
             "30:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
         ]
@@ -2352,7 +2352,7 @@ fn a_map_key_is_refused_once() {
     let code = leak(method(
         "        Map<callable, int> rows = [:];\n        Map<static, int> others = [:];\n        Map<float, int> prices = [:];\n        Map<callable?, int> maybe = [:];\n        Map<int?, int> counts = [:];\n        return 1;\n",
     ));
-    let key = "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.";
+    let key = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.";
 
     assert_eq!(
         issues(code),
@@ -3680,7 +3680,9 @@ fn an_interface_method_takes_and_returns_list_and_map_types() {
 
     assert_eq!(
         issues(code),
-        ["5:9 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value."]
+        [
+            "5:9 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`."
+        ]
     );
 }
 
@@ -3749,9 +3751,9 @@ fn a_map_key_that_is_not_int_string_or_a_named_type_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "3:16 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "3:54 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
-            "3:84 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
+            "3:16 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.",
+            "3:54 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.",
+            "3:84 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `string`, a backed enum, a struct, or a class that declares `operator ==`.",
         ]
     );
 }
