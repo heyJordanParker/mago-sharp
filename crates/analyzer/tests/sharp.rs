@@ -10476,7 +10476,7 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
         let checkout = (
             "app/Shop/Checkout.sharp",
             leak(format!(
-                "namespace App.Shop;\n\nimport Lib.Client;\nimport Lib.{name};\nimport Lib.Store;\n\npublic class Checkout\n{{\n    private Function<int(int) uses {name}> step;\n\n    public Checkout(private Client client)\n    {{\n        this.step = n => this.client.get(n);\n        this.step = n => {name}.post(n);\n        this.step = n => Store.get(n);\n    }}\n\n    public int size => this.client.get(1);\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => this.step(1) + Checkout.apply(this.client.get);\n}}\n"
+                "namespace App.Shop;\n\nimport Lib.Client;\nimport Lib.{name};\nimport Lib.Store;\n\npublic class Checkout\n{{\n    private Function<int(int) uses {name}> step;\n\n    public Checkout(private Client client)\n    {{\n        this.step = n => this.client.get(n);\n        this.step = n => {name}.post(n);\n        this.step = n => Store.get(n);\n    }}\n\n    public int size => this.client.get(1);\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public int run() => this.step(1) + Checkout.apply(this.client.get);\n\n    law positive(Client client) => client.get(1) > 0;\n}}\n"
             )),
         );
         let services = (
@@ -10505,6 +10505,9 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect(
             [
                 format!(
                     "app/Shop/Checkout.sharp:18:24 impure-getter: Getter `size` calls `Client.get`, which has the effect `{name}`. Getters must be pure."
+                ),
+                format!(
+                    "app/Shop/Checkout.sharp:24:36 impure-law: Law `positive` calls `Client.get`, which has the effect `{name}`. Laws hold only over pure code."
                 ),
                 format!(
                     "app/Shop/Checkout.sharp:15:21 invalid-property-assignment-value: This lambda calls `Store.get`, which has no `extern` declaration, so a `Function<int(int) uses {name}>` cannot hold it. Help: Declare it in a .sharp file: `extern Store.get;` when it has no effect, or name its effects after `uses`."
