@@ -5342,6 +5342,25 @@ fn a_map_read_handled_by_a_null_safe_read_reports_nothing() {
     assert_eq!(worded(("src/Demo/Tally.sharp", sharp), &[]), Vec::<String>::new());
 }
 
+/// Spec section 12 handles a `List` index read with `?.` as it handles a `Map` read, so a missing index reads as null
+/// and `rows[9]?.count()` is `int?`, a call and a property read alike. Only the index directly before `?.` is
+/// nullable: `cube[9]` in `cube[9][0]?.count()` is a bare read.
+#[test]
+fn a_null_safe_read_through_a_list_index_is_nullable() {
+    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan(public int price) { }\n}\n\nclass Tally\n{\n    public int count(List<List<int>> rows) => rows[9]?.count();\n\n    public int local(List<List<int>> rows)\n    {\n        int n = rows[9]?.count();\n        return n;\n    }\n\n    public int price(List<Plan> plans) => plans[9]?.price;\n\n    public int? maybeCount(List<List<int>> rows) => rows[9]?.count();\n\n    public bool? maybeContains(List<List<int>> rows) => rows[9]?.contains(1);\n\n    public int? maybePrice(List<Plan> plans) => plans[9]?.price;\n\n    public int? nested(List<List<List<int>>> cube) => cube[9][0]?.count();\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Tally.sharp", sharp), &[]),
+        [
+            "10:47 nullable-return-statement",
+            "10:47 invalid-return-statement",
+            "14:17 invalid-local-assignment-value",
+            "18:43 nullable-return-statement",
+            "18:43 invalid-return-statement",
+        ]
+    );
+}
+
 #[test]
 fn a_map_read_handled_by_is_reports_nothing() {
     let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, int> stock = [\"a\": 1];\n\n    public int count(Map<string, int> counts, string k)\n    {\n        Map<string, int> local = [\"a\": 1];\n        let total = 0;\n        if (counts[k] is int n) {\n            total += n;\n        }\n        if (local[k] is int m) {\n            total += m;\n        }\n        if (this.stock[k] is int s) {\n            total += s;\n        }\n        if (counts[k] is int) {\n            total += 1;\n        }\n        return total;\n    }\n}\n";
