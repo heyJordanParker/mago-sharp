@@ -11,6 +11,8 @@ use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
+use mago_codex::metadata::module::ModuleKind;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
@@ -147,7 +149,9 @@ impl IncrementalAnalysisService {
     /// declares a method whose return it reads from that method's body, along every chain of such returns, with that
     /// file's own inputs.
     ///
-    /// A file that states a law also lists its proof file and every source its laws reach. A file outside `vendor/`
+    /// A file that states a law also lists its proof file and every source its laws reach. A file that declares a
+    /// module or a listener also lists the module files its check resolves services through, each folder's
+    /// `Module.sharp` whether or not a file is at it, as [`Self::module_inputs`] gives them. A file outside `vendor/`
     /// lists the workspace-relative Lean files `rules` gives for its name, whose structure rules may judge it. `check`
     /// gets the Lean translation of every accepted file and the namespace of every class-like PHP or PHP# code
     /// declares, in the project or `vendor/`, refused or not, and returns the issues of each file whose law is not proved or that breaks a structure rule, which refuse that
@@ -312,6 +316,7 @@ impl IncrementalAnalysisService {
                 .chain(lean)
                 .chain(namespace_class_files)
                 .chain(namespace_files)
+                .chain(self.module_inputs(file, &dependencies))
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .collect();
             paths.sort_unstable();
@@ -458,6 +463,58 @@ impl IncrementalAnalysisService {
         }
 
         reads
+    }
+
+    /// Spec section 32: the module files the check of `file` resolves services through, whether a file is at each or
+    /// not. A module's bindings and a listener's constructor take each service from the module of the taking class's
+    /// namespace or of a namespace above it, and the container reads those from the class's folder and each folder
+    /// above it. So a file that declares a module or a listener names the `Module.sharp` of each of those folders, for
+    /// its own folder, each class its check read and each class of a test module's namespace. An environment module
+    /// also names its environment's `Module.<Environment>.sharp` of each, since its check reads them all. An edit, an
+    /// addition or a deletion of one makes the compiled file stale.
+    fn module_inputs(&self, file: &File, dependencies: &Dependencies<'_>) -> Vec<Vec<u8>> {
+        let modules: Vec<&ModuleMetadata> =
+            self.codebase.modules.iter().filter(|module| module.file.as_bytes() == file.name.as_ref()).collect();
+        let listens = self
+            .codebase
+            .function_likes
+            .values()
+            .any(|method| !method.listens.is_empty() && method.span.file_id == file.id);
+        if modules.is_empty() && !listens {
+            return Vec::new();
+        }
+
+        let read = dependencies.files.get(&mago_word::word(file.name.as_ref())).into_iter().flatten();
+        let read = read.filter_map(|(class, _)| self.codebase.get_class_like(class.as_bytes()));
+        let tested = modules.iter().filter(|module| module.kind == ModuleKind::Test).flat_map(|module| {
+            self.codebase.class_likes.values().filter(|class| {
+                let name = class.name.as_bytes();
+                let namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&name[..0], |end| &name[..end]);
+
+                namespace == module.namespace.as_bytes()
+            })
+        });
+        let mut names = vec![b"Module.sharp".to_vec()];
+        for module in &modules {
+            if let ModuleKind::Environment(environment) = module.kind {
+                names.push([b"Module.", environment.as_bytes(), b".sharp"].concat());
+            }
+        }
+
+        let mut paths = Vec::new();
+        let declaring = read
+            .chain(tested)
+            .filter_map(|class| self.database.get(&class.span.file_id).ok())
+            .filter(|declaring| is_source(declaring));
+        for name in std::iter::once(file.name.to_vec()).chain(declaring.map(|declaring| declaring.name.to_vec())) {
+            let folders = std::iter::once(&name[..0])
+                .chain(name.iter().enumerate().filter(|(_, byte)| **byte == b'/').map(|(end, _)| &name[..=end]));
+            for folder in folders {
+                paths.extend(names.iter().map(|module| [folder, module.as_slice()].concat()));
+            }
+        }
+
+        paths
     }
 
     /// `name` and, when it names a class-like, every class, interface and trait it inherits from, since an extension
@@ -1617,6 +1674,94 @@ mod tests {
         }
         let order = input_paths(accepted(&compiled, "app/Order.sharp"));
         assert!(!order.iter().any(|path| path == "app/Order.lean"), "{order:?}");
+    }
+
+    /// Spec section 32: a file whose check resolves services through modules names the module files of every folder
+    /// it resolves through as inputs, with no file at most of them, so the engine refuses it after one is edited,
+    /// added or deleted. `app/Shop/Module.sharp` binds `Panel` of `App.Shop.Admin`, whose `Mailer` comes from
+    /// `app/Shop/Admin/Module.sharp`.
+    #[test]
+    fn a_module_test_module_or_listener_file_names_the_module_files_it_resolves_services_through() {
+        let database = project(&[
+            ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+            ("app/Mail/SmtpMailer.sharp", "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n"),
+            (
+                "app/Shop/Admin/Panel.sharp",
+                "namespace App.Shop.Admin;\n\nimport App.Mail.Mailer;\n\npublic class Panel\n{\n    public Panel(private Mailer mailer) { }\n}\n",
+            ),
+            (
+                "app/Shop/Admin/Module.sharp",
+                "namespace App.Shop.Admin;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{\n    singleton Mailer = SmtpMailer;\n}\n",
+            ),
+            (
+                "app/Shop/Module.sharp",
+                "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Shop.Admin.Panel;\n\nmodule\n{\n    scoped Mailer = SmtpMailer;\n    singleton Panel = Panel;\n}\n",
+            ),
+            (
+                "app/Shop/Module.Production.sharp",
+                "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule : App.Shop\n{\n    singleton Mailer = SmtpMailer;\n}\n",
+            ),
+            (
+                "tests/Shop/PanelTest.sharp",
+                "namespace Tests.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule : App.Shop\n{\n    transient Mailer = SmtpMailer;\n}\n\npublic class PanelTest\n{\n}\n",
+            ),
+            ("app/Shop/OrderPaid.sharp", "namespace App.Shop;\n\npublic event OrderPaid(int orderId);\n"),
+            (
+                "app/Shop/Tick.sharp",
+                "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class Tick\n{\n    public Tick(private Mailer mailer) { }\n\n    public void count() on OrderPaid { }\n}\n",
+            ),
+        ]);
+
+        let compiled = compile(&mut analyzed(&database), database_stamp(&database));
+        // Each module file the inputs of `name` name, and whether a file is at it, as its stamp says.
+        let modules = |name: &str| -> Vec<(String, bool)> {
+            inputs(accepted(&compiled, name))
+                .into_iter()
+                .filter(|input| input.path.ends_with(b".sharp"))
+                .filter(|input| input.path.starts_with(b"Module.") || input.path.windows(8).any(|w| w == b"/Module."))
+                .map(|input| (String::from_utf8_lossy(&input.path).into_owned(), input.hash != [0; 16]))
+                .collect()
+        };
+        let names_each = |name: &str, paths: &[&str]| {
+            let named = modules(name);
+            for path in paths {
+                let present = database.read_only().get(&FileId::new(path.as_bytes())).is_ok();
+                assert!(named.contains(&((*path).to_owned(), present)), "{name} misses {path}: {named:?}");
+            }
+        };
+
+        // A module names its folder's modules and those of each class its bindings build: `app/Mail/` for
+        // `SmtpMailer` and `app/Shop/Admin/` for `Panel`.
+        let base = ["Module.sharp", "app/Mail/Module.sharp", "app/Module.sharp", "app/Shop/Admin/Module.sharp"];
+        names_each("app/Shop/Module.sharp", &[&base[..], &["app/Shop/Module.sharp"]].concat());
+        assert!(
+            !modules("app/Shop/Module.sharp").iter().any(|(path, _)| path == "app/Module.Production.sharp"),
+            "a base module reads no environment's modules"
+        );
+        // An environment module also names its environment's module of each of those folders.
+        names_each(
+            "app/Shop/Module.Production.sharp",
+            &[
+                &base[..],
+                &[
+                    "app/Shop/Module.sharp",
+                    "Module.Production.sharp",
+                    "app/Mail/Module.Production.sharp",
+                    "app/Module.Production.sharp",
+                    "app/Shop/Admin/Module.Production.sharp",
+                    "app/Shop/Module.Production.sharp",
+                ],
+            ]
+            .concat(),
+        );
+        // A test module names its own folders' modules and those of the namespace it overrides.
+        names_each(
+            "tests/Shop/PanelTest.sharp",
+            &[&base[..], &["app/Shop/Module.sharp", "tests/Module.sharp", "tests/Shop/Module.sharp"]].concat(),
+        );
+        // A listener names the modules its constructor's services come from.
+        names_each("app/Shop/Tick.sharp", &["Module.sharp", "app/Module.sharp", "app/Shop/Module.sharp"]);
+        assert_eq!(modules("app/Shop/Admin/Panel.sharp"), [], "a bound class's own check reads no module");
     }
 
     #[test]

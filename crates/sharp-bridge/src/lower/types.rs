@@ -4,6 +4,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::add_optional_union_type;
@@ -15,6 +16,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
@@ -120,6 +122,29 @@ impl<'analysis> Types<'analysis> {
     #[must_use]
     pub fn parent_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
         self.codebase.get_parent_constructor(class)
+    }
+
+    /// The parameters of the main constructor the fully qualified class name `class` declares, which the container
+    /// fills, spec section 32.
+    #[must_use]
+    pub fn constructor_parameters(&self, class: &[u8]) -> &'analysis [FunctionLikeParameterMetadata] {
+        self.codebase.get_method(class, b"__construct").map_or(&[], |constructor| constructor.parameters.as_slice())
+    }
+
+    /// The module the scanner recorded at `span`, with its bindings in the order the module declares them.
+    #[must_use]
+    pub fn module(&self, span: Span) -> &'analysis ModuleMetadata {
+        self.codebase
+            .modules
+            .iter()
+            .find(|module| module.span == span)
+            .unwrap_or_else(|| unreachable!("the scanner records every module of a file the checker accepted"))
+    }
+
+    /// The parameters of the lambda a binding's expression runs as, named `lambda` by the scanner.
+    #[must_use]
+    pub fn binding_parameters(&self, lambda: Word) -> &'analysis [FunctionLikeParameterMetadata] {
+        self.codebase.get_closure(&lambda).map_or(&[], |lambda| lambda.parameters.as_slice())
     }
 
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,
