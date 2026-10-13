@@ -1803,7 +1803,7 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
 
 /// Checks an extension block of a static class, spec section 26: one receiver, a parameter with no modifier, default
 /// or `...`, and members that are methods or computed properties of the receiver, each with only an access modifier,
-/// naming the receiver and never `this`.
+/// naming the receiver and never `this`. A static class has no constructor, in an extension either.
 fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
     let receivers = &extension.parameter_list.parameters;
     let refused_receiver = match receivers.as_slice() {
@@ -1824,8 +1824,19 @@ fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
 
     let receiver = receivers.first().map_or(b"value".as_slice(), |receiver| receiver.variable.name);
     let this = format!("An extension member names its receiver: write `{}`, not `this`.", BytesDisplay(receiver));
+    let class = enclosing_class(context.program, extension.span()).map(|class| class.name.value);
     for member in &extension.members {
         let (modifiers, body) = match member {
+            ClassLikeMember::Method(method)
+                if method.return_type_hint.is_none() && class == Some(method.name.value) =>
+            {
+                context.report(
+                    Issue::error("A static class has no constructor.")
+                        .with_annotation(Annotation::primary(method.name.span).with_message("Declared here.")),
+                );
+
+                continue;
+            }
             ClassLikeMember::Method(method) => (&method.modifiers, Node::MethodBody(&method.body)),
             ClassLikeMember::Property(Property::Computed(property)) => {
                 (&property.modifiers, Node::PropertyHookConcreteExpressionBody(&property.body))
@@ -3606,7 +3617,7 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 }
 
 /// What the slice has at a place, as the note of a refusal there.
-const fn supported(place: Place) -> &'static str {
+fn supported(place: Place) -> &'static str {
     match place {
         Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
         Place::Class => {
@@ -3625,9 +3636,7 @@ const fn supported(place: Place) -> &'static str {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
         Place::Module => "A PHP# module states laws.",
-        Place::Extension => {
-            "A PHP# extension has one receiver, as in `extension(string value)`, and the methods and computed properties it adds to the receiver's type."
-        }
+        Place::Extension => unreachable!("`enter` places an extension's keyword, receiver and every member of it"),
         Place::FieldOrProperty => {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }

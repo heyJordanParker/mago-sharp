@@ -2658,11 +2658,14 @@ fn a_member_of_a_static_class_that_is_not_static_is_an_error() {
     );
 }
 
+/// A static class has no constructor, in its body or in an extension's.
 #[test]
 fn a_static_class_has_no_constructor() {
     let code = "namespace App.Tenant;\n\npublic static class Text\n{\n    public Text() {}\n}\n";
+    let extension = "namespace App.Tenant;\n\npublic static class Text\n{\n    extension(string value)\n    {\n        public Text() {}\n    }\n}\n";
 
     assert_eq!(issues(code), ["5:12 A static class has no constructor."]);
+    assert_eq!(issues(extension), ["7:16 A static class has no constructor."]);
 }
 
 /// Spec section 26: a static class declares extension blocks, each with one receiver and the methods and computed

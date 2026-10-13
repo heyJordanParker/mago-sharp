@@ -13172,10 +13172,10 @@ const ORDERS: (&str, &str) = (
     "<?php namespace App; class Order { public int $amount = 0; } final class Receipt { public int $amount = 0; }",
 );
 
-/// `App\Text\Extensions`, a project's extensions on `string`, on `App\Order` and on `App\Receipt`.
+/// `App\Text\Extensions`, a project's extensions on `string`, on `App\Order`, on `App\Receipt` and on `Any`.
 const EXTENSIONS: (&str, &str) = (
     "src/App/Text/Extensions.sharp",
-    "namespace App.Text;\n\nimport App.Order;\nimport App.Receipt;\n\npublic static class Extensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n\n        public bool isBlank => value == \"\";\n    }\n\n    extension(Order order)\n    {\n        public int total(int extra) => order.amount + extra;\n\n        public bool isEmpty => order.amount == 0;\n    }\n\n    extension(Receipt receipt)\n    {\n        public int paid() => receipt.amount;\n    }\n}\n",
+    "namespace App.Text;\n\nimport App.Order;\nimport App.Receipt;\n\npublic static class Extensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n\n        public bool isBlank => value == \"\";\n    }\n\n    extension(Order order)\n    {\n        public int total(int extra) => order.amount + extra;\n\n        public bool isEmpty => order.amount == 0;\n    }\n\n    extension(Receipt receipt)\n    {\n        public int paid() => receipt.amount;\n    }\n\n    extension(Any value)\n    {\n        public string kind => \"value\";\n    }\n}\n",
 );
 
 /// The statements of `run`, declared with `signature` and holding `statements`, in a class that imports `Order`,
@@ -13274,22 +13274,89 @@ fn an_extension_member_on_an_open_receiver_is_picked_by_the_engine() {
     );
 }
 
-/// `Sharp\Text\TextExtensions` at the standard library's path: its extension on `string` wraps `trim` with a method
-/// and `strlen` with a computed property.
+/// ```php
+/// return \Sharp\Internal\extension($value, 'App\Text\Extensions', 'kind', true);
+/// ```
+///
+/// Spec section 26: a value of `Any` can be an object whose class declares the member itself, so the engine picks at
+/// the call, and runs the extension for a value that is no object.
+#[test]
+fn an_extension_member_on_any_value_is_picked_by_the_engine() {
+    assert_eq!(
+        extension_body("string run(Any value)", "        return value.kind;\n"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\extension"
+                  ARG_LIST
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "kind"
+                    ZVAL true
+        "#}
+    );
+}
+
+/// ```php
+/// return \App\Text\Extensions::slug($title, separator: '-')
+///     . (string) \Sharp\Internal\extension($order, 'App\Text\Extensions', 'total', false, extra: 2);
+/// ```
+///
+/// Spec section 26: a named argument passes to the extension's method by its name, as it does to any call.
+#[test]
+fn an_extension_member_passes_a_named_argument_by_its_name() {
+    assert_eq!(
+        extension_body(
+            "string run(string title, Order order)",
+            "        return title.slug(separator: \"-\") + (string) order.total(extra: 2);\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [8]
+                  STATIC_CALL
+                    ZVAL "App\\Text\\Extensions"
+                    ZVAL "slug"
+                    ARG_LIST
+                      VAR
+                        ZVAL "title"
+                      NAMED_ARG
+                        ZVAL "separator"
+                        ZVAL "-"
+                  CAST [6]
+                    CALL
+                      ZVAL "Sharp\\Internal\\extension"
+                      ARG_LIST
+                        VAR
+                          ZVAL "order"
+                        ZVAL "App\\Text\\Extensions"
+                        ZVAL "total"
+                        ZVAL false
+                        NAMED_ARG
+                          ZVAL "extra"
+                          ZVAL 2
+        "#}
+    );
+}
+
+/// `Sharp\Text\TextExtensions` at the standard library's path, beside a constant: its extension on `string` wraps
+/// `trim` with a method, `strlen` with a computed property and `strtoupper` with a method whose block returns it.
 const TEXT_EXTENSIONS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/TextExtensions.sharp",
-    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    extension(string text)\n    {\n        public string trim() => trim(text);\n\n        public int length => strlen(text);\n    }\n}\n",
+    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    public const int LIMIT = 80;\n\n    extension(string text)\n    {\n        public string trim() => trim(text);\n\n        public int length => strlen(text);\n\n        public string upper()\n        {\n            return strtoupper(text);\n        }\n    }\n}\n",
 );
 
 /// ```php
-/// return trim($name) . strlen(trim($name));
+/// return trim($name) . strlen(trim($name)) . strtoupper($name);
 /// ```
 ///
 /// Spec section 8: a standard library extension member whose body is one call inlines as that call, so `name.trim()`
 /// runs as `trim($name)`, with no call of the library's method. Every file has the library's extensions.
 #[test]
 fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return name.trim() + (string) name.trim().length;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return name.trim() + (string) name.trim().length + name.upper();\n    }\n}\n";
 
     assert_eq!(
         Lowered::inlining(code, &[], &[TEXT_EXTENSIONS]).body(),
@@ -13297,20 +13364,26 @@ fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
             STMT_LIST
               RETURN
                 BINARY_OP [8]
+                  BINARY_OP [8]
+                    CALL
+                      ZVAL "trim"
+                      ARG_LIST
+                        VAR
+                          ZVAL "name"
+                    CAST [6]
+                      CALL
+                        ZVAL "strlen"
+                        ARG_LIST
+                          CALL
+                            ZVAL "trim"
+                            ARG_LIST
+                              VAR
+                                ZVAL "name"
                   CALL
-                    ZVAL "trim"
+                    ZVAL "strtoupper"
                     ARG_LIST
                       VAR
                         ZVAL "name"
-                  CAST [6]
-                    CALL
-                      ZVAL "strlen"
-                      ARG_LIST
-                        CALL
-                          ZVAL "trim"
-                          ARG_LIST
-                            VAR
-                              ZVAL "name"
         "#}
     );
 }

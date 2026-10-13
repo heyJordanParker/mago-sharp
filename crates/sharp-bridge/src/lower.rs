@@ -883,7 +883,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let body = self.method_body(&method.body, method.returns_value(), statements);
                 let (start, return_type) = match &method.return_type_hint {
                     Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
-                    None => (method.name.span, NULL),
+                    None => unreachable!("semantics refuses an extension method without a return type"),
                 };
                 let attributes = self.attributes(&method.attribute_lists, None);
 

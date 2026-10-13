@@ -16,6 +16,8 @@ use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::plugin::context::HookContext;
+use mago_analyzer::plugin::context::InvocationInfo;
+use mago_analyzer::plugin::context::ProviderContext;
 use mago_analyzer::plugin::hook::ExpressionHook;
 use mago_analyzer::plugin::hook::ExpressionHookResult;
 use mago_analyzer::plugin::hook::HookResult;
@@ -23,12 +25,15 @@ use mago_analyzer::plugin::hook::StaticCall;
 use mago_analyzer::plugin::hook::StaticMethodCallHook;
 use mago_analyzer::plugin::provider::Provider;
 use mago_analyzer::plugin::provider::ProviderMeta;
+use mago_analyzer::plugin::provider::method::MethodReturnTypeProvider;
+use mago_analyzer::plugin::provider::method::MethodTarget;
 use mago_analyzer::settings::Settings;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::union::TUnion;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
@@ -52,6 +57,10 @@ mod sharp_words;
 
 static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
+
+/// The standard library's package in `vendor/`. A file under it is the standard library's, as the loader marks a file
+/// whose nearest `composer.json` names the package.
+const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 
 const CALC: &str = "<?php\n\nnamespace Lib;\n\nfinal class Calc\n{\n    public static function make(): self\n    {\n        return new self();\n    }\n\n    public function add(int $a, int $b): int\n    {\n        return $a + $b;\n    }\n}\n";
 
@@ -117,7 +126,10 @@ fn analyze_with_artifacts(
     let file_ids: Vec<_> = std::iter::once(&analyzed)
         .chain(others)
         .map(|(name, code)| {
-            (*name, database.add(File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()))))
+            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+            file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
+
+            (*name, database.add(file))
         })
         .collect();
 
@@ -4871,7 +4883,7 @@ fn php_calls_an_extension_member_as_the_static_method_it_runs_as() {
 /// property is read, never written.
 #[test]
 fn an_imported_extension_is_a_member_of_its_receiver() {
-    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n    public int count(string title) => title.slug(\"-\");\n    public string wrong(string title) => title.slug(1);\n    public bool none(string title) => title.isBlank(\"-\");\n    public string bare(string title) => title.slug;\n    public void write(string title)\n    {\n        title.isBlank = true;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n    public int count(string title) => title.slug(\"-\");\n    public string wrong(string title) => title.slug(1);\n    public bool none(string title) => title.isBlank(\"-\");\n    public string bare(string title) => title.slug;\n    public void write(string title)\n    {\n        title.isBlank = true;\n    }\n    public string few(string title) => title.slug();\n}\n";
 
     assert_messages(
         sharp,
@@ -4883,6 +4895,7 @@ fn an_imported_extension_is_a_member_of_its_receiver() {
             "11:39 mixed-return-statement: Could not infer a precise return type for method `Catalog.none`. Saw type `Any?`.",
             "12:47 non-existent-property: `slug` is a method of `string`, not a computed property: call it as `slug(…)`.",
             "15:15 invalid-property-write: `isBlank` is a computed property an extension adds: it is read, never written.",
+            "17:40 too-few-arguments: Too few arguments provided for method `TextExtensions.slug`.",
         ],
     );
 }
@@ -4961,15 +4974,46 @@ fn the_standard_library_extensions_on_the_default_types_need_no_import() {
     );
 }
 
+/// Decision 040 and spec section 8: a call of a PHP function the standard library wraps names the member to write. An
+/// extension's member, spec section 26, is written on the call's first argument, with `(…)` when it takes more than
+/// the receiver, and needs no import on `string`. A static method is written on its class. Each names the import its
+/// class needs.
+#[test]
+fn a_call_of_a_function_the_standard_library_wraps_names_the_member_that_replaces_it() {
+    let replaces = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\npublic class Replaces\n{\n    public Replaces(string ...functions)\n    {\n    }\n}\n";
+    let text = "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    extension(string text)\n    {\n        [Replaces(\"ucfirst\")]\n        public string capital() => ucfirst(text);\n\n        [Replaces(\"strlen\")]\n        public int length => strlen(text);\n\n        [Replaces(\"str_repeat\")]\n        public string repeated(int times) => str_repeat(text, times);\n    }\n}\n";
+    let flags = "namespace Sharp.Data;\n\npublic static class Flags\n{\n    extension(bool flag)\n    {\n        [Replaces(\"boolval\")]\n        public bool truthy() => boolval(flag);\n    }\n}\n";
+    let date = "namespace Sharp.Time;\n\npublic static class Date\n{\n    [Replaces(\"date\")]\n    public static string format(string pattern) => date(pattern);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public string label(string name) => ucfirst(name);\n\n    public int size(string name) => strlen(name);\n\n    public string twice(string name) => str_repeat(name, 2);\n\n    public bool on(bool ready) => boolval(ready);\n\n    public string year() => date(\"Y\");\n}\n";
+
+    assert_messages(
+        sharp,
+        &[
+            ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Replaces.sharp", replaces),
+            ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/TextExtensions.sharp", text),
+            ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Data/Flags.sharp", flags),
+            ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Date.sharp", date),
+        ],
+        &[
+            "5:41 wrapped-function: `ucfirst` is wrapped by the standard library: write `name.capital()`.",
+            "7:37 wrapped-function: `strlen` is wrapped by the standard library: write `name.length`.",
+            "9:41 wrapped-function: `str_repeat` is wrapped by the standard library: write `name.repeated(…)`.",
+            "11:35 wrapped-function: `boolval` is wrapped by the standard library: write `ready.truthy()`. Add `import Sharp.Data.Flags;` to the file.",
+            "13:29 wrapped-function: `date` is wrapped by the standard library: write `Date.format(…)`. Add `import Sharp.Time.Date;` to the file.",
+        ],
+    );
+}
+
 /// Spec section 26: the receiver's type picks among the imported extensions of one name, and two that fit one
-/// receiver are an error naming both classes.
+/// receiver are an error naming both classes. A receiver no extension of the name fits has no such member, and one
+/// that is always `null` has no value to fit, so `?.` skips it.
 #[test]
 fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
     let lines = "namespace App.Billing;\n\npublic static class LineTotals\n{\n    extension(List<int> lines)\n    {\n        public int total() => 0;\n    }\n}\n";
-    let prices = "namespace App.Billing;\n\npublic static class PriceTotals\n{\n    extension(Map<string, int> prices)\n    {\n        public string total() => \"\";\n    }\n}\n";
-    let slugs = "namespace App.Billing;\n\npublic static class Slugs\n{\n    extension(Map<string, int> prices)\n    {\n        public string total() => \"\";\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport App.Billing.LineTotals;\nimport App.Billing.PriceTotals;\n\npublic class Report\n{\n    public int lines(List<int> lines) => lines.total();\n    public string prices(Map<string, int> prices) => prices.total();\n    public string wrong(List<int> lines) => lines.total();\n}\n";
-    let ambiguous = "namespace Demo;\n\nimport App.Billing.PriceTotals;\nimport App.Billing.Slugs;\n\npublic class Report\n{\n    public string prices(Map<string, int> prices) => prices.total();\n}\n";
+    let prices = "namespace App.Billing;\n\npublic static class PriceTotals\n{\n    extension(Map<string, int> prices)\n    {\n        public string total() => \"\";\n        public int sum => 0;\n    }\n}\n";
+    let slugs = "namespace App.Billing;\n\npublic static class Slugs\n{\n    extension(Map<string, int> prices)\n    {\n        public string total() => \"\";\n        public int sum => 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Billing.LineTotals;\nimport App.Billing.PriceTotals;\n\npublic class Report\n{\n    public int lines(List<int> lines) => lines.total();\n    public string prices(Map<string, int> prices) => prices.total();\n    public string wrong(List<int> lines) => lines.total();\n    public string title(string title) => title.total();\n    public bool gone(Map<string, int>? prices)\n    {\n        if (prices == null) {\n            return prices?.total() == null;\n        }\n\n        return false;\n    }\n}\n";
+    let ambiguous = "namespace Demo;\n\nimport App.Billing.PriceTotals;\nimport App.Billing.Slugs;\n\npublic class Report\n{\n    public string prices(Map<string, int> prices) => prices.total();\n    public int sum(Map<string, int> prices) => prices.sum;\n}\n";
     let others = [
         ("src/App/Billing/LineTotals.sharp", lines),
         ("src/App/Billing/PriceTotals.sharp", prices),
@@ -4981,6 +5025,8 @@ fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
         &others,
         &[
             "10:45 invalid-return-statement: Invalid return type for method `Report.wrong`: expected `string`, but found `int`.",
+            "11:48 invalid-method-access: Attempting to access a method on a non-object type (`string`).",
+            "11:42 mixed-return-statement: Could not infer a precise return type for method `Report.title`. Saw type `Any?`.",
         ],
     );
     assert_messages(
@@ -4988,6 +5034,7 @@ fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
         &others,
         &[
             "8:61 ambiguous-object-method-access: The imported extensions `PriceTotals` and `Slugs` each add `total` to `Map<string, int>`.",
+            "9:55 ambiguous-object-property-access: The imported extensions `PriceTotals` and `Slugs` each add `sum` to `Map<string, int>`.",
         ],
     );
 }
@@ -5031,6 +5078,81 @@ fn an_extension_member_reads_its_receiver_as_a_parameter_of_its_type() {
         issues(("src/App/Shared/Text/TextExtensions.sharp", sharp), &[]),
         ["7:32 invalid-return-statement", "8:28 invalid-return-statement"]
     );
+}
+
+/// Spec section 26: an extension holds methods and computed properties. Semantics refuses any other member and a
+/// member declared twice, so the analyzer checks neither: only the first `label` runs.
+#[test]
+fn the_analyzer_checks_only_the_members_an_extension_holds_once() {
+    let sharp = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public const int LIMIT = 1;\n        public string label() => value;\n        public int label() => value;\n    }\n}\n";
+
+    assert_eq!(issues(("src/App/Shared/Text/TextExtensions.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// The arguments each call of a member of `TextExtensions` passes its method, by the method's name.
+type ExtensionArguments = Vec<(String, [Option<Span>; 2])>;
+
+/// Records the first two arguments of each call of a method of `TextExtensions` a return type provider sees.
+#[derive(Clone, Default)]
+struct ExtensionArgumentRecorder(Arc<Mutex<ExtensionArguments>>);
+
+impl Provider for ExtensionArgumentRecorder {
+    fn meta() -> &'static ProviderMeta {
+        static META: ProviderMeta =
+            ProviderMeta::new("test::extension-arguments", "extension arguments", "Records extension arguments.");
+
+        &META
+    }
+}
+
+impl MethodReturnTypeProvider for ExtensionArgumentRecorder {
+    fn targets() -> &'static [MethodTarget] {
+        static TARGETS: [MethodTarget; 1] = [MethodTarget::all_methods(b"App\\Shared\\Text\\TextExtensions")];
+
+        &TARGETS
+    }
+
+    fn get_return_type(
+        &self,
+        _context: &ProviderContext<'_, '_, '_>,
+        _class_name: &[u8],
+        method_name: &[u8],
+        invocation: &InvocationInfo<'_, '_, '_>,
+    ) -> Option<TUnion> {
+        let argument = |index| invocation.get_argument(index, &[]).map(HasSpan::span);
+        self.0.lock().unwrap().push((String::from_utf8_lossy(method_name).into_owned(), [argument(0), argument(1)]));
+
+        None
+    }
+}
+
+/// Spec section 26: a plugin reads an extension member's receiver as the first argument of the static method it runs
+/// as, as PHP passes it, and the arguments in `(…)` after it. A computed property passes only the receiver.
+#[test]
+fn a_plugin_reads_an_extension_members_receiver_as_its_first_argument() {
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n}\n";
+    let recorder = ExtensionArgumentRecorder::default();
+    let mut registry = PluginRegistry::default();
+    registry.register_method_provider(recorder.clone());
+
+    let issues = issues_in(
+        &registry,
+        settings(),
+        ("src/Demo/Catalog.sharp", sharp),
+        &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)],
+    );
+
+    assert_eq!(issues, Vec::<String>::new());
+    let text =
+        |span: Option<Span>| span.map_or("none", |span| &sharp[span.start.offset as usize..span.end.offset as usize]);
+    let seen: Vec<String> = recorder
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(method, [receiver, argument])| format!("{method} {} {}", text(*receiver), text(*argument)))
+        .collect();
+    assert_eq!(seen, ["slug title \"-\"", "isblank title none"]);
 }
 
 /// Spec section 9.1: a named constructor's `: this(…)` creates its object with the main constructor, so its arguments
