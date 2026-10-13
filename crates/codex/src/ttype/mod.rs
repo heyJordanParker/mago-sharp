@@ -1415,11 +1415,11 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
     None
 }
 
-/// Returns the key type plain PHP sees for `key_type`.
+/// Returns `key_type` with each backed enum in it replaced by its backing type and each struct by `string`.
 ///
-/// A PHP# `Map` keyed by a backed enum holds each case's backing value at runtime, as spec section 12 writes it, and
-/// one keyed by a struct holds each struct's key text, a `string`, as section 10 writes it. So plain PHP sees such a
-/// key as its backing type.
+/// A PHP# `Map` keeps each backed enum and struct key as itself and finds it by its `==` and `hash()`. Its key type is
+/// one a `Map` takes when this result is always `int` or `string`. A plain PHP array that crosses into a `Map` keyed by a
+/// backed enum holds each case's backing value, which this result types.
 #[must_use]
 pub fn get_backing_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMetadata) -> Cow<'key, TUnion> {
     let backing_type = |atomic: &TAtomic| match atomic {
@@ -1500,8 +1500,8 @@ pub fn get_array_parameters(array_type: &TArray, codebase: &CodebaseMetadata) ->
 
             (key_type, value_type)
         }
-        // A `Set` is keyed by each element, which runs as its backing value when it is a backed enum, as a `Map`'s
-        // key does.
+        // The checker keys a `Set` by each element, which the `Set` finds by its `==` and `hash()`, as a `Map` finds a
+        // key.
         TArray::Set(element_type) => (element_type.as_ref().clone(), element_type.as_ref().clone()),
     }
 }

@@ -1914,9 +1914,9 @@ where
 }
 
 /// Reports each PHP# `Map` written in `type_union` whose key type is a class, an enum without a backing value, or a
-/// struct that holds a class instance. Spec section 12 keys a `Map` by an `int`, a `string` or a backed enum, which
-/// runs as its backing value, and section 10 by a struct, which runs as its key text. A key type that names no type is
-/// reported as a type that cannot be found.
+/// struct that holds a class instance. Spec section 12 keys a `Map` by an `int`, a `string` or a backed enum, and
+/// section 10 by a struct, each found by its `==` and `hash()`. A key type that names no type is reported as a type that
+/// cannot be found.
 pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -1947,7 +1947,7 @@ where
 }
 
 /// Reports each PHP# `Set` written in `type_union` whose element type is a class, an enum without a backing value, or a
-/// struct that holds a class instance. A `Set` runs keyed by each element, so it holds `int`, `string`, backed enums
+/// struct that holds a class instance. A `Set` holds the elements a `Map` takes as keys, `int`, `string`, backed enums
 /// and structs, and the semantic checks refuse every other element a type can name without the codebase.
 pub(crate) fn report_unsupported_set_elements<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where

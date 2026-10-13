@@ -51,8 +51,6 @@ use crate::expression::assignment::property_assignment;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::method::with_declared_kinds;
-use crate::statement::keys_mix_a_stored_key;
-use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
@@ -888,24 +886,6 @@ where
                     .with_help(
                         "Change an element with `list.set(index, value)`, as `list.set(i, list[i] + 1)` replaces `+=`, `++` and `--`, and append one with `list.add(value)`.",
                     ),
-            );
-        }
-
-        // A write puts its key into the `Map`, which cannot tell a case or a struct from the key equal to its backing
-        // value or its key text when its keys mix a backed enum or a struct with other types. A `??=` or `+=` read the
-        // key first, and that read reported it.
-        if context.dialect.is_sharp()
-            && is_last
-            && let ArrayTarget::Access(access) = array_target
-            && artifacts.get_expression_type(access).is_none()
-            && keys_mix_a_stored_key(context, written_type)
-        {
-            report_keys_sharing_entries(
-                context,
-                IssueCode::InvalidArrayAccess,
-                array_target.get_array().span(),
-                "the index",
-                Annotation::primary(access.index.span()).with_message("Its key is written here."),
             );
         }
 

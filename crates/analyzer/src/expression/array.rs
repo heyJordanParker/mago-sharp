@@ -58,8 +58,6 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::function_like::map_key_error;
-use crate::statement::keys_mix_a_stored_key;
-use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_atomic;
@@ -86,23 +84,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Array<'arena> {
     where
         A: Arena,
     {
-        analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())?;
-
-        // The engine holds a `Map`'s key as its backing value or its key text, so a literal whose keys, written or
-        // spread in, mix a backed enum or a struct with other types cannot tell it from the key equal to that value.
-        if context.dialect.is_sharp()
-            && artifacts.get_expression_type(self).is_some_and(|literal| keys_mix_a_stored_key(context, literal))
-        {
-            report_keys_sharing_entries(
-                context,
-                IssueCode::InvalidArrayElement,
-                self.span(),
-                "the literal",
-                Annotation::primary(self.span()).with_message("Its keys go in here."),
-            );
-        }
-
-        Ok(())
+        analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())
     }
 }
 
@@ -322,7 +304,7 @@ where
                         let key_type = if context.dialect.is_sharp() {
                             // PHP# casts only between numbers, so a key PHP would cast, such as `1.5`, `true` or
                             // `null`, names the rule a `Map` type keeps, and its error is its only report. A backed
-                            // enum key runs as its backing value, and a struct key as its key text.
+                            // enum or a struct keys a `Map` too.
                             if get_backing_key_type(item_key_type, context.codebase).is_always_array_key(true) {
                                 let span = key_value_array_element.key.span();
                                 if report_class_held_by_key(context, item_key_type, false, span) {
@@ -979,17 +961,12 @@ fn handle_variadic_array_element<'arena, A>(
 
                     (None, Cow::Borrowed(list_data.get_element_type()))
                 }
-                // A PHP# `Set` spread is refused above; plain PHP spreads the array it runs as, keyed by each
-                // element's backing value.
+                // A PHP# `Set` spread is refused above. Plain PHP spreads the `Sharp\Set` object, which gives its
+                // elements at positions 0 to n, as a list does.
                 TArray::Set(element_type) => {
                     all_non_empty = false;
-                    array_creation_info.is_list = false;
-                    array_creation_info.can_create_objectlike = false;
 
-                    (
-                        Some(Cow::Owned(get_backing_key_type(element_type, context.codebase).into_owned())),
-                        Cow::Borrowed(element_type.as_ref()),
-                    )
+                    (None, Cow::Borrowed(element_type.as_ref()))
                 }
             },
             atomic => {
@@ -1037,7 +1014,8 @@ fn handle_variadic_array_element<'arena, A>(
                 continue;
             }
 
-            // A PHP# `Map` keyed by a backed enum or a struct holds each key as its backing value or its key text.
+            // A PHP# `Map` spread may hold a backed enum or a struct key, which a `Map` literal takes. Plain PHP
+            // spreads into a PHP array, whose keys are `int` or `string` alone.
             let stored_key_type = if context.dialect.is_sharp() {
                 get_backing_key_type(&key_type, context.codebase)
             } else {

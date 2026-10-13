@@ -214,11 +214,11 @@ pub(crate) fn declares_equality(codebase: &CodebaseMetadata, name: Word) -> bool
     codebase.get_method(name.as_bytes(), b"op_Equality").is_some_and(|equality| equality.span != r#struct.span)
 }
 
-/// Reports each struct in `key_type` that holds a class instance at any depth, spec section 10: a `Map` holds a struct
-/// key, and a `Set` a struct element, as its key text, built from its values, while a class instance compares through
-/// its own `==`, which no text matches. A struct that declares `operator ==` is held through it and its `hash()`, so
-/// it holds what it likes. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's `Dictionary` needs
-/// `Hashable`. `key_type` runs as an array key, so each class it names is a struct. `in_set` names a `Set` element.
+/// Reports each struct in `key_type` that holds a class instance at any depth, spec section 10: a `Map` finds a struct
+/// key, and a `Set` a struct element, by a hash of its fields and their `==`, and a class instance has neither unless
+/// its class declares them. A struct that declares `operator ==` is held through it and its `hash()`, so it holds what
+/// it likes. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's `Dictionary` needs `Hashable`. Each
+/// class `key_type` names is a struct, since only a struct keys a `Map` among classes. `in_set` names a `Set` element.
 /// Returns whether it reported one.
 pub(crate) fn report_class_held_by_key<A>(
     context: &mut Context<'_, '_, A>,

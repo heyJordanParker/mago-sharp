@@ -30,8 +30,6 @@ use crate::invocation::resolver::resolve_invocation_type;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::map_key_error;
-use crate::statement::key_type_mixes_a_stored_key;
-use crate::statement::report_keys_sharing_entries;
 use crate::utils::names::display_sharp_type;
 
 pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
@@ -93,20 +91,6 @@ where
                 );
 
                 return Ok(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(map))));
-            }
-
-            if key_type_mixes_a_stored_key(context, key_type) {
-                // The engine holds a `Map`'s key as its backing value or its key text, so keys that mix a backed enum
-                // or a struct with other types share entries where such a key and the key equal to that value meet.
-                let method =
-                    if is_collection_method(&invocation.target, b"groupBy") { "`groupBy`" } else { "`associateBy`" };
-                report_keys_sharing_entries(
-                    context,
-                    IssueCode::TemplateConstraintViolation,
-                    invocation.span,
-                    method,
-                    Annotation::primary(selector.span()).with_message("Its keys come from here."),
-                );
             }
         }
     }
@@ -196,7 +180,7 @@ where
 }
 
 /// Gives a PHP# `Set<T>`'s `filter` its type `Set<T>`. A docblock writes no `Set`, so `Sharp\SetMethods::filter`
-/// declares the array a `Set` runs as, and the call keeps that array's elements as a `Set`.
+/// declares an array of the elements, and the call keeps them as a `Set`.
 fn fetch_set_filter_return_type<A>(
     context: &Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
@@ -214,9 +198,8 @@ where
 }
 
 /// Whether `target` is a PHP# `List`'s or `Map`'s `groupBy` or `associateBy`, which key a `Map` by what their function
-/// returns. A `.sharp` call checks that key by spec sections 10 and 12's rule, where a backed enum keys a `Map` as its
-/// backing value and a struct as its key text, so it infers their `G` without the `array-key` bound a `.php` call checks
-/// it by.
+/// returns. A `.sharp` call checks that key by spec sections 10 and 12's rule, where a backed enum or a struct keys a
+/// `Map` too, so it infers their `G` without the `array-key` bound a `.php` call checks it by.
 pub(crate) fn keys_a_map_by_its_function(target: &InvocationTarget<'_>) -> bool {
     is_collection_method(target, b"groupBy") || is_collection_method(target, b"associateBy")
 }

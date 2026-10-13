@@ -7330,7 +7330,7 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
             "11:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
             "11:68 invalid-argument `Map<Spot, int>` can't be passed to the parameter `value` of function `count`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
             "11:178 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of closure `Closure`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "11:218 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `Iterable<int>`, but possibly received `Map<Status, int>`.",
+            "11:218 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
         ]
     );
 }
@@ -7832,76 +7832,21 @@ fn a_loop_over_a_map_keyed_by_a_backed_enum_reads_each_key_as_its_case() {
     );
 }
 
-/// The engine holds a backed enum key as its backing value and a struct key as its key text, and reads them back
-/// only through one enum's `from` or one struct's key text. So the keys of a `Map` that mix a backed enum or a struct
-/// with other types are refused where they are read back, by a loop and by
-/// `keys()`. They are refused where a key goes in or is looked up too, even a key of one enum, because the case
-/// `Size.Small` and the `int` key `1` share one entry: by `get`, `has` and `remove`, by an index read, write and `??=`,
-/// by a literal whose written or spread keys mix, and by a `groupBy` or `associateBy` function whose keys mix. Each
-/// position is refused once. The keys of a `Map` keyed by one enum or one struct read back and go in.
+/// Spec section 12 refuses no mixed key type: a `Map` keeps each key as itself and finds it by its `==` and `hash()`,
+/// so the case `Status.Active` and the `string` key `"active"` are two entries of a `Map<string|Status, int>`. Keys
+/// that mix a backed enum or a struct with other types go in and read back everywhere: a loop, `keys()`, `get`, `has`
+/// and `remove`, an index read, write and `??=`, a literal whose written or spread keys mix, and a `groupBy` or
+/// `associateBy` function whose keys mix.
 #[test]
-fn a_map_key_type_that_mixes_a_backed_enum_or_a_struct_with_other_types_is_refused_where_a_key_goes_in_or_out() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key, Map<Spot|string, int> spots, Map<Spot, int> placed, Spot spot)\n    {\n        for (const [k, n] of spots) {\n        }\n        for (const [k, n] of placed) {\n        }\n        const stops = placed.keys();\n        const here = placed.has(spot);\n        const mixed = spots.keys();\n        const found = spots.has(spot);\n        const at = spots[spot] ?? 0;\n        const listed = [spot: 1, \"a\": 2];\n        const grouped = [spot].groupBy(s => s.x > 0 ? s : \"none\");\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranks, Map<Size, int> sizes, Map<int, int> ids, List<int> amounts)\n    {\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
+fn a_map_key_type_that_mixes_a_backed_enum_or_a_struct_with_other_types_takes_every_key() {
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int named(Map<string|Status, int> tally)\n    {\n        tally[\"active\"] = 1;\n        tally[Status.Active] = 2;\n        return (tally[\"active\"] ?? 0) + (tally.get(Status.Active) ?? 0) + tally.keys().count();\n    }\n\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key, Map<Spot|string, int> spots, Map<Spot, int> placed, Spot spot)\n    {\n        for (const [k, n] of spots) {\n        }\n        for (const [k, n] of placed) {\n        }\n        const stops = placed.keys();\n        const here = placed.has(spot);\n        const mixed = spots.keys();\n        const found = spots.has(spot);\n        const at = spots[spot] ?? 0;\n        const listed = [spot: 1, \"a\": 2];\n        const grouped = [spot].groupBy(s => s.x > 0 ? s : \"none\");\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranks, Map<Size, int> sizes, Map<int, int> ids, List<int> amounts)\n    {\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
 
-    assert_eq!(
-        messages(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
-        [
-            "The keys of `spots` mix a backed enum or a struct with other types, so the loop cannot read them back.",
-            "The keys of `spots` mix a backed enum or a struct with other types, so `keys()` cannot read them back.",
-            "The keys of `spots` mix a backed enum or a struct with other types, so `has` cannot tell them apart.",
-            "The keys of `spots` mix a backed enum or a struct with other types, so the index cannot tell them apart.",
-            "The keys of `[spot: 1, \"a\": 2]` mix a backed enum or a struct with other types, so the literal cannot tell them apart.",
-            "The keys of `[spot].groupBy(s => s.x > 0 ? s : \"none\")` mix a backed enum or a struct with other types, so `groupBy` cannot tell them apart.",
-            "The keys of `counts` mix a backed enum or a struct with other types, so the loop cannot read them back.",
-            "The keys of `totals` mix a backed enum or a struct with other types, so the loop cannot read them back.",
-            "The keys of `(first ? statuses : sizes)` mix a backed enum or a struct with other types, so `keys()` cannot read them back.",
-            "The keys of `totals` mix a backed enum or a struct with other types, so `keys()` cannot read them back.",
-            "The keys of `totals` mix a backed enum or a struct with other types, so `has` cannot tell them apart.",
-            "The keys of `totals` mix a backed enum or a struct with other types, so `get` cannot tell them apart.",
-            "The keys of `totals` mix a backed enum or a struct with other types, so `remove` cannot tell them apart.",
-            "The keys of `totals` mix a backed enum or a struct with other types, so `has` cannot tell them apart.",
-            "The keys of `totals` mix a backed enum or a struct with other types, so `remove` cannot tell them apart.",
-            "The keys of `[1: 5, Size.Small: 6]` mix a backed enum or a struct with other types, so the literal cannot tell them apart.",
-            "The keys of `ranks` mix a backed enum or a struct with other types, so the index cannot tell them apart.",
-            "The keys of `ranks` mix a backed enum or a struct with other types, so the index cannot tell them apart.",
-            "The keys of `ranks` mix a backed enum or a struct with other types, so the index cannot tell them apart.",
-            "The keys of `[...sizes, ...ids]` mix a backed enum or a struct with other types, so the literal cannot tell them apart.",
-            "The keys of `amounts.groupBy(n => n > 5 ? Size.Small : n)` mix a backed enum or a struct with other types, so `groupBy` cannot tell them apart.",
-            "The keys of `amounts.associateBy(n => n > 5 ? Size.Small : n)` mix a backed enum or a struct with other types, so `associateBy` cannot tell them apart.",
-        ]
-    );
-    assert_eq!(
-        issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
-        [
-            "10:21 invalid-foreach-key",
-            "16:29 invalid-array-access",
-            "17:29 invalid-argument",
-            "18:26 invalid-array-access",
-            "19:24 invalid-array-element",
-            "20:40 template-constraint-violation",
-            "21:21 invalid-foreach-key",
-            "23:21 invalid-foreach-key",
-            "27:49 invalid-array-access",
-            "28:29 invalid-array-access",
-            "29:29 invalid-argument",
-            "30:30 invalid-argument",
-            "31:32 invalid-argument",
-            "32:31 invalid-argument",
-            "32:60 invalid-argument",
-            "38:25 invalid-array-element",
-            "39:28 invalid-array-access",
-            "40:15 invalid-array-access",
-            "41:15 invalid-array-access",
-            "42:24 invalid-array-element",
-            "43:41 template-constraint-violation",
-            "44:48 template-constraint-violation",
-        ]
-    );
+    assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
 /// A written key or value type checks as a typed local's does. Spec section 12 reads a `Map<string, V>` key back as a
-/// `string`, even the key `"5"` PHP stores as an int, because the lowering casts every key of a `Map<string, V>` loop
-/// back to `string`, written or not.
+/// `string`, even the key `"5"` a PHP array stores as an int, because a `Map` keeps each key as it was stored, written
+/// or not.
 #[test]
 fn a_written_loop_variable_type_checks_as_a_typed_local_does() {
     let sharp = "namespace Demo;\n\nimport Lib.Line;\n\nclass Tally\n{\n    public void read(Map<string, int> stock, List<Line> lines)\n    {\n        for (const [int|string sku, int n] of stock) {\n        }\n        for (const [string sku, int n] of stock) {\n            this.reserve(sku);\n        }\n        for (const [sku, n] of stock) {\n            this.reserve(sku);\n        }\n        for (const [string? sku, int n] of stock) {\n        }\n        for (const Line line of lines) {\n        }\n        for (const int line of lines) {\n        }\n    }\n\n    private void reserve(string sku)\n    {\n    }\n}\n";
@@ -8318,15 +8263,18 @@ fn a_list_literal_where_a_set_is_declared_is_a_set() {
 }
 
 /// A spread copies a `List`'s values or a `Map`'s entries, and a `Set` is neither, so a `.sharp` literal refuses its
-/// spread. PHP keeps spreading the array a `Set` runs as.
+/// spread. Plain PHP spreads the `Sharp\Set` object, which gives its elements at positions 0 to n, so the result is a
+/// list.
 #[test]
 fn a_spread_of_a_set_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public List<string> all(Set<string> tags)\n    {\n        return [...tags];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public List<string> all(Set<string> tags)\n    {\n        return [...tags];\n    }\n\n    public static Set<string> of() => [\"a\"];\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Report\n{\n    /** @return list<string> */\n    public static function tags(): array\n    {\n        return [...Tags::of(), 'b'];\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Tags.sharp", sharp), &[])[0],
         "7:17 invalid-array-element Cannot spread a value of type `Set<string>`: PHP# spreads a `List` or a `Map`. | Spread a `List`, such as a `list<int>` from plain PHP."
     );
+    assert_eq!(issues(("src/Demo/Report.php", php), &[("src/Demo/Tags.sharp", sharp)]), Vec::<String>::new());
 }
 
 /// A `List` spread appends, so a literal of values and `List` spreads is a `List`, a plain PHP `list<int>` included.
@@ -8391,7 +8339,7 @@ fn a_spread_of_a_value_that_is_neither_a_list_nor_a_map_is_an_error() {
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &[("src/Lib/Prices.php", PRICES)]),
         [
-            "Cannot spread a value of type `Iterable<int>`: PHP# spreads a `List` or a `Map`.",
+            "Cannot spread a value of type `iterable<int, int>`: PHP# spreads a `List` or a `Map`.",
             "Cannot use spread operator on non-iterable type `int`.",
         ]
     );
