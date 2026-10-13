@@ -7478,28 +7478,39 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
 /// Spec section 10: every struct has a static `parse` and `tryParse`, and classes don't. `[Key]` renames the key a
 /// struct's main constructor parameter reads, so it is refused anywhere else, and two parameters may not read one key.
 /// A bare `Key` is the standard attribute, spec section 23. A property the main constructor sets is read once, by
-/// the parameter of its name, or not at all.
+/// the parameter of its name, or not at all. Any other property a parameter's key names is read twice, whether `[Key]`
+/// or the parameter's own name gives that key, and the help renames the parameter's key, which then compiles.
 /// A struct with a field no value can give, a pure enum or a function, also in a list or a nested struct, compiles, and
 /// its `parse` and `tryParse` are refused where they are called, while its other static methods are not. A struct that
 /// holds itself parses.
 #[test]
 fn every_struct_parses_and_classes_do_not() {
-    let sharp = "namespace Demo;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nstruct Temp\n{\n    public Temp(int celsius) { this.celsius = celsius; }\n\n    public int celsius { get; init; }\n}\n\nstruct Gauge\n{\n    public Gauge(int c) { this.celsius = c; }\n\n    public int celsius { get; init; }\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n\n    public void note(Map<string, Any?> input)\n    {\n        Note.parse(input);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nstruct Temp\n{\n    public Temp(int celsius) { this.celsius = celsius; }\n\n    public int celsius { get; init; }\n}\n\nstruct Gauge\n{\n    public Gauge(int c) { this.celsius = c; }\n\n    public int celsius { get; init; }\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n\n    public void note(Map<string, Any?> input)\n    {\n        Note.parse(input);\n    }\n}\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n\nstruct Renamed\n{\n    public Renamed([Key(\"x_key\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Mended\n{\n    public Mended([Key(\"temp\")] int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n";
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
 
+    let issues =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reads.sharp", sharp), &[("src/Sharp/Key.sharp", key)]);
     assert_eq!(
-        written(
-            sharp,
-            &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reads.sharp", sharp), &[("src/Sharp/Key.sharp", key)])
-        ),
+        written(sharp, &issues),
         [
-            "20:75 invalid-struct `code` is read twice, by `plan` and `code`.",
+            "20:75 invalid-struct `code` is read twice: by the main constructor parameter `plan` and the main constructor parameter `code`.",
             "61:18 invalid-struct `Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
             "70:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
             "72:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
             "74:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
             "76:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
             "88:14 non-existent-method Method `Note.parse` does not exist.",
+            "96:16 invalid-struct `y` is read twice: by the main constructor parameter `x` and the property `y`.",
+            "103:16 invalid-struct `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`.",
+        ]
+    );
+    assert_eq!(
+        issues.iter().filter_map(|issue| issue.help.as_deref()).collect::<Vec<_>>(),
+        [
+            "Give `plan` another key with `[Key(\"…\")]`.",
+            "Ensure the method `Note.parse` is defined.",
+            "Give `x` another key with `[Key(\"…\")]`.",
+            "Give `celsius` another key with `[Key(\"…\")]`.",
         ]
     );
 }
@@ -11583,7 +11594,8 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
 /// property with `set` takes its type exactly. A class that names the interface answers for the property it inherits
 /// too, from a PHP# or a plain PHP base class, a base's `private` field included. A property stated with `set` needs
 /// one the class can set, reported once, naming what the class gives instead: get-only, `private set`, `protected set`
-/// or `init`. A class gives it with `{ get; set; }`, and an event, whose properties `new` sets once, cannot give it.
+/// or `init`. A class gives it with `{ get; set; }`, and an event, whose properties `new` sets once, or a struct, which
+/// never changes, cannot give it.
 #[test]
 fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
     let event = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : OrderEvent;\n");
@@ -11795,6 +11807,26 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         worded(init, &[settable_interface]),
         [
             "5:16 incompatible-property-access `Guarded` gives `total` with `init`, and `Settable` states it with `set`. | Given here. | Stated here. | Declare `total` with `{ get; set; }`."
+        ]
+    );
+    let init_struct = (
+        "app/Shop/Stocked.sharp",
+        "namespace App.Shop;\n\npublic struct Stocked : Settable\n{\n    public int total { get; init; } = 0;\n}\n",
+    );
+    let get_only_struct = (
+        "app/Shop/Stock.sharp",
+        "namespace App.Shop;\n\npublic struct Stock : Settable\n{\n    public Stock(public int total { get; }) { }\n}\n",
+    );
+    assert_eq!(
+        worded(init_struct, &[settable_interface]),
+        [
+            "5:16 incompatible-property-access `Stocked` cannot give `total`, which `Settable` states with `set`: a struct never changes. | Given here. | Stated here."
+        ]
+    );
+    assert_eq!(
+        worded(get_only_struct, &[settable_interface]),
+        [
+            "5:29 incompatible-property-access `Stock` cannot give `total`, which `Settable` states with `set`: a struct never changes. | Given here. | Stated here."
         ]
     );
 }

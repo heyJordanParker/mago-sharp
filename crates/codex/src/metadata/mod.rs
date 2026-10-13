@@ -631,9 +631,10 @@ impl CodebaseMetadata {
     }
 
     /// The fields a PHP# struct's `parse` reads, spec section 10: its main constructor's parameters in order, then each
-    /// property an object initializer may set, a public `init` one, whose key no parameter reads, as creation from a
-    /// `Map` is the constructor call and then the initializer. A property the main constructor sets on every path may
-    /// be left out, as it may be from the initializer.
+    /// property an object initializer may set, a public `init` one, as creation from a `Map` is the constructor call
+    /// and then the initializer. A property the main constructor sets on every path may be left out, as it may be from
+    /// the initializer, and is read once, by the parameter, when a parameter reads its key. Any other property a
+    /// parameter's key names is a second field of that key, which the struct check refuses.
     #[must_use]
     pub fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'_>> {
         let constructor = self.get_method(class, b"__construct");
@@ -676,7 +677,9 @@ impl CodebaseMetadata {
                     let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
                     let name = property.name.0.as_bytes();
                     let name = name.strip_prefix(b"$").unwrap_or(name);
-                    if parameters.iter().any(|parameter| parameter.key == name) {
+                    let set_by_constructor =
+                        set_by_constructor.is_some_and(|assigned| assigned.contains(&property.name.0));
+                    if set_by_constructor && parameters.iter().any(|parameter| parameter.key == name) {
                         return None;
                     }
 
@@ -684,8 +687,7 @@ impl CodebaseMetadata {
                         name,
                         key: name,
                         r#type: &r#type.type_union,
-                        has_default: property.flags.has_default()
-                            || set_by_constructor.is_some_and(|assigned| assigned.contains(&property.name.0)),
+                        has_default: property.flags.has_default() || set_by_constructor,
                         is_parameter: false,
                         span: property.name_span,
                     })

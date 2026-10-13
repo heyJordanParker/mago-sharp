@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_array_parameters;
@@ -124,8 +125,14 @@ where
         );
     }
 
-    // Language rule 10: `parse` reads each key into one field.
+    // Language rule 10: `parse` reads each key into one field. The parameters come first, so the first reader of a key
+    // is a main constructor parameter, the one `[Key]` can rename.
     let fields = context.codebase.struct_parse_fields(class_like_metadata.name.as_bytes());
+    let reader = |field: &ParsedField<'_>| {
+        let kind = if field.is_parameter { "the main constructor parameter" } else { "the property" };
+
+        format!("{kind} `{}`", BytesDisplay(field.name))
+    };
     for (index, field) in fields.iter().enumerate() {
         let Some(first) = fields[..index].iter().find(|earlier| earlier.key == field.key) else {
             continue;
@@ -134,15 +141,16 @@ where
         context.collector.report_with_code(
             IssueCode::InvalidStruct,
             Issue::error(format!(
-                "`{}` is read twice, by `{}` and `{}`.",
+                "`{}` is read twice: by {} and {}.",
                 BytesDisplay(field.key),
-                BytesDisplay(first.name),
-                BytesDisplay(field.name)
+                reader(first),
+                reader(field)
             ))
             .with_annotation(
                 Annotation::primary(field.span.unwrap_or(r#struct.name.span)).with_message("Read again here."),
             )
-            .with_note("`parse` reads each key of its input into one field."),
+            .with_note("`parse` reads each key of its input into one field.")
+            .with_help(format!("Give `{}` another key with `[Key(\"…\")]`.", BytesDisplay(first.name))),
         );
     }
 

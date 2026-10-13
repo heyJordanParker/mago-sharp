@@ -4376,11 +4376,19 @@ fn report_unfit_interface_property<A>(
         && property.write_visibility == Visibility::Public
         && (!property.flags.is_virtual_property() || property.hooks.contains_key(&set));
     if stated.hooks.contains_key(&set) && !given_settable {
-        if owner.flags.is_event() {
+        let never_set_again = if owner.flags.is_event() {
+            Some("an event's properties are set once, by `new`")
+        } else if owner.flags.is_struct() {
+            Some("a struct never changes")
+        } else {
+            None
+        };
+
+        if let Some(reason) = never_set_again {
             context.collector.report_with_code(
                 IssueCode::IncompatiblePropertyAccess,
                 Issue::error(format!(
-                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: an event's properties are set once, by `new`."
+                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: {reason}."
                 ))
                 .with_annotation(Annotation::primary(property_span).with_message("Given here."))
                 .with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")),

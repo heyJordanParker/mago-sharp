@@ -13261,7 +13261,9 @@ const KEY: (&str, &str) = (
 ///
 /// Spec section 10: `parse` reads each main constructor parameter from its key, which `[Key]` renames, then each
 /// property an object initializer may set, records every bad or missing field, and throws them all at once. The
-/// arguments go in by name, so a missing key takes its parameter's default, and a missing `T?` property is null.
+/// arguments go in by name, so a missing key takes its parameter's default, and a missing `T?` property is null. A
+/// parameter that reads the key of a property the main constructor doesn't set is refused, so `parse` never leaves
+/// that property unset.
 #[test]
 fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_constructor() {
     let lowered = Lowered::with(
@@ -13541,6 +13543,15 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
               ZVAL [256] "App\\Ticket"
               null
         "#}
+    );
+    assert_eq!(
+        Lowered::new(
+            "namespace App;\n\npublic struct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n"
+        )
+        .diagnostics(),
+        [
+            "7:16 compile error: `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`."
+        ]
     );
 }
 
