@@ -673,11 +673,11 @@ fn check_stored_in_static<A>(
         return;
     };
 
+    // An argument the analysis gave no type stores nothing the check can read.
     let class = word(context.resolved_names.get(&class.name));
-    for argument in argument_list.arguments.iter() {
-        if let Some(stored) = artifacts.get_expression_type(argument.value()) {
-            check_foreign_static_write(context, class, word(name.value), stored, argument.value().span());
-        }
+    let stored = argument_list.arguments.iter().map(Argument::value);
+    for (value, stored) in stored.filter_map(|value| Some((value, artifacts.get_expression_type(value)?))) {
+        check_foreign_static_write(context, class, word(name.value), stored, value.span());
     }
 }
 
