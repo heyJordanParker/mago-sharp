@@ -354,6 +354,9 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
     let interface_fqcn_bytes: &[u8] = context.get_name(interface.name.span.start);
     let interface_name = BytesDisplay(interface_name_bytes);
     let interface_fqcn = BytesDisplay(interface_fqcn_bytes);
+    // A PHP# interface member is public without a modifier, and its default bodies run from the interface's trait, so
+    // `check_slice` decides both.
+    let is_sharp = context.program.dialect.is_sharp();
 
     if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(interface_name_bytes))
         || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
@@ -454,7 +457,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     );
                 }
 
-                if let MethodBody::Concrete(body) = &method.body {
+                if !is_sharp && let MethodBody::Concrete(body) = &method.body {
                     context.report(
                         Issue::error(format!("Interface method `{interface_name}::{method_name}` cannot have a body."))
                             .with_annotations([
@@ -583,7 +586,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                             );
                         }
 
-                        if !found_public {
+                        if !found_public && !is_sharp {
                             context.report(
                                 Issue::error(format!(
                                     "Interface virtual property `{interface_name}::{property_name}` must be declared public."
@@ -666,6 +669,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                             }
                         }
                     }
+                    Property::Computed(_) if is_sharp => {}
                     Property::Computed(computed_property) => {
                         let property_name = BytesDisplay(computed_property.variable.name);
 

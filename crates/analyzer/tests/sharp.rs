@@ -794,13 +794,13 @@ fn a_header_names_the_base_class_and_the_interfaces_as_in_php() {
     assert_eq!(issues(("src/Demo/Page.sharp", sharp), &others), Vec::<String>::new());
 }
 
-/// A header with two classes, a trait, a missing name, a final class or an interface whose method the class lacks
-/// reports what its PHP twin's `extends` and `implements` report.
+/// A header with two classes, a missing name, a final class or an interface whose method the class lacks reports what
+/// its PHP twin's `extends` and `implements` report.
 #[test]
 fn a_header_reports_what_extends_and_implements_report_in_php() {
-    let library = "<?php\n\nnamespace Lib;\n\ninterface Named\n{\n    public function name(): string;\n}\n\nclass Entity\n{\n}\n\nclass Other\n{\n}\n\ntrait Mixin\n{\n}\n\nfinal class Sealed\n{\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Entity;\nimport Lib.Mixin;\nimport Lib.Named;\nimport Lib.Other;\nimport Lib.Sealed;\n\npublic class Twice : Entity, Other\n{\n}\n\npublic class Blend : Mixin\n{\n}\n\npublic class Lost : Missing\n{\n}\n\npublic class Closed : Sealed\n{\n}\n\npublic class Partial : Named\n{\n}\n\npublic interface Wide : Entity\n{\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Entity;\nuse Lib\\Mixin;\nuse Lib\\Named;\nuse Lib\\Other;\nuse Lib\\Sealed;\n\nclass Twice extends Entity implements Other\n{\n}\n\nclass Blend implements Mixin\n{\n}\n\nclass Lost implements Missing\n{\n}\n\nclass Closed extends Sealed\n{\n}\n\nclass Partial implements Named\n{\n}\n\ninterface Wide extends Entity\n{\n}\n";
+    let library = "<?php\n\nnamespace Lib;\n\ninterface Named\n{\n    public function name(): string;\n}\n\nclass Entity\n{\n}\n\nclass Other\n{\n}\n\nfinal class Sealed\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Entity;\nimport Lib.Named;\nimport Lib.Other;\nimport Lib.Sealed;\n\npublic class Twice : Entity, Other\n{\n}\n\npublic class Lost : Missing\n{\n}\n\npublic class Closed : Sealed\n{\n}\n\npublic class Partial : Named\n{\n}\n\npublic interface Wide : Entity\n{\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Entity;\nuse Lib\\Named;\nuse Lib\\Other;\nuse Lib\\Sealed;\n\nclass Twice extends Entity implements Other\n{\n}\n\nclass Lost implements Missing\n{\n}\n\nclass Closed extends Sealed\n{\n}\n\nclass Partial implements Named\n{\n}\n\ninterface Wide extends Entity\n{\n}\n";
     let others = [("src/Lib/Named.php", library)];
 
     let sharp_issues = issues(("src/Demo/Twice.sharp", sharp), &others);
@@ -809,7 +809,6 @@ fn a_header_reports_what_extends_and_implements_report_in_php() {
     assert_eq!(
         codes(&php_issues),
         [
-            "invalid-implement",
             "invalid-implement",
             "non-existent-class-like",
             "extend-final-class",
@@ -874,6 +873,85 @@ fn a_php_class_that_implements_a_class_is_still_an_error() {
         codes(&issues(("src/Demo/Page.php", php), &[])),
         ["invalid-implement", "invalid-parent-type", "mixed-return-statement"]
     );
+}
+
+const HAS_LABEL: &str = "<?php\n\nnamespace Lib;\n\ntrait HasLabel\n{\n    public string $name = 'order';\n\n    public function describe(): string\n    {\n        return 'labeled ' . $this->name;\n    }\n}\n\ntrait HasTitle\n{\n    public function describe(): string\n    {\n        return 'titled';\n    }\n}\n\ntrait Measured\n{\n    abstract public function describe(int $width): string;\n}\n\ntrait Priced\n{\n    abstract public function price(): int;\n}\n";
+
+/// A header names a plain PHP trait, and the class uses it as `use HasLabel;` does, spec section 22: it calls the
+/// trait's method and reads its field through `this.`, and passes itself where the trait is the type, as a parameter
+/// and as a `List<HasLabel>` element. Its subclass does the same, and PHP's `instanceof HasLabel` holds for both.
+#[test]
+fn a_header_trait_gives_the_class_its_members_and_its_type_as_use_does_in_php() {
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\n\npublic class Order : HasLabel\n{\n    public List<HasLabel> labeled { get; private set; } = [];\n\n    public string title()\n    {\n        this.labeled.add(this);\n        return this.describe() + this.name + Order.show(this);\n    }\n\n    public static string show(HasLabel labeled)\n    {\n        return labeled.describe();\n    }\n}\n\npublic class RushOrder : Order\n{\n    public int rushed()\n    {\n        List<HasLabel> all = [this];\n        all.add(this);\n        return strlen(this.describe() + this.name + Order.show(this)) + count(all);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\HasLabel;\n\nclass Order\n{\n    use HasLabel;\n\n    /** @var list<HasLabel> */\n    public private(set) array $labeled = [];\n\n    public function title(): string\n    {\n        $this->labeled[] = $this;\n        return $this->describe() . $this->name . Order::show($this);\n    }\n\n    public static function show(HasLabel $labeled): string\n    {\n        return $labeled->describe();\n    }\n}\n\nclass RushOrder extends Order\n{\n    public function rushed(): int\n    {\n        $all = [$this];\n        $all[] = $this;\n        return strlen($this->describe() . $this->name . Order::show($this)) + count($all);\n    }\n}\n";
+    let caller = "<?php\n\nnamespace App;\n\nuse Demo\\Order;\nuse Demo\\RushOrder;\nuse Lib\\HasLabel;\n\nfunction label(Order $order, RushOrder $rush, object $any): string\n{\n    if ($any instanceof HasLabel) {\n        return $any->describe();\n    }\n\n    return $order instanceof HasLabel && $rush instanceof HasLabel ? 'both' : 'none';\n}\n";
+    let library = ("src/Lib/HasLabel.php", HAS_LABEL);
+
+    assert_eq!(issues(("src/Demo/Order.php", php), &[library]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &[library]), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/App/label.php", caller), &[library, ("src/Demo/Order.sharp", sharp)]),
+        issues(("src/App/label.php", caller), &[library, ("src/Demo/Order.php", php)]),
+    );
+}
+
+/// Two header traits whose methods collide, a header trait field the class declares again with another type, and a
+/// header trait's abstract method the class leaves out each report what the PHP twin's `use` reports. Mago reports no
+/// collision of two concrete methods for PHP, so `Twice` reports none for its twin either.
+#[test]
+fn a_header_trait_reports_what_use_reports_in_php() {
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\nimport Lib.HasTitle;\nimport Lib.Measured;\nimport Lib.Priced;\n\npublic class Twice : HasLabel, HasTitle\n{\n}\n\npublic class Narrow : HasLabel, Measured\n{\n}\n\npublic class Clash : HasLabel\n{\n    public int name = 1;\n}\n\npublic class Unpriced : Priced\n{\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\HasLabel;\nuse Lib\\HasTitle;\nuse Lib\\Measured;\nuse Lib\\Priced;\n\nclass Twice\n{\n    use HasLabel, HasTitle;\n}\n\nclass Narrow\n{\n    use HasLabel, Measured;\n}\n\nclass Clash\n{\n    use HasLabel;\n\n    public int $name = 1;\n}\n\nclass Unpriced\n{\n    use Priced;\n}\n";
+    let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
+
+    let sharp_issues = issues(("src/Demo/Twice.sharp", sharp), &others);
+    let php_issues = issues(("src/Demo/Twice.php", php), &others);
+
+    assert_eq!(
+        codes(&php_issues),
+        [
+            "incompatible-parameter-count",
+            "incompatible-parameter-count",
+            "incompatible-property-type",
+            "unimplemented-abstract-method"
+        ],
+        "{php_issues:?}"
+    );
+    assert_eq!(codes(&sharp_issues), codes(&php_issues), "{sharp_issues:?}");
+}
+
+/// The checker cannot tell a missing trait from a missing class, so a header naming a trait that does not exist
+/// reports what a header naming a missing class reports.
+#[test]
+fn a_header_trait_that_does_not_exist_reports_what_a_missing_class_reports() {
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\n\npublic class Gone : HasLabel, MissingTrait\n{\n}\n\npublic class Lost : MissingClass\n{\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Gone.sharp", sharp), &[("src/Lib/HasLabel.php", HAS_LABEL)]),
+        [
+            "Class `Demo\\Gone` cannot implement unknown type `MissingTrait`",
+            "Class `Demo\\Lost` cannot implement unknown type `MissingClass`",
+        ]
+    );
+}
+
+/// Only a class composes traits. An interface or enum header that names a trait reports what the PHP twin's `extends`
+/// and `implements` report, and a PHP class that implements a trait still reports it.
+#[test]
+fn an_interface_or_enum_header_that_names_a_trait_reports_what_php_reports() {
+    let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\n\npublic interface Wide : HasLabel\n{\n}\n\nenum Kind : HasLabel\n{\n    case One;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\HasLabel;\n\ninterface Wide extends HasLabel\n{\n}\n\nenum Kind implements HasLabel\n{\n    case One;\n}\n\nclass Blend implements HasLabel\n{\n}\n";
+    let others = [("src/Lib/HasLabel.php", HAS_LABEL)];
+
+    let sharp_messages = messages(("src/Demo/Wide.sharp", sharp), &others);
+    let php_messages = messages(("src/Demo/Wide.php", php), &others);
+
+    assert_eq!(
+        codes(&issues(("src/Demo/Wide.php", php), &others)),
+        ["invalid-extend", "invalid-implement", "invalid-implement"]
+    );
+    assert_eq!(codes(&issues(("src/Demo/Wide.sharp", sharp), &others)), ["invalid-extend", "invalid-implement"]);
+    assert_eq!(sharp_messages, php_messages[..2]);
 }
 
 /// A plain PHP method is open unless PHP marks it `final`, and replacing one needs `override`, spec section 22. So

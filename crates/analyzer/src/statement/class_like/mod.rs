@@ -53,7 +53,6 @@ use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
-use mago_syntax::cst::TraitUse;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
@@ -859,25 +858,42 @@ where
 
     let mut extended_types: Vec<&Identifier<'arena>> = extends_ast.iter().flat_map(|e| e.types.iter()).collect();
     let mut implemented_types: Vec<&Identifier<'arena>> = implements_ast.iter().flat_map(|i| i.types.iter()).collect();
+    let mut header_traits: Vec<&Identifier<'arena>> = Vec::new();
 
-    // A PHP# header, `: Base, IFace`, names an interface's parents, or a class's parent among its interfaces: the
-    // one class the populator linked as the parent.
+    // A PHP# header, `: Base, IFace, Trait`, names an interface's parents, or a class's parent and traits among its
+    // interfaces: the one class the populator linked as the parent, and every trait, which the class uses.
     for type_name in inheritance_ast.iter().flat_map(|inheritance| inheritance.types.iter()) {
-        let is_parent = class_like_metadata.kind.is_interface()
+        let header_name = context.resolved_names.get(type_name);
+
+        if class_like_metadata.kind.is_interface()
             || class_like_metadata
                 .direct_parent_class
-                .is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(context.resolved_names.get(type_name)));
-
-        if is_parent { extended_types.push(type_name) } else { implemented_types.push(type_name) }
+                .is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(header_name))
+        {
+            extended_types.push(type_name);
+        } else if class_like_metadata.kind.is_class() && context.codebase.get_trait(header_name).is_some() {
+            header_traits.push(type_name);
+        } else {
+            implemented_types.push(type_name);
+        }
     }
+
+    // The traits of a PHP# header compose as one `use` statement does, before the class's own `use` statements.
+    let trait_uses: Vec<(Span, Vec<&Identifier<'arena>>)> = inheritance_ast
+        .filter(|_| !header_traits.is_empty())
+        .map(|inheritance| (inheritance.span(), header_traits))
+        .into_iter()
+        .chain(members.iter().filter_map(|member| match member {
+            ClassLikeMember::TraitUse(trait_use) => Some((trait_use.span(), trait_use.trait_names.iter().collect())),
+            _ => None,
+        }))
+        .collect();
 
     check_class_like_extends(context, class_like_metadata, &extended_types);
     check_class_like_implements(context, class_like_metadata, &implemented_types, &mut checked_signatures);
 
-    for member in members {
-        if let ClassLikeMember::TraitUse(used_trait) = member {
-            check_class_like_use(context, class_like_metadata, used_trait);
-        }
+    for (_, used_types) in &trait_uses {
+        check_class_like_use(context, class_like_metadata, used_types);
     }
 
     let has_complete_hierarchy = !class_like_metadata.has_incomplete_hierarchy();
@@ -1027,11 +1043,11 @@ where
 
     if !class_like_metadata.kind.is_trait() {
         check_abstract_method_signatures(context, class_like_metadata, &mut checked_signatures);
-        check_trait_method_conflicts(context, class_like_metadata, members);
+        check_trait_method_conflicts(context, class_like_metadata, &trait_uses);
     }
 
-    check_trait_property_conflicts(context, class_like_metadata, members);
-    check_readonly_class_trait_properties(context, class_like_metadata, members);
+    check_trait_property_conflicts(context, class_like_metadata, &trait_uses, members);
+    check_readonly_class_trait_properties(context, class_like_metadata, &trait_uses);
     check_template_variance_positions(context, class_like_metadata);
     check_uninhabitable_diamonds(context, class_like_metadata);
 
@@ -1491,7 +1507,7 @@ fn check_class_like_implements<'ctx, 'arena, A>(
 fn check_class_like_use<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    trait_use: &TraitUse<'arena>,
+    used_types: &[&Identifier<'arena>],
 ) where
     A: Arena,
 {
@@ -1501,8 +1517,8 @@ fn check_class_like_use<'ctx, 'arena, A>(
     let using_name = class_like_metadata.original_name;
     let using_class_span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
 
-    for used_type in &trait_use.trait_names {
-        let used_type_str = context.resolved_names.get(&used_type);
+    for &used_type in used_types {
+        let used_type_str = context.resolved_names.get(used_type);
         let used_trait_metadata = context.codebase.get_class_like(used_type_str);
 
         let Some(used_trait_metadata) = used_trait_metadata else {
@@ -2235,28 +2251,17 @@ fn check_abstract_method_signatures<'ctx, A>(
     }
 }
 
-fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
+fn check_trait_method_conflicts<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    members: &'ast [ClassLikeMember<'arena>],
+    trait_uses: &[(Span, Vec<&Identifier<'arena>>)],
 ) where
     A: Arena,
 {
-    let mut trait_uses: Vec<(&'ast TraitUse<'arena>, Vec<Word>)> = Vec::new();
-
-    for member in members {
-        if let ClassLikeMember::TraitUse(trait_use) = member {
-            let mut trait_names = Vec::new();
-            for trait_name_id in &trait_use.trait_names {
-                let (trait_fqcn, _) = context.scope.resolve(NameKind::Default, trait_name_id.value());
-                trait_names.push(word(&trait_fqcn));
-            }
-            trait_uses.push((trait_use, trait_names));
-        }
-    }
+    let trait_uses = resolve_trait_uses(context, trait_uses);
 
     for i in 0..trait_uses.len() {
-        let (first_trait_use, first_traits) = &trait_uses[i];
+        let (first_trait_use_span, first_traits) = &trait_uses[i];
 
         for k in 0..first_traits.len() {
             for l in (k + 1)..first_traits.len() {
@@ -2299,8 +2304,6 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
                             );
 
                             for incompatibility in issues {
-                                let trait_use_span = first_trait_use.span();
-
                                 report_signature_compatibility_issue(
                                     context,
                                     class_like_metadata,
@@ -2308,7 +2311,7 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
                                     *method_name,
                                     second_method,
                                     incompatibility,
-                                    trait_use_span,
+                                    *first_trait_use_span,
                                 );
                             }
                         }
@@ -2317,7 +2320,7 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
             }
         }
 
-        for (second_trait_use, second_traits) in trait_uses.iter().skip(i + 1) {
+        for (second_trait_use_span, second_traits) in trait_uses.iter().skip(i + 1) {
             for first_trait_fqcn in first_traits {
                 let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
                     continue;
@@ -2359,8 +2362,6 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
                                 );
 
                                 for incompatibility in issues {
-                                    let second_trait_use_span = second_trait_use.span();
-
                                     report_signature_compatibility_issue(
                                         context,
                                         class_like_metadata,
@@ -2368,7 +2369,7 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
                                         *method_name,
                                         second_method,
                                         incompatibility,
-                                        second_trait_use_span,
+                                        *second_trait_use_span,
                                     );
                                 }
                             }
@@ -2380,25 +2381,15 @@ fn check_trait_method_conflicts<'ctx, 'ast, 'arena, A>(
     }
 }
 
-fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
+fn check_trait_property_conflicts<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    members: &'ast [ClassLikeMember<'arena>],
+    trait_uses: &[(Span, Vec<&Identifier<'arena>>)],
+    members: &[ClassLikeMember<'arena>],
 ) where
     A: Arena,
 {
-    let mut trait_uses: Vec<(&'ast TraitUse<'arena>, Vec<Word>)> = Vec::new();
-
-    for member in members {
-        if let ClassLikeMember::TraitUse(trait_use) = member {
-            let mut trait_names = Vec::new();
-            for trait_name_id in &trait_use.trait_names {
-                let (trait_fqcn, _) = context.scope.resolve(NameKind::Default, trait_name_id.value());
-                trait_names.push(word(&trait_fqcn));
-            }
-            trait_uses.push((trait_use, trait_names));
-        }
-    }
+    let trait_uses = resolve_trait_uses(context, trait_uses);
 
     let mut class_properties: IndexMap<Word, &PropertyMetadata> = IndexMap::new();
     for (property_name, property_metadata) in class_like_metadata.properties.iter().sorted_by_key(|(k, _)| *k) {
@@ -2410,7 +2401,7 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
     }
 
     for i in 0..trait_uses.len() {
-        let (first_trait_use, first_traits) = &trait_uses[i];
+        let (first_trait_use_span, first_traits) = &trait_uses[i];
 
         for k in 0..first_traits.len() {
             for l in (k + 1)..first_traits.len() {
@@ -2440,14 +2431,14 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
                         *property_name,
                         *first_trait_fqcn,
                         *second_trait_fqcn,
-                        first_trait_use.span(),
+                        *first_trait_use_span,
                         conflict,
                     );
                 }
             }
         }
 
-        for (second_trait_use, second_traits) in trait_uses.iter().skip(i + 1) {
+        for (second_trait_use_span, second_traits) in trait_uses.iter().skip(i + 1) {
             for first_trait_fqcn in first_traits {
                 let Some(first_trait_metadata) = context.codebase.get_class_like(first_trait_fqcn.as_ref()) else {
                     continue;
@@ -2476,7 +2467,7 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
                             *property_name,
                             *first_trait_fqcn,
                             *second_trait_fqcn,
-                            second_trait_use.span(),
+                            *second_trait_use_span,
                             conflict,
                         );
                     }
@@ -2521,7 +2512,7 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
                         }
                         None
                     })
-                    .unwrap_or_else(|| first_trait_use.span());
+                    .unwrap_or(*first_trait_use_span);
 
                 report_trait_property_conflict(
                     context,
@@ -2535,6 +2526,22 @@ fn check_trait_property_conflicts<'ctx, 'ast, 'arena, A>(
             }
         }
     }
+}
+
+/// The fully qualified names of the traits in each group of `trait_uses`, beside the span the group's errors point at.
+fn resolve_trait_uses<A>(
+    context: &Context<'_, '_, A>,
+    trait_uses: &[(Span, Vec<&Identifier<'_>>)],
+) -> Vec<(Span, Vec<Word>)>
+where
+    A: Arena,
+{
+    trait_uses
+        .iter()
+        .map(|(span, trait_names)| {
+            (*span, trait_names.iter().map(|trait_name| word(context.resolved_names.get(*trait_name))).collect())
+        })
+        .collect()
 }
 
 /// Check if two properties are compatible, returns Err with specific conflict type if not
@@ -3898,7 +3905,7 @@ fn check_class_like_constants<'ctx, 'arena, A>(
 fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    members: &[ClassLikeMember<'arena>],
+    trait_uses: &[(Span, Vec<&Identifier<'arena>>)],
 ) where
     A: Arena,
 {
@@ -3906,33 +3913,28 @@ fn check_readonly_class_trait_properties<'ctx, 'arena, A>(
         return;
     }
 
-    for member in members {
-        if let ClassLikeMember::TraitUse(trait_use) = member {
-            for trait_name_id in &trait_use.trait_names {
-                let (trait_fqcn, _) = context.scope.resolve(NameKind::Default, trait_name_id.value());
-                let trait_fqcn = word(&trait_fqcn);
+    for trait_name_id in trait_uses.iter().flat_map(|(_, trait_names)| trait_names) {
+        let trait_fqcn = word(context.resolved_names.get(*trait_name_id));
 
-                let Some(trait_metadata) = context.codebase.get_class_like(trait_fqcn.as_ref()) else {
-                    continue;
-                };
+        let Some(trait_metadata) = context.codebase.get_class_like(trait_fqcn.as_ref()) else {
+            continue;
+        };
 
-                for (property_name, property) in &trait_metadata.properties {
-                    if !property.flags.is_readonly() {
-                        context.collector.report_with_code(
-                            IssueCode::InvalidTraitUse,
-                            Issue::error(format!(
-                                "Readonly class `{}` cannot use trait `{}` which has non-readonly property `{}`",
-                                class_like_metadata.name, trait_fqcn, property_name
-                            ))
-                            .with_annotation(Annotation::primary(trait_name_id.span()).with_message("Trait used here"))
-                            .with_note("All properties in a trait used by a readonly class must be declared readonly.")
-                            .with_help(format!(
-                                "Add the `readonly` modifier to property `{}` in trait `{}`.",
-                                property_name, trait_fqcn
-                            )),
-                        );
-                    }
-                }
+        for (property_name, property) in &trait_metadata.properties {
+            if !property.flags.is_readonly() {
+                context.collector.report_with_code(
+                    IssueCode::InvalidTraitUse,
+                    Issue::error(format!(
+                        "Readonly class `{}` cannot use trait `{}` which has non-readonly property `{}`",
+                        class_like_metadata.name, trait_fqcn, property_name
+                    ))
+                    .with_annotation(Annotation::primary(trait_name_id.span()).with_message("Trait used here"))
+                    .with_note("All properties in a trait used by a readonly class must be declared readonly.")
+                    .with_help(format!(
+                        "Add the `readonly` modifier to property `{}` in trait `{}`.",
+                        property_name, trait_fqcn
+                    )),
+                );
             }
         }
     }

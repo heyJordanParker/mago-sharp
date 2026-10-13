@@ -405,8 +405,9 @@ where
         }
     }
 
-    // A PHP# header, `: Base, IFace`, lists a class's base among its interfaces. PHP links the one class there as
-    // the parent, and so does the populator. An enum has no parent, so every name in its header is an interface.
+    // A PHP# header, `: Base, IFace, Trait`, lists a class's base and traits among its interfaces. PHP links the one
+    // class there as the parent and uses every trait there, and so does the populator. An enum has no parent and
+    // uses no header trait, so every name in its header is an interface.
     if let Some(inheritance) = inheritance {
         for type_name in &inheritance.types {
             class_like_metadata

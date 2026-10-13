@@ -86,9 +86,12 @@ const SUPERGLOBALS: [&[u8]; 9] =
 /// - A class: attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header,
 ///   constants, fields, properties and methods, with no other modifiers, `extends` or `implements`. The engine tells
 ///   the base class from the interfaces when it links the class.
-/// - An interface: an optional `public`, a name, an optional `: Interface` header and methods, with no attributes,
-///   other modifiers or `extends`. An interface method has parameters, a return type and no body, as spec section 29
-///   writes `Money quote(Cart cart);`. A modifier on it is an error, because every interface method is public.
+/// - An interface: an optional `public`, a name, an optional `: Interface` header, methods and properties, with no
+///   attributes, other modifiers or `extends`. An interface method has parameters, a return type and no body, as spec
+///   section 29 writes `Money quote(Cart cart);`, or a default body, a block or `=> expr;`, as spec section 22 writes
+///   `string designKey() => …;`. A modifier on it is an error, because every interface method is public. A property is
+///   `T p { get; }` or `T p { get; set; }` without a modifier or an initial value, or a computed property without a
+///   modifier, whose expression is its default body. A default body is checked as a class method's body.
 /// - An enum: attributes, an optional `public`, a name, an optional `: string, Interface` header, constants, cases and
 ///   methods, with no other modifiers or `implements`. A leading `int` or `string` in the header is the backing type,
 ///   and every class name is an interface. A constant follows a class constant's rules. A case has attributes as a
@@ -211,7 +214,7 @@ pub enum Place {
     Class,
     /// An interface and its members.
     Interface,
-    /// An interface method's parameters and return type.
+    /// An interface method's parameters, return type and default body, whose block or expression is the method body's.
     Signature,
     /// An enum and its members.
     Enum,
@@ -324,7 +327,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Class)
         }
-        (Node::Interface(_), File) => Some(Interface),
+        (Node::Interface(interface), File) => {
+            report_methods_named_as_properties(
+                ClassLike { name: &interface.name, span: interface.span(), members: &interface.members },
+                context,
+            );
+
+            Some(Interface)
+        }
         (Node::Enum(_), File) => Some(Enum),
         (Node::FunctionLikeParameterList(parameters), Method | Signature) => {
             report_optional_before_required(parameters, context);
@@ -349,6 +359,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Modifier(Modifier::Public(_)), Interface | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
+        (Node::ClassLikeMember(ClassLikeMember::Property(property)), Interface)
+            if is_slice_interface_property(property) =>
+        {
+            Some(FieldOrProperty)
+        }
         (Node::Modifier(modifier), Signature) => {
             context.report(
                 Issue::error("An interface method takes no modifier: every interface method is public.")
@@ -369,7 +384,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 None
             }
         },
-        // A body's block is not in the place, so `MethodBody` admits only `MethodAbstractBody`.
         (
             Node::FunctionLikeReturnTypeHint(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
             Signature,
@@ -581,8 +595,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(Parameter),
         (Node::PropertyHookList(_), Parameter) => None,
         (Node::FunctionLikeParameterDefaultValue(_), Parameter) => Some(Constant),
-        (Node::Block(_), Method | Body) => Some(Body),
-        (Node::MethodExpressionBody(_), Method) => Some(Body),
+        (Node::Block(_), Method | Signature | Body) => Some(Body),
+        (Node::MethodExpressionBody(_), Method | Signature) => Some(Body),
         (Node::TryCatchClause(_), Body) => Some(TryCatchClause),
         // `check_try` reports a catch type that is not a class, and `check_try_catch_clause` the variable's name.
         (Node::Hint(_) | Node::DirectVariable(_), TryCatchClause) => None,
@@ -860,7 +874,7 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), (&'static s
 }
 
 /// Whether the slice has an interface method, with the refusal's message and note when it does not. `enter` reports a
-/// modifier and a body.
+/// modifier. A body is the method's default body, checked as a class method's body.
 fn is_slice_signature(method: &Method) -> Result<(), (&'static str, &'static str)> {
     if method.return_type_hint.is_none() {
         Err((
@@ -874,6 +888,26 @@ fn is_slice_signature(method: &Method) -> Result<(), (&'static str, &'static str
         ))
     } else {
         Ok(())
+    }
+}
+
+/// Whether the slice has an interface property: an abstract `T p { get; }` or `T p { get; set; }`, whose accessors
+/// `check_accessors` decides, or a computed `T p => expr;`, whose expression is its default body. It has no attributes,
+/// no modifier, because every interface member is public, no accessor modifier or body, and no initial value, because
+/// the class that implements the interface declares the storage.
+fn is_slice_interface_property(property: &Property) -> bool {
+    match property {
+        Property::Hooked(property) => {
+            property.attribute_lists.is_empty()
+                && property.modifiers.is_empty()
+                && matches!(property.item, PropertyItem::Abstract(_))
+                && property.initial_value.is_none()
+                && property.hook_list.hooks.iter().all(|accessor| {
+                    accessor.modifiers.is_empty() && matches!(accessor.body, PropertyHookBody::Abstract(_))
+                })
+        }
+        Property::Computed(property) => property.attribute_lists.is_empty() && property.modifiers.is_empty(),
+        Property::Plain(_) => false,
     }
 }
 
@@ -1465,10 +1499,10 @@ const fn supported(place: Place) -> &'static str {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties and methods, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header and methods, with no attributes, other modifiers, `extends`, constants or properties."
+            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header, methods, properties `T p { get; }` or `T p { get; set; }`, and computed properties `T p => expr;`, each without a modifier, and no attributes, other modifiers, `extends`, constants or fields."
         }
         Place::Signature => {
-            "A PHP# interface method has no modifier, parameters, a return type of `int`, `float`, `bool`, `string`, `void`, a class, `List<T>` or `Map<TKey, TValue>`, and no body."
+            "A PHP# interface method has no modifier, parameters, a return type of `int`, `float`, `bool`, `string`, `void`, a class, `List<T>` or `Map<TKey, TValue>`, and no body or a default body."
         }
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases and methods, with no other modifiers or `implements`."
@@ -1803,7 +1837,7 @@ fn check_member_access(object: &Expression, member: &ClassLikeMemberSelector, co
     }
 }
 
-/// A class or an enum a PHP# file declares. The slice's class rules treat both alike.
+/// A class, an enum or an interface a PHP# file declares. The slice's class rules treat them alike.
 #[derive(Clone, Copy)]
 struct ClassLike<'ast, 'arena> {
     name: &'ast LocalIdentifier<'arena>,

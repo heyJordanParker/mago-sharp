@@ -126,22 +126,29 @@ pub fn populate_class_like_metadata_iterative(
         metadata.declaring_method_ids.insert(*method_name, method_id);
     }
 
-    for trait_name in sorted_atoms(metadata.used_traits.iter().copied()) {
-        merge_metadata_from_trait(&mut metadata, codebase, trait_name, symbol_references);
+    // A PHP# header lists a class's base class and traits among its interfaces. PHP links the one class there as the
+    // parent and uses every trait there, as `extends` and `use` do.
+    if metadata.flags.is_sharp() && metadata.kind.is_class() {
+        for name in sorted_atoms(metadata.direct_parent_interfaces.iter().copied()) {
+            let Some(kind) = codebase.get_class_like_by_word(name).map(|header_type| header_type.kind) else {
+                continue;
+            };
+
+            if kind.is_trait() {
+                metadata.direct_parent_interfaces.remove(&name);
+                metadata.all_parent_interfaces.remove(&name);
+                metadata.add_used_trait(name);
+            } else if kind.is_class() && metadata.direct_parent_class.is_none() {
+                metadata.direct_parent_interfaces.remove(&name);
+                metadata.all_parent_interfaces.remove(&name);
+                metadata.direct_parent_class = Some(name);
+                metadata.all_parent_classes.insert(name);
+            }
+        }
     }
 
-    // A PHP# header lists the base class among the interfaces, so the one class there is the parent, as PHP links it.
-    if metadata.flags.is_sharp()
-        && metadata.kind.is_class()
-        && metadata.direct_parent_class.is_none()
-        && let Some(parent_classname) = sorted_atoms(metadata.direct_parent_interfaces.iter().copied())
-            .into_iter()
-            .find(|name| codebase.get_class_like_by_word(*name).is_some_and(|parent| parent.kind.is_class()))
-    {
-        metadata.direct_parent_interfaces.remove(&parent_classname);
-        metadata.all_parent_interfaces.remove(&parent_classname);
-        metadata.direct_parent_class = Some(parent_classname);
-        metadata.all_parent_classes.insert(parent_classname);
+    for trait_name in sorted_atoms(metadata.used_traits.iter().copied()) {
+        merge_metadata_from_trait(&mut metadata, codebase, trait_name, symbol_references);
     }
 
     if let Some(parent_classname) = metadata.direct_parent_class {
@@ -525,5 +532,57 @@ pub fn populate_class_like_types(
             symbol_references,
             force_repopulation,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use foldhash::HashSet;
+    use mago_allocator::LocalArena;
+    use mago_database::file::File;
+    use mago_names::resolver::NameResolver;
+    use mago_php_version::PHPVersion;
+    use mago_syntax::parser::parse_file;
+    use mago_word::WordSet;
+
+    use crate::metadata::CodebaseMetadata;
+    use crate::populator::populate_codebase;
+    use crate::reference::SymbolReferences;
+    use crate::scanner::scan_program;
+
+    fn populate(files: &[(&'static str, &'static str)]) -> CodebaseMetadata {
+        let arena = LocalArena::new();
+        let mut codebase = CodebaseMetadata::new();
+        for (name, code) in files {
+            let file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+            let program = parse_file(&arena, &file);
+            assert!(!program.has_errors(), "{name} did not parse: {:?}", program.errors);
+            let resolved_names = NameResolver::new(&arena).resolve(program);
+            codebase.extend(scan_program(&arena, &file, program, &resolved_names, PHPVersion::LATEST));
+        }
+
+        populate_codebase(&mut codebase, &mut SymbolReferences::new(), WordSet::default(), HashSet::default());
+        codebase
+    }
+
+    #[test]
+    fn a_sharp_class_header_uses_its_traits_as_php_use_does() {
+        let library = "<?php\n\nnamespace Lib;\n\ntrait HasLabel\n{\n    public function describe(): string\n    {\n        return 'labeled';\n    }\n}\n";
+        let sharp = "namespace Demo;\n\nimport Lib.HasLabel;\n\npublic class Order : HasLabel\n{\n}\n\npublic class RushOrder : Order\n{\n}\n";
+        let php = "<?php\n\nnamespace Demo;\n\nclass Blend implements \\Lib\\HasLabel\n{\n}\n";
+
+        let codebase = populate(&[
+            ("src/Lib/HasLabel.php", library),
+            ("src/Demo/Order.sharp", sharp),
+            ("src/Demo/Blend.php", php),
+        ]);
+
+        assert!(codebase.class_uses_trait(b"Demo\\Order", b"Lib\\HasLabel"));
+        assert!(codebase.class_uses_trait(b"Demo\\RushOrder", b"Lib\\HasLabel"));
+        assert!(!codebase.class_implements(b"Demo\\Order", b"Lib\\HasLabel"));
+        assert!(codebase.method_exists(b"Demo\\RushOrder", b"describe"));
+        assert!(!codebase.class_uses_trait(b"Demo\\Blend", b"Lib\\HasLabel"));
     }
 }

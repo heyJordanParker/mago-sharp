@@ -75,6 +75,7 @@ use mago_syntax::cst::WhileBody;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file_with_dialect;
 use mago_syntax::settings::ParserSettings;
+use mago_syntax::utils::interface::DEFAULTS_TRAIT_SHORT_NAME;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_syntax_core::utils::parse_literal_integer_as_float;
 
@@ -180,6 +181,7 @@ const ZEND_ACC_FINAL: u32 = 1 << 5;
 const ZEND_ACC_ABSTRACT: u32 = 1 << 6;
 const ZEND_ACC_EXPLICIT_ABSTRACT_CLASS: u32 = 1 << 6;
 const ZEND_ACC_INTERFACE: u32 = 1 << 0;
+const ZEND_ACC_TRAIT: u32 = 1 << 1;
 const ZEND_ACC_READONLY: u32 = 1 << 7;
 const ZEND_ACC_PROTECTED_SET: u32 = 1 << 11;
 const ZEND_ACC_PRIVATE_SET: u32 = 1 << 12;
@@ -375,7 +377,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             Statement::Use(_) => {}
             Statement::Class(class) => statements.push(self.class(class)),
-            Statement::Interface(interface) => statements.push(self.interface(interface)),
+            Statement::Interface(interface) => {
+                statements.push(self.interface(interface));
+                statements.extend(self.defaults(interface));
+            }
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
         }
@@ -454,16 +459,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_NAME_LIST, 0, self.line(inheritance), &names)
     }
 
-    /// An interface is a class declaration with `ZEND_ACC_INTERFACE`, and its methods are `public`, as php-src's
-    /// grammar builds `interface Measured { public function area(): float; }`.
+    /// An interface is a class declaration with `ZEND_ACC_INTERFACE` whose members are all abstract and `public`, as
+    /// php-src's grammar builds `interface Measured { public function area(): float; public int $sides { get; } }`.
+    /// Its default bodies are in the trait `defaults` lowers.
     fn interface(&mut self, interface: &Interface) -> u32 {
         let mut members = Vec::new();
         for member in &interface.members {
-            let ClassLikeMember::Method(method) = member else {
-                unreachable!("check_slice refuses the interface member `{member}`");
-            };
-
-            members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
+            members.push(match member {
+                ClassLikeMember::Method(method) => self.signature(method),
+                ClassLikeMember::Property(property) => self.abstract_property(property),
+                _ => unreachable!("check_slice refuses the interface member `{member}`"),
+            });
         }
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
@@ -477,6 +483,43 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             interface.name.value,
             &[NULL, header, members, NULL, NULL],
         )
+    }
+
+    /// The trait that holds an interface's default bodies, as php-src's grammar builds `trait Defaults { … }`, on the
+    /// interface's lines. Its name is `HasDesign\Defaults` for the interface `HasDesign`, which the engine declares in
+    /// the file's namespace, so every name in a body resolves as it does in the interface. Each default method is a
+    /// `public` method with its body, and each computed property a `public` property with its `get` hook, in source
+    /// order. An interface without a default body has no trait.
+    fn defaults(&mut self, interface: &Interface) -> Option<u32> {
+        let mut members = Vec::new();
+        for member in &interface.members {
+            match member {
+                ClassLikeMember::Method(method) if !matches!(method.body, MethodBody::Abstract(_)) => {
+                    members.push(self.method(method, ZEND_ACC_PUBLIC, &[]));
+                }
+                ClassLikeMember::Property(property @ Property::Computed(computed)) => {
+                    let hooks = self.get_hook(&computed.body);
+                    members.push(self.property_group(property, ZEND_ACC_PUBLIC, hooks));
+                }
+                _ => {}
+            }
+        }
+
+        if members.is_empty() {
+            return None;
+        }
+
+        let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
+        let name = [interface.name.value, b"\\", DEFAULTS_TRAIT_SHORT_NAME.as_bytes()].concat();
+
+        Some(self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_TRAIT,
+            interface.interface.span,
+            interface.right_brace,
+            &name,
+            &[NULL, NULL, members, NULL, NULL],
+        ))
     }
 
     /// An enum is a final class with the enum flag, its header as its interface list and its backing type as its last
@@ -532,34 +575,48 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             unreachable!("check_slice refuses a method without an access modifier");
         }
 
+        self.method_declaration(method, flags, |lowering| {
+            let mut statements = initial_values.to_vec();
+            match &method.body {
+                MethodBody::Concrete(block) => {
+                    for statement in &block.statements {
+                        statements.push(lowering.statement(statement));
+                    }
+
+                    lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(block), &statements)
+                }
+                MethodBody::Expression(body) => {
+                    let line = lowering.line(body);
+                    let expression = lowering.expression(body.expression);
+                    statements.push(if method.returns_value() {
+                        lowering.node(SHARP_AST_RETURN, 0, line, &[expression])
+                    } else {
+                        expression
+                    });
+
+                    lowering.node(SHARP_AST_STMT_LIST, 0, line, &statements)
+                }
+                MethodBody::Abstract(_) => NULL,
+            }
+        })
+    }
+
+    /// An interface's method is `public` with no statement list, as php-src's grammar builds
+    /// `public function designKey(): string;`. Its default body, if any, is in the trait `defaults` lowers.
+    fn signature(&mut self, method: &Method) -> u32 {
+        self.method_declaration(method, ZEND_ACC_PUBLIC, |_| NULL)
+    }
+
+    /// A method's declaration with `flags`: its parameters, the statement list `body` lowers after them, its return
+    /// type and its attributes.
+    fn method_declaration(&mut self, method: &Method, flags: u32, body: impl FnOnce(&mut Self) -> u32) -> u32 {
         let mut parameters = Vec::new();
         for parameter in &method.parameter_list.parameters {
             parameters.push(self.parameter(parameter));
         }
 
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&method.parameter_list), &parameters);
-        let mut statements = initial_values.to_vec();
-        let body = match &method.body {
-            MethodBody::Concrete(block) => {
-                for statement in &block.statements {
-                    statements.push(self.statement(statement));
-                }
-
-                self.node(SHARP_AST_STMT_LIST, 0, self.line(block), &statements)
-            }
-            MethodBody::Expression(body) => {
-                let line = self.line(body);
-                let expression = self.expression(body.expression);
-                statements.push(if method.returns_value() {
-                    self.node(SHARP_AST_RETURN, 0, line, &[expression])
-                } else {
-                    expression
-                });
-
-                self.node(SHARP_AST_STMT_LIST, 0, line, &statements)
-            }
-            MethodBody::Abstract(_) => NULL,
-        };
+        let body = body(self);
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
             None => (method.name.span, NULL),
@@ -606,14 +663,53 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `public string $slug { get => expr; }`. A constant initial value is its default, unless the property is
     /// `readonly`.
     fn property(&mut self, property: &Property) -> u32 {
-        let (accessor_flags, attribute_lists, hooks) = match property {
-            Property::Plain(field) => (0, &field.attribute_lists, NULL),
-            Property::Hooked(auto_property) => (
-                accessor_flags(&auto_property.modifiers, &auto_property.hook_list),
-                &auto_property.attribute_lists,
-                NULL,
-            ),
-            Property::Computed(computed) => (0, &computed.attribute_lists, self.get_hook(&computed.body)),
+        let (accessor_flags, hooks) = match property {
+            Property::Plain(_) => (0, NULL),
+            Property::Hooked(auto_property) => {
+                (accessor_flags(&auto_property.modifiers, &auto_property.hook_list), NULL)
+            }
+            Property::Computed(computed) => (0, self.get_hook(&computed.body)),
+        };
+
+        self.property_group(property, modifier_flags(property.modifiers()) | accessor_flags, hooks)
+    }
+
+    /// An interface's property is `public`, and each accessor is a hook without a body, as php-src's grammar builds
+    /// `public string $designColumn { get; }`. A computed property is `{ get; }` here, and its default body is in the
+    /// trait `defaults` lowers.
+    fn abstract_property(&mut self, property: &Property) -> u32 {
+        let mut hooks = Vec::new();
+        let line = match property {
+            Property::Hooked(auto_property) => {
+                for accessor in &auto_property.hook_list.hooks {
+                    hooks.push(self.abstract_hook(accessor.name.value, accessor.body.span()));
+                }
+
+                self.line(auto_property.hook_list.left_brace)
+            }
+            Property::Computed(computed) => {
+                hooks.push(self.abstract_hook(b"get", computed.body.arrow));
+
+                self.line(computed.body.arrow)
+            }
+            Property::Plain(_) => unreachable!("check_slice refuses a field in an interface"),
+        };
+        let hooks = self.node(SHARP_AST_STMT_LIST, 0, line, &hooks);
+
+        self.property_group(property, ZEND_ACC_PUBLIC, hooks)
+    }
+
+    /// A hook without a body, as php-src's grammar builds `get;`, on the line of `at`, the token after its name.
+    fn abstract_hook(&mut self, name: &[u8], at: Span) -> u32 {
+        self.declaration(SHARP_AST_PROPERTY_HOOK, 0, at, at, name, &[NULL, NULL, NULL, NULL, NULL])
+    }
+
+    /// A property group of one property with `flags` and the hook list `hooks`, or null.
+    fn property_group(&mut self, property: &Property, flags: u32, hooks: u32) -> u32 {
+        let attribute_lists = match property {
+            Property::Plain(field) => &field.attribute_lists,
+            Property::Hooked(auto_property) => &auto_property.attribute_lists,
+            Property::Computed(computed) => &computed.attribute_lists,
         };
         let Some(hint) = property.hint() else {
             unreachable!("the PHP# parser gives every field and property its type");
@@ -630,7 +726,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, default, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let flags = modifier_flags(property.modifiers()) | accessor_flags;
         let attributes = self.attributes(attribute_lists, None);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])

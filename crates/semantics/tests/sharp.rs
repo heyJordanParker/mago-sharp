@@ -11,8 +11,13 @@ use mago_syntax::parser::parse_file;
 
 /// Every semantic issue in the PHP# source, as `line:column message` at its primary span.
 fn issues(code: &'static str) -> Vec<String> {
+    issues_in("src/Report.sharp", code)
+}
+
+/// Every semantic issue in the source of the file `name`, whose extension picks the dialect, as `issues` prints them.
+fn issues_in(name: &'static str, code: &'static str) -> Vec<String> {
     let arena = LocalArena::new();
-    let file = File::ephemeral(Cow::Borrowed(b"src/Report.sharp"), Cow::Borrowed(code.as_bytes()));
+    let file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
     let program = parse_file(&arena, &file);
     assert!(program.errors.is_empty(), "test source did not parse: {:#?}", program.errors);
 
@@ -560,6 +565,59 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
     assert_eq!(
         issues(code),
         ["3:1 This modifier is not supported yet in PHP#.", "5:5 This class member is not supported yet in PHP#."]
+    );
+}
+
+/// Spec section 22: an interface declares abstract properties, `{ get; }` or `{ get; set; }`, and gives a method or a
+/// computed property a default body, which is checked as a class method's body.
+#[test]
+fn an_interface_declares_abstract_properties_and_gives_methods_and_properties_default_bodies() {
+    let code = "namespace App;\n\npublic interface HasDesign\n{\n    List<string> claims { get; set; }\n    string designColumn { get; }\n    string designKey() => `design:${this.designColumn}`;\n    string designLabel => `label:${this.designColumn}`;\n    string designName()\n    {\n        return this.designColumn;\n    }\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+#[test]
+fn a_default_body_outside_the_slice_is_not_supported_yet_as_in_a_class_method() {
+    let code = "namespace App;\n\ninterface HasDesign\n{\n    string designColumn { get; }\n    string designKey()\n    {\n        echo 1;\n        return designColumn;\n    }\n    string designLabel => $label;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "8:9 This statement is not supported yet in PHP#.",
+            "9:16 Write `this.designColumn`: members of the same object are always written with `this.`.",
+            "11:27 PHP# variables have no `$`: write `label`."
+        ]
+    );
+}
+
+#[test]
+fn a_php_interface_method_with_a_body_is_still_an_error() {
+    let code = "<?php\n\ninterface HasDesign\n{\n    public function designKey(): string\n    {\n        return 'design';\n    }\n}\n";
+
+    assert_eq!(
+        issues_in("src/HasDesign.php", code),
+        [
+            "5:21 Interface method `HasDesign::designKey` cannot have a body.",
+            "6:5 Interface method `HasDesign::designKey` is implicitly abstract and cannot have a concrete body."
+        ]
+    );
+}
+
+#[test]
+fn an_interface_field_constant_initial_value_or_accessor_body_is_still_not_supported() {
+    let code = "namespace App;\n\ninterface HasDesign\n{\n    private int count = 0;\n\n    const int SIDES = 4;\n\n    string label { get { return \"label\"; } }\n\n    int views { get; } = 0;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:5 Interface `HasDesign` cannot have non-hooked properties.",
+            "9:24 Interface virtual property `HasDesign::label` must be abstract.",
+            "5:5 This class member is not supported yet in PHP#.",
+            "7:5 This class member is not supported yet in PHP#.",
+            "9:5 This class member is not supported yet in PHP#.",
+            "11:5 This class member is not supported yet in PHP#."
+        ]
     );
 }
 

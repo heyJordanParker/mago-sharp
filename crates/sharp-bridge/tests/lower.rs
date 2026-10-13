@@ -1381,6 +1381,219 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
 }
 
 /// ```php
+/// namespace App;
+/// interface HasDesign {
+///     public array $claims { get; set; }
+///     public string $designColumn { get; }
+///     public function designKey(): string;
+///     public string $designLabel { get; }
+/// }
+/// trait Defaults {
+///     public function designKey(): string { return "design:{$this->designColumn}"; }
+///     public string $designLabel { get => "label:{$this->designColumn}"; }
+/// }
+/// ```
+///
+/// A PHP# interface with default bodies is a PHP interface whose members are all abstract, `[1]` `ZEND_ACC_INTERFACE`,
+/// then a trait, `[2]` `ZEND_ACC_TRAIT`, named `HasDesign\Defaults`, which the engine declares as
+/// `App\HasDesign\Defaults`. The trait holds each default body in source order: a method as a public method, and a
+/// computed property as a public property with a short `get` hook. An abstract hook has no body, as php-src's grammar
+/// builds `get;`, on the line of its `;`.
+#[test]
+fn an_interface_with_default_bodies_is_an_abstract_interface_then_its_defaults_trait() {
+    let lowered = Lowered::new(
+        "namespace App;\n\npublic interface HasDesign\n{\n    List<string> claims { get; set; }\n    string designColumn { get; }\n    string designKey() => `design:${this.designColumn}`;\n    string designLabel => `label:${this.designColumn}`;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [1] "HasDesign" @3-9
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [1]
+                    TYPE [7]
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "claims"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @5-5
+                            null
+                            null
+                            null
+                            null
+                            null
+                          PROPERTY_HOOK "set" @5-5
+                            null
+                            null
+                            null
+                            null
+                            null
+                    null
+                  PROP_GROUP [1]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "designColumn"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @6-6
+                            null
+                            null
+                            null
+                            null
+                            null
+                    null
+                  METHOD [1] "designKey" @7-7
+                    PARAM_LIST
+                    null
+                    null
+                    ZVAL [1] "string"
+                    null
+                  PROP_GROUP [1]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "designLabel"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @8-8
+                            null
+                            null
+                            null
+                            null
+                            null
+                    null
+                null
+                null
+              CLASS [2] "HasDesign\\Defaults" @3-9
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "designKey" @7-7
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        ENCAPS_LIST
+                          ZVAL "design:"
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "designColumn"
+                    ZVAL [1] "string"
+                    null
+                  PROP_GROUP [1]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "designLabel"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @8-8
+                            null
+                            null
+                            PROPERTY_HOOK_SHORT_BODY
+                              ENCAPS_LIST
+                                ZVAL "label:"
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "designColumn"
+                            null
+                            null
+                    null
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// namespace App;
+/// interface Measured {
+///     public float $area { get; }
+///     public function label(int $digits): string;
+/// }
+/// ```
+///
+/// An interface without a default body is the interface alone, with no trait after it.
+#[test]
+fn an_interface_without_default_bodies_has_no_defaults_trait() {
+    let lowered = Lowered::new(
+        "namespace App;\n\ninterface Measured\n{\n    float area { get; }\n    string label(int digits);\n}\n",
+    );
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [1] "Measured" @3-7
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [1]
+                    ZVAL [1] "float"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "area"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @5-5
+                            null
+                            null
+                            null
+                            null
+                            null
+                    null
+                  METHOD [1] "label" @6-6
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "int"
+                        ZVAL "digits"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    null
+                    ZVAL [1] "string"
+                    null
+                null
+                null
+        "#}
+    );
+}
+
+/// ```php
 /// interface Linkable extends \Lib\Named { }
 /// class Page implements \Lib\Entity, \App\Tenant\Linkable { }
 /// ```
