@@ -39,9 +39,6 @@ where
             T!["case"] => ClassLikeMember::EnumCase(self.parse_enum_case_with_attributes(Sequence::empty())?),
             T!["use"] => ClassLikeMember::TraitUse(self.parse_trait_use()?),
             _ if self.dialect.is_sharp() && self.is_at_law()? => ClassLikeMember::Law(self.parse_law()?),
-            _ if self.dialect.is_sharp() && self.is_at_extension()? => {
-                ClassLikeMember::Extension(self.parse_extension()?)
-            }
             _ if self.dialect.is_sharp() => {
                 self.parse_sharp_member_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?
             }

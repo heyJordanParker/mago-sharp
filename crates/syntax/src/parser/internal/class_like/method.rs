@@ -53,12 +53,16 @@ where
     /// a field. A type has no length limit, so no fixed lookahead can decide before it. A PHP property, which starts
     /// with `var` or a `$` variable, still parses so the rest of the class does, and its PHP syntax is an error. So do
     /// `required` on any member but the constructor, which is one "not supported yet" error, and a type declared inside
-    /// the class-like. A class name, a `.` and a name followed by `(` is a named constructor.
+    /// the class-like. A class name, a `.` and a name followed by `(` is a named constructor. `extension(…)` with no
+    /// attribute or modifier before it is an extension, spec section 26.
     pub(crate) fn parse_sharp_member_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
     ) -> Result<ClassLikeMember<'arena>, ParseError> {
+        if attributes.is_empty() && modifiers.is_empty() && self.is_at_extension()? {
+            return self.parse_extension().map(ClassLikeMember::Extension);
+        }
         if self.stream.is_at(T!["var"])? || self.stream.is_at(T!["$variable"])? {
             return Ok(ClassLikeMember::Property(
                 self.parse_property_with_attributes_and_modifiers(attributes, modifiers)?,
