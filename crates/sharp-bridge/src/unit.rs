@@ -31,6 +31,14 @@ pub const SHARP_UNIT_MAGIC: [u8; 8] = *b"SHARPC\0\0";
 /// The folder at the workspace root, and at each package root, that holds every compiled file.
 pub const COMPILED_FOLDER: &str = ".sharp";
 
+/// The last segment of an input that stands for the `.sharp` files of its folder, as in `app/Shop/*.sharp`.
+///
+/// Its stamp is the listing of the names of the regular files whose name ends in `.sharp` after at least one other
+/// byte, each followed by a newline, in byte order: its size is the listing's length, its modification time zero, and
+/// its hash the listing's. A link counts as the file it reaches, and a link that reaches none is left out. A file
+/// appearing or going changes it, and an edit doesn't.
+pub const SOURCE_LISTING: &str = "*.sharp";
+
 /// The first bytes of a `.sharpc` file. Every 16-byte hash is xxh3-128 in canonical big-endian order.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -289,13 +297,32 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
 }
 
 /// The size, modification time and hash of the file at the workspace-relative `path` under `root`, or none when no
-/// file is there.
+/// file of exactly that name is there.
+///
+/// A path whose last segment is [`SOURCE_LISTING`] gets the stamp of its folder's listing, which a missing folder gives
+/// empty.
 ///
 /// # Errors
 ///
-/// Returns the error of reading the file, other than its absence.
+/// Returns the error of reading the file or the folder, other than its absence.
 pub fn stamp(root: &Path, path: &[u8]) -> io::Result<Option<Input>> {
+    if let Some(folder) = path.strip_suffix(SOURCE_LISTING.as_bytes())
+        && (folder.is_empty() || folder.ends_with(b"/"))
+    {
+        let listing = source_listing(&root.join(String::from_utf8_lossy(folder).as_ref()))?;
+
+        return Ok(Some(Input {
+            path: path.to_vec(),
+            size: listing.len() as u64,
+            mtime_ns: 0,
+            hash: source_hash(&listing),
+        }));
+    }
+
     let full = root.join(String::from_utf8_lossy(path).as_ref());
+    if !folder_holds_name(&full)? {
+        return Ok(None);
+    }
     let contents = match std::fs::read(&full) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -307,6 +334,50 @@ pub fn stamp(root: &Path, path: &[u8]) -> io::Result<Option<Input>> {
     };
 
     Ok(Some(Input { path: path.to_vec(), size: contents.len() as u64, mtime_ns, hash: source_hash(&contents) }))
+}
+
+/// Whether the folder of the file at `full` holds a file of exactly its name, case included. A disk that ignores case,
+/// as macOS's does by default, opens `environment.php` for `Environment.php`. Linux does not, so a file is there only
+/// under its exact name, and a compile on either disk stamps the same inputs, as the engine's
+/// `sharp_folder_holds_name` reads them. A folder that is not there holds nothing.
+fn folder_holds_name(full: &Path) -> io::Result<bool> {
+    let entries = match std::fs::read_dir(full.parent().unwrap_or(full)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        if Some(entry?.file_name().as_os_str()) == full.file_name() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// The listing of `folder` that [`SOURCE_LISTING`] stamps.
+fn source_listing(folder: &Path) -> io::Result<Vec<u8>> {
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().into_encoded_bytes();
+        // A link whose target is gone, or a file deleted since the folder was read, is no file, as the loader and the
+        // engine skip it.
+        if name.len() > b".sharp".len()
+            && name.ends_with(b".sharp")
+            && std::fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_file())
+        {
+            names.push(name);
+        }
+    }
+    names.sort_unstable();
+
+    Ok(names.into_iter().flat_map(|name| name.into_iter().chain(std::iter::once(b'\n'))).collect())
 }
 
 /// Where the compiled file of `source` lives, or none when `source` is a link to a file outside `root`.

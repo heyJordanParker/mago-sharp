@@ -1462,6 +1462,9 @@ where
             ClassLikeMember::NamedConstructor(named_constructor) => {
                 named_constructor.analyze(context, &mut block_context, artifacts)?;
             }
+            ClassLikeMember::Extension(extension) => {
+                extension.analyze(context, &mut block_context, artifacts)?;
+            }
             _ => {}
         }
     }

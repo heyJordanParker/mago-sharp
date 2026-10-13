@@ -16,6 +16,7 @@ use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
+use mago_syntax::cst::Extension;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
@@ -155,6 +156,27 @@ impl Fingerprintable for ClassLikeMember<'_> {
             ClassLikeMember::NamedConstructor(named_constructor) => {
                 named_constructor.fingerprint_with_hasher(hasher, resolved_names, options);
             }
+            ClassLikeMember::Extension(extension) => {
+                extension.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+        }
+    }
+}
+
+impl Fingerprintable for Extension<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "extension".hash(hasher);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        for member in &self.members {
+            member.fingerprint_with_hasher(hasher, resolved_names, options);
         }
     }
 }

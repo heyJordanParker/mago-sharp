@@ -72,6 +72,7 @@ enum NodeKind: string
     case On = 'On';
     case Operator = 'Operator';
     case Law = 'Law';
+    case Extension = 'Extension';
     case ConstructorInitializer = 'ConstructorInitializer';
     case NamedConstructor = 'NamedConstructor';
     case ConstructorName = 'ConstructorName';

@@ -14,11 +14,13 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Node;
+use mago_syntax::cst::Property;
 use mago_syntax::cst::Return;
 use mago_syntax::cst::Statement;
 
@@ -28,6 +30,7 @@ use super::NULL;
 use super::ZEND_NAME_FQ;
 use super::is_current_position;
 use super::set_parameter;
+use super::types::Declaration;
 use super::types::DeclarationKind;
 use super::types::receiver_classes;
 use crate::lower::checked::CheckedProgram;
@@ -100,16 +103,50 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
     });
     for class in classes {
         let name = checked.names().get(&class.name);
+        let lowering = || Lowering::new(&lines, checked.names(), checked.types());
         for member in &class.members {
-            if let ClassLikeMember::Method(method) = member
-                && let Some(form) = Lowering::new(&lines, checked.names(), checked.types()).form(name, method)
-            {
-                forms.push((key(name, method.name.value), form));
+            match member {
+                ClassLikeMember::Method(method) => {
+                    forms.extend(
+                        lowering().method_form(name, method, None).map(|form| (key(name, method.name.value), form)),
+                    );
+                }
+                ClassLikeMember::Extension(extension) => {
+                    let [receiver] = extension.parameter_list.parameters.as_slice() else {
+                        unreachable!("semantics refuses an extension without exactly one receiver");
+                    };
+                    for member in &extension.members {
+                        let (member, form) = match member {
+                            ClassLikeMember::Method(method) => {
+                                (method.name.value, lowering().method_form(name, method, Some(receiver)))
+                            }
+                            ClassLikeMember::Property(Property::Computed(property)) => (
+                                property.variable.name,
+                                lowering().form(
+                                    name,
+                                    property.variable.name,
+                                    &[receiver],
+                                    Body::Expression(property.body.expression),
+                                ),
+                            ),
+                            _ => unreachable!("semantics refuses the extension member `{member}`"),
+                        };
+                        forms.extend(form.map(|form| (key(name, member), form)));
+                    }
+                }
+                _ => {}
             }
         }
     }
 
     forms
+}
+
+/// What a library member's body runs: one expression, or the call of an `extern` method's native function.
+#[derive(Clone, Copy)]
+enum Body<'body, 'ast> {
+    Expression(&'body Expression<'ast>),
+    Native(&'body Method<'ast>),
 }
 
 /// What a form's body runs, in the order it runs it.
@@ -121,17 +158,22 @@ enum Step {
 }
 
 impl Lowering<'_, '_> {
-    /// The form of `class`'s method `method`, lowered into this empty lowering, when the inlining rule takes it.
+    /// The form of `class`'s method `method`, when the inlining rule takes it. A method an extension adds takes its
+    /// `receiver` first.
     ///
-    /// The body is one expression whose steps the rule takes, or, for an `extern` method, the call of its native
-    /// function. `None` for an expression means the native call.
-    fn form(mut self, class: &[u8], method: &Method) -> Option<InlineForm> {
-        let expression = match &method.body {
-            MethodBody::Expression(body) if method.returns_value() => Some(body.expression),
+    /// The body is one expression, or, for an `extern` method, the call of its native function.
+    fn method_form(
+        self,
+        class: &[u8],
+        method: &Method,
+        receiver: Option<&FunctionLikeParameter>,
+    ) -> Option<InlineForm> {
+        let body = match &method.body {
+            MethodBody::Expression(body) if method.returns_value() => Body::Expression(body.expression),
             MethodBody::Concrete(block) => {
                 let mut statements = block.statements.iter();
                 match (statements.next(), statements.next()) {
-                    (Some(Statement::Return(Return { value: Some(value), .. })), None) => Some(*value),
+                    (Some(Statement::Return(Return { value: Some(value), .. })), None) => Body::Expression(value),
                     _ => return None,
                 }
             }
@@ -139,17 +181,31 @@ impl Lowering<'_, '_> {
                 if method.returns_value()
                     && method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
             {
-                None
+                Body::Native(method)
             }
             _ => return None,
         };
+        let parameters: Vec<&FunctionLikeParameter> =
+            receiver.into_iter().chain(&method.parameter_list.parameters).collect();
+
+        self.form(class, method.name.value, &parameters, body)
+    }
+
+    /// The form of `class`'s member `name`, which takes `parameters` and runs `body`, lowered into this empty lowering,
+    /// when the inlining rule takes it: the body's steps are ones the rule takes.
+    fn form(
+        mut self,
+        class: &[u8],
+        name: &[u8],
+        parameters: &[&FunctionLikeParameter],
+        body: Body,
+    ) -> Option<InlineForm> {
         // A form runs without the method's statements before its body, which make each `Set` parameter a `Set`.
-        let parameters = &method.parameter_list.parameters;
         if parameters.iter().any(|parameter| parameter.is_variadic() || set_parameter(parameter).is_some()) {
             return None;
         }
 
-        let declaration = self.types.member_declaration(class, method.name.value);
+        let declaration = self.types.member_declaration(class, name);
         let receiver = match declaration.kind {
             DeclarationKind::Method { overridable: false } => true,
             DeclarationKind::StaticMethod => false,
@@ -164,8 +220,8 @@ impl Lowering<'_, '_> {
             .into_iter()
             .chain(parameters.iter().map(|parameter| parameter.variable.name))
             .collect();
-        let (root, in_order) = match expression {
-            Some(expression) => {
+        let (root, in_order) = match body {
+            Body::Expression(expression) => {
                 let mut steps = Vec::new();
                 if !self.steps(expression, &names, &mut steps) {
                     return None;
@@ -189,7 +245,7 @@ impl Lowering<'_, '_> {
                 (self.expression(expression), in_order)
             }
             // The native call reads each parameter once, in order, and then calls.
-            None => (self.native_call(method, class), true),
+            Body::Native(method) => (self.native_call(method, class), true),
         };
         let mut slots = vec![NULL; names.len()];
         for (index, node) in self.nodes.iter().enumerate() {
@@ -303,9 +359,22 @@ impl Lowering<'_, '_> {
             None => return None,
         };
         let declaration = self.types.call_target(expression);
-        let form = self.types.inline_form(&declaration)?;
+
+        self.inlined(&declaration, receiver, Some(&call.argument_list), self.line(call))
+    }
+
+    /// The call of `declaration` on `receiver`, its first slot, with `arguments`, as the method's inline form on
+    /// `line`, under the rule [`Self::inlined_call`] states.
+    pub(super) fn inlined(
+        &mut self,
+        declaration: &Declaration,
+        receiver: Option<&Expression>,
+        arguments: Option<&ArgumentList>,
+        line: u32,
+    ) -> Option<u32> {
+        let form = self.types.inline_form(declaration)?;
         let mut values: Vec<&Expression> = receiver.into_iter().collect();
-        for argument in &call.argument_list.arguments {
+        for argument in arguments.into_iter().flat_map(|list| list.arguments.iter()) {
             let Argument::Positional(argument) = argument else {
                 return None;
             };
@@ -319,7 +388,6 @@ impl Lowering<'_, '_> {
             return None;
         }
 
-        let line = self.line(call);
         let values: Vec<u32> = values.into_iter().map(|value| self.expression(value)).collect();
         self.inlined.push(Read {
             name: key(declaration.class.as_bytes(), declaration.name.as_bytes()),

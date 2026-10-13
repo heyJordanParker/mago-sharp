@@ -65,6 +65,12 @@ impl MetadataFlags {
     pub const INIT: MetadataFlags = MetadataFlags(1 << 47);
     /// A PHP# event, spec section 15: the final class an `event` declaration runs as.
     pub const EVENT: MetadataFlags = MetadataFlags(1 << 48);
+    /// A PHP# extension method, spec section 26: the public static method of a static class it runs as, which takes
+    /// the extension's receiver first and is called as a method of the receiver.
+    pub const EXTENSION_METHOD: MetadataFlags = MetadataFlags(1 << 49);
+    /// A PHP# extension's computed property, spec section 26: the public static method of a static class it runs as,
+    /// which takes only the extension's receiver and is read as a property of the receiver.
+    pub const EXTENSION_PROPERTY: MetadataFlags = MetadataFlags(1 << 50);
     /// A PHP# `foreign` class, spec section 29: an effect, which code has by holding one of its objects.
     pub const FOREIGN: MetadataFlags = MetadataFlags(1 << 51);
 }
@@ -155,6 +161,18 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_event(self) -> bool {
         self.contains(Self::EVENT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_extension_method(self) -> bool {
+        self.contains(Self::EXTENSION_METHOD)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_extension_property(self) -> bool {
+        self.contains(Self::EXTENSION_PROPERTY)
     }
 
     #[inline]
@@ -500,6 +518,8 @@ mod tests {
             ("NAMED_CONSTRUCTOR", MetadataFlags::NAMED_CONSTRUCTOR),
             ("INIT", MetadataFlags::INIT),
             ("EVENT", MetadataFlags::EVENT),
+            ("EXTENSION_METHOD", MetadataFlags::EXTENSION_METHOD),
+            ("EXTENSION_PROPERTY", MetadataFlags::EXTENSION_PROPERTY),
             ("FOREIGN", MetadataFlags::FOREIGN),
         ];
 

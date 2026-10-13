@@ -24,6 +24,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::call::analyze_extension_access;
 use crate::expression::is_refused_type;
 use crate::resolver::property::resolve_instance_properties;
 use crate::utils::expression::get_block_expression_id;
@@ -122,6 +123,19 @@ where
         is_null_safe,
         false, // `for_assignment`
     )?;
+
+    if let Some(extension) = resolution_result.extension {
+        return analyze_extension_access(
+            context,
+            block_context,
+            artifacts,
+            extension,
+            object,
+            None,
+            is_null_safe,
+            span,
+        );
+    }
 
     let mut resulting_expression_type = None;
     if !resolution_result.has_error_path {
