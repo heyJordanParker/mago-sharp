@@ -10122,8 +10122,43 @@ fn a_php_caller_passes_null_as_the_left_operand_of_op_equality() {
     assert_eq!(issues(("src/App/Check.php", php), &[MONEY_OPERATORS]), Vec::<String>::new());
 }
 
+/// Plain PHP receives a PHP# `Map` or `Set` as the object it runs as, spec section 12: a `Sharp\Map<K, V>` or a
+/// `Sharp\Set<T>` from a return, a property, a static property, and a callback's argument, at any depth. So
+/// `is_array` on one is never true, and an index read and a loop resolve through the object's `ArrayAccess` and
+/// `IteratorAggregate`. A PHP# parameter or property takes the object back, or the PHP array PHP# turns into one, and a
+/// property read after such a write is the object again.
+#[test]
+fn plain_php_receives_a_map_or_a_set_as_the_object_it_runs_as() {
+    let tally = (
+        "src/Demo/Tally.sharp",
+        "namespace Demo;\n\npublic class Tally\n{\n    public Set<string> seen = [];\n    public static Map<string, List<Set<int>>> nested = [:];\n    public Map<string, int> kept { get; set => field = value; } = [:];\n\n    public Map<string, int> counts() => [\"a\": 1];\n\n    public int total(Map<string, int> counts) => counts.count();\n\n    public void each(Function<void(Map<string, int>)> visit)\n    {\n        visit(this.counts());\n    }\n\n    public int build(Function<Set<int>()> make) => make().count();\n}\n",
+    );
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function counts(Tally $tally): int\n    {\n        return $tally->counts();\n    }\n\n    public function seen(Tally $tally): int\n    {\n        return $tally->seen;\n    }\n\n    public function nested(): int\n    {\n        return Tally::$nested;\n    }\n\n    public function isArray(Tally $tally): int\n    {\n        $counts = $tally->counts();\n        if (is_array($counts)) {\n            return 1;\n        }\n        if (is_array($tally->seen)) {\n            return 2;\n        }\n        return 0;\n    }\n\n    public function read(Tally $tally): string\n    {\n        return $tally->counts()['a'];\n    }\n\n    public function loop(Tally $tally): int\n    {\n        foreach ($tally->counts() as $key => $count) {\n            return $key;\n        }\n        foreach ($tally->seen as $position => $tag) {\n            return $tag;\n        }\n        return 0;\n    }\n\n    public function back(Tally $tally): int\n    {\n        $tally->seen = ['x'];\n        $tally->seen = $tally->seen;\n        $tally->kept = ['k' => 1];\n        Tally::$nested = ['n' => []];\n        if (is_array($tally->kept)) {\n            return 3;\n        }\n        $tally->each(function (\\Sharp\\Map $counts): void {});\n        $tally->each(function (array $counts): void {});\n        $tally->build(fn (): \\Sharp\\Set => new \\Sharp\\Set([1]));\n        $tally->build(fn (): array => [1]);\n        return $tally->total($tally->counts()) + $tally->total(['b' => 2]);\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Caller.php", php), &[tally]),
+        [
+            "Invalid return type for function `Demo\\Caller::counts`: expected `int`, but found `Sharp\\Map<string, int>`.",
+            "Invalid return type for function `Demo\\Caller::seen`: expected `int`, but found `Sharp\\Set<string>`.",
+            "Invalid return type for function `Demo\\Caller::nested`: expected `int`, but found `Sharp\\Map<string, list<Sharp\\Set<int>>>`.",
+            "Impossible type assertion: `$counts` of type `Sharp\\Map<string, int>` can never be `array<array-key, mixed>`.",
+            "This condition (type `false`) will always evaluate to false.",
+            "Impossible type assertion: `$tally->seen` of type `Sharp\\Set<string>` can never be `array<array-key, mixed>`.",
+            "This condition (type `false`) will always evaluate to false.",
+            "Invalid return type for function `Demo\\Caller::read`: expected `string`, but found `int`.",
+            "Invalid return type for function `Demo\\Caller::loop`: expected `int`, but found `string`.",
+            "Invalid return type for function `Demo\\Caller::loop`: expected `int`, but found `string`.",
+            "Impossible type assertion: `$tally->kept` of type `Sharp\\Map<string, int>` can never be `array<array-key, mixed>`.",
+            "This condition (type `false`) will always evaluate to false.",
+            "Invalid argument type for argument #1 of `Demo\\Tally::each`: expected `(closure(Sharp\\Map<string, int>): void)`, but found `(closure(array<array-key, mixed>): void)`.",
+            "Invalid argument type for argument #1 of `Demo\\Tally::build`: expected `(closure(): Sharp\\Set<int>)`, but found `(closure(): list{int(1)})`.",
+        ]
+    );
+}
+
 /// A PHP caller checks its arguments against the PHP method a PHP# method runs as, whose `List<int>` and
-/// `Map<string, int>` parameters keep their element types, so a wrongly typed list or map is still reported.
+/// `Map<string, int>` parameters keep their element types, so a wrongly typed list or map is still reported. The `Map`
+/// takes a `Sharp\Map` or the PHP array PHP# turns into one.
 #[test]
 fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters() {
     let tally = (
@@ -10136,7 +10171,7 @@ fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters
         messages(("src/Demo/Report.php", php), &[tally]),
         [
             "Possible argument type mismatch for argument #1 of `Demo\\Tally::total`: expected `list<int>`, but possibly received `list{string('a')}`.",
-            "Possible argument type mismatch for argument #2 of `Demo\\Tally::total`: expected `array<string, int>`, but possibly received `array{1: string('x')}`.",
+            "Possible argument type mismatch for argument #2 of `Demo\\Tally::total`: expected `Sharp\\Map<string, int>|array<string, int>`, but possibly received `array{1: string('x')}`.",
         ]
     );
 }

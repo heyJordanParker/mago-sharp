@@ -11,6 +11,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_received_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -287,6 +288,9 @@ where
     let function_like_metadata = invocation.target.get_function_like_metadata();
     if function_like_metadata.is_some_and(|metadata| metadata.flags.is_sharp()) {
         resulting_type = known_type_or_error(resulting_type);
+        if !context.dialect.is_sharp() {
+            resulting_type = get_php_received_type(&resulting_type, context.codebase);
+        }
     }
 
     if function_like_metadata.is_some_and(|metadata| metadata.flags.is_by_reference()) {

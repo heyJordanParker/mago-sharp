@@ -69,6 +69,7 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_bool;
+use mago_codex::ttype::get_collection_object;
 use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_float;
 use mago_codex::ttype::get_int;
@@ -1949,20 +1950,14 @@ fn encode_array_snapshot<'type_info>(
 /// always a `Sharp\Set<T>`, and a keyed array is a `Sharp\Map<K, V>` in PHP# code, or wherever its keys can be objects,
 /// which no PHP array holds. A `List` runs as a PHP array, and so does a keyed array in plain PHP code.
 fn collection_object(array: &TArray, types: &SnapshotTypeTable<'_, '_>) -> Option<TAtomic> {
-    let (class, parameters) = match array {
-        TArray::List(_) => return None,
-        TArray::Set(element_type) => ("Sharp\\Set", vec![element_type.as_ref().clone()]),
-        TArray::Keyed(_) => {
-            let (key_type, value_type) = get_array_parameters(array, types.codebase);
-            if !types.dialect.is_sharp() && !key_type.types.iter().any(TAtomic::is_object_type) {
-                return None;
-            }
+    if let TArray::Keyed(_) = array
+        && !types.dialect.is_sharp()
+        && !get_array_parameters(array, types.codebase).0.types.iter().any(TAtomic::is_object_type)
+    {
+        return None;
+    }
 
-            ("Sharp\\Map", vec![key_type, value_type])
-        }
-    };
-
-    Some(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(word(class), Some(parameters)))))
+    get_collection_object(array, types.codebase)
 }
 
 fn encode_reference_snapshot<'type_info>(
@@ -3418,6 +3413,8 @@ fn validate_provider_indices(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub(super) mod testing {
+    use mago_codex::ttype::get_php_received_type;
+
     use super::*;
 
     #[test]
@@ -3458,10 +3455,14 @@ pub(super) mod testing {
     /// What an external analyzer receives for `array` in code of `dialect`: the class of the object it is sent as, or
     /// `array`, then the ids of the types inside it.
     fn sent_as(array: TArray, codebase: &CodebaseMetadata, dialect: Dialect) -> String {
-        let array = TUnion::from_atomic(TAtomic::Array(array));
+        sent_as_type(&TUnion::from_atomic(TAtomic::Array(array)), codebase, dialect)
+    }
+
+    /// What an external analyzer receives for `array`, a type of one atomic part, in code of `dialect`.
+    fn sent_as_type(array: &TUnion, codebase: &CodebaseMetadata, dialect: Dialect) -> String {
         let mut types = Vec::new();
         let mut writer = PayloadWriter::new();
-        encode_union_snapshot(&mut writer, &array, &mut types, codebase, dialect, 0).unwrap();
+        encode_union_snapshot(&mut writer, array, &mut types, codebase, dialect, 0).unwrap();
         let payload = writer.finish();
         let mut reader = PayloadReader::new(&payload);
         reader.read_u32("union handle").unwrap();
@@ -3480,13 +3481,17 @@ pub(super) mod testing {
 
     /// A `Set` and a `Map` run as the objects `Sharp\Set` and `Sharp\Map`, so an external analyzer receives them as
     /// those objects, each key as itself. A keyed array is a `Map` in PHP# code, and in plain PHP code where its keys
-    /// are objects, which no PHP array holds. A `List` and a plain PHP array stay arrays.
+    /// are objects, which no PHP array holds. A `List` and a plain PHP array stay arrays. Plain PHP code types a `Map`
+    /// a PHP# declaration gives it as `Sharp\Map<K, V>` already, which goes as that object too.
     #[test]
     fn a_map_and_a_set_are_sent_as_the_objects_they_run_as() {
         let codebase = string_backed_status();
         let status = || Arc::new(TUnion::from_atomic(TAtomic::Object(TObject::new_enum(word(b"Status")))));
         let keyed = |key_type| TArray::Keyed(TKeyedArray::new_with_parameters(key_type, Arc::new(get_int())));
         let list = TArray::List(TList::new(Arc::new(get_int())));
+        let received = get_php_received_type(&TUnion::from_atomic(TAtomic::Array(keyed(status()))), &codebase);
+
+        assert_eq!(sent_as_type(&received, &codebase, Dialect::Php), "Sharp\\Map<enum(Status), int>");
 
         assert_eq!(sent_as(TArray::Set(status()), &codebase, Dialect::Php), "Sharp\\Set<enum(Status)>");
         assert_eq!(sent_as(keyed(status()), &codebase, Dialect::Php), "Sharp\\Map<enum(Status), int>");

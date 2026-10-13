@@ -28,6 +28,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
@@ -1504,7 +1505,9 @@ where
     let parameter_type = if context.dialect.is_sharp() && keys_a_map_by_its_function(invocation_target) {
         without_method_template_bounds(&parameter_type)
     } else if invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) {
-        known_type_or_error(parameter_type)
+        // A plain PHP caller passes a `Map` or a `Set` as the object it runs as, or as a PHP array PHP# turns into one.
+        let parameter_type = known_type_or_error(parameter_type);
+        if context.dialect.is_sharp() { parameter_type } else { get_php_passed_type(&parameter_type, context.codebase) }
     } else {
         parameter_type
     };
