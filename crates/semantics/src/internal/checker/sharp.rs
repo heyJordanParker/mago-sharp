@@ -23,6 +23,7 @@ use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::BinaryPattern;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Break;
 use mago_syntax::cst::Call;
@@ -605,9 +606,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ModuleMember(_), Place::Module) => Some(Place::Module),
         // The header names the module it overrides, which `check_module_file_name` checked.
         (Node::ModuleParent(_), Place::Module) => None,
-        // A binding's parameters and value are checked as a method's, and the analyzer checks its value as the
-        // lambda it runs as.
+        // A binding's parameters are checked as a method's, and its expression as a method's expression body. The
+        // analyzer checks the expression as the lambda it runs as.
         (Node::Binding(_), Place::Module) => Some(Method),
+        (Node::BindingValue(BindingValue::Expression(_)), Method) => Some(Body),
         (Node::BindingTarget(_) | Node::BindingValue(_) | Node::BindingClasses(_), Method) => Some(Method),
         (Node::FunctionLikeParameterList(parameters), Method | Signature | Place::Event) => {
             report_optional_before_required(parameters, context);

@@ -1,7 +1,10 @@
 use mago_span::Span;
 use mago_word::Word;
+use mago_word::ascii_lowercase_word;
 
 use crate::metadata::ttype::TypeMetadata;
+use crate::ttype::TType;
+use crate::ttype::union::TUnion;
 
 /// A PHP# module, spec section 32: the services it binds for the classes of one namespace and the namespaces below it.
 ///
@@ -73,6 +76,15 @@ pub enum BindingValueMetadata {
     /// One expression over the binding's parameters. It is scanned as a lambda that takes the parameters and returns
     /// the service, and this is that lambda's name.
     Expression(Word),
+}
+
+/// The id the container knows the service of `type` by: its type in lowercase, as PHP compares class names.
+///
+/// A binding serves it, the analyzer resolves a parameter by it, and a compiled module's table and a parameter whose
+/// PHP type drops its type arguments carry it to the engine.
+#[must_use]
+pub fn service_id(r#type: &TUnion) -> Word {
+    ascii_lowercase_word(r#type.get_id().as_bytes())
 }
 
 impl Lifetime {

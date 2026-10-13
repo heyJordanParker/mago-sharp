@@ -12,6 +12,7 @@ use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::Lifetime;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::module::service_id;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::TType;
@@ -72,7 +73,7 @@ where
             continue;
         };
 
-        let key = (service_key(service), binding_metadata.target.map(|target| ascii_lowercase_word(target.as_bytes())));
+        let key = (service_id(service), binding_metadata.target.map(|target| ascii_lowercase_word(target.as_bytes())));
         if let Some((_, first)) = bound.iter().find(|(earlier, _)| *earlier == key) {
             report_duplicate_binding(context, service, binding_metadata, *first);
         } else {
@@ -253,7 +254,7 @@ impl<'ctx> Services<'ctx> {
         service: &TUnion,
         requester: Option<Word>,
     ) -> Option<(&'ctx ModuleMetadata, &'ctx BindingMetadata)> {
-        let key = service_key(service);
+        let key = service_id(service);
         let mut namespace = namespace;
         loop {
             let modules = self
@@ -261,7 +262,7 @@ impl<'ctx> Services<'ctx> {
                 .into_iter()
                 .chain(self.codebase.modules.iter().filter(|module| module.kind == ModuleKind::Base));
             for module in modules.filter(|module| module.namespace.as_bytes() == namespace) {
-                let serves = |binding: &&BindingMetadata| service_key(&binding.service.type_union) == key;
+                let serves = |binding: &&BindingMetadata| service_id(&binding.service.type_union) == key;
                 let targeted = module.bindings.iter().filter(serves).find(|binding| {
                     binding
                         .target
@@ -382,7 +383,7 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
         }
 
         let name = match node {
-            Node::Binding(..) => service_key(service),
+            Node::Binding(..) => service_id(service),
             Node::Class(class) => class,
         };
         // A singleton past the start keeps its own services, and its own walk checks them.
@@ -560,11 +561,6 @@ fn service_type(written: &TUnion) -> Option<&TUnion> {
 /// The type a constructor or binding parameter needs.
 fn parameter_service(parameter: &FunctionLikeParameterMetadata) -> Option<&TUnion> {
     service_type(&parameter.type_metadata.as_ref()?.type_union)
-}
-
-/// What names one service: its type, in lowercase, so `Mailer` and `List<PriceRule>` each name one.
-fn service_key(service: &TUnion) -> Word {
-    ascii_lowercase_word(service.get_id().as_bytes())
 }
 
 /// The element type of a `List` service.

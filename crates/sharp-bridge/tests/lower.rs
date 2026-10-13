@@ -669,8 +669,8 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
     assert_eq!(with.tree(), without.tree());
 }
 
-/// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it. A module holds only
-/// laws, so its `Module.sharp` lowers to its namespace alone.
+/// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it. A module of laws
+/// alone binds no service, so its `Module.sharp` lowers to its namespace alone.
 #[test]
 fn a_class_an_enum_or_a_module_with_a_law_lowers_to_the_nodes_it_lowers_to_without_it() {
     for (path, with, without) in [
@@ -690,6 +690,150 @@ fn a_class_an_enum_or_a_module_with_a_law_lowers_to_the_nodes_it_lowers_to_witho
 
         assert!(with.0.is_ok(), "{path}: {:?}", with.0.err());
         assert_eq!(with.tree(), without.tree(), "{path}");
+    }
+}
+
+/// Spec section 32: a module file returns its bindings, after its classes, as the table `Sharp\Container` reads. Each
+/// row is a module's bindings and the binding the table holds for them, as php-src builds the PHP each comment shows.
+#[test]
+fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_value() {
+    let library = [
+        ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+        ("app/Mail/SmtpMailer.sharp", "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n"),
+        ("app/Pricing/PriceRule.sharp", "namespace App.Pricing;\n\npublic interface PriceRule\n{\n}\n"),
+        ("app/Pricing/TaxRule.sharp", "namespace App.Pricing;\n\npublic class TaxRule : PriceRule\n{\n}\n"),
+        (
+            "app/Shop/SendReceipt.sharp",
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class SendReceipt\n{\n    public SendReceipt(private Mailer mailer) { }\n}\n",
+        ),
+    ];
+    let module = |bindings: &str| {
+        format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Pricing.PriceRule;\nimport App.Pricing.TaxRule;\n\nmodule\n{{\n{bindings}\n}}\n"
+        )
+    };
+
+    let mailer = r#"ZVAL "app\\mail\\mailer""#;
+    let smtp = r#"ZVAL "App\\Mail\\SmtpMailer""#;
+    for (bindings, expected) in [
+        // ['app\shop', 'app\mail\mailer', null, 'singleton', 'App\Mail\SmtpMailer']
+        ("    singleton Mailer = SmtpMailer;", [mailer, "ZVAL null", r#"ZVAL "singleton""#, smtp]),
+        // ['app\shop', 'app\mail\mailer', 'App\Shop\SendReceipt', 'scoped', 'App\Mail\SmtpMailer']
+        (
+            "    scoped Mailer for SendReceipt = SmtpMailer;",
+            [mailer, r#"ZVAL "App\\Shop\\SendReceipt""#, r#"ZVAL "scoped""#, smtp],
+        ),
+        // ['app\shop', 'list<app\pricing\pricerule>', null, 'transient', ['App\Pricing\TaxRule']]
+        (
+            "    transient List<PriceRule> = [TaxRule];",
+            [
+                r#"ZVAL "list<app\\pricing\\pricerule>""#,
+                "ZVAL null",
+                r#"ZVAL "transient""#,
+                indoc! {r#"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "App\\Pricing\\TaxRule"
+                        null"#},
+            ],
+        ),
+        // ['app\shop', 'app\mail\mailer', null, 'singleton', static fn (\App\Mail\SmtpMailer $smtp) => $smtp]
+        (
+            "    singleton Mailer(SmtpMailer smtp) = smtp;",
+            [
+                mailer,
+                "ZVAL null",
+                r#"ZVAL "singleton""#,
+                indoc! {r#"
+                    ARROW_FUNC [16] "" @10-10
+                      PARAM_LIST
+                        PARAM
+                          ZVAL "App\\Mail\\SmtpMailer"
+                          ZVAL "smtp"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      VAR
+                        ZVAL "smtp"
+                      null
+                      null"#},
+            ],
+        ),
+        // ['app\shop', 'app\mail\mailer', null, 'singleton',
+        //     static fn (#[\Sharp\Internal\Service('list<app\pricing\pricerule>')] array $rules) => new \App\Mail\SmtpMailer()]
+        (
+            "    singleton Mailer(List<PriceRule> rules) = new SmtpMailer();",
+            [
+                mailer,
+                "ZVAL null",
+                r#"ZVAL "singleton""#,
+                indoc! {r#"
+                    ARROW_FUNC [16] "" @10-10
+                      PARAM_LIST
+                        PARAM
+                          TYPE [7]
+                          ZVAL "rules"
+                          null
+                          ATTRIBUTE_LIST
+                            ATTRIBUTE_GROUP
+                              ATTRIBUTE
+                                ZVAL "Sharp\\Internal\\Service"
+                                ARG_LIST
+                                  ZVAL "list<app\\pricing\\pricerule>"
+                          null
+                          null
+                      null
+                      NEW
+                        ZVAL "App\\Mail\\SmtpMailer"
+                        ARG_LIST
+                      null
+                      null"#},
+            ],
+        ),
+    ] {
+        let lowered = Lowered(common::checked("app/Shop/Module.sharp", &module(bindings), &library, lower));
+        // `return [[namespace, service, class, lifetime, value]];`, the file's third statement.
+        let table = lowered.child(lowered.root(), 2);
+        let entry = lowered.child(lowered.child(lowered.child(table, 0), 0), 0);
+        let fields: Vec<String> =
+            (0..5).map(|index| lowered.render(lowered.child(lowered.child(entry, index), 0))).collect();
+
+        let expected: Vec<String> =
+            std::iter::once(r#"ZVAL "app\\shop""#).chain(expected).map(|field| format!("{field}\n")).collect();
+        assert_eq!(fields, expected, "{bindings}");
+    }
+}
+
+/// Spec section 32: the container fills a class's main constructor, and reads each parameter's service from its PHP
+/// type. A `List` runs as `array`, so a constructor's collection of objects names its service in an attribute, and no
+/// other parameter does: a collection of values is no service. Each row is a parameter and the attributes the PHP of
+/// the constructor gives it. A method's parameter never has one.
+#[test]
+fn a_constructor_parameter_whose_php_type_drops_its_service_names_the_service() {
+    let library = [("app/Pricing/TaxRule.sharp", "namespace App.Pricing;\n\npublic class TaxRule\n{\n}\n")];
+    let service = |id: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Sharp\\\\Internal\\\\Service\"\n      ARG_LIST\n        ZVAL {id:?}\n"
+        )
+    };
+
+    for (parameter, constructor) in [
+        ("List<TaxRule> rules", service("list<app\\pricing\\taxrule>")),
+        ("Map<string, TaxRule> rules", service("array<string, app\\pricing\\taxrule>")),
+        ("List<string> names", "null\n".to_owned()),
+        ("TaxRule rule", "null\n".to_owned()),
+        ("int count", "null\n".to_owned()),
+    ] {
+        let code = format!(
+            "namespace App.Shop;\n\nimport App.Pricing.TaxRule;\n\npublic class Cart\n{{\n    public Cart({parameter}) {{ }}\n\n    public void price({parameter}) {{ }}\n}}\n"
+        );
+        let lowered = Lowered::with(&code, &library);
+        let attributes = |method: u32| lowered.render(lowered.child(lowered.child(lowered.child(method, 0), 0), 3));
+
+        assert_eq!(attributes(lowered.method_named("__construct")), constructor, "{parameter}");
+        assert_eq!(attributes(lowered.method_named("price")), "null\n", "{parameter}");
     }
 }
 
