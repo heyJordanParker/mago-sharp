@@ -4065,28 +4065,32 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 }
 
 /// ```php
-/// $rows[0]?->add(5);
+/// $rows[0]?->add(5); // the index carries ZEND_DIM_IS
 /// $maybe[1]?->insert(0, 6);
 /// $this->held[0]?->add(7);
 /// ($maybe[0] ?? null)?->entries();
+/// (($maybe[2] ?? null) === null) ? null : $maybe[2]->clear();
+/// return (($maybe[3] ?? null) === null) ? null : \in_array(4, $maybe[3], true);
 /// ```
 ///
 /// Spec section 12 makes a `List` index a place, so a change after `?.` on one runs on the index itself, as a change
 /// without `?.` does, and reaches the element the list stores, here a local's, a nullable element's and a hooked
-/// property's. `?.` skips only a null element. A method that changes nothing still reads a missing key as null, as
-/// `null_safe_access_on_an_index_coalesces_a_missing_key_to_null` shows.
+/// property's. The index carries `ZEND_DIM_IS`, so a missing index reads as null. A `List` index read with `?.` is
+/// handled where it is read, as a `Map` read is, so `?.` skips a missing index as it skips a null element, on every
+/// path: the marked index, `?? null` before a method that changes nothing, and `?? null` in the test an inlined
+/// method runs first.
 #[test]
 fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
     assert_eq!(
         child_body(
-            "void run(List<List<int>> rows, List<List<int>?> maybe)",
-            "        rows[0]?.add(5);\n        maybe[1]?.insert(0, 6);\n        this.held[0]?.add(7);\n        maybe[0]?.entries();\n",
+            "bool? run(List<List<int>> rows, List<List<int>?> maybe)",
+            "        rows[0]?.add(5);\n        maybe[1]?.insert(0, 6);\n        this.held[0]?.add(7);\n        maybe[0]?.entries();\n        maybe[2]?.clear();\n        return maybe[3]?.contains(4);\n",
             "<?php namespace App\\Tenant; class Base { /** @var list<list<int>> */ public array $held = [[1]] { set { $this->held = $value; } } }"
         ),
         indoc! {r#"
             STMT_LIST
               NULLSAFE_METHOD_CALL
-                DIM
+                DIM [1]
                   VAR
                     ZVAL "rows"
                   ZVAL 0
@@ -4094,7 +4098,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                 ARG_LIST
                   ZVAL 5
               NULLSAFE_METHOD_CALL
-                DIM
+                DIM [1]
                   VAR
                     ZVAL "maybe"
                   ZVAL 1
@@ -4103,7 +4107,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                   ZVAL 0
                   ZVAL 6
               NULLSAFE_METHOD_CALL
-                DIM
+                DIM [1]
                   PROP
                     VAR
                       ZVAL "this"
@@ -4121,6 +4125,43 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                   ZVAL null
                 ZVAL "entries"
                 ARG_LIST
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  COALESCE
+                    DIM
+                      VAR
+                        ZVAL "maybe"
+                      ZVAL 2
+                    ZVAL null
+                  ZVAL null
+                ZVAL null
+                METHOD_CALL
+                  DIM
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL 2
+                  ZVAL "clear"
+                  ARG_LIST
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    COALESCE
+                      DIM
+                        VAR
+                          ZVAL "maybe"
+                        ZVAL 3
+                      ZVAL null
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "in_array"
+                    ARG_LIST
+                      ZVAL 4
+                      DIM
+                        VAR
+                          ZVAL "maybe"
+                        ZVAL 3
+                      ZVAL true
         "#}
     );
 }

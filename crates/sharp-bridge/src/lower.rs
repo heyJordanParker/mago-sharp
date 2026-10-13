@@ -227,6 +227,7 @@ const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
 const IS_STATIC: u32 = 15;
 const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
+const ZEND_DIM_IS: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
 const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
@@ -1783,8 +1784,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
 
                 let is_property_call = tested && self.is_property_call(expression, call.object);
-                let object = if tested || self.changes_list_element(expression, call.object) {
+                let object = if tested {
                     self.expression(call.object)
+                } else if self.changes_list_element(expression, call.object) {
+                    self.null_safe_index(call.object)
                 } else {
                     self.null_safe_object(call.object)
                 };
@@ -2315,12 +2318,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// Whether the null-safe `call` changes the element the `List` index `object` reads, as `rows[0]?.add(5)` does. A
     /// `List` index is a place (spec section 12), so the change reaches the element the list stores, through the index
-    /// itself and not a copy of it. `?.` then skips only a null element.
+    /// itself and not a copy of it.
     fn changes_list_element(&self, call: &Expression, object: &Expression) -> bool {
         matches!(object.unparenthesized(), Expression::ArrayAccess(access) if self.is_list(access.array))
             && self.types.collection_method(call).is_some_and(|(_, method)| {
                 CHANGING_COLLECTION_METHODS.iter().any(|changing| changing.as_bytes() == method)
             })
+    }
+
+    /// The `List` index a change after `?.` runs on, marked with `ZEND_DIM_IS`, the mark php-src gives an index `??`
+    /// reads. The engine reads the element through the list's collection, as it does for the change without `?.`, and
+    /// a missing index reads as null, which `?.` skips as it skips a null element (spec section 12).
+    fn null_safe_index(&mut self, index: &Expression) -> u32 {
+        let index = self.expression(index);
+        self.nodes[index as usize].attr |= ZEND_DIM_IS;
+
+        index
     }
 
     /// The object of `?.`. An index there reads a missing key as null, as `??` does, so `x[k]?.name` is
@@ -3051,7 +3064,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A read of the collection a method call runs on, which is also where the method writes it. The read that tests
-    /// a null-safe call's receiver reads a property with `?->`.
+    /// a null-safe call's receiver reads a property with `?->`, and a `List` index as `??` does, so a missing index
+    /// skips the call as a null element does (spec section 12).
     fn read_collection(&mut self, collection: &mut CollectionReceiver, line: u32, null_safe: bool) -> u32 {
         match collection {
             CollectionReceiver::Place(place) => self.target(place),
@@ -3065,8 +3079,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             CollectionReceiver::Index(list, index) => {
                 let list = self.read_collection(list, line, false);
                 let index = self.read(index);
+                let element = self.node(SHARP_AST_DIM, 0, line, &[list, index]);
+                if !null_safe {
+                    return element;
+                }
+                let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
 
-                self.node(SHARP_AST_DIM, 0, line, &[list, index])
+                self.node(SHARP_AST_COALESCE, 0, line, &[element, null])
             }
             CollectionReceiver::Value(value) if null_safe => self.read_as(value, Self::null_safe_object),
             CollectionReceiver::Value(value) => self.read(value),
