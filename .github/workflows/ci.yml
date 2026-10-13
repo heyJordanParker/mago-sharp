@@ -302,9 +302,11 @@ jobs:
           }
 
   # Lists the pull request's mutants, so mutants runs them in shards of 6, on at most 8 runners. A mutant takes about
-  # 2 minutes against every test, so a shard of 6 takes about 15.
+  # 2 minutes against every test, so a shard of 6 takes about 15. It runs only on a pull request labelled `mutants`,
+  # because builders prove each new test row fails with its code removed, and eight runners per push starve every
+  # other pull request's checks.
   mutants-plan:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'mutants')
     runs-on: ubuntu-latest
 
     permissions:
