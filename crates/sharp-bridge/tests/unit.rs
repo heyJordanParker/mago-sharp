@@ -44,7 +44,8 @@ use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_bridge::unit::stamp;
 use xxhash_rust::xxh3::xxh3_128;
 
-const SOURCE: &str = "namespace App.Tenant;\n\nclass Report\n{\n    public string title()\n    {\n        return \"weekly\";\n    }\n}\n";
+/// An abstract class, which has no `parse`, so the unit holds only what the source writes.
+const SOURCE: &str = "namespace App.Tenant;\n\nabstract class Report\n{\n    public string title()\n    {\n        return \"weekly\";\n    }\n}\n";
 
 /// The unit the bridge lowers from `source`, which the checker accepts.
 fn lowered(source: &str) -> Unit {

@@ -7459,6 +7459,29 @@ fn a_struct_compares_by_value() {
     );
 }
 
+/// Spec section 10: a struct may declare `operator ==` with `hash()`, as a class may, and the pair replaces the `==`
+/// that compares property by property: `==`, `!=`, `contains`, a `Set`, a `Map` key and `groupBy` run it, whatever the
+/// struct holds, also as a field of another struct key, and with the operand type the operator takes. The same struct
+/// without the pair holds a function, which has
+/// no `==`, so each of those is refused, naming the field. A struct is still a value, so `===` is refused, and `parse`
+/// still can't read a function.
+#[test]
+fn a_struct_that_declares_equality_compares_and_keys_by_it() {
+    let sharp = "namespace Demo;\n\nstruct Rule\n{\n    public Rule(public string name { get; }, public Function<bool(int)> check { get; }) { }\n\n    public static bool operator ==(Rule a, Rule b) => a.name == b.name;\n\n    public int hash() => 7;\n}\n\nstruct Hook\n{\n    public Hook(public string name { get; }, public Function<bool(int)> check { get; }) { }\n}\n\nstruct Step\n{\n    public Step(public int at { get; }, public Rule rule { get; }) { }\n}\n\nclass Rules\n{\n    public Set<Rule> seen = [];\n    public Map<Rule, int> counts = [:];\n    public Map<Step, int> steps = [:];\n    public Set<Hook> hooks = [];\n    public Map<Hook, int> hooked = [:];\n\n    public bool same(Rule a, Rule b) => a == b;\n\n    public bool other(Rule a, Rule b) => a != b;\n\n    public bool hookSame(Hook a, Hook b) => a == b;\n\n    public bool identical(Rule a, Rule b) => a === b;\n\n    public int count(Rule rule)\n    {\n        this.counts[rule] = 1;\n        return this.counts[rule] ?? 0;\n    }\n\n    public bool has(List<Rule> rules, Rule rule) => rules.contains(rule);\n\n    public bool hasHook(List<Hook> hooks, Hook hook) => hooks.contains(hook);\n\n    public void group(List<Rule> rules)\n    {\n        const byRule = rules.groupBy(rule => rule);\n    }\n\n    public Rule read(Map<string, Any?> input) => Rule.parse(input);\n}\n\nstruct Cents\n{\n    public Cents(public int amount { get; }) { }\n\n    public static bool operator ==(Cents a, int amount) => a.amount == amount;\n\n    public int hash() => this.amount;\n\n    public bool costs(int amount) => this == amount;\n}\n";
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Rules.sharp", sharp), &[])),
+        [
+            "27:12 template-constraint-violation `Hook` can't be in a `Set`: `check` is a `Function<bool(int)>`, a function, and a `Set` holds only values.",
+            "28:12 template-constraint-violation `Hook` can't key a `Map`: `check` is a `Function<bool(int)>`, a function, and a key holds only values.",
+            "34:45 invalid-operand `Hook` can't be compared: `check` is a function.",
+            "36:46 invalid-operand `===` tests for the same object, and `Rule` is a struct: write `==`.",
+            "46:72 invalid-argument `contains` compares elements with `==`, and `Hook` can't be compared: `check` is a function.",
+            "53:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+        ]
+    );
+}
+
 /// Spec section 16: `with` and an object initializer set only a property with `init` or `set`, each once, and the help
 /// of a get-only PHP# property, `{ get; init; }`, compiles. A plain PHP `readonly` property is get-only too, with no
 /// help, since its class isn't PHP#'s. `with` copies a struct or a class, so an enum and an event are refused.
@@ -7494,17 +7517,17 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
     );
 }
 
-/// Spec section 10: every struct has a static `parse` and `tryParse`, and classes don't. `[Key]` renames the key a
-/// struct's main constructor parameter reads, so it is refused anywhere else, and two parameters may not read one key.
-/// A bare `Key` is the standard attribute, spec section 23. A property the main constructor sets is read once, by
+/// Spec section 10: every struct has a static `parse` and `tryParse`. `[Key]` renames the key a struct's main
+/// constructor parameter reads, and two parameters may not read one key. A bare `Key` is the standard attribute, spec
+/// section 23. A property the main constructor sets is read once, by
 /// the parameter of its name, or not at all. Any other property a parameter's key names is read twice, whether `[Key]`
 /// or the parameter's own name gives that key, and the help renames the parameter's key, which then compiles.
 /// A struct with a field no value can give, a pure enum or a function, also in a list or a nested struct, compiles, and
 /// its `parse` and `tryParse` are refused where they are called, while its other static methods are not. A struct that
-/// holds itself parses.
+/// holds itself parses. A struct that declares its own `parse` reads no key, so none is read twice.
 #[test]
-fn every_struct_parses_and_classes_do_not() {
-    let sharp = "namespace Demo;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nstruct Temp\n{\n    public Temp(int celsius) { this.celsius = celsius; }\n\n    public int celsius { get; init; }\n}\n\nstruct Gauge\n{\n    public Gauge(int c) { this.celsius = c; }\n\n    public int celsius { get; init; }\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n\n    public void note(Map<string, Any?> input)\n    {\n        Note.parse(input);\n    }\n}\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n\nstruct Renamed\n{\n    public Renamed([Key(\"x_key\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Mended\n{\n    public Mended([Key(\"temp\")] int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n";
+fn every_struct_parses() {
+    let sharp = "namespace Demo;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nstruct Temp\n{\n    public Temp(int celsius) { this.celsius = celsius; }\n\n    public int celsius { get; init; }\n}\n\nstruct Gauge\n{\n    public Gauge(int c) { this.celsius = c; }\n\n    public int celsius { get; init; }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n}\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n\nstruct Renamed\n{\n    public Renamed([Key(\"x_key\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Mended\n{\n    public Mended([Key(\"temp\")] int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n\nstruct Reading\n{\n    public Reading(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Reading? parse(string text) => null;\n}\n";
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
 
     let issues =
@@ -7513,23 +7536,64 @@ fn every_struct_parses_and_classes_do_not() {
         written(sharp, &issues),
         [
             "20:75 invalid-struct `code` is read twice: by the main constructor parameter `plan` and the main constructor parameter `code`.",
-            "61:18 invalid-struct `Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
-            "70:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
-            "72:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
-            "74:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
-            "76:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
-            "88:14 non-existent-method Method `Note.parse` does not exist.",
-            "96:16 invalid-struct `y` is read twice: by the main constructor parameter `x` and the property `y`.",
-            "103:16 invalid-struct `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`.",
+            "65:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
+            "67:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
+            "69:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "71:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
+            "86:16 invalid-struct `y` is read twice: by the main constructor parameter `x` and the property `y`.",
+            "93:16 invalid-struct `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`.",
         ]
     );
     assert_eq!(
         issues.iter().filter_map(|issue| issue.help.as_deref()).collect::<Vec<_>>(),
         [
             "Give `plan` another key with `[Key(\"…\")]`.",
-            "Ensure the method `Note.parse` is defined.",
             "Give `x` another key with `[Key(\"…\")]`.",
             "Give `celsius` another key with `[Key(\"…\")]`.",
+        ]
+    );
+}
+
+/// Spec section 10: a PHP# class that can be created parses the same way a struct does, as C#'s `System.Text.Json`
+/// reads a class. It reads the main constructor's parameters, a parameter that declares its property once, then each
+/// property an initializer may set, with the same `[Key]`, the same refusal of a key read twice and the same
+/// `tryParse`, and builds a nested class through that class's own `parse`. A class that declares its own `parse` keeps
+/// it, a class whose parent declares one inherits it, as a subclass of a plain PHP class does, and an abstract class
+/// has none, so `[Key]` on its constructor is refused as on any other parameter, and no key of it is read twice. A
+/// field `parse` can't build is refused where `parse` is called, with why: a function, an abstract class, an interface, a
+/// plain PHP class, a class whose `parse` reads no value, or a type such as `Object` that names no type to build.
+#[test]
+fn a_class_parses_as_a_struct_does() {
+    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Stamp;\n\nabstract class Shape\n{\n    public Shape([Key(\"corners\")] public int sides { get; }) { }\n\n    public int corners { get; set; } = 0;\n}\n\ninterface Named\n{\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n\n    public string author { get; set; } = \"\";\n}\n\nclass Letter\n{\n    public Letter(public Note note { get; init; }, public List<Note> copies { get; }) { }\n}\n\nclass Bill\n{\n    public Bill([Key(\"total\")] public int amount { get; }) { }\n\n    public int total { get; set; } = 0;\n}\n\nclass Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money parse(string text) => new Money(1);\n}\n\nclass Hook\n{\n    public Hook(public Function<bool(int)> check { get; }) { }\n}\n\nclass Drawing\n{\n    public Drawing(public Shape shape { get; }) { }\n}\n\nclass Badge\n{\n    public Badge(public Named owner { get; }) { }\n}\n\nclass Receipt\n{\n    public Receipt(public Stamp stamp { get; }) { }\n}\n\nclass Wallet\n{\n    public Wallet(public Money money { get; }) { }\n}\n\nclass Reads\n{\n    public Note note(Map<string, Any?> input) => Note.parse(input);\n\n    public Note? maybe(Map<string, Any?> input) => Note.tryParse(input);\n\n    public Letter letter(Map<string, Any?> input) => Letter.parse(input);\n\n    public Money money() => Money.parse(\"1\");\n\n    public Hook hook(Map<string, Any?> input) => Hook.parse(input);\n\n    public Drawing drawing(Map<string, Any?> input) => Drawing.parse(input);\n\n    public Badge badge(Map<string, Any?> input) => Badge.parse(input);\n\n    public Receipt receipt(Map<string, Any?> input) => Receipt.parse(input);\n\n    public Wallet wallet(Map<string, Any?> input) => Wallet.parse(input);\n\n    public void shape(Map<string, Any?> input)\n    {\n        Shape.parse(input);\n    }\n\n    public void keyed([Key(\"other\")] Map<string, Any?> input) { }\n}\n\nclass Deadline : Clock\n{\n    public Deadline(public int at { get; }) { }\n\n    public static Deadline due() => Deadline.parse(\"soon\");\n}\n\nclass Holder\n{\n    public Holder(public Object thing { get; }) { }\n\n    public static Holder held(Map<string, Any?> input) => Holder.parse(input);\n}\n";
+    let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
+    let php = "<?php namespace Lib; final class Stamp { public function __construct(public readonly int $at) {} }";
+
+    let issues = analyze(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Reads.sharp", sharp),
+        &[
+            ("src/Sharp/Key.sharp", key),
+            ("src/Lib/Stamp.php", php),
+            (
+                "src/Lib/Clock.php",
+                "<?php namespace Lib; class Clock { public static function parse(string $text): static { return new static(); } }",
+            ),
+        ],
+    );
+    assert_eq!(
+        written(sharp, &issues),
+        [
+            "8:19 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
+            "33:16 invalid-struct `total` is read twice: by the main constructor parameter `amount` and the property `total`.",
+            "78:50 invalid-struct `Hook.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "80:56 invalid-struct `Drawing.parse` can't read `shape`: `Shape` is abstract.",
+            "82:52 invalid-struct `Badge.parse` can't read `owner`: `Named` is an interface.",
+            "84:56 invalid-struct `Receipt.parse` can't read `stamp`: `Stamp` is a plain PHP class.",
+            "86:54 invalid-struct `Wallet.parse` can't read `money`: `Money` has no `parse` that reads a value.",
+            "90:15 non-existent-method Method `Shape.parse` does not exist.",
+            "93:24 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
+            "107:59 invalid-struct `Holder.parse` can't read `thing`: `Object` is no type `parse` reads.",
         ]
     );
 }
@@ -9843,7 +9907,8 @@ fn an_operator_body_is_checked_as_its_static_method_body() {
     assert_eq!(issues(("src/App/Money.sharp", wrong), &[]), ["12:57 invalid-return-statement"]);
 }
 
-/// Equal values hash alike, so a class that declares `operator ==` declares `public int hash()` or inherits it.
+/// Equal values hash alike, so a class that declares `operator ==` declares `public int hash()` or inherits it, and a
+/// struct, which has no parent, declares it.
 #[test]
 fn equality_needs_a_public_int_hash_in_the_class_or_a_parent() {
     let missing =
@@ -9863,6 +9928,13 @@ fn equality_needs_a_public_int_hash_in_the_class_or_a_parent() {
     assert_eq!(issues(("src/App/Money.sharp", protected), &[]), ["7:24 unimplemented-abstract-method"]);
     assert_eq!(issues(("src/App/Money.sharp", string), &[]), ["7:24 unimplemented-abstract-method"]);
     assert_eq!(issues(("src/App/Order.sharp", inherited), &[entity]), Vec::<String>::new());
+    let r#struct = "namespace App;\n\npublic struct Coin\n{\n    public Coin(public int cents { get; }) { }\n\n    public static bool operator ==(Coin a, Coin b) => true;\n}\n";
+    assert_eq!(
+        messages(("src/App/Coin.sharp", r#struct), &[]),
+        [
+            "`Coin` declares `operator ==` without `public int hash()`: declare it in `Coin`, so equal values hash alike."
+        ]
+    );
 }
 
 /// A subclass inherits its parent's operators, which are static, and PHP# has no overloading by parameter types, so

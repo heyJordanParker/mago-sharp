@@ -53,6 +53,7 @@ use crate::expression::binary::utils::is_always_identical_to;
 use crate::expression::binary::utils::is_always_less_than;
 use crate::expression::binary::utils::is_always_less_than_or_equal;
 use crate::expression::binary::utils::takes_operands;
+use crate::statement::class_like::r#struct::declares_equality;
 use crate::utils::expression::get_literal_array_key;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_bool;
@@ -711,7 +712,8 @@ enum Comparand {
     Enum(Word),
     /// An instance of a class that is no struct, or a function.
     Instance,
-    /// An instance of the struct of this name, spec section 10, which compares by value.
+    /// An instance of the struct of this name, spec section 10, which compares by value: through the `operator ==` it
+    /// declares, or else property by property.
     Struct(Word),
     Collection,
     Any,
@@ -925,7 +927,9 @@ fn refusal(
                 .collect();
             if has(Comparand::Collection) {
                 collection_refusal(operator, lhs_type, rhs_type, codebase, visiting)
-            } else if let Some(&name) = structs.first() {
+            } else if let Some(&name) = structs.first()
+                && !declares_equality(codebase, name)
+            {
                 // A struct equals only an instance of the same struct, or an `Any` that holds one.
                 let same = lhs
                     .iter()
@@ -939,7 +943,7 @@ fn refusal(
                 } else {
                     None
                 }
-            } else if has(Comparand::Instance) {
+            } else if has(Comparand::Instance) || !structs.is_empty() {
                 match get_comparison_method(operator, lhs_type, rhs_type, codebase) {
                     None => Some(Refusal::Instance),
                     Some(method) => {

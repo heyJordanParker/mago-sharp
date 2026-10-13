@@ -538,8 +538,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some(inheritance) => self.class_header(inheritance),
             None => (NULL, NULL, None),
         };
-        let members =
+        let mut members =
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
+        members.extend(self.parse_methods(&class.members, class.name.span));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(class.left_brace), &members);
         let attributes = self.attributes(&class.attribute_lists, None);
 
@@ -554,7 +555,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A struct is a final class, spec section 10, whose members are a class's, with its header and `\Sharp\Struct`
-    /// as its interface list and the `op_Equality` that compares it by value, as php-src's grammar builds
+    /// as its interface list and, unless it declares `operator ==`, the `op_Equality` that compares it by value, as
+    /// php-src's grammar builds
     /// `final class Username implements \App\HasLabel, \Sharp\Struct`. The engine lets only a `.sharp` class implement
     /// `\Sharp\Struct`, and writes a key text only for one that does.
     fn r#struct(&mut self, r#struct: &Struct) -> u32 {
@@ -567,11 +569,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             r#struct.left_brace,
             r#struct.right_brace,
         );
-        members.push(self.struct_equality(r#struct.name.span));
-        if let Some(parse) = self.struct_parse(r#struct) {
-            members.push(parse);
-            members.push(self.struct_try_parse(r#struct.name.span));
+        let declares_equality = r#struct.members.iter().any(|member| {
+            matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
+        });
+        if !declares_equality {
+            members.push(self.struct_equality(r#struct.name.span));
         }
+        members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None);
         let mut interfaces = Vec::new();
@@ -647,12 +651,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// A struct's `parse`, spec section 10, as `public static function parse(array|object $value): \App\Point`,
-    /// spanning the struct's name. It reads each field `struct_parse_fields` gives from the input, a `Map` or an
+    /// The `parse` and `tryParse` of the struct or PHP# class being lowered, whose `members` are declared and whose name
+    /// is at `span`, where the codex gives it them, spec section 10. No input holds a function, so a type with a
+    /// function field, also inside a collection, has neither, and the checker refuses its call.
+    fn parse_methods(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Vec<u32> {
+        if !self.types.parses(self.class) {
+            return Vec::new();
+        }
+        let Some(parse) = self.parse(members, span) else {
+            return Vec::new();
+        };
+
+        vec![parse, self.try_parse(span)]
+    }
+
+    /// A struct's or a PHP# class's `parse`, spec section 10, as
+    /// `public static function parse(array|object $value): \App\Point`, spanning the type's name, at `span`, with
+    /// `members` its declared members. It reads each field `struct_parse_fields` gives from the input, a `Map` or an
     /// object's public properties, records each bad value's problem under its path in `$fields#2` through generics
     /// R3c's walk, and throws one `\Sharp\InvalidFields` when any is bad. Otherwise it creates the struct through its main
     /// constructor, with the arguments spread by name, so a missing key takes its parameter's default, then writes each
-    /// property read:
+    /// property read. A field whose type has no type text, a function, gives no `parse`:
     ///
     /// ```php
     /// $input#1 = \is_object($value) ? \get_object_vars($value) : $value;
@@ -665,13 +684,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// foreach ($properties#4 as $name#6 => $property#7) { $object#5->$name#6 = $property#7; }
     /// return $object#5;
     /// ```
-    ///
-    /// No input holds a function, so a struct with a function field, also inside a collection, has no `parse`, and the
-    /// checker refuses its call.
-    fn struct_parse(&mut self, r#struct: &Struct) -> Option<u32> {
+    fn parse(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Option<u32> {
         let fields = self.types.struct_parse_fields(self.class);
         let texts = fields.iter().map(|field| self.types.type_text(field.r#type)).collect::<Option<Vec<_>>>()?;
-        let span = r#struct.name.span;
         self.enter(b"parse");
         let line = self.line(span);
         let taken = self.temporaries;
@@ -693,7 +708,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let collected = if field.is_parameter { &arguments } else { &properties };
             let target = Place::element(collected, Index::Text(field.name.to_vec()));
             let source = Place::element(&input, Index::Text(field.key.to_vec()));
-            let hint = written_hint(&r#struct.members, field.name);
+            let hint = written_hint(members, field.name);
             let read = self.parse_field(span, field.r#type, text, hint, &source, field.key, &target, &problems);
             let key = self.string(0, line, field.key);
             let input_read = self.variable(span, &input);
@@ -752,7 +767,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ))
     }
 
-    /// A struct's `tryParse`, spec section 10: its `parse`, giving null where `parse` throws `\Sharp\InvalidFields`.
+    /// A struct's or a PHP# class's `tryParse`, spec section 10: its `parse`, giving null where `parse` throws
+    /// `\Sharp\InvalidFields`.
     ///
     /// ```php
     /// public static function tryParse(array|object $value): ?\App\Point
@@ -760,7 +776,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     ///     try { return \App\Point::parse($value); } catch (\Sharp\InvalidFields) { return null; }
     /// }
     /// ```
-    fn struct_try_parse(&mut self, span: Span) -> u32 {
+    fn try_parse(&mut self, span: Span) -> u32 {
         self.enter(b"tryParse");
         let line = self.line(span);
         let class = self.string(ZEND_NAME_FQ, line, self.class);
@@ -918,7 +934,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut structs: Vec<&[u8]> = members
             .iter()
             .filter_map(|atomic| match atomic {
-                TAtomic::Object(TObject::Named(object)) if self.types.is_struct(object.name.as_bytes()) => {
+                TAtomic::Object(TObject::Named(object)) if self.types.parses(object.name.as_bytes()) => {
                     Some(object.name.as_bytes())
                 }
                 _ => None,
@@ -1058,10 +1074,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL])
     }
 
-    /// Whether `r#type` holds a struct or a backed enum, at any depth, which `parse_build` builds from a value.
+    /// Whether `r#type` holds a struct, a PHP# class or a backed enum, at any depth, which `parse_build` builds from a
+    /// value.
     fn builds(&self, r#type: &TUnion) -> bool {
         r#type.types.iter().any(|atomic| match atomic {
-            TAtomic::Object(TObject::Named(object)) => self.types.is_struct(object.name.as_bytes()),
+            TAtomic::Object(TObject::Named(object)) => self.types.parses(object.name.as_bytes()),
             TAtomic::Object(TObject::Enum(r#enum)) => self.types.backing_type(r#enum.name.as_bytes()).is_some(),
             TAtomic::Array(array) => self.builds(&self.types.array_parameters(array).1),
             _ => false,

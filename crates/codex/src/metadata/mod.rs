@@ -630,14 +630,28 @@ impl CodebaseMetadata {
         self.class_likes.get(declaring_class)?.properties.get(&property_name)
     }
 
-    /// The fields a PHP# struct's `parse` reads, spec section 10: its main constructor's parameters in order, then each
-    /// property an object initializer may set, a public `init` one, as creation from a `Map` is the constructor call
-    /// and then the initializer. A property the main constructor sets on every path may be left out, as it may be from
+    /// Whether `class` has the `parse` spec section 10 gives a struct or a PHP# class, rather than one it declares,
+    /// inherits from a parent that declares one, or none. The codex's spans the whole type, which no declared member
+    /// does.
+    #[must_use]
+    pub fn parses(&self, class: &[u8]) -> bool {
+        let Some(metadata) = self.get_class_like(class) else {
+            return false;
+        };
+
+        self.get_declaring_method_class(class, b"parse") == Some(metadata.name)
+            && self.get_method(class, b"parse").is_some_and(|parse| parse.span == metadata.span)
+    }
+
+    /// The fields a PHP# struct's or class's `parse` reads, spec section 10: its main constructor's parameters in
+    /// order, then each property an object initializer may set, a public `init` or `set` one, as creation from a `Map`
+    /// is the constructor call and then the initializer. A parameter that declares its property is that property's one
+    /// field. A property the main constructor sets on every path may be left out, as it may be from
     /// the initializer, and is read once, by the parameter, when a parameter reads its key. Any other property a
     /// parameter's key names is a second field of that key, which the struct check refuses.
     #[must_use]
     pub fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'_>> {
-        let constructor = self.get_method(class, b"__construct");
+        let constructor = self.get_declaring_method(class, b"__construct");
         let parameters: Vec<ParsedField<'_>> = constructor
             .into_iter()
             .flat_map(|constructor| {
@@ -672,7 +686,7 @@ impl CodebaseMetadata {
             metadata
                 .struct_properties()
                 .into_iter()
-                .filter(|property| property.write_visibility.is_public())
+                .filter(|property| property.write_visibility.is_public() && !property.flags.is_promoted_property())
                 .filter_map(|property| {
                     let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
                     let name = property.name.0.as_bytes();

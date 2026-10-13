@@ -13,6 +13,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::AnonymousClass;
 use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
@@ -131,6 +132,8 @@ where
     finish_registration(codebase, class_like_metadata)
 }
 
+/// Registers a class. A PHP# class that can be created, neither abstract nor static, gets the `parse` and `tryParse`
+/// a struct gets, spec section 10, unless it declares a member of either name.
 #[inline]
 pub fn register_class<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -142,7 +145,7 @@ where
     A: Arena,
 {
     let span = class.span();
-    let class_like_metadata = scan_class_like(
+    let mut class_like_metadata = scan_class_like(
         codebase,
         word(context.resolved_names.get(&class.name)),
         SymbolKind::Class,
@@ -160,6 +163,13 @@ where
         context,
         scope,
     )?;
+    if context.program.dialect.is_sharp()
+        && !class.modifiers.contains_abstract()
+        && !class.modifiers.contains_static()
+        && leaves_parse_free(&class.members)
+    {
+        create_parse_methods(codebase, &mut class_like_metadata, span);
+    }
 
     finish_registration(codebase, class_like_metadata)
 }
@@ -324,7 +334,7 @@ where
 }
 
 /// Registers a PHP# struct, spec section 10, as the final class it runs as, with the `operator ==` that compares it by
-/// value, and its `parse` and `tryParse`.
+/// value and the `parse` and `tryParse` that read it, each unless it declares its own.
 #[inline]
 pub fn register_struct<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -356,7 +366,13 @@ where
     )?;
     class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::STRUCT;
     require_struct_properties(&mut class_like_metadata, &r#struct.members);
-    create_struct_methods(codebase, &mut class_like_metadata, span);
+    let declares_equality = r#struct.members.iter().any(|member| {
+        matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
+    });
+    create_struct_equality(codebase, &mut class_like_metadata, span, declares_equality);
+    if leaves_parse_free(&r#struct.members) {
+        create_parse_methods(codebase, &mut class_like_metadata, span);
+    }
 
     finish_registration(codebase, class_like_metadata)
 }
@@ -1690,16 +1706,43 @@ fn require_struct_properties(class_like: &mut ClassLikeMetadata, members: &Seque
     }
 }
 
-/// A struct's `operator ==`, which the bridge writes to compare each property, spec section 10, and its `parse` and
-/// `tryParse`, which read a `Map<string, Any?>` or an object's public properties. `operator ==` takes any value, so an
-/// `Any?` compares with a struct, and is false when the other value is no instance of the struct. The analyzer
-/// decides which values `==` may compare with a struct.
-fn create_struct_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
-    let instance = get_named_object(class_like.original_name, None);
+/// A struct's `operator ==`, which the bridge writes to compare each property, spec section 10, unless
+/// `declares_equality` says the struct declares its own. It takes any value, so an `Any?` compares with a struct, and
+/// is false when the other value is no instance of the struct. The analyzer decides which values `==` may compare with
+/// a struct. It spans the whole struct, which no declared member does.
+fn create_struct_equality(
+    codebase: &mut CodebaseMetadata,
+    class_like: &mut ClassLikeMetadata,
+    span: Span,
+    declares_equality: bool,
+) {
+    if declares_equality {
+        return;
+    }
+
     let operand = |name: &str| create_parameter(name, get_mixed(), span);
     let equality = create_static_method("op_Equality", span, vec![operand("$a"), operand("$b")], get_bool(), vec![]);
     add_method(codebase, b"op_Equality", class_like, equality);
+}
 
+/// Whether `members` declare no member named `parse` or `tryParse`, whose name the generated pair would take: a type
+/// that declares either keeps its own and gets neither.
+fn leaves_parse_free(members: &Sequence<ClassLikeMember<'_>>) -> bool {
+    !members.iter().any(|member| {
+        let name = match member {
+            ClassLikeMember::Method(method) => method.name.value,
+            ClassLikeMember::NamedConstructor(constructor) => constructor.name.value,
+            _ => return false,
+        };
+
+        name.eq_ignore_ascii_case(b"parse") || name.eq_ignore_ascii_case(b"tryParse")
+    })
+}
+
+/// A struct's or a PHP# class's `parse` and `tryParse`, spec section 10, which read a `Map<string, Any?>` or an
+/// object's public properties. Each spans the whole type, which no declared member does.
+fn create_parse_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
+    let instance = get_named_object(class_like.original_name, None);
     let input = || {
         let map = get_keyed_array(get_string(), get_mixed());
         create_parameter("$value", TUnion::from_vec([map.types.as_ref(), get_object().types.as_ref()].concat()), span)

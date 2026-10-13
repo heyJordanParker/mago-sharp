@@ -1422,13 +1422,13 @@ fn a_struct_member_is_private_where_a_class_would_be_protected() {
     );
 }
 
-/// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct declares no `operator ==`.
-/// Another operator compiles.
+/// Spec section 10: a struct may declare `operator ==`, as a class may, which replaces the `==` that compares each
+/// property with its own `==`. Another operator compiles too.
 #[test]
-fn a_struct_declares_no_operator_equality() {
-    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    public Size(public int width { get; }) { }\n\n    public static bool operator ==(Size a, Size b) => a.width == b.width;\n\n    public static Size operator +(Size a, Size b) => new Size(a.width + b.width);\n}\n";
+fn a_struct_declares_operators_as_a_class_does() {
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    public Size(public int width { get; }) { }\n\n    public static bool operator ==(Size a, Size b) => a.width == b.width;\n\n    public static Size operator +(Size a, Size b) => new Size(a.width + b.width);\n\n    public int hash() => this.width;\n}\n";
 
-    assert_eq!(issues(code), ["7:33 A struct compares by value: remove `operator ==`."]);
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]

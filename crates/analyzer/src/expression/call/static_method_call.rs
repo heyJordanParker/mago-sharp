@@ -129,7 +129,7 @@ where
 
         let method_name = resolved_method.method_identifier.get_method_name();
         if context.dialect.is_sharp()
-            && metadata.flags.is_struct()
+            && context.codebase.parses(metadata.name.as_bytes())
             && (method_name.as_bytes().eq_ignore_ascii_case(b"parse")
                 || method_name.as_bytes().eq_ignore_ascii_case(b"tryParse"))
         {

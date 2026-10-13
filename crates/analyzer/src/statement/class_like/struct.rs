@@ -5,6 +5,7 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -125,8 +126,23 @@ where
         );
     }
 
-    // Language rule 10: `parse` reads each key into one field. The parameters come first, so the first reader of a key
-    // is a main constructor parameter, the one `[Key]` can rename.
+    if context.codebase.parses(class_like_metadata.name.as_bytes()) {
+        report_keys_read_twice(context, class_like_metadata, r#struct.name.span);
+    }
+
+    !inherits
+}
+
+/// Reports each key the `parse` of `class_like_metadata`, a struct or a PHP# class, would read into two fields,
+/// spec section 10's language rule 10, at the second field, or at `name` where the codex has no span for it. The
+/// parameters come first, so the first reader of a key is a main constructor parameter, the one `[Key]` can rename.
+pub(crate) fn report_keys_read_twice<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    name: Span,
+) where
+    A: Arena,
+{
     let fields = context.codebase.struct_parse_fields(class_like_metadata.name.as_bytes());
     let reader = |field: &ParsedField<'_>| {
         let kind = if field.is_parameter { "the main constructor parameter" } else { "the property" };
@@ -146,20 +162,17 @@ where
                 reader(first),
                 reader(field)
             ))
-            .with_annotation(
-                Annotation::primary(field.span.unwrap_or(r#struct.name.span)).with_message("Read again here."),
-            )
+            .with_annotation(Annotation::primary(field.span.unwrap_or(name)).with_message("Read again here."))
             .with_note("`parse` reads each key of its input into one field.")
             .with_help(format!("Give `{}` another key with `[Key(\"…\")]`.", BytesDisplay(first.name))),
         );
     }
-
-    !inherits
 }
 
-/// Reports `Order.parse`, or `Order.tryParse` when it does not `throws`, on a struct with a field `parse` can't read from a value, spec section
-/// 10's language rule 11: an enum with no backing value or a function type, also inside a collection or a nested
-/// struct. The struct itself compiles, so code that never parses it may hold such a field.
+/// Reports `Order.parse`, or `Order.tryParse` when it does not `throws`, on a struct or a PHP# class with a field
+/// `parse` can't read from a value, spec section 10's language rule 11: an enum with no backing value, a function
+/// type, or a class no `parse` builds, also inside a collection or a nested struct or class. The type itself compiles,
+/// so code that never parses it may hold such a field.
 pub(crate) fn check_struct_parse<A>(
     context: &mut Context<'_, '_, A>,
     r#struct: &ClassLikeMetadata,
@@ -171,11 +184,9 @@ pub(crate) fn check_struct_parse<A>(
     let method = if throws { "parse" } else { "tryParse" };
     let class = display_class_like_name(context, r#struct.original_name);
     for field in context.codebase.struct_parse_fields(r#struct.name.as_bytes()) {
-        let Some(unreadable) = unreadable_part(context.codebase, field.r#type, &mut vec![r#struct.name]) else {
+        let Some((unreadable, why)) = unreadable_part(context.codebase, field.r#type, &mut vec![r#struct.name]) else {
             continue;
         };
-        let why =
-            if let TAtomic::Object(TObject::Enum(_)) = unreadable { "has no backing value" } else { "is a function" };
 
         context.collector.report_with_code(
             IssueCode::InvalidStruct,
@@ -192,11 +203,23 @@ pub(crate) fn check_struct_parse<A>(
     }
 }
 
+/// Whether the struct `name` declares `operator ==`, which replaces the `==` that compares it property by property and,
+/// with the `hash()` it then declares, keys a `Map` and joins a `Set`.
+pub(crate) fn declares_equality(codebase: &CodebaseMetadata, name: Word) -> bool {
+    // The `op_Equality` the codex writes for a struct that declares none spans the whole struct.
+    let Some(r#struct) = codebase.get_class_like(name.as_bytes()) else {
+        return false;
+    };
+
+    codebase.get_method(name.as_bytes(), b"op_Equality").is_some_and(|equality| equality.span != r#struct.span)
+}
+
 /// Reports each struct in `key_type` that holds a class instance at any depth, spec section 10: a `Map` holds a struct
 /// key, and a `Set` a struct element, as its key text, built from its values, while a class instance compares through
-/// its own `==`, which no text matches. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's
-/// `Dictionary` needs `Hashable`. `key_type` runs as an array key, so each class it names is a struct. `in_set` names a
-/// `Set` element. Returns whether it reported one.
+/// its own `==`, which no text matches. A struct that declares `operator ==` is held through it and its `hash()`, so
+/// it holds what it likes. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's `Dictionary` needs
+/// `Hashable`. `key_type` runs as an array key, so each class it names is a struct. `in_set` names a `Set` element.
+/// Returns whether it reported one.
 pub(crate) fn report_class_held_by_key<A>(
     context: &mut Context<'_, '_, A>,
     key_type: &TUnion,
@@ -208,7 +231,9 @@ where
 {
     let codebase = context.codebase;
     let structs = key_type.types.iter().filter_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(object)) => codebase.get_class_like(object.name.as_bytes()),
+        TAtomic::Object(TObject::Named(object)) if !declares_equality(codebase, object.name) => {
+            codebase.get_class_like(object.name.as_bytes())
+        }
         _ => None,
     });
     let mut reported = false;
@@ -285,7 +310,8 @@ fn held_class(
     })
 }
 
-/// The part of `r#type` that can be a class instance, or none when every value of it is a value.
+/// The part of `r#type` that can be a class instance, or none when every value of it is a value. A struct that
+/// declares `operator ==` is a value whatever it holds.
 fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {
     r#type.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) => {
@@ -294,7 +320,7 @@ fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<W
             if !class_like.flags.is_struct() {
                 return Some(atomic.clone());
             }
-            if visiting.contains(&class_like.name) {
+            if visiting.contains(&class_like.name) || declares_equality(codebase, class_like.name) {
                 return None;
             }
 
@@ -315,19 +341,38 @@ fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<W
     })
 }
 
-/// The part of `r#type` `parse` can't read from a value: an enum with no backing value or a function, also inside a
-/// collection or a struct `parse` reads through, which `visiting` holds while it is read.
-fn unreadable_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {
+/// The part of `r#type` `parse` can't read from a value, with why: an enum with no backing value, a function, a class
+/// no `parse` builds, or any other type but `Any`, `int`, `float`, `string`, `bool` and a collection, which the bridge
+/// writes no `parse` for, also inside a collection or a struct or class `parse` reads through, which `visiting` holds
+/// while it is read.
+fn unreadable_part(
+    codebase: &CodebaseMetadata,
+    r#type: &TUnion,
+    visiting: &mut Vec<Word>,
+) -> Option<(TAtomic, &'static str)> {
     r#type.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(TObject::Enum(r#enum)) => codebase
             .get_class_like(r#enum.name.as_bytes())
             .filter(|r#enum| r#enum.enum_type.is_none())
-            .map(|_| atomic.clone()),
-        TAtomic::Callable(_) => Some(atomic.clone()),
-        TAtomic::Object(TObject::Named(object))
-            if !visiting.contains(&object.name)
-                && codebase.get_class_like(object.name.as_bytes()).is_some_and(|class| class.flags.is_struct()) =>
-        {
+            .map(|_| (atomic.clone(), "has no backing value")),
+        TAtomic::Callable(_) => Some((atomic.clone(), "is a function")),
+        TAtomic::Object(TObject::Named(object)) if visiting.contains(&object.name) => None,
+        TAtomic::Object(TObject::Named(object)) if !codebase.parses(object.name.as_bytes()) => {
+            // A type that names no class is reported where it is written.
+            let class = codebase.get_class_like(object.name.as_bytes())?;
+            let why = if class.kind.is_interface() {
+                "is an interface"
+            } else if class.flags.is_abstract() {
+                "is abstract"
+            } else if !class.flags.is_sharp() {
+                "is a plain PHP class"
+            } else {
+                "has no `parse` that reads a value"
+            };
+
+            Some((atomic.clone(), why))
+        }
+        TAtomic::Object(TObject::Named(object)) => {
             visiting.push(object.name);
             let found = codebase
                 .struct_parse_fields(object.name.as_bytes())
@@ -342,6 +387,9 @@ fn unreadable_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut 
 
             unreadable_part(codebase, &key, visiting).or_else(|| unreadable_part(codebase, &value, visiting))
         }
-        _ => None,
+        TAtomic::Mixed(_)
+        | TAtomic::Null
+        | TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_) | TScalar::String(_) | TScalar::Bool(_)) => None,
+        _ => Some((atomic.clone(), "is no type `parse` reads")),
     })
 }

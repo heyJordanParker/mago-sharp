@@ -152,6 +152,7 @@ pub fn populate_class_like_metadata_iterative(
 
     if let Some(parent_classname) = metadata.direct_parent_class {
         merge_metadata_from_parent_class_like(&mut metadata, codebase, parent_classname, symbol_references);
+        inherit_declared_parse(&mut metadata, codebase, parent_classname);
     }
 
     let direct_parent_interfaces = sorted_atoms(metadata.direct_parent_interfaces.iter().copied());
@@ -256,6 +257,46 @@ pub fn populate_class_like_metadata_iterative(
 
     metadata.mark_as_populated();
     codebase.class_likes.insert(classlike_name, metadata);
+}
+
+/// Gives the `parse` and `tryParse` the scanner gives a PHP# class, spec section 10, up to the pair its parent class
+/// declares when the parent declares either, as a plain PHP date class declares `parse(string)`: the class then
+/// inherits the parent's pair, as it inherits any static method, and has no `tryParse` where the parent has none. The
+/// scanner's pair stays in the class's methods, so each population decides again.
+fn inherit_declared_parse(metadata: &mut ClassLikeMetadata, codebase: &CodebaseMetadata, parent_classname: Word) {
+    let names = [word(b"parse"), word(b"tryparse")];
+    let generated = |class: Word, name: Word| {
+        codebase
+            .function_likes
+            .get(&(class, name))
+            .zip(codebase.class_likes.get(&class))
+            .is_some_and(|(method, class_like)| method.span == class_like.span)
+    };
+    let Some(parent) = codebase.get_class_like_by_word(parent_classname) else {
+        return;
+    };
+    let parent_declares = names
+        .iter()
+        .any(|name| parent.declaring_method_ids.get(name).is_some_and(|id| !generated(id.get_class_name(), *name)));
+    // The class being populated is out of the codebase until it is done.
+    let own_generated =
+        codebase.function_likes.get(&(metadata.name, names[0])).is_some_and(|parse| parse.span == metadata.span);
+    if !metadata.flags.is_sharp() || !own_generated || !parent_declares {
+        return;
+    }
+
+    for name in names {
+        for (ids, parent_ids) in [
+            (&mut metadata.declaring_method_ids, &parent.declaring_method_ids),
+            (&mut metadata.appearing_method_ids, &parent.appearing_method_ids),
+            (&mut metadata.inheritable_method_ids, &parent.inheritable_method_ids),
+        ] {
+            match parent_ids.get(&name) {
+                Some(id) => ids.insert(name, *id),
+                None => ids.remove(&name),
+            };
+        }
+    }
 }
 
 /// Populates types for properties, constants, enum cases, type aliases and laws within a class-like.

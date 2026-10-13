@@ -257,7 +257,12 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_class_like(class)?.enum_type.as_ref()
     }
 
-    /// The fields the struct `class`'s `parse` reads, as the codex gives them.
+    /// Whether the class-like `class` has the `parse` the codex gives a struct or a PHP# class.
+    pub(crate) fn parses(&self, class: &[u8]) -> bool {
+        self.codebase.parses(class)
+    }
+
+    /// The fields the `parse` of the struct or PHP# class `class` reads, as the codex gives them.
     pub(crate) fn struct_parse_fields(&self, class: &[u8]) -> Vec<ParsedField<'analysis>> {
         self.codebase.struct_parse_fields(class)
     }

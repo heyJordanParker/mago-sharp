@@ -508,7 +508,7 @@ fn written_default(default: &TUnion, hint: Option<&TUnion>) -> Option<String> {
 }
 
 /// Reports `class`'s `operator ==`, declared at `operator`, when neither `class` nor a parent declares a
-/// `public int hash()`, which equal values need to hash alike.
+/// `public int hash()`, which equal values need to hash alike. A struct has no parent, so its fix names it alone.
 fn check_hash<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, operator: Span)
 where
     A: Arena,
@@ -522,10 +522,11 @@ where
     }
 
     let class_name = display_class_like_name(context, class.name);
+    let or_parent = if class.flags.is_struct() { "" } else { " or a parent" };
     context.collector.report_with_code(
         IssueCode::UnimplementedAbstractMethod,
         Issue::error(format!(
-            "`{class_name}` declares `operator ==` without `public int hash()`: declare it in `{class_name}` or a parent, so equal values hash alike."
+            "`{class_name}` declares `operator ==` without `public int hash()`: declare it in `{class_name}`{or_parent}, so equal values hash alike."
         ))
         .with_annotation(Annotation::primary(operator).with_message("Declared here.")),
     );

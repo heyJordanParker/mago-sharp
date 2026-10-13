@@ -7,6 +7,7 @@ use mago_codex::context::ScopeContext;
 use mago_codex::flags::attribute::AttributeFlags;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::expander::StaticClassType;
@@ -260,12 +261,12 @@ where
 
         if context.dialect.is_sharp()
             && attribute_name_bytes.eq_ignore_ascii_case(b"Sharp\\Key")
-            && !is_struct_parameter(block_context, target)
+            && !is_parsed_parameter(context.codebase, block_context, target)
         {
             context.collector.report_with_code(
                 IssueCode::InvalidStruct,
                 Issue::error(
-                    "`Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
+                    "`Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
                 )
                 .with_annotation(Annotation::primary(attribute.name.span()).with_message("Written here.")),
             );
@@ -294,11 +295,11 @@ where
     Ok(())
 }
 
-/// Whether an attribute on `target` is on a parameter of a struct's main constructor, the one place `[Key]` renames
-/// the key a struct's `parse` reads, spec section 10.
-fn is_struct_parameter(block_context: &BlockContext<'_>, target: AttributeTarget) -> bool {
+/// Whether an attribute on `target` is on a parameter of the main constructor of a type with the `parse` spec section
+/// 10 gives a struct or a PHP# class, the one place `[Key]` renames the key that `parse` reads.
+fn is_parsed_parameter(codebase: &CodebaseMetadata, block_context: &BlockContext<'_>, target: AttributeTarget) -> bool {
     matches!(target, AttributeTarget::Parameter | AttributeTarget::PromotedProperty)
-        && block_context.scope.get_class_like().is_some_and(|class| class.flags.is_struct())
+        && block_context.scope.get_class_like().is_some_and(|class| codebase.parses(class.name.as_bytes()))
         && matches!(block_context.scope.get_function_like_identifier(),
             Some(FunctionLikeIdentifier::Method(_, method)) if method.as_bytes().eq_ignore_ascii_case(b"__construct"))
 }

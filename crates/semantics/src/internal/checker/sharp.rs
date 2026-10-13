@@ -1800,8 +1800,7 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
 }
 
 /// Reports what spec section 10 refuses in a struct: a modifier but `public`, `readonly` above all because every
-/// struct is read-only, a `set` accessor, a member modifier only a subclass would need, and `operator ==`, because a
-/// struct compares by value.
+/// struct is read-only, a `set` accessor, and a member modifier only a subclass would need.
 fn check_struct_declaration(r#struct: &Struct, context: &mut Context<'_, '_, '_>) {
     let mut report = |issue: Issue| context.report(issue);
 
@@ -1866,18 +1865,6 @@ fn check_struct_declaration(r#struct: &Struct, context: &mut Context<'_, '_, '_>
             report(
                 Issue::error("A struct has no subclasses, so write `private`.")
                     .with_annotation(Annotation::primary(modifier.span()).with_message("Written here.")),
-            );
-        }
-    }
-
-    for member in &r#struct.members {
-        if let ClassLikeMember::Operator(operator) = member
-            && matches!(operator.symbol, BinaryOperator::Equal(_))
-        {
-            report(
-                Issue::error("A struct compares by value: remove `operator ==`.")
-                    .with_annotation(Annotation::primary(operator.symbol.span()).with_message("Declared here."))
-                    .with_note("`==` on a struct compares each property with its own `==`."),
             );
         }
     }
