@@ -352,6 +352,9 @@ where
     };
     let namespace = match &module.parent {
         Some(parent) => context.resolved_names.get(&parent.name),
+        // The standard library's module serves the root namespace, so its bindings reach every class after the
+        // bindings of the class's own namespaces.
+        None if context.file.is_standard_library => b"".as_slice(),
         None => scope.namespace_name().unwrap_or_default(),
     };
     let bindings = module

@@ -18,8 +18,9 @@ pub struct ModuleMetadata {
     pub file: Word,
     /// The declaration, from `module` to its closing brace.
     pub span: Span,
-    /// The full name of the namespace whose classes it serves, in lowercase: its own namespace for a base module, and
-    /// the namespace its header names for an environment or test module.
+    /// The full name of the namespace whose classes it serves, in lowercase: its own namespace for a base module, the
+    /// root namespace for the standard library's, and the namespace its header names for an environment or test
+    /// module.
     pub namespace: Word,
     pub kind: ModuleKind,
     /// Its bindings, in the order it declares them.

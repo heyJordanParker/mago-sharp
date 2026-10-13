@@ -739,7 +739,7 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
         ),
         // ['app\shop', 'app\mail\mailer', null, 'singleton', static fn (\App\Mail\SmtpMailer $smtp) => $smtp]
         (
-            "    singleton Mailer(SmtpMailer smtp) = smtp;",
+            "    singleton Mailer(SmtpMailer smtp) = smtp;\n    transient SmtpMailer = SmtpMailer;",
             [
                 mailer,
                 "ZVAL null",
@@ -764,7 +764,7 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
         // ['app\shop', 'app\mail\mailer', null, 'singleton',
         //     static fn (#[\Sharp\Internal\Service('list<app\pricing\pricerule>')] array $rules) => new \App\Mail\SmtpMailer()]
         (
-            "    singleton Mailer(List<PriceRule> rules) = new SmtpMailer();",
+            "    singleton Mailer(List<PriceRule> rules) = new SmtpMailer();\n    transient List<PriceRule> = [TaxRule];",
             [
                 mailer,
                 "ZVAL null",
@@ -803,6 +803,77 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
         let expected: Vec<String> =
             std::iter::once(r#"ZVAL "app\\shop""#).chain(expected).map(|field| format!("{field}\n")).collect();
         assert_eq!(fields, expected, "{bindings}");
+    }
+}
+
+/// Spec section 32: the standard library's module binds the services the library gives, such as `Environment`, for
+/// every namespace, so its table names the root namespace, which every class's lookup reaches last. An app's module
+/// names its own namespace. Each row is a module file, its code and the namespace its table names.
+#[test]
+fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
+    let binding = "module\n{\n    singleton Environment = Environment;\n}\n";
+    for (path, namespace, expected) in [
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp", "Sharp", "ZVAL \"\"\n"),
+        ("app/Module.sharp", "App", "ZVAL \"app\"\n"),
+    ] {
+        let code = format!("namespace {namespace};\n\n{binding}");
+        let lowered = Lowered(common::checked(path, &code, &[], lower));
+        // `return [[namespace, service, class, lifetime, value]];`, the file's third statement.
+        let table = lowered.child(lowered.root(), 2);
+        let entry = lowered.child(lowered.child(lowered.child(table, 0), 0), 0);
+
+        assert_eq!(lowered.render(lowered.child(lowered.child(entry, 0), 0)), expected, "{path}");
+    }
+}
+
+/// Spec section 32: a test file's module applies while a test of a class the file declares runs, so the file hands
+/// its bindings to the container for each of its classes, as `\Sharp\Internal\testModule([...], [...])`, and returns
+/// nothing. Each row is the types the file declares beside its module and the classes the call names.
+#[test]
+fn a_test_module_hands_its_bindings_to_the_container_for_each_class_its_file_declares() {
+    let library = [
+        ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+        ("app/Mail/FakeMailer.sharp", "namespace App.Mail;\n\npublic class FakeMailer : Mailer\n{\n}\n"),
+        ("app/Mail/SmtpMailer.sharp", "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n"),
+        (
+            "app/Shop/Module.sharp",
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{\n    singleton Mailer = SmtpMailer;\n}\n",
+        ),
+    ];
+    let file = |types: &str| {
+        format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\n\nmodule : App.Shop\n{{\n    singleton Mailer = FakeMailer;\n}}\n\n{types}"
+        )
+    };
+
+    for (types, classes) in [
+        ("public class CheckoutTest\n{\n}\n", vec!["App\\Shop\\CheckoutTest"]),
+        (
+            "public class CheckoutTest\n{\n}\n\npublic class RefundTest\n{\n}\n",
+            vec!["App\\Shop\\CheckoutTest", "App\\Shop\\RefundTest"],
+        ),
+        ("public class CheckoutTest\n{\n}\n\npublic interface Step\n{\n}\n", vec!["App\\Shop\\CheckoutTest"]),
+    ] {
+        let lowered = Lowered(common::checked("tests/Shop/CheckoutTest.sharp", &file(types), &library, lower));
+        let calls: Vec<u32> = (0..lowered.nodes().len() as u32)
+            .filter(|&node| {
+                lowered.nodes()[node as usize].kind == sharp_kind::SHARP_AST_CALL
+                    && lowered.render(lowered.child(node, 0)) == "ZVAL \"Sharp\\\\Internal\\\\testModule\"\n"
+            })
+            .collect();
+        let elements = classes
+            .iter()
+            .map(|class| format!("  ARRAY_ELEM\n    ZVAL {class:?}\n    null\n"))
+            .collect::<Vec<_>>()
+            .concat();
+
+        assert_eq!(calls.len(), 1, "{types}");
+        assert_eq!(
+            lowered.render(lowered.child(lowered.child(calls[0], 1), 0)),
+            format!("ARRAY [3]\n{elements}"),
+            "{types}"
+        );
+        assert!(lowered.nodes().iter().all(|node| node.kind != sharp_kind::SHARP_AST_RETURN), "{types}");
     }
 }
 

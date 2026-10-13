@@ -1,6 +1,7 @@
-//! Spec section 32: a module binds the services the container builds, and the checker proves the container can build
-//! every one. As in .NET's scope validation and Dagger's graph check, it refuses a service nothing binds, a service
-//! that needs itself, and a `scoped` service a `singleton` would keep after its scope ends.
+//! Spec section 32: a module binds the services the container builds, and PHP# creates only the classes a module
+//! binds. The checker proves the container can build every one, whether or not anything takes it, as Guice's
+//! `requireExplicitBindings()` does. As in .NET's scope validation and Dagger's graph check, it refuses a service
+//! nothing binds, a service that needs itself, and a `scoped` service a `singleton` would keep after its scope ends.
 
 use foldhash::HashSet;
 use mago_allocator::Arena;
@@ -47,11 +48,13 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_undefined_type;
 use crate::statement::function_like::report_undefined_types;
+use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
+use crate::utils::names::display_variable_name;
 
-/// Checks each binding of `module` where it is written, then walks the services each one needs for a cycle and for a
-/// `scoped` service a `singleton` holds.
+/// Checks each binding of `module` where it is written, with every service its class or its expression takes, then
+/// walks the services each one needs for a cycle and for a `scoped` service a `singleton` holds.
 pub(crate) fn analyze_bindings<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -66,6 +69,7 @@ where
         ModuleMember::Law(_) => None,
     });
     let origin = ReferenceOrigin::File(word(&context.source_file.name));
+    let services = Services::new(context.codebase, metadata);
     let mut bound: Vec<((Word, Option<Word>), Span)> = Vec::new();
     for (binding, binding_metadata) in written.zip(&metadata.bindings) {
         let Some(service) = service_type(&binding_metadata.service.type_union) else {
@@ -87,7 +91,11 @@ where
         }
 
         match &binding_metadata.value {
-            BindingValueMetadata::Class(class, span) => check_class_value(context, service, *class, *span),
+            BindingValueMetadata::Class(class, span) => {
+                if check_class_value(context, service, *class, *span) {
+                    check_constructor_services(context, &services, *class, *span);
+                }
+            }
             BindingValueMetadata::Classes(classes) => {
                 let Some(element) = list_element(service) else {
                     context.collector.report_with_code(
@@ -102,7 +110,9 @@ where
                     continue;
                 };
                 for (class, span) in classes {
-                    check_class_value(context, element, *class, *span);
+                    if check_class_value(context, element, *class, *span) {
+                        check_constructor_services(context, &services, *class, *span);
+                    }
                 }
             }
             BindingValueMetadata::Expression(lambda) => {
@@ -138,13 +148,19 @@ where
                     FunctionLikeBody::Expression(expression),
                     None,
                 )?;
+
+                let namespace = metadata.namespace.as_bytes();
+                for parameter in &lambda.parameters {
+                    if let Some(missing) = services.missing(namespace, None, parameter) {
+                        report_missing_service(context, Builds::Binding(service), missing, parameter);
+                    }
+                }
             }
         }
     }
 
     // An environment or test module also changes what the base modules' bindings reach, so each base binding it
     // leaves in place is walked again over its services.
-    let services = Services::new(context.codebase, metadata);
     let base = context
         .codebase
         .modules
@@ -162,7 +178,7 @@ where
     let mut reported: Vec<(IssueCode, *const BindingMetadata)> = Vec::new();
     for (module, binding) in starts {
         let mut walk = Walk::new(&services, binding);
-        walk.dependencies_of(Node::Binding(module, binding));
+        walk.dependencies_of((module, binding));
         for class in &walk.classes {
             artifacts.symbol_references.add_reference(origin, (*class, empty_word()), true);
         }
@@ -188,44 +204,141 @@ where
     Ok(())
 }
 
-/// Spec section 32: the container builds a class through its main constructor, so each parameter whose type only a
-/// binding can build, an interface or an abstract class, needs a module of the class's namespace, or of a namespace
-/// above it, to bind it. The standard library's classes come from the host.
-pub(crate) fn check_constructor_services<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+/// Spec section 32: PHP# creates the classes a module binds, so the bound `class` is built through its main
+/// constructor, and each parameter needs a binding in the module of the class's namespace or of a namespace above it.
+/// A problem is reported at the binding's class value, `bound`, with a note at the parameter.
+fn check_constructor_services<A>(context: &mut Context<'_, '_, A>, services: &Services<'_>, class: Word, bound: Span)
 where
     A: Arena,
 {
-    if !class.kind.is_class() || class.flags.is_abstract() || class.flags.is_event() {
-        return;
+    if let Some(metadata) = context.codebase.get_class_like(class.as_bytes()) {
+        check_class_services(context, services, metadata, Builds::Bound(metadata.original_name, bound));
     }
+}
+
+/// Spec sections 15 and 32: PHP# also creates the class of a listener, a new object for every event, so each
+/// parameter of its main constructor needs a binding as a bound class's does, in the base modules. A problem is
+/// reported at the parameter. `event` is the first event the class listens to.
+pub(crate) fn check_listener_services<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, event: Word)
+where
+    A: Arena,
+{
+    let services = Services { codebase: context.codebase, overrides: None };
+
+    check_class_services(context, &services, class, Builds::Listener(class.original_name, event));
+}
+
+/// Reports each parameter of `class`'s main constructor that `services` can't fill, as `builds` names the class.
+fn check_class_services<A>(
+    context: &mut Context<'_, '_, A>,
+    services: &Services<'_>,
+    class: &ClassLikeMetadata,
+    builds: Builds<'_>,
+) where
+    A: Arena,
+{
     let Some(constructor) = context.codebase.get_declaring_method(class.name.as_bytes(), b"__construct") else {
         return;
     };
 
-    let services = Services::base(context.codebase);
+    let namespace = namespace_of(class.name);
     for parameter in &constructor.parameters {
-        let Some(service) = parameter_service(parameter) else {
-            continue;
-        };
-        if !needs_binding(context.codebase, service)
-            || services.binding_for(&namespace_of(class.name), service, Some(class.name)).is_some()
-        {
-            continue;
+        if let Some(missing) = services.missing(&namespace, Some(class.name), parameter) {
+            report_missing_service(context, builds, missing, parameter);
         }
-
-        let class_name = display_class_like_name(context, class.original_name);
-        let service_name = display_sharp_type(context, service);
-        context.collector.report_with_code(
-            IssueCode::MissingService,
-            Issue::error(format!(
-                "`{class_name}` needs a `{service_name}`, and no module binds one: the container can't build `{class_name}`."
-            ))
-            .with_annotation(Annotation::primary(parameter.span).with_message("Needed here."))
-            .with_help(format!(
-                "Bind `{service_name}` in a module of `{class_name}`'s namespace or one above it, as in `singleton {service_name} = …;`."
-            )),
-        );
     }
+}
+
+/// What the container builds when it fills a parameter: a class a binding binds, with the span of the binding's
+/// class value, the service of a binding's expression, or a listener's class, with the first event it listens to.
+#[derive(Clone, Copy)]
+enum Builds<'ctx> {
+    Bound(Word, Span),
+    Binding(&'ctx TUnion),
+    Listener(Word, Word),
+}
+
+/// A parameter the container can't fill: a service no module binds, or a type that is no service, `None` when the
+/// parameter has no type.
+enum Missing<'ctx> {
+    Unbound(&'ctx TUnion),
+    NoService(Option<&'ctx TUnion>),
+}
+
+/// Reports that the container can't build what `builds` names because it can't fill `parameter`, at a binding's
+/// class value or else at the parameter.
+fn report_missing_service<A>(
+    context: &mut Context<'_, '_, A>,
+    builds: Builds<'_>,
+    missing: Missing<'_>,
+    parameter: &FunctionLikeParameterMetadata,
+) where
+    A: Arena,
+{
+    let (name, subject) = match builds {
+        Builds::Bound(class, _) => {
+            let name = display_class_like_name(context, class).to_string();
+            (name.clone(), format!("`{name}`"))
+        }
+        Builds::Binding(service) => {
+            let name = display_sharp_type(context, service);
+            (name.clone(), format!("`{name}`"))
+        }
+        Builds::Listener(class, event) => {
+            let name = display_class_like_name(context, class).to_string();
+            let subject = format!("`{name}` listens to `{}` and", display_class_like_name(context, event));
+            (name, subject)
+        }
+    };
+    let issue = match missing {
+        Missing::Unbound(service) => {
+            let service_name = display_sharp_type(context, service);
+            let example = match single_class(context.codebase, service) {
+                Some(class) if is_buildable(class) => format!("transient {service_name} = {service_name};"),
+                _ => format!("singleton {service_name} = …;"),
+            };
+            let place = match builds {
+                Builds::Binding(_) => "this namespace".to_owned(),
+                Builds::Bound(..) | Builds::Listener(..) => format!("`{name}`'s namespace"),
+            };
+            Issue::error(format!(
+                "{subject} needs {} `{service_name}`, and no module binds one: the container can't build `{name}`.",
+                article(&service_name)
+            ))
+            .with_help(format!("Bind `{service_name}` in a module of {place} or one above it, as in `{example}`."))
+        }
+        Missing::NoService(written) => {
+            let taken = match written {
+                Some(written) => {
+                    let written = display_sharp_type(context, written);
+                    format!("{} `{written}`", article(&written))
+                }
+                None => format!("`{}` with no type", display_variable_name(context, parameter.name.0)),
+            };
+            let help = match builds {
+                Builds::Bound(..) => format!(
+                    "Bind `{name}` to an expression that creates it, as in `singleton {name}(…) = new {name}(…);`."
+                ),
+                Builds::Binding(_) | Builds::Listener(..) => {
+                    "Take a service that gives the value, such as `Environment`, and read the value from it.".to_owned()
+                }
+            };
+            Issue::error(format!(
+                "{subject} takes {taken}, which no binding can give: the container can't build `{name}`."
+            ))
+            .with_help(help)
+        }
+    };
+    let issue = match builds {
+        Builds::Bound(_, bound) => issue
+            .with_annotation(Annotation::primary(bound).with_message("Bound here."))
+            .with_annotation(Annotation::secondary(parameter.span).with_message("Needed here.")),
+        Builds::Binding(_) | Builds::Listener(..) => {
+            issue.with_annotation(Annotation::primary(parameter.span).with_message("Needed here."))
+        }
+    };
+
+    context.collector.report_with_code(IssueCode::MissingService, issue);
 }
 
 /// The modules one set of services reads: every folder's base module, and the environment or test module whose
@@ -236,8 +349,24 @@ struct Services<'ctx> {
 }
 
 impl<'ctx> Services<'ctx> {
-    fn base(codebase: &'ctx CodebaseMetadata) -> Self {
-        Self { codebase, overrides: None }
+    /// Why the container can't fill `parameter` of `requester`, or of a binding of `namespace` when it is `None`, or
+    /// nothing when a binding gives it or its type names a class no file declares, which is reported where it is
+    /// written.
+    fn missing<'parameter>(
+        &self,
+        namespace: &[u8],
+        requester: Option<Word>,
+        parameter: &'parameter FunctionLikeParameterMetadata,
+    ) -> Option<Missing<'parameter>> {
+        let Some(written) = parameter.type_metadata.as_ref().map(|metadata| &metadata.type_union) else {
+            return Some(Missing::NoService(None));
+        };
+        let service = service_type(written)?;
+        if !is_service(service) {
+            return Some(Missing::NoService(Some(service)));
+        }
+
+        self.binding_for(namespace, service, requester).is_none().then_some(Missing::Unbound(service))
     }
 
     /// The set of services `module` belongs to: the base set for a base module, and the base set under `module`'s own
@@ -284,13 +413,8 @@ impl<'ctx> Services<'ctx> {
     }
 }
 
-/// A service the walk reaches: a binding, or a concrete class nothing binds, which the container builds through its
-/// main constructor every time.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Node<'ctx> {
-    Binding(&'ctx ModuleMetadata, &'ctx BindingMetadata),
-    Class(Word),
-}
+/// A service the walk reaches: a binding and the module that holds it.
+type Node<'ctx> = (&'ctx ModuleMetadata, &'ctx BindingMetadata);
 
 /// A walk of the services one binding needs, which records every class it reads, the first cycle back to that
 /// binding, and the first `scoped` service a `singleton` binding reaches without passing another `singleton`. Each
@@ -301,7 +425,7 @@ struct Walk<'services, 'ctx> {
     start: &'ctx BindingMetadata,
     path: Vec<Word>,
     bindings: Vec<&'ctx BindingMetadata>,
-    seen: HashSet<(Word, bool, bool)>,
+    seen: HashSet<(*const BindingMetadata, bool, bool)>,
     classes: Vec<Word>,
     cycle: Option<(Vec<Word>, &'ctx BindingMetadata)>,
     captive: Option<(&'ctx BindingMetadata, &'ctx BindingMetadata)>,
@@ -322,7 +446,7 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
     }
 
     /// Visits each service `node` needs. A `singleton` start binding holds what it reaches through transient
-    /// services and unbound classes.
+    /// services.
     fn dependencies_of(&mut self, node: Node<'ctx>) {
         let held = self.start.lifetime == Lifetime::Singleton;
         self.visit_parameters_of(node, held);
@@ -355,65 +479,52 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
         }
     }
 
+    /// Visits the binding that serves `service` to `requester`. A service no binding serves is reported at the
+    /// binding of the class that takes it, so the walk stops there.
     fn visit(&mut self, namespace: &[u8], requester: Option<Word>, service: &TUnion, held: bool) {
-        let node = match self.services.binding_for(namespace, service, requester) {
-            Some((module, binding)) => Node::Binding(module, binding),
-            None => match single_class(self.services.codebase, service) {
-                Some(class) if is_buildable(class) => Node::Class(class.name),
-                _ => return,
-            },
+        let Some((module, binding)) = self.services.binding_for(namespace, service, requester) else {
+            return;
         };
 
-        if let Node::Binding(_, binding) = node {
-            if std::ptr::eq(binding, self.start) {
-                if self.cycle.is_none()
-                    && let Some(at) = self.reported_at(None)
-                {
-                    self.cycle = Some((self.path.clone(), at));
-                }
-                return;
-            }
-            if held
-                && binding.lifetime == Lifetime::Scoped
-                && self.captive.is_none()
-                && let Some(at) = self.reported_at(Some(binding))
+        if std::ptr::eq(binding, self.start) {
+            if self.cycle.is_none()
+                && let Some(at) = self.reported_at(None)
             {
-                self.captive = Some((binding, at));
+                self.cycle = Some((self.path.clone(), at));
             }
+            return;
+        }
+        if held
+            && binding.lifetime == Lifetime::Scoped
+            && self.captive.is_none()
+            && let Some(at) = self.reported_at(Some(binding))
+        {
+            self.captive = Some((binding, at));
         }
 
-        let name = match node {
-            Node::Binding(..) => service_id(service),
-            Node::Class(class) => class,
-        };
         // A singleton past the start keeps its own services, and its own walk checks them.
-        let held = held && !matches!(node, Node::Binding(_, binding) if binding.lifetime == Lifetime::Singleton);
-        if self.seen.insert((name, held, self.reported_at(None).is_some())) {
-            if let Node::Binding(_, binding) = node {
-                self.bindings.push(binding);
-            }
-            self.visit_parameters_of(node, held);
-            if let Node::Binding(..) = node {
-                self.bindings.pop();
-            }
+        let held = held && binding.lifetime != Lifetime::Singleton;
+        if self.seen.insert((std::ptr::from_ref(binding), held, self.reported_at(None).is_some())) {
+            self.bindings.push(binding);
+            self.visit_parameters_of((module, binding), held);
+            self.bindings.pop();
         }
     }
 
     /// The parameters the container fills to build `node`, each list with the namespace its services resolve from
-    /// and the class they serve: a class's main constructor, or a binding expression's own parameters, which resolve
-    /// from the module that holds the binding.
+    /// and the class they serve: a bound class's main constructor, or a binding expression's own parameters, which
+    /// resolve from the module that holds the binding.
     fn parameters_of(
         &mut self,
         node: Node<'ctx>,
     ) -> Vec<(Vec<u8>, Option<Word>, &'ctx [FunctionLikeParameterMetadata])> {
         let codebase = self.services.codebase;
         let classes: Vec<Word> = match node {
-            Node::Class(class) => vec![class],
-            Node::Binding(_, BindingMetadata { value: BindingValueMetadata::Class(class, _), .. }) => vec![*class],
-            Node::Binding(_, BindingMetadata { value: BindingValueMetadata::Classes(classes), .. }) => {
+            (_, BindingMetadata { value: BindingValueMetadata::Class(class, _), .. }) => vec![*class],
+            (_, BindingMetadata { value: BindingValueMetadata::Classes(classes), .. }) => {
                 classes.iter().map(|(class, _)| *class).collect()
             }
-            Node::Binding(module, BindingMetadata { value: BindingValueMetadata::Expression(lambda), .. }) => {
+            (module, BindingMetadata { value: BindingValueMetadata::Expression(lambda), .. }) => {
                 return codebase
                     .get_closure(lambda)
                     .map(|lambda| vec![(module.namespace.as_bytes().to_vec(), None, lambda.parameters.as_slice())])
@@ -433,14 +544,15 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
     }
 }
 
-/// Spec section 32: a class value is a concrete class of the service, built through its main constructor.
-fn check_class_value<A>(context: &mut Context<'_, '_, A>, service: &TUnion, class: Word, span: Span)
+/// Spec section 32: a class value is a concrete class of the service, built through its main constructor. Whether it
+/// is one.
+fn check_class_value<A>(context: &mut Context<'_, '_, A>, service: &TUnion, class: Word, span: Span) -> bool
 where
     A: Arena,
 {
     let Some(metadata) = context.codebase.get_class_like(class.as_bytes()) else {
         report_undefined_type(context, class, span);
-        return;
+        return false;
     };
 
     let class_name = display_class_like_name(context, metadata.original_name);
@@ -459,7 +571,7 @@ where
                 .with_annotation(Annotation::primary(span).with_message("Bound here."))
                 .with_help(format!("Bind `{service_name}` to a class that the container can build.")),
         );
-        return;
+        return false;
     }
 
     let value = get_named_object(metadata.name, None);
@@ -471,7 +583,10 @@ where
                 .with_annotation(Annotation::primary(span).with_message("Bound here."))
                 .with_help(format!("Bind `{service_name}` to a class that implements it.")),
         );
+        return false;
     }
+
+    true
 }
 
 fn report_duplicate_binding<A>(
@@ -571,13 +686,16 @@ fn list_element(service: &TUnion) -> Option<&TUnion> {
     }
 }
 
-/// Whether only a binding can build `service`: an interface or abstract class of the app, or a `List` of one.
-fn needs_binding(codebase: &CodebaseMetadata, service: &TUnion) -> bool {
-    if let Some(element) = list_element(service) {
-        return needs_binding(codebase, element);
+/// Whether a binding can give `service`, as the container reads a parameter's service: a class, or a collection of
+/// objects, which the compiler names in the parameter's `Service` attribute.
+fn is_service(service: &TUnion) -> bool {
+    match service.types.as_ref() {
+        [TAtomic::Object(TObject::Named(_))] => true,
+        [TAtomic::Array(_)] => {
+            service.get_all_child_nodes().iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::Object(_))))
+        }
+        _ => false,
     }
-
-    single_class(codebase, service).is_some_and(|class| !is_buildable(class) && !is_standard_library(class))
 }
 
 fn single_class<'ctx>(codebase: &'ctx CodebaseMetadata, service: &TUnion) -> Option<&'ctx ClassLikeMetadata> {
@@ -590,11 +708,6 @@ fn single_class<'ctx>(codebase: &'ctx CodebaseMetadata, service: &TUnion) -> Opt
 /// Whether the container can build `class` through its main constructor: a class that is not abstract.
 fn is_buildable(class: &ClassLikeMetadata) -> bool {
     class.kind.is_class() && !class.flags.is_abstract()
-}
-
-/// Whether the standard library declares `class`, whose services, such as `Environment`, the host gives.
-fn is_standard_library(class: &ClassLikeMetadata) -> bool {
-    class.name.as_bytes().get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"))
 }
 
 /// The namespace of `class`, in lowercase, as modules name theirs.

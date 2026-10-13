@@ -104,6 +104,9 @@ fn analyze(
     analyze_with_artifacts(registry, settings, analyzed, others).0
 }
 
+/// Where a project holds the standard library: a file under it belongs to the library.
+const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
+
 /// Analyzes `analyzed` together with `others` under `settings` and the plugins of `registry`, and returns its issues
 /// and the analysis artifacts.
 fn analyze_with_artifacts(
@@ -117,7 +120,9 @@ fn analyze_with_artifacts(
     let file_ids: Vec<_> = std::iter::once(&analyzed)
         .chain(others)
         .map(|(name, code)| {
-            (*name, database.add(File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()))))
+            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+            file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
+            (*name, database.add(file))
         })
         .collect();
 
@@ -10189,9 +10194,8 @@ fn an_on_clause_lists_events_or_interfaces_an_event_implements() {
     );
 }
 
-/// Spec section 15: a listener runs on an object the container creates, so it is not `static`, and its class-like is a
-/// class that is not abstract and whose constructor is public. It returns nothing. Until spec section 32's container
-/// exists, the object is created with no arguments, so a class whose constructor takes parameters is not supported yet.
+/// Spec section 15: a listener runs on an object PHP# creates, so it is not `static`, and its class-like is a class
+/// that is not abstract and whose constructor is public. It returns nothing.
 #[test]
 fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_creates() {
     let fixed = (
@@ -10216,10 +10220,6 @@ fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_c
     );
     let interface =
         ("app/Shop/Tick.sharp", "namespace App.Shop;\n\npublic interface Tick\n{\n    void tick() on OrderPaid;\n}\n");
-    let constructed = (
-        "app/Shop/Tick.sharp",
-        "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick(public Logger logger { get; }) { }\n\n    public void tick() on OrderPaid { }\n}\n",
-    );
     let opened = (
         "app/Shop/Tick.sharp",
         "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick() { }\n\n    public void tick() on OrderPaid { }\n}\n",
@@ -10273,12 +10273,41 @@ fn a_listener_is_an_instance_method_returning_nothing_in_a_class_the_container_c
             "5:17 invalid-event `Tick` is an interface, so the container cannot create it to run `tick`. | `tick` listens here."
         ]
     );
-    assert_eq!(
-        worded(constructed, &listened()),
-        [
-            "7:24 invalid-event A listener whose class takes constructor parameters is not supported yet in PHP#. | `tick` listens to events. | PHP# creates `Tick` with no arguments to run its listeners."
-        ]
+}
+
+/// Spec sections 15 and 32: PHP# creates a new object of a listener's class for every event, with no binding of the
+/// class, and fills its constructor as it fills a bound class's: each parameter from a binding in the base module of
+/// the class's namespace or of a namespace above it, of any lifetime. Each row is the modules of the project and the
+/// refusals `Tick`, which takes a `Logger`, gets.
+#[test]
+fn a_listener_class_takes_services_its_namespace_modules_bind() {
+    let tick = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public Tick(private Logger logger) { }\n\n    public void tick() on OrderPaid { }\n}\n",
     );
+    let module = |path: &'static str, namespace: &str, members: &str| {
+        (path, leak(format!("namespace {namespace};\n\nimport App.Shop.Logger;\n\nmodule\n{{\n{members}\n}}\n")))
+    };
+    let missing = "5:17 missing-service `Tick` listens to `OrderPaid` and needs a `Logger`, and no module binds one: the container can't build `Tick`. | Bind `Logger` in a module of `Tick`'s namespace or one above it, as in `transient Logger = Logger;`.";
+
+    for (modules, expected) in [
+        (vec![], vec![missing]),
+        (vec![module("app/Shop/Module.sharp", "App.Shop", "    transient Logger = Logger;")], vec![]),
+        (vec![module("app/Shop/Module.sharp", "App.Shop", "    scoped Logger = Logger;")], vec![]),
+        (vec![module("app/Module.sharp", "App", "    singleton Logger = Logger;")], vec![]),
+        (vec![module("app/Mail/Module.sharp", "App.Mail", "    singleton Logger = Logger;")], vec![missing]),
+    ] {
+        let files: Vec<_> = listened().into_iter().chain(modules.iter().copied()).collect();
+        let refused: Vec<_> =
+            refusals(tick, &files).into_iter().filter(|refusal| refusal.contains(" missing-service ")).collect();
+        assert_eq!(refused, expected, "{modules:?}");
+    }
+
+    let fixed = (
+        "app/Shop/Tick.sharp",
+        "namespace App.Shop;\n\npublic class Tick\n{\n    public void tick() on OrderPaid { }\n}\n",
+    );
+    assert_eq!(refusals(fixed, &listened()), Vec::<String>::new());
 }
 
 const LABEL: (&str, &str) = (
@@ -11797,7 +11826,7 @@ fn shop_module(members: &str) -> (&'static str, &'static str) {
 fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_that_service() {
     for (members, expected) in [
         (
-            "    singleton Mailer = SmtpMailer;\n    singleton Mailer for SendReceipt = QueueMailer;\n    singleton List<PriceRule> = [TaxRule, DiscountRule];\n    singleton RedisStore(Config config) = new RedisStore(config.url);\n    scoped QueueMailer = QueueMailer;\n    transient SmtpMailer = SmtpMailer;",
+            "    singleton Mailer = SmtpMailer;\n    singleton Mailer for SendReceipt = QueueMailer;\n    singleton List<PriceRule> = [TaxRule, DiscountRule];\n    singleton RedisStore(Config config) = new RedisStore(config.url);\n    scoped QueueMailer = QueueMailer;\n    transient SmtpMailer = SmtpMailer;\n    singleton Config = Config;",
             vec![],
         ),
         (
@@ -11862,49 +11891,94 @@ fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_th
     }
 }
 
-/// Spec section 32: the container builds a class through its main constructor, so each interface or abstract class
-/// it takes needs a binding in the module of its namespace or of a namespace above it, the nearest one winning and a
-/// binding `for` it before any other. Each row is the modules of the project and the refusals `SendReceipt` gets.
+/// Spec section 32: PHP# creates only the classes a module binds, so every parameter of a bound class's main
+/// constructor and of a binding's expression needs a binding, in the module of its namespace or of a namespace above
+/// it, the nearest one winning and a binding `for` the class before any other. A bound class's parameters resolve from
+/// its own namespace, and a binding's from its module's. The standard library's module binds
+/// `Environment` for every namespace. A class no module binds is ordinary code, checked by nothing here. Each row is
+/// the other modules of the project, `App.Shop`'s bindings from line 13, and the refusals they get.
 #[test]
-fn a_constructor_parameter_only_a_binding_can_build_needs_one_in_its_namespace_or_above() {
-    let send_receipt = BOUND_SERVICES[9];
-    let others: Vec<_> = BOUND_SERVICES.iter().filter(|file| file.0 != send_receipt.0).copied().collect();
-    let missing = "7:24 missing-service `SendReceipt` needs a `Mailer`, and no module binds one: the container can't build `SendReceipt`. | Bind `Mailer` in a module of `SendReceipt`'s namespace or one above it, as in `singleton Mailer = …;`.";
+fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
+    let margin_rule = (
+        "app/Pricing/MarginRule.sharp",
+        "namespace App.Pricing;\n\nimport App.Flags;\n\npublic class MarginRule : PriceRule\n{\n    public MarginRule(private Flags flags) { }\n}\n",
+    );
+    let library = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp",
+        "namespace Sharp;\n\nmodule\n{\n    singleton Environment = Environment;\n}\n",
+    );
     let module = |path: &'static str, namespace: &str, members: &str| {
         (
             path,
             leak(format!(
-                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Shop.Cart;\n\nmodule\n{{\n{members}\n}}\n"
+                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Pricing.PriceRule;\nimport App.Pricing.TaxRule;\nimport App.Pricing.MarginRule;\nimport App.Cache.RedisStore;\nimport App.Flags;\n\nmodule\n{{\n{members}\n}}\n"
             )),
         )
     };
+    let parent = module("app/Module.sharp", "App", "    singleton Mailer = SmtpMailer;");
+    let sibling = module("app/Mail/Module.sharp", "App.Mail", "    singleton Mailer = SmtpMailer;");
+    let app_flags = module("app/Module.sharp", "App", "    transient Flags = Flags;");
+    let mailer = |line: u32, column: u32| {
+        format!(
+            "{line}:{column} missing-service `SendReceipt` needs a `Mailer`, and no module binds one: the container can't build `SendReceipt`. | Bind `Mailer` in a module of `SendReceipt`'s namespace or one above it, as in `singleton Mailer = …;`."
+        )
+    };
+    let flags = "13:43 missing-service `MarginRule` needs a `Flags`, and no module binds one: the container can't build `MarginRule`. | Bind `Flags` in a module of `MarginRule`'s namespace or one above it, as in `transient Flags = Flags;`.";
+    let rules = "13:22 missing-service `Cart` needs a `List<PriceRule>`, and no module binds one: the container can't build `Cart`. | Bind `List<PriceRule>` in a module of `Cart`'s namespace or one above it, as in `singleton List<PriceRule> = …;`.";
+    let smtp = "13:22 missing-service `Mailer` needs a `SmtpMailer`, and no module binds one: the container can't build `Mailer`. | Bind `SmtpMailer` in a module of this namespace or one above it, as in `transient SmtpMailer = SmtpMailer;`.";
+    let environment = "13:26 missing-service `RedisStore` needs an `Environment`, and no module binds one: the container can't build `RedisStore`. | Bind `Environment` in a module of this namespace or one above it, as in `transient Environment = Environment;`.";
+    let url = "13:28 missing-service `RedisStore` takes a `string`, which no binding can give: the container can't build `RedisStore`. | Bind `RedisStore` to an expression that creates it, as in `singleton RedisStore(…) = new RedisStore(…);`.";
+    let value = "13:22 missing-service `Mailer` takes a `string`, which no binding can give: the container can't build `Mailer`. | Take a service that gives the value, such as `Environment`, and read the value from it.";
+    let store =
+        "    singleton RedisStore(Environment environment) = new RedisStore(environment.require(\"REDIS_URL\"));";
 
-    for (modules, expected) in [
-        (vec![], vec![missing]),
-        (vec![module("app/Shop/Module.sharp", "App.Shop", "    singleton Mailer = SmtpMailer;")], vec![]),
-        (vec![module("app/Module.sharp", "App", "    singleton Mailer = SmtpMailer;")], vec![]),
-        (vec![module("app/Mail/Module.sharp", "App.Mail", "    singleton Mailer = SmtpMailer;")], vec![missing]),
+    for (modules, members, expected) in [
+        (vec![], "    singleton Mailer = SmtpMailer;", vec![]),
+        (vec![], "    transient SendReceipt = SendReceipt;", vec![mailer(13, 29)]),
+        (vec![], "    singleton Mailer = SmtpMailer;\n    transient SendReceipt = SendReceipt;", vec![]),
+        (vec![parent], "    transient SendReceipt = SendReceipt;", vec![]),
+        (vec![sibling], "    transient SendReceipt = SendReceipt;", vec![mailer(13, 29)]),
         (
-            vec![module("app/Shop/Module.sharp", "App.Shop", "    singleton Mailer for Cart = SmtpMailer;")],
-            vec![missing],
+            vec![],
+            "    singleton Mailer for Cart = SmtpMailer;\n    transient SendReceipt = SendReceipt;",
+            vec![mailer(14, 29)],
         ),
         (
-            vec![module("app/Shop/Module.sharp", "App.Shop", "    singleton Mailer for SendReceipt = SmtpMailer;")],
+            vec![],
+            "    singleton Mailer for SendReceipt = SmtpMailer;\n    transient SendReceipt = SendReceipt;",
             vec![],
         ),
+        (vec![], "    transient Cart = Cart;", vec![rules.to_owned()]),
+        (vec![], "    singleton List<PriceRule> = [TaxRule, MarginRule];", vec![flags.to_owned()]),
+        (
+            vec![],
+            "    singleton List<PriceRule> = [TaxRule, MarginRule];\n    transient Flags = Flags;",
+            vec![flags.to_owned()],
+        ),
+        (vec![app_flags], "    singleton List<PriceRule> = [TaxRule, MarginRule];", vec![]),
+        (vec![], "    singleton Mailer(SmtpMailer smtp) = smtp;", vec![smtp.to_owned()]),
+        (vec![], "    singleton Mailer(SmtpMailer smtp) = smtp;\n    transient SmtpMailer = SmtpMailer;", vec![]),
+        (vec![], "    transient RedisStore = RedisStore;", vec![url.to_owned()]),
+        (vec![], "    singleton Mailer(string url) = new SmtpMailer();", vec![value.to_owned()]),
+        (vec![], store, vec![environment.to_owned()]),
+        (vec![library], store, vec![]),
     ] {
-        let files: Vec<_> = others.iter().copied().chain(modules.iter().copied()).collect();
-        let refused: Vec<_> = refusals(send_receipt, &files)
-            .into_iter()
-            .filter(|refusal| refusal.contains(" missing-service "))
-            .collect();
-        assert_eq!(refused, expected, "{modules:?}");
+        let shop = module("app/Shop/Module.sharp", "App.Shop", members);
+        let files: Vec<_> =
+            BOUND_SERVICES.iter().copied().chain([margin_rule]).chain(modules.iter().copied()).collect();
+        let refused: Vec<_> =
+            refusals(shop, &files).into_iter().filter(|refusal| refusal.contains(" missing-service ")).collect();
+        assert_eq!(refused, expected, "{modules:?}: {members}");
     }
+
+    let send_receipt = BOUND_SERVICES[9];
+    let others: Vec<_> = BOUND_SERVICES.iter().filter(|file| file.0 != send_receipt.0).copied().collect();
+    assert!(refusals(send_receipt, &others).iter().all(|refusal| !refusal.contains(" missing-service ")));
 }
 
-/// Spec section 32, as .NET's scope validation and Dagger's graph check refuse them: a service that needs itself, and
-/// a `scoped` service a `singleton` holds, directly or through services built each time. Each row is a module's
-/// bindings, from line 12, and the refusals they get.
+/// Spec section 32, as .NET's scope validation and Dagger's graph check refuse them: a service that needs itself, at
+/// each binding on the cycle, and a `scoped` service a `singleton` holds, directly or through `transient` services.
+/// Each row is a module's bindings, from line 12, and the refusals they get.
 #[test]
 fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refused() {
     let looping = (
@@ -11927,15 +12001,33 @@ fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refus
         )
     };
 
+    let through = "13:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+    let looped = "12:5 service-cycle `LoopMailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
+
     for (members, expected) in [
         ("    singleton Mailer = LoopMailer;", vec![cycle.to_owned()]),
-        ("    transient Mailer(LoopMailer loop) = loop;", vec![cycle.to_owned()]),
+        (
+            "    transient LoopMailer = LoopMailer;\n    transient Mailer(LoopMailer loop) = loop;",
+            vec![looped.to_owned(), through.to_owned()],
+        ),
         ("    singleton Mailer = SmtpMailer;\n    singleton LoopMailer = LoopMailer;", vec![]),
-        ("    scoped Flags = Flags;\n    singleton Mailer(Flags flags, SmtpMailer smtp) = smtp;", vec![captive(13)]),
+        (
+            "    scoped Flags = Flags;\n    singleton Mailer(Flags flags, SmtpMailer smtp) = smtp;\n    transient SmtpMailer = SmtpMailer;",
+            vec![captive(13)],
+        ),
         ("    scoped Flags = Flags;\n    singleton Mailer = FlaggedMailer;", vec![captive(13)]),
-        ("    scoped Flags = Flags;\n    singleton Mailer = Wrapper;", vec![captive(13)]),
-        ("    scoped Flags = Flags;\n    scoped Mailer = Wrapper;", vec![]),
-        ("    singleton Flags = Flags;\n    singleton Mailer = Wrapper;", vec![]),
+        (
+            "    scoped Flags = Flags;\n    singleton Mailer = Wrapper;\n    transient FlaggedMailer = FlaggedMailer;",
+            vec![captive(13)],
+        ),
+        (
+            "    scoped Flags = Flags;\n    scoped Mailer = Wrapper;\n    transient FlaggedMailer = FlaggedMailer;",
+            vec![],
+        ),
+        (
+            "    singleton Flags = Flags;\n    singleton Mailer = Wrapper;\n    transient FlaggedMailer = FlaggedMailer;",
+            vec![],
+        ),
     ] {
         // The module of `App` serves the classes of `App.Mail` and `App.Shop` below it.
         let module = (
@@ -11951,7 +12043,7 @@ fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refus
 /// Spec section 32: an environment or test module overrides the base modules' bindings, so the services it changes
 /// are checked with the base bindings that reach them, and a problem it causes is reported at its own binding. Each
 /// row is the overriding file, its bindings from line 10, and the refusals it gets over a base module that binds
-/// `singleton Mailer = Wrapper;` and `singleton Flags = Flags;`.
+/// `singleton Mailer = Wrapper;`, `singleton Flags = Flags;` and `transient FlaggedMailer = FlaggedMailer;`.
 #[test]
 fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() {
     let looping = (
@@ -11968,7 +12060,7 @@ fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() 
     );
     let base = (
         "app/Module.sharp",
-        "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.Wrapper;\n\nmodule\n{\n    singleton Mailer = Wrapper;\n    singleton Flags = Flags;\n}\n",
+        "namespace App;\n\nimport App.Mail.Mailer;\nimport App.Mail.Wrapper;\nimport App.Mail.FlaggedMailer;\n\nmodule\n{\n    singleton Mailer = Wrapper;\n    singleton Flags = Flags;\n    transient FlaggedMailer = FlaggedMailer;\n}\n",
     );
     let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper, base]).collect();
     let captive = "10:5 captive-service The singleton `Mailer` holds the scoped `Flags`, which would outlive the scope it belongs to. | Make `Mailer` scoped too, or make `Flags` a singleton.";

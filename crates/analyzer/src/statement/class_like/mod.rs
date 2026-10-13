@@ -519,10 +519,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
             self.members.as_slice(),
         )?;
 
-        if context.dialect.is_sharp() {
-            crate::statement::module::check_constructor_services(context, class_like_metadata);
-        }
-
         if context.settings.enforce_class_finality
             && !class_like_metadata.flags.is_final()
             && !class_like_metadata.flags.is_abstract()

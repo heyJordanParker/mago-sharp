@@ -251,6 +251,12 @@ where
     if context.dialect.is_sharp() { word(mago_bytes::trim_start_byte(name.as_bytes(), b'$')) } else { name }
 }
 
+/// The article a message writes before `name`: "an" before a vowel, as in "an `Environment`", and "a" otherwise.
+#[must_use]
+pub(crate) fn article(name: &str) -> &'static str {
+    if name.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }
+}
+
 /// Returns the variable `id` as the analyzed file writes it. The analyzer keys a variable, a parameter and a read
 /// through one by its PHP text, as `$order`, `$this->total` and `App\Shop\Order::$count`. A `.sharp` file writes them
 /// as `order`, `this.total` and `Order.count`: a property is named without `$`, and the class before `::` as

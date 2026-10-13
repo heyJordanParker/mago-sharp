@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
 use mago_codex::metadata::module::BindingValueMetadata;
+use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::service_id;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::TType;
@@ -443,7 +444,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         {
             let line = self.line(*first);
             let table = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &bindings);
-            statements.push(self.node(SHARP_AST_RETURN, 0, line, &[table]));
+            let statement = if self.types.module(first.span()).kind == ModuleKind::Test {
+                self.test_module(checked, line, table)
+            } else {
+                self.node(SHARP_AST_RETURN, 0, line, &[table])
+            };
+            statements.push(statement);
         }
 
         let root = self.node(SHARP_AST_STMT_LIST, 0, 1, &statements);
@@ -487,10 +493,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
     }
 
-    /// Spec section 32: a file whose modules bind services returns their bindings, which `Sharp\Container` reads, after
-    /// the classes a test file declares beside its module. A module of laws alone returns nothing. Each binding is a list of the namespace whose classes it serves, its
-    /// service's id, the class it serves or null, its lifetime, and its value: a class's full name, a list of them,
-    /// or a static `fn` over the binding's parameters that returns its expression.
+    /// Spec section 32: a test file's module, the call `\Sharp\Internal\testModule([...], table)`, which hands the
+    /// container the module's bindings for each class the file declares, so the container uses them while a test of
+    /// one of those classes runs.
+    fn test_module(&mut self, checked: &CheckedProgram, line: u32, table: u32) -> u32 {
+        let names = Node::Program(checked.program()).filter_map(|node| match *node {
+            Node::Class(class) => Some(self.names.get(&class.name)),
+            _ => None,
+        });
+        let mut classes = Vec::new();
+        for name in names {
+            let class = self.string(0, line, name);
+            classes.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[class, NULL]));
+        }
+        let classes = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &classes);
+        let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\testModule");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[classes, table]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// Spec section 32: a file whose base or environment modules bind services returns their bindings, which
+    /// `Sharp\Container` reads. A module of laws alone returns nothing. Each binding is a list of the namespace whose
+    /// classes it serves, its service's id, the class it serves or null, its lifetime, and its value: a class's full
+    /// name, a list of them, or a static `fn` over the binding's parameters that returns its expression.
     fn module_bindings(&mut self, module: &Module, bindings: &mut Vec<u32>) {
         let metadata = self.types.module(module.span());
         let written = module.members.iter().filter_map(|member| match member {
