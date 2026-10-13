@@ -297,7 +297,7 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
 }
 
 /// The size, modification time and hash of the file at the workspace-relative `path` under `root`, or none when no
-/// file is there.
+/// file of exactly that name is there.
 ///
 /// A path whose last segment is [`SOURCE_LISTING`] gets the stamp of its folder's listing, which a missing folder gives
 /// empty.
@@ -325,12 +325,32 @@ pub fn stamp(root: &Path, path: &[u8]) -> io::Result<Option<Input>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    if !folder_holds_name(&full)? {
+        return Ok(None);
+    }
     let mtime_ns = match std::fs::metadata(&full)?.modified()?.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_nanos()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_nanos()).map_or(i64::MIN, |nanos| -nanos),
     };
 
     Ok(Some(Input { path: path.to_vec(), size: contents.len() as u64, mtime_ns, hash: source_hash(&contents) }))
+}
+
+/// Whether the folder of the file at `full` holds a file of exactly its name, case included. A disk that ignores case,
+/// as macOS's does by default, opens `environment.php` for `Environment.php`. Linux does not, so a file is there only
+/// under its exact name, and a compile on either disk stamps the same inputs, as the engine's
+/// `sharp_folder_holds_name` reads them.
+fn folder_holds_name(full: &Path) -> io::Result<bool> {
+    let (Some(folder), Some(name)) = (full.parent(), full.file_name()) else {
+        return Ok(false);
+    };
+    for entry in std::fs::read_dir(folder)? {
+        if entry?.file_name() == name {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// The listing of `folder` that [`SOURCE_LISTING`] stamps.

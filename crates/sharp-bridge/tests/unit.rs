@@ -317,6 +317,8 @@ fn write(root: &Path, name: &str, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
+/// A file is there only under its exact name, case included, as on Linux, so a compile on a disk that ignores case
+/// stamps the same inputs as one on Linux.
 #[test]
 fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     let directory = tempfile::tempdir().unwrap();
@@ -329,6 +331,11 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     assert_eq!(stamped.hash, source_hash(SOURCE.as_bytes()));
     assert_ne!(stamped.mtime_ns, 0);
     assert_eq!(stamp(directory.path(), b"app/Missing.sharp").unwrap(), None);
+    assert_eq!(
+        stamp(directory.path(), b"app/report.sharp").unwrap(),
+        None,
+        "a disk that ignores case still has no report.sharp"
+    );
 }
 
 /// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files, so a file appearing, going or being renamed changes
