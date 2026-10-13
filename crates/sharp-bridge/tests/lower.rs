@@ -418,6 +418,30 @@ fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_an_event() {
     );
 }
 
+/// Only a file declares a type, so in a class body a class named after a type's keyword or a modifier is a member's
+/// type, as `Struct`, `Class` and `Lazy` are here, and an operator's return type keeps its name.
+#[test]
+fn a_class_named_after_a_type_keyword_or_a_modifier_types_a_member() {
+    let r#struct =
+        ("src/Shop/Struct.sharp", "namespace App.Shop;\n\npublic class Struct\n{\n    public Struct() { }\n}\n");
+    let class = ("src/Shop/Class.sharp", "namespace App.Shop;\n\npublic class Class\n{\n    public Class() { }\n}\n");
+    let lazy = (
+        "src/Shop/Lazy.sharp",
+        "namespace App.Shop;\n\npublic class Lazy\n{\n    public Lazy() { }\n\n    public static Lazy operator +(Lazy a, Lazy b) { return a; }\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App.Shop;\n\npublic class Report\n{\n    public Struct shape { get; set; }\n    public Class kind { get; set; }\n\n    public Report()\n    {\n        this.shape = new Struct();\n        this.kind = new Class();\n    }\n\n    public Lazy sum(Lazy a, Lazy b) => a + b;\n}\n",
+        &[r#struct, class, lazy],
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert!(
+        lowered.tree().contains("ZVAL \"shape\"") && lowered.tree().contains("ZVAL \"kind\""),
+        "{}",
+        lowered.tree()
+    );
+}
+
 /// Each keyword an error on a keyword, `true`, `false` or `null` written in another case names compiles once written
 /// in lowercase, in every place the error fires: a statement on two lines and two keywords on one line included.
 #[test]

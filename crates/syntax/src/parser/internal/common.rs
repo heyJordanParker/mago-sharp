@@ -44,10 +44,17 @@ where
     /// Reads the name at the head of the stream, or after `static` there, as the PHP keyword it spells where PHP's
     /// construct follows it, as [`Self::read_php_keyword`] decides. A `.sharp` file reads a PHP keyword that PHP#
     /// doesn't use as a plain name, spec section 2, so PHP's construct parses only where a member or a part of a PHP
-    /// construct starts, and its own error names the PHP# form. A modifier or a type's keyword written in another case
-    /// reads as it there, as `Static` in `public Static int run()` does.
+    /// construct starts, and its own error names the PHP# form. A modifier written in another case reads as it there,
+    /// as `Static` in `public Static int run()` does.
     pub(crate) fn read_php_construct(&mut self) -> Result<(), ParseError> {
         self.read_php_keyword(Head::Declaration)
+    }
+
+    /// Reads the name after a type's modifiers as [`Self::read_php_construct`] does, and also a type's keyword written
+    /// in another case, as `Class` in `public Class Cart {`. Only a file declares a type, so in a class body that word
+    /// is a member's type, as in `public Class kind { get; set; }`.
+    pub(crate) fn read_php_type_declaration(&mut self) -> Result<(), ParseError> {
+        self.read_php_keyword(Head::TypeDeclaration)
     }
 
     /// Reads the name at the head of an expression as [`Self::read_php_construct`] does, and also a keyword written
@@ -99,7 +106,7 @@ where
             if self.miscased_construct_follows(word, head)? {
                 self.read_miscased_keyword(token, word);
             }
-        } else if head != Head::Declaration
+        } else if matches!(head, Head::Expression | Head::Statement)
             && token.kind == T![Identifier]
             && let Some(keyword) = lookup_keyword(token.value).filter(|_| self.dialect.is_sharp())
             && self.construct_follows(keyword, 0, head == Head::Statement)?
@@ -142,8 +149,9 @@ where
     /// after `try`, `do`, `else` and `finally`, `if` after `else`, and `;` after `break`, `continue` and `return`,
     /// unless the name starts a local whose type it names, as in `Return refund = new Return();`. At a declaration's
     /// head, it is a modifier followed by another modifier or by a type and a name, as `Static` in
-    /// `public Static int run()`, and a type's keyword followed by its name, as `Class` in `public Class Cart {`. So
-    /// `public Static run()` keeps `Static` a return type.
+    /// `public Static int run()`, so `public Static run()` keeps `Static` a return type, and so does an operator's name,
+    /// as in `public static Lazy operator +(…)`. After a type's modifiers, it is a type's keyword followed by its name,
+    /// as `Class` in `public Class Cart {`.
     fn miscased_construct_follows(&mut self, word: &'static str, head: Head) -> Result<bool, ParseError> {
         let next = self.stream.lookahead(1)?;
         let next_kind = next.map(|next| next.kind);
@@ -152,16 +160,20 @@ where
             _ => None,
         };
 
-        if head == Head::Declaration {
-            return Ok(match word {
-                "class" | "interface" | "enum" | "struct" => matches!(after_name, Some(T!["{" | ":" | "<"])),
-                _ if is_modifier_word(word) => {
-                    next.is_some_and(|next| {
+        match head {
+            Head::TypeDeclaration => {
+                return Ok(matches!(word, "class" | "interface" | "enum" | "struct")
+                    && matches!(after_name, Some(T!["{" | ":" | "<"])));
+            }
+            Head::Declaration => {
+                return Ok(is_modifier_word(word)
+                    && (next.is_some_and(|next| {
                         next.kind.is_modifier() || self.miscased_keyword(next).is_some_and(is_modifier_word)
-                    }) || after_name.is_some_and(|kind| !matches!(kind, T!["(" | ")" | ";" | "=" | "{" | "=>" | ","]))
-                }
-                _ => false,
-            });
+                    }) || next.is_some_and(|next| next.value != b"operator")
+                        && after_name
+                            .is_some_and(|kind| !matches!(kind, T!["(" | ")" | ";" | "=" | "{" | "=>" | ","]))));
+            }
+            Head::Expression | Head::Statement => {}
         }
 
         let follows = match word {
@@ -262,10 +274,11 @@ where
 }
 
 /// Where the parser reads a name that may spell a PHP keyword: in a declaration, as a member's or an import's head,
-/// at an expression's head, or at a statement's head.
+/// after a type's modifiers in a file, at an expression's head, or at a statement's head.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Head {
     Declaration,
+    TypeDeclaration,
     Expression,
     Statement,
 }

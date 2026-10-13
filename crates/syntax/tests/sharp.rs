@@ -2135,6 +2135,8 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
         ("class Report\n{\n    public Static int run() { return 1; }\n}\n", &["static"]),
         ("class Report\n{\n    Public Static List<int> run() { return []; }\n}\n", &["public", "static"]),
         ("public Class Report\n{\n}\n", &["class"]),
+        ("public Enum Suit\n{\n    case Hearts;\n}\n", &["enum"]),
+        ("public Interface Drawable\n{\n}\n", &["interface"]),
         ("Import Lib.Calc;\n\nclass Report\n{\n}\n", &["import"]),
         ("Namespace App;\n\nclass Report\n{\n}\n", &["namespace"]),
     ] {
@@ -2168,6 +2170,9 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
         (method("        const f = (Static s) => s;\n        return f;\n"), "Static", 1),
         ("class Report\n{\n    public Static run() { return new Static(); }\n}\n", "Static", 2),
         ("class Report\n{\n    private Static items;\n\n    public Static(int x) { }\n}\n", "Static", 2),
+        ("class Report\n{\n    public Struct shape { get; set; }\n}\n", "Struct", 1),
+        ("class Report\n{\n    public Class kind { get; set; }\n}\n", "Class", 1),
+        ("class Lazy\n{\n    public static Lazy operator +(Lazy a, Lazy b) { return a; }\n}\n", "Lazy", 4),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
