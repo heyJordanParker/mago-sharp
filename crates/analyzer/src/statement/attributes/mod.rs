@@ -7,6 +7,7 @@ use mago_codex::context::ScopeContext;
 use mago_codex::flags::attribute::AttributeFlags;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::expander::StaticClassType;
@@ -218,9 +219,31 @@ where
         if let Some(first_usage_span) = used_attributes.get(&attribute_name_bytes)
             && !attribute_flags.is_repeatable()
         {
+            // The attribute class may be written in either dialect, so a PHP# message names no PHP code to add to it.
+            let (note, help) = if context.dialect.is_sharp() {
+                (
+                    format!(
+                        "The attribute `{attribute_name}` is not declared repeatable, so it applies once to a given target."
+                    ),
+                    format!(
+                        "Remove this duplicate `{attribute_name}` attribute, or declare the attribute class `{attribute_name}` repeatable."
+                    ),
+                )
+            } else {
+                (
+                    format!(
+                        "The attribute `{attribute_name}` is not declared with `Attribute::IS_REPEATABLE` in its `#[Attribute]` flags. Non-repeatable attributes can only be applied once to a given target (e.g., a class, method, property)."
+                    ),
+                    format!(
+                        "Remove this duplicate `{attribute_name}` attribute, or if multiple instances are intended and valid, modify the attribute class `{attribute_name}` to include `Attribute::IS_REPEATABLE` in its `#[Attribute]` declaration (e.g., `#[Attribute(Attribute::TARGET_ALL | Attribute::IS_REPEATABLE)]`)."
+                    ),
+                )
+            };
             context.collector.report_with_code(
                 IssueCode::AttributeNotRepeatable,
-                Issue::error(format!("Attribute `{attribute_name}` is not declared as repeatable and has already been used."))
+                Issue::error(format!(
+                    "Attribute `{attribute_name}` is not declared as repeatable and has already been used."
+                ))
                 .with_annotation(
                     Annotation::primary(attribute.name.span())
                         .with_message(format!("Duplicate use of non-repeatable attribute `{attribute_name}`")),
@@ -229,16 +252,25 @@ where
                     Annotation::secondary(*first_usage_span)
                         .with_message(format!("Attribute `{attribute_name}` was first used here")),
                 )
-                .with_note(format!(
-                    "The attribute `{attribute_name}` is not declared with `Attribute::IS_REPEATABLE` in its `#[Attribute]` flags. Non-repeatable attributes can only be applied once to a given target (e.g., a class, method, property).",
-                ))
-                .with_help(format!(
-                    "Remove this duplicate `{attribute_name}` attribute, or if multiple instances are intended and valid, modify the attribute class `{attribute_name}` to include `Attribute::IS_REPEATABLE` in its `#[Attribute]` declaration (e.g., `#[Attribute(Attribute::TARGET_ALL | Attribute::IS_REPEATABLE)]`).",
-                )),
+                .with_note(note)
+                .with_help(help),
             );
         }
 
         used_attributes.insert(attribute_name_bytes, attribute.name.span());
+
+        if context.dialect.is_sharp()
+            && attribute_name_bytes.eq_ignore_ascii_case(b"Sharp\\Key")
+            && !is_parsed_parameter(context.codebase, block_context, target)
+        {
+            context.collector.report_with_code(
+                IssueCode::InvalidStruct,
+                Issue::error(
+                    "`Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
+                )
+                .with_annotation(Annotation::primary(attribute.name.span()).with_message("Written here.")),
+            );
+        }
 
         if let Some(flags) = metadata.attribute_flags {
             let is_valid_target = match target {
@@ -261,6 +293,15 @@ where
     }
 
     Ok(())
+}
+
+/// Whether an attribute on `target` is on a parameter of the main constructor of a type with the `parse` spec section
+/// 10 gives a struct or a PHP# class, the one place `[Key]` renames the key that `parse` reads.
+fn is_parsed_parameter(codebase: &CodebaseMetadata, block_context: &BlockContext<'_>, target: AttributeTarget) -> bool {
+    matches!(target, AttributeTarget::Parameter | AttributeTarget::PromotedProperty)
+        && block_context.scope.get_class_like().is_some_and(|class| codebase.parses(class.name.as_bytes()))
+        && matches!(block_context.scope.get_function_like_identifier(),
+            Some(FunctionLikeIdentifier::Method(_, method)) if method.as_bytes().eq_ignore_ascii_case(b"__construct"))
 }
 
 fn analyze_attribute_argument_expressions<'ctx, 'arena, A>(

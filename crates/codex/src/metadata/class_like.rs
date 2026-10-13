@@ -102,6 +102,7 @@ pub struct ClassLikeMetadata {
     pub enum_cases: WordMap<EnumCaseMetadata>,
     pub invalid_dependencies: WordSet,
     pub attributes: Vec<AttributeMetadata>,
+    /// The backing type of a backed enum, or of a PHP# struct that declares one, spec section 10.
     pub enum_type: Option<TAtomic>,
     pub has_sealed_methods: Option<bool>,
     pub has_sealed_properties: Option<bool>,
@@ -118,7 +119,38 @@ pub struct ClassLikeMetadata {
     pub version_constraint: VersionConstraint,
 }
 
+/// A key a PHP# struct's `parse` reads, spec section 10: a main constructor parameter, or a property an object
+/// initializer may set that the constructor does not.
+#[derive(Clone, Copy, Debug)]
+pub struct ParsedField<'codebase> {
+    /// The name, without `$`.
+    pub name: &'codebase [u8],
+    /// The key `parse` reads: the name, or the one `[Key("…")]` gives a parameter.
+    pub key: &'codebase [u8],
+    pub r#type: &'codebase TUnion,
+    /// Whether a missing key leaves the field to its default value or its initial value.
+    pub has_default: bool,
+    /// Whether the main constructor takes the field, rather than a write after it runs.
+    pub is_parameter: bool,
+    /// The span of the field's name, where the codex has one.
+    pub span: Option<Span>,
+}
+
 impl ClassLikeMetadata {
+    /// The properties `==` compares on a PHP# struct, spec section 10: each one with storage that is not static, in the
+    /// order the struct declares them.
+    #[must_use]
+    pub fn struct_properties(&self) -> Vec<&PropertyMetadata> {
+        let mut properties: Vec<&PropertyMetadata> = self
+            .properties
+            .values()
+            .filter(|property| !property.flags.is_static() && !property.flags.is_virtual_property())
+            .collect();
+        properties.sort_by_key(|property| property.span.map(|span| span.start.offset));
+
+        properties
+    }
+
     /// Returns whether this class-like's inherited metadata is incomplete.
     ///
     /// Synthetic enum contracts are materialized by the scanner and do not make
@@ -1066,7 +1098,7 @@ mod tests {
         assert!(vendored.inheritable_method_ids.contains_key(&method_override));
 
         // No warning: patch overrides of inherited methods are expected and intentional.
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1094,7 +1126,7 @@ mod tests {
         assert!(!vendored.methods.contains(&pseudo));
 
         // No issues.
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1112,7 +1144,7 @@ mod tests {
 
         assert!(vendored.magic_properties.contains_key(&prop_magic));
         assert_eq!(vendored.magic_property_ids.get(&prop_magic), Some(&vendored.name));
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1134,7 +1166,7 @@ mod tests {
         assert!(vendored.initialized_properties.contains(&prop));
         // overridden_property_ids must not be cleared by the patch
         assert!(vendored.overridden_property_ids.contains_key(&prop));
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1154,7 +1186,7 @@ mod tests {
         assert!(vendored.template_types.contains_key(&t));
         assert_eq!(vendored.template_variance.first().copied(), Some(Variance::Covariant));
         assert!(vendored.template_readonly.contains(&t));
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1187,7 +1219,7 @@ mod tests {
         assert_eq!(vendored.template_types.keys().copied().collect::<Vec<_>>(), [t, u, v]);
         assert_eq!(vendored.template_variance, [Variance::Contravariant, Variance::Covariant, Variance::Invariant]);
 
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]
@@ -1214,7 +1246,7 @@ mod tests {
 
         assert!(vendored.template_readonly.contains(&t), "T should remain readonly after patch");
         assert!(!vendored.template_readonly.contains(&u), "U was not declared readonly by the patch");
-        assert!(issues.is_empty());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]

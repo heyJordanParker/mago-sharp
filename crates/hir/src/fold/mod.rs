@@ -1696,7 +1696,7 @@ mod tests {
             IR { span: Span::zero(), comments: &[], statements: &[], errors: &[] };
         let output: IR<'_, (), Vec<String>, u32> = widen.fold_ir(&input);
 
-        assert!(output.statements.is_empty());
+        assert!(output.statements.is_empty(), "expected no statements");
     }
 
     struct WidenStatements<'arena> {
@@ -1728,6 +1728,6 @@ mod tests {
         let input: IR<'_, u8, String, u16> = IR { span: Span::zero(), comments: &[], statements: &[], errors: &[] };
         let output: IR<'_, u8, Vec<String>, u16> = folder.fold_ir(&input);
 
-        assert!(output.statements.is_empty());
+        assert!(output.statements.is_empty(), "expected no statements");
     }
 }

@@ -15,6 +15,8 @@ use crate::cst::cst::control_flow::switch::Switch;
 use crate::cst::cst::declare::Declare;
 use crate::cst::cst::echo::Echo;
 use crate::cst::cst::echo::EchoTag;
+use crate::cst::cst::emit::Emit;
+use crate::cst::cst::event::Event;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::r#extern::Extern;
 use crate::cst::cst::function_like::function::Function;
@@ -31,9 +33,11 @@ use crate::cst::cst::r#loop::r#for::For;
 use crate::cst::cst::r#loop::for_of::ForOf;
 use crate::cst::cst::r#loop::foreach::Foreach;
 use crate::cst::cst::r#loop::r#while::While;
+use crate::cst::cst::module::Module;
 use crate::cst::cst::namespace::Namespace;
 use crate::cst::cst::r#return::Return;
 use crate::cst::cst::r#static::Static;
+use crate::cst::cst::r#struct::Struct;
 use crate::cst::cst::tag::ClosingTag;
 use crate::cst::cst::tag::OpeningTag;
 use crate::cst::cst::terminator::Terminator;
@@ -67,10 +71,13 @@ pub enum Statement<'arena> {
     Namespace(Namespace<'arena>),
     Use(Use<'arena>),
     Extern(Extern<'arena>),
+    Module(Module<'arena>),
     Class(Class<'arena>),
     Interface(Interface<'arena>),
     Trait(Trait<'arena>),
     Enum(Enum<'arena>),
+    Event(Event<'arena>),
+    Struct(Struct<'arena>),
     Block(Block<'arena>),
     Constant(Constant<'arena>),
     Function(Function<'arena>),
@@ -88,6 +95,7 @@ pub enum Statement<'arena> {
     Switch(Switch<'arena>),
     If(If<'arena>),
     Return(Return<'arena>),
+    Emit(Emit<'arena>),
     Expression(ExpressionStatement<'arena>),
     Echo(Echo<'arena>),
     EchoTag(EchoTag<'arena>),
@@ -117,6 +125,7 @@ impl Statement<'_> {
             }
             Statement::Use(r#use) => r#use.terminator.is_closing_tag(),
             Statement::Extern(r#extern) => r#extern.terminator.is_closing_tag(),
+            Statement::Event(event) => event.terminator.is_closing_tag(),
             Statement::Goto(goto) => goto.terminator.is_closing_tag(),
             Statement::Declare(Declare { body: DeclareBody::Statement(b), .. }) => b.terminates_scripting(),
             Statement::Declare(Declare { body: DeclareBody::ColonDelimited(b), .. }) => b.terminator.is_closing_tag(),
@@ -140,6 +149,7 @@ impl Statement<'_> {
             },
             Statement::If(If { body: IfBody::ColonDelimited(body), .. }) => body.terminator.is_closing_tag(),
             Statement::Return(ret) => ret.terminator.is_closing_tag(),
+            Statement::Emit(emit) => emit.terminator.is_closing_tag(),
             Statement::Expression(expression_statement) => expression_statement.terminator.is_closing_tag(),
             Statement::Echo(echo) => echo.terminator.is_closing_tag(),
             Statement::EchoTag(echo) => echo.terminator.is_closing_tag(),
@@ -218,10 +228,13 @@ impl HasSpan for Statement<'_> {
             Statement::Namespace(statement) => statement.span(),
             Statement::Use(statement) => statement.span(),
             Statement::Extern(statement) => statement.span(),
+            Statement::Module(statement) => statement.span(),
             Statement::Class(statement) => statement.span(),
             Statement::Interface(statement) => statement.span(),
             Statement::Trait(statement) => statement.span(),
             Statement::Enum(statement) => statement.span(),
+            Statement::Event(statement) => statement.span(),
+            Statement::Struct(statement) => statement.span(),
             Statement::Block(statement) => statement.span(),
             Statement::Constant(statement) => statement.span(),
             Statement::Function(statement) => statement.span(),
@@ -239,6 +252,7 @@ impl HasSpan for Statement<'_> {
             Statement::Switch(statement) => statement.span(),
             Statement::If(statement) => statement.span(),
             Statement::Return(statement) => statement.span(),
+            Statement::Emit(statement) => statement.span(),
             Statement::Expression(statement) => statement.span(),
             Statement::Echo(statement) => statement.span(),
             Statement::EchoTag(statement) => statement.span(),

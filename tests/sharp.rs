@@ -700,23 +700,23 @@ fn analyze_names_the_methods_that_replace_a_function_by_the_name_the_file_import
     );
 }
 
-/// Spec section 23's example, with a class for its struct and the project's own `Key` attribute for the standard one:
-/// the renamed import leaves the bare `Key` to name another class.
+/// Spec section 23's example: the renamed import leaves the bare `Key` to name the standard attribute.
 #[test]
-fn compile_accepts_a_class_that_renames_an_import_to_keep_the_short_name_free() {
+fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"src\"]\n");
     write(root, "src/Cache/Key.php", "<?php\n\nnamespace Cache;\n\nfinal class Key\n{\n}\n");
     write(
         root,
-        "src/App/Key.php",
-        "<?php\n\nnamespace App;\n\n#[\\Attribute]\nfinal class Key\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n",
+        "src/Sharp/Key.php",
+        "<?php\n\nnamespace Sharp;\n\n#[\\Attribute]\nfinal class Key\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n",
     );
+
     write(
         root,
         "src/App/Entry.sharp",
-        "namespace App;\n\nimport Cache.Key as CacheKey;\n\npublic class Entry\n{\n    public Entry(\n        [Key(\"cache_key\")] public CacheKey key { get; },\n    ) { }\n}\n",
+        "namespace App;\n\nimport Cache.Key as CacheKey;\n\npublic struct Entry\n{\n    public Entry(\n        [Key(\"cache_key\")] public CacheKey key { get; },\n    ) { }\n}\n",
     );
 
     let output = run(root, "compile", &[]);

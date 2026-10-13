@@ -35,8 +35,8 @@ use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_array_value_parameter;
-use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_iterable_parameters;
+use mago_codex::ttype::get_non_negative_int;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::definition_type_replacer::DefinitionReplacementOptions;
@@ -346,12 +346,11 @@ fn infer_templates_from_input_and_container_types<A>(
                                         }
                                     }
 
-                                    // A PHP# `Map` keyed by a backed enum reaches plain PHP as its backing values.
                                     if let Some(input_key_type) = input_key_type {
                                         infer_templates_from_input_and_container_types(
                                             context,
                                             &container_parameter.0,
-                                            &get_backing_key_type(&input_key_type, context.codebase),
+                                            &input_key_type,
                                             template_result,
                                             options,
                                             violations,
@@ -557,13 +556,13 @@ fn infer_templates_from_input_and_container_types<A>(
                                     violations,
                                 );
                             }
-                            // Plain PHP reads a `Set` as the array it runs as, keyed by each element's backing value.
+                            // Plain PHP receives a `Set` as the list of its elements.
                             (TArray::Keyed(container_array), TArray::Set(input_element_type)) => {
                                 if let Some((container_key_type, container_value_type)) = &container_array.parameters {
                                     infer_templates_from_input_and_container_types(
                                         context,
                                         container_key_type,
-                                        &get_backing_key_type(input_element_type, context.codebase),
+                                        &get_non_negative_int(),
                                         template_result,
                                         options,
                                         violations,
@@ -592,7 +591,7 @@ fn infer_templates_from_input_and_container_types<A>(
                     infer_templates_from_input_and_container_types(
                         context,
                         container_iterable.get_key_type(),
-                        &get_backing_key_type(&input_params.0, context.codebase),
+                        &input_params.0,
                         template_result,
                         options,
                         violations,

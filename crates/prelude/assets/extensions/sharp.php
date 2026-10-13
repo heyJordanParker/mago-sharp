@@ -64,8 +64,8 @@ final class List
 
 /**
  * The methods a PHP# `List<T>` has. The analyzer checks a call on a list against them, and the engine runs them on
- * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which run as PHP. A method
- * without `@mutation-free` changes the list.
+ * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which the bridge lowers from
+ * the list's type. A method without `@mutation-free` changes the list.
  *
  * @template T
  */
@@ -107,6 +107,56 @@ final class ListMethods
      * @mutation-free
      */
     public function count(): int {}
+
+    /**
+     * @param T $value
+     *
+     * @return bool whether an element equals `$value` by `==`.
+     *
+     * @mutation-free
+     */
+    public function contains(mixed $value): bool {}
+
+    /**
+     * @param T $value
+     *
+     * @return int|null the index of the first element that equals `$value` by `==`, or null when none does.
+     *
+     * @mutation-free
+     */
+    public function indexOf(mixed $value): ?int {}
+
+    /**
+     * @return T the last element.
+     *
+     * @throws \OutOfRangeException when the list is empty.
+     *
+     * @mutation-free
+     */
+    public function last(): mixed {}
+
+    /**
+     * Puts `$value` at `$index`, after the elements before it, and renumbers the ones after it.
+     *
+     * @param T $value
+     *
+     * @throws \OutOfRangeException when `$index` is below 0 or above the number of elements.
+     */
+    public function insert(int $index, mixed $value): void {}
+
+    /**
+     * Removes the first element that equals `$value` by `==`, and renumbers the elements after it.
+     *
+     * @param T $value
+     *
+     * @return bool whether an element equalled `$value`.
+     */
+    public function remove(mixed $value): bool {}
+
+    /**
+     * Removes every element.
+     */
+    public function clear(): void {}
 
     /**
      * @param \Closure(T): bool $predicate
@@ -194,9 +244,8 @@ final class ListMethods
 }
 
 /**
- * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs them on
- * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which run as PHP. A method
- * without `@mutation-free` changes the map.
+ * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs each on
+ * `Sharp\Collection`, over the `Sharp\Map` object. A method without `@mutation-free` changes the map.
  *
  * @template K of array-key
  * @template V
@@ -207,8 +256,10 @@ final class MapMethods
      * Removes the entry of `$key`, if the map has one.
      *
      * @param K $key
+     *
+     * @return bool whether the map had an entry for `$key`.
      */
-    public function delete(int|string $key): void {}
+    public function remove(int|string $key): bool {}
 
     /**
      * @param K $key
@@ -220,6 +271,22 @@ final class MapMethods
     public function get(int|string $key): mixed {}
 
     /**
+     * @param K $key
+     *
+     * @return bool whether the map has an entry for `$key`, which may hold null.
+     *
+     * @mutation-free
+     */
+    public function has(int|string $key): bool {}
+
+    /**
+     * @return list<K> the keys, in order.
+     *
+     * @mutation-free
+     */
+    public function keys(): array {}
+
+    /**
      * @return int how many entries the map holds.
      *
      * @mutation-free
@@ -229,20 +296,11 @@ final class MapMethods
     /**
      * @param \Closure(V): bool $predicate
      *
-     * @return list<V> the values `$predicate` keeps, in order, without their keys.
-     *
-     * @mutation-free
-     */
-    public function filter(\Closure $predicate): array {}
-
-    /**
-     * @param \Closure(V): bool $predicate
-     *
      * @return array<K, V> the entries whose values `$predicate` keeps, with their keys.
      *
      * @mutation-free
      */
-    public function filterValues(\Closure $predicate): array {}
+    public function filter(\Closure $predicate): array {}
 
     /**
      * @template R
@@ -321,8 +379,8 @@ final class MapMethods
 }
 
 /**
- * The methods a PHP# `Set<T>` has. The analyzer checks a call on a set against them. A method without
- * `@mutation-free` changes the set.
+ * The methods a PHP# `Set<T>` has. The analyzer checks a call on a set against them, and the engine runs each on
+ * `Sharp\Collection`, over the `Sharp\Set` object. A method without `@mutation-free` changes the set.
  *
  * @template T
  */

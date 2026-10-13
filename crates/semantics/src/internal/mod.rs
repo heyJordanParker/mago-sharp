@@ -11,6 +11,7 @@ use mago_syntax::cst::Constant;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Declare;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::Function;
@@ -27,12 +28,14 @@ use mago_syntax::cst::List;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::Match;
+use mago_syntax::cst::Module;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::Pipe;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::Struct;
 use mago_syntax::cst::Switch;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAliasAdaptation;
@@ -111,7 +114,10 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
 
     #[inline]
     fn walk_in_declare(&self, declare: &Declare<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
-        checker::statement::check_declare(declare, context);
+        // A `.sharp` file has no `declare`, and the PHP# checker refuses it whole.
+        if !context.program.dialect.is_sharp() {
+            checker::statement::check_declare(declare, context);
+        }
     }
 
     #[inline]
@@ -167,6 +173,22 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
         if context.program.dialect.is_sharp() {
             checker::sharp::check_class_name(&interface.name, context);
         }
+    }
+
+    #[inline]
+    fn walk_in_event(&self, event: &'ast Event<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
+        checker::sharp::check_class_name(&event.name, context);
+    }
+
+    #[inline]
+    fn walk_in_struct(&self, r#struct: &'ast Struct<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
+        checker::class_like::check_struct(r#struct, context);
+        checker::sharp::check_class_name(&r#struct.name, context);
+    }
+
+    #[inline]
+    fn walk_in_module(&self, module: &'ast Module<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
+        checker::sharp::check_module(module, context);
     }
 
     #[inline]

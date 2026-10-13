@@ -19,9 +19,12 @@ use crate::cst::cst::ClassLikeMemberSelector;
 use crate::cst::cst::Clone;
 use crate::cst::cst::Conditional;
 use crate::cst::cst::ConstantAccess;
+use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FunctionCall;
 use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::Identifier;
+use crate::cst::cst::Instantiation;
 use crate::cst::cst::MethodCall;
 use crate::cst::cst::MethodPartialApplication;
 use crate::cst::cst::NullSafeMethodCall;
@@ -37,6 +40,7 @@ use crate::cst::cst::UnaryPostfix;
 use crate::cst::cst::UnaryPostfixOperator;
 use crate::cst::cst::UnaryPrefix;
 use crate::cst::cst::UnaryPrefixOperator;
+use crate::cst::cst::With;
 use crate::dialect::Dialect;
 use crate::error::ParseError;
 use crate::parser::MAX_RECURSION_DEPTH;
@@ -178,6 +182,25 @@ where
                 continue;
             }
 
+            // `point with { y: 9 }` copies the object, spec section 16. It binds looser than unary `-` and the casts
+            // and tighter than `!`, at the level of PHP's `instanceof`, which PHP# does not have.
+            if self.dialect.is_sharp()
+                && next.kind == T![Identifier]
+                && next.value == b"with"
+                && self.stream.peek_kind(1)? == Some(T!["{"])
+            {
+                if Precedence::Instanceof < precedence {
+                    break;
+                }
+
+                left = self.arena.alloc(Expression::With(With {
+                    object: left,
+                    with: self.expect_any_keyword()?,
+                    initializer: self.parse_object_initializer()?,
+                }));
+                continue;
+            }
+
             // Don't allow function calls on error expressions.
             // This prevents `if(...)` from being parsed as a function call when `if` is an unexpected token.
             if matches!(left, Expression::Error(_)) && matches!(kind, T!["("]) {
@@ -204,6 +227,8 @@ where
                     break;
                 }
 
+                self.stream.read_as(0, kind);
+
                 if let Expression::Binary(binary) = left
                     && matches!(binary.rhs, Expression::Assignment(_))
                     && infix_precedence > binary.operator.precedence().in_dialect(self.dialect)
@@ -226,6 +251,7 @@ where
 
     #[inline]
     fn parse_lhs_expression(&mut self, precedence: Precedence) -> Result<&'arena Expression<'arena>, ParseError> {
+        self.read_php_expression()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let next = self.stream.peek_kind(1)?;
 
@@ -261,24 +287,30 @@ where
         }
 
         // `new Report.fromJson(…)` calls a named constructor, spec section 9.1: in PHP# a name after `new` is a class,
-        // so a `.` after it names the constructor. It parses whole as one error, and its value is the error expression.
+        // so a `.` after it names the constructor. `new Self.of(…)` parses too, so the checker can refuse it by name.
         if self.dialect.is_sharp()
             && token.kind == T!["new"]
-            && next == Some(T![Identifier])
+            && matches!(next, Some(T![Identifier] | T!["self"]))
             && self.stream.peek_kind(2)? == Some(T!["."])
             && self.stream.peek_kind(3)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
         {
-            let new = self.stream.consume_span()?;
-            let class = self.parse_local_identifier()?;
-            self.stream.consume()?;
-            let name = self.parse_local_identifier()?;
-            let end = match self.parse_optional_argument_list()? {
-                Some(arguments) => arguments.span(),
-                None => name.span,
+            let new = self.expect_keyword(T!["new"])?;
+            let class = if next == Some(T!["self"]) {
+                Expression::Self_(self.expect_any_keyword()?)
+            } else {
+                Expression::Identifier(Identifier::Local(self.parse_local_identifier()?))
             };
-            self.errors.push(ParseError::NotSupportedYetInSharp("A named constructor", class.span.join(name.span)));
 
-            return Ok(self.arena.alloc(Expression::Error(new.join(end))));
+            return Ok(self.arena.alloc(Expression::Instantiation(Instantiation {
+                new,
+                class: self.arena.alloc(class),
+                constructor: Some(ConstructorName {
+                    dot: self.stream.eat_span(T!["."])?,
+                    name: self.parse_local_identifier()?,
+                }),
+                argument_list: self.parse_optional_argument_list()?,
+                initializer: self.parse_optional_object_initializer()?,
+            })));
         }
 
         if self.is_at_type_of()? {
@@ -401,7 +433,8 @@ where
     /// Returns the operator the next token stands for in the current dialect.
     ///
     /// In PHP#, `.` is member access, which PHP writes `->`, and `?` written right before `.` is null-safe member
-    /// access, which PHP writes `?->`.
+    /// access, which PHP writes `?->`. A name that spells one of PHP's word operators, such as `xor`, stands for that
+    /// operator after an operand, where no name can follow.
     fn operator_kind(&mut self, token: Token<'_>) -> Result<TokenKind, ParseError> {
         Ok(match (self.dialect, token.kind) {
             (Dialect::Sharp, T!["."]) => T!["->"],
@@ -412,6 +445,9 @@ where
                     .is_some_and(|next| next.kind == T!["."] && next.start.offset == token.start.offset + 1) =>
             {
                 T!["?->"]
+            }
+            (Dialect::Sharp, T![Identifier]) => {
+                self.php_keyword(token).filter(TokenKind::is_infix).unwrap_or(token.kind)
             }
             _ => token.kind,
         })

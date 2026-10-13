@@ -54,6 +54,23 @@ impl MetadataFlags {
     pub const EXTERNAL: MetadataFlags = MetadataFlags(1 << 43);
     /// Declared in a PHP# file.
     pub const SHARP: MetadataFlags = MetadataFlags(1 << 44);
+    /// A PHP# module, spec section 32: the class-like `<Namespace>\Module` its `Module.sharp` declares, which holds only
+    /// laws and never runs.
+    pub const MODULE: MetadataFlags = MetadataFlags(1 << 45);
+    /// A PHP# named constructor, spec section 9.1: the public static method it runs as, which creates its class's
+    /// object with the main constructor and is called as `new Class.name(…)`.
+    pub const NAMED_CONSTRUCTOR: MetadataFlags = MetadataFlags(1 << 46);
+    /// A PHP# property declared with `init`, spec section 6.1: it is set only while the object is created, and runs as
+    /// PHP's `set` hook or set visibility.
+    pub const INIT: MetadataFlags = MetadataFlags(1 << 47);
+    /// A PHP# event, spec section 15: the final class an `event` declaration runs as.
+    pub const EVENT: MetadataFlags = MetadataFlags(1 << 48);
+    /// A PHP# struct, spec section 10: a final class whose object never changes and compares by value.
+    pub const STRUCT: MetadataFlags = MetadataFlags(1 << 49);
+    /// A PHP# property each creation of its object must set, spec sections 6.1 and 10: one written `required`, or a
+    /// struct's public `init` property with no initial value that its main constructor does not take. What a
+    /// constructor assigns is its own `MethodMetadata::assigned_properties`.
+    pub const REQUIRED: MetadataFlags = MetadataFlags(1 << 50);
 }
 
 impl MetadataFlags {
@@ -118,6 +135,42 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_sharp(self) -> bool {
         self.contains(Self::SHARP)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_module(self) -> bool {
+        self.contains(Self::MODULE)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_named_constructor(self) -> bool {
+        self.contains(Self::NAMED_CONSTRUCTOR)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_init(self) -> bool {
+        self.contains(Self::INIT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_event(self) -> bool {
+        self.contains(Self::EVENT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_struct(self) -> bool {
+        self.contains(Self::STRUCT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_required(self) -> bool {
+        self.contains(Self::REQUIRED)
     }
 
     #[inline]

@@ -69,6 +69,10 @@ where
         flags |= MetadataFlags::READONLY;
     }
 
+    if is_sharp && parameter.hooks.as_ref().is_some_and(is_sharp_init) {
+        flags |= MetadataFlags::INIT;
+    }
+
     if parameter.modifiers.contains_abstract() {
         flags |= MetadataFlags::ABSTRACT;
     }
@@ -197,12 +201,17 @@ where
                 .map(|item| {
                     let (name, name_span, mut has_default, mut default_type) =
                         scan_property_item(item, classname, context, scope);
-                    if is_sharp && !has_default {
+                    let is_required = is_sharp && is_required(&plain_property.modifiers);
+                    if is_sharp && !has_default && !is_required {
                         default_type = sharp_null_default(plain_property.hint.as_ref(), name_span);
                         has_default = default_type.is_some();
                     }
 
                     let mut item_flags = flags;
+
+                    if is_required {
+                        item_flags |= MetadataFlags::REQUIRED;
+                    }
 
                     if has_default {
                         item_flags |= MetadataFlags::HAS_DEFAULT;
@@ -296,7 +305,9 @@ where
                     type_metadata
                 });
             }
-            if is_sharp && !has_default && !hooked_property.hook_list.is_get_only() {
+            if is_sharp && is_required(&hooked_property.modifiers) {
+                flags |= MetadataFlags::REQUIRED;
+            } else if is_sharp && !has_default && !hooked_property.hook_list.is_get_only() {
                 default_type = sharp_null_default(hooked_property.hint.as_ref(), name_span);
                 has_default = default_type.is_some();
             }
@@ -318,6 +329,10 @@ where
 
             if is_sharp && is_sharp_get_only(&hooked_property.hook_list, context) {
                 flags |= MetadataFlags::READONLY;
+            }
+
+            if is_sharp && is_sharp_init(&hooked_property.hook_list) {
+                flags |= MetadataFlags::INIT;
             }
 
             if hooked_property.modifiers.contains_static() {
@@ -430,22 +445,29 @@ where
     }
 }
 
-/// The write visibility of a PHP# property: its `set` accessor's access modifier, or the property's own for a `set`
-/// without one. A get-only property runs as `readonly`, or as `protected(set)` when its `get` has a body, so it is
-/// written at `protected` at most.
+/// The write visibility of a PHP# property: its `set` or `init` accessor's access modifier, or the property's own for
+/// an accessor without one. An `init` property is written at that level only while its object is created, which the
+/// analyzer checks, as an object initializer and `with` write it, spec section 16. A get-only property runs as
+/// `readonly`, or as `protected(set)` when its `get` has a body, so it is written at `protected` at most.
 fn sharp_write_visibility(accessors: &PropertyHookList, read_visibility: Visibility) -> Visibility {
-    match accessors.hooks.iter().find(|accessor| accessor.name.value == b"set") {
-        Some(set) => {
-            set.modifiers.first().and_then(|modifier| Visibility::try_from(modifier).ok()).unwrap_or(read_visibility)
-        }
+    let setter = accessors.setter();
+    match setter.and_then(|setter| setter.modifiers.first()).and_then(|modifier| Visibility::try_from(modifier).ok()) {
+        Some(visibility) => visibility,
+        None if setter.is_some() => read_visibility,
         None if read_visibility == Visibility::Public => Visibility::Protected,
         None => read_visibility,
     }
 }
 
+/// Whether a PHP# property is written by an `init` accessor, which sets it only while the object is created.
+fn is_sharp_init(accessors: &PropertyHookList) -> bool {
+    accessors.setter().is_some_and(|setter| setter.name.value == b"init")
+}
+
 /// Scans a property's hooks and whether it is virtual. A PHP# accessor without a body is storage, as an
 /// auto-property's is, so only its bodies are hooks. A PHP# property is virtual when no accessor is auto and no body
-/// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`.
+/// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`. A PHP# interface property
+/// runs as PHP's, so its accessors are abstract hooks.
 fn scan_hooks<'arena, A>(
     hook_list: &'arena PropertyHookList<'arena>,
     property: &mut PropertyMetadata,
@@ -455,7 +477,7 @@ fn scan_hooks<'arena, A>(
 ) where
     A: Arena,
 {
-    let is_sharp = context.program.dialect.is_sharp();
+    let is_sharp = context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface();
     for hook in &hook_list.hooks {
         if is_sharp && matches!(hook.body, PropertyHookBody::Abstract(_)) {
             continue;
@@ -487,6 +509,12 @@ where
     accessors.is_get_only() && context.resolved_names.has_storage(accessors)
 }
 
+/// Whether a PHP# property is written `required`, spec section 6.1: each creation of its object sets it, so it takes
+/// no `null` default.
+fn is_required(modifiers: &Sequence<Modifier>) -> bool {
+    modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)))
+}
+
 /// The default of a PHP# field or auto-property with `set` of a nullable type written without an initial value: it
 /// starts as null, as in C# and Swift, and the engine gives it the default `null`.
 fn sharp_null_default(hint: Option<&Hint>, name_span: Span) -> Option<TypeMetadata> {
@@ -507,9 +535,11 @@ fn scan_property_hook<'arena, A>(
 where
     A: Arena,
 {
-    let name = word(hook.name.value);
     let is_get = hook.name.value == b"get";
-    let is_set = hook.name.value == b"set";
+    // A PHP# `init` accessor's body runs as the `set` hook it lowers to, and the property's `INIT` flag keeps that it
+    // writes only while the object is created.
+    let is_set = if context.program.dialect.is_sharp() { hook.is_setter() } else { hook.name.value == b"set" };
+    let name = if is_set { word(b"set") } else { word(hook.name.value) };
     let is_abstract = matches!(hook.body, PropertyHookBody::Abstract(_));
     let has_explicit_parameter = hook.parameter_list.is_some();
 

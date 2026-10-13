@@ -36,6 +36,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Variable;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
@@ -48,16 +49,20 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
+use crate::expression::with::CREATED_OBJECT_PREFIX;
 use crate::external::PropertyAccessKind;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
+use crate::statement::function_like::known_type_or_error;
 use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -663,10 +668,12 @@ impl DeclaredProperty<'_> {
             }
         }
 
-        annotation_type_metadata(self.property, for_write)
+        let declared = annotation_type_metadata(self.property, for_write)
             .or(self.property.type_declaration_metadata.as_ref())
             .map(|tm| tm.type_union.clone())
-            .unwrap_or_else(get_mixed)
+            .unwrap_or_else(get_mixed);
+
+        if self.declaring_class.flags.is_sharp() { known_type_or_error(declared) } else { declared }
     }
 }
 
@@ -783,6 +790,36 @@ pub(crate) fn resolve_property_for_external_access<'ctx>(
 }
 
 /// Finds a property in a class, gets its type, and handles template localization.
+/// Whether `object_expr` is the object `new` with an object initializer or `with` creates, spec section 16, which
+/// they set properties of while it is created.
+fn is_created_object(object_expr: &Expression) -> bool {
+    matches!(object_expr, Expression::Variable(Variable::Direct(variable))
+        if variable.name.starts_with(CREATED_OBJECT_PREFIX))
+}
+
+/// The first method, in declaration order, that the struct `r#struct` declares on its objects and that returns the
+/// struct: a method that returns a changed copy, as spec section 10's `moved` does.
+fn first_copying_method<A>(context: &Context<'_, '_, A>, r#struct: &ClassLikeMetadata) -> Option<String>
+where
+    A: Arena,
+{
+    r#struct
+        .methods
+        .iter()
+        .filter_map(|method| context.codebase.get_method(r#struct.name.as_bytes(), method.as_bytes()))
+        .filter(|method| {
+            method.method_metadata.as_ref().is_some_and(|metadata| !metadata.is_static && !metadata.is_constructor)
+                && method.return_type_metadata.as_ref().is_some_and(|return_type| {
+                    return_type.type_union.types.iter().any(|atomic| {
+                        matches!(atomic, TAtomic::Object(TObject::Named(object))
+                            if object.name.as_bytes().eq_ignore_ascii_case(r#struct.name.as_bytes()))
+                    })
+                })
+        })
+        .min_by_key(|method| method.span.start.offset)
+        .map(|method| method.original_name.to_string())
+}
+
 fn find_property_in_class<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -1081,6 +1118,53 @@ where
         property_type.set_possibly_undefined(true, None);
     }
 
+    // A PHP# `init` property is set only while its object is created, spec section 6.1: on `this`, in a constructor of
+    // its class or a subclass, or in a named constructor, where C# allows an `init` accessor. A lambda may run after
+    // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
+    // its storage through `field`, on `this` only.
+    // A struct never changes, spec section 10: every property is set only while the struct is created, `init` or not.
+    let is_struct = declaring_class_metadata.flags.is_struct();
+    if for_assignment && context.dialect.is_sharp() && (is_struct || property_metadata.flags.is_init()) {
+        let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
+        let creates_this = is_created_object(object_expr)
+            || is_this(object_expr, context.resolved_names)
+                && block_context.scope.get_function_like().is_some_and(|function_like| {
+                    function_like.flags.is_named_constructor()
+                        || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
+                });
+
+        if is_struct && !writes_its_storage && !creates_this {
+            let message = match first_copying_method(context, declaring_class_metadata) {
+                Some(method) => {
+                    format!("A struct never changes; return a changed copy from a method, such as `{method}`.")
+                }
+                None => "A struct never changes; return a changed copy built with `with`.".to_owned(),
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                    .with_note("A struct's properties are set only while it is created."),
+            );
+            result.has_error_path = true;
+
+            return None;
+        }
+
+        if !writes_its_storage && !creates_this {
+            let property = display_property_name(context, prop_name);
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(format!("`{property}` is set only while the object is created."))
+                    .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                    .with_help("Set it on `this` in a constructor or a named constructor."),
+            );
+            result.has_error_path = true;
+
+            return None;
+        }
+    }
+
     let is_visible = if for_assignment {
         check_resolved_property_write_visibility(
             context,
@@ -1088,6 +1172,7 @@ where
             &resolution,
             access_span,
             Some(selector.span()),
+            is_created_object(object_expr),
         )
     } else {
         check_resolved_property_read_visibility(context, block_context, &resolution, access_span, Some(selector.span()))
@@ -1545,6 +1630,19 @@ where
         None,
     ) {
         return Some(get_never());
+    }
+
+    // Spec section 9.1: a named constructor creates an object, so it is called with `new` and is no function value.
+    // The read keeps the closure's type, so the one error is this one.
+    if context.codebase.get_method_by_id(&method).is_some_and(|metadata| metadata.flags.is_named_constructor()) {
+        let constructor = quoted_source(context, access_span);
+        context.collector.report_with_code(
+            IssueCode::NamedConstructorWithoutNew,
+            Issue::error(format!(
+                "`{constructor}` is a constructor, so it is no function value: create the object with `new {constructor}(…)`."
+            ))
+            .with_annotation(Annotation::primary(access_span).with_message("Read as a value here.")),
+        );
     }
 
     artifacts.symbol_references.add_reference_to_class_member(

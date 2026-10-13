@@ -1,8 +1,10 @@
 use foldhash::HashMap;
 use foldhash::fast::RandomState;
 use indexmap::IndexMap;
+use itertools::Itertools;
 
 use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
@@ -21,14 +23,19 @@ use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::ConstructorName;
 use mago_syntax::cst::Instantiation;
+use mago_syntax::cst::ObjectInitializer;
 use mago_syntax::cst::PartialArgumentList;
+use mago_word::Word;
 use mago_word::WordMap;
+use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -37,6 +44,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::with::analyze_object_initializer;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -50,6 +58,7 @@ use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
+use crate::utils::names::sharp_code_class_name;
 use crate::utils::template::get_generic_parameter_for_offset;
 use crate::visibility::check_method_visibility;
 
@@ -103,6 +112,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
             );
         }
 
+        let created_class = match classnames.as_slice() {
+            [classname] => classname.fqcn,
+            _ => None,
+        };
         let mut resulting_type = None;
         for classname in classnames {
             let instantiation_span = self.span();
@@ -117,22 +130,109 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
                 &classname,
                 instantiation_span,
                 class_expression_span,
+                self.constructor.as_ref(),
                 argument_list,
             )?;
 
             resulting_type = Some(add_optional_union_type(type_candidate, resulting_type.as_ref(), context.codebase));
         }
 
-        if let Some(resulting_type) = resulting_type {
-            artifacts.set_expression_type(self, resulting_type);
-        } else {
-            artifacts.set_expression_type(self, get_object()); // Fallback to object if no valid instantiation was found
+        let resulting_type = resulting_type.unwrap_or_else(get_object); // Fallback to object if no valid instantiation was found
+        match &self.initializer {
+            // The initializer sets properties of the object `new` creates, spec section 16.
+            Some(initializer) => analyze_object_initializer(
+                context,
+                block_context,
+                artifacts,
+                self.span(),
+                &resulting_type,
+                initializer,
+                "an object initializer",
+            )?,
+            None => artifacts.set_expression_type(self, resulting_type),
+        }
+
+        if context.dialect.is_sharp()
+            && let Some(class) = created_class
+        {
+            check_required_properties(
+                context,
+                class,
+                self.constructor.as_ref(),
+                self.initializer.as_ref(),
+                self.span(),
+            );
         }
 
         Ok(())
     }
 }
 
+/// Reports a PHP# `new` that leaves a required property unset, spec sections 6.1 and 10. The object initializer names
+/// every required property the constructor that runs does not assign: the main constructor, or a named constructor
+/// together with the main constructor it runs first.
+fn check_required_properties<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    constructor: Option<&ConstructorName<'_>>,
+    initializer: Option<&ObjectInitializer<'_>>,
+    span: Span,
+) where
+    A: Arena,
+{
+    let Some(metadata) = context.codebase.get_class_like(class.as_bytes()) else {
+        return;
+    };
+    let assigned_by = |method: &[u8]| {
+        context
+            .codebase
+            .get_declaring_method(metadata.name.as_bytes(), method)
+            .and_then(|method| method.method_metadata.as_ref())
+            .map(|method| method.assigned_properties.clone())
+            .unwrap_or_default()
+    };
+    let mut assigned = assigned_by(b"__construct");
+    if let Some(constructor) = constructor {
+        assigned.extend(assigned_by(constructor.name.value));
+    }
+    for value in initializer.iter().flat_map(|initializer| initializer.values.iter()) {
+        assigned.insert(php_variable_name(value.name.value));
+    }
+
+    let missing: Vec<String> = metadata
+        .declaring_property_ids
+        .iter()
+        .filter(|(name, _)| !assigned.contains(*name))
+        .filter_map(|(name, declaring)| {
+            let property = context.codebase.get_class_like(declaring.as_bytes())?.properties.get(name)?;
+            (property.flags.is_required() && !property.flags.is_static()).then(|| {
+                (
+                    property.name_span.map(|span| span.start.offset),
+                    String::from_utf8_lossy(name.as_bytes().strip_prefix(b"$").unwrap_or(name.as_bytes())),
+                )
+            })
+        })
+        .sorted()
+        .map(|(_, name)| format!("`{name}`"))
+        .collect();
+    let Some((last, others)) = missing.split_last() else {
+        return;
+    };
+    let names = if others.is_empty() { last.clone() } else { format!("{} and {last}", others.join(", ")) };
+
+    context.collector.report_with_code(
+        IssueCode::MissingRequiredProperty,
+        Issue::error(format!("`new {}` must set {names}.", display_class_like_name(context, metadata.original_name)))
+            .with_annotation(Annotation::primary(span).with_message("Created here."))
+            .with_note(
+                "A property written `required`, and a struct's public `init` property with no initial value, is set where its object is created: by the constructor that runs, or by the object initializer.",
+            ),
+    );
+}
+
+/// Analyzes `new` of `classname` with its main constructor, or with the PHP# named `constructor` it declares, spec
+/// section 9.1.
+#[allow(clippy::too_many_arguments)]
 fn analyze_class_instantiation<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -140,6 +240,7 @@ fn analyze_class_instantiation<'ctx, 'arena, A>(
     classname: &ResolvedClassname,
     instantiation_span: Span,
     class_expression_span: Span,
+    constructor: Option<&ConstructorName<'arena>>,
     argument_list: Option<&ArgumentList<'arena>>,
 ) -> Result<TUnion, AnalysisError>
 where
@@ -254,6 +355,17 @@ where
         argument_list.analyze(context, block_context, artifacts)?;
 
         return Ok(get_never());
+    } else if metadata.flags.is_module() {
+        let name = display_class_like_name(context, metadata.original_name);
+        context.collector.report_with_code(
+            IssueCode::AbstractInstantiation,
+            Issue::error(format!("`{name}` is its namespace's module, not a class: it has no instances."))
+                .with_annotation(Annotation::primary(class_expression_span).with_message("A module has no instances.")),
+        );
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(get_never());
     }
     // class kind is a regular class; no kind-specific instantiation diagnostic to emit
 
@@ -315,7 +427,58 @@ where
 
     let mut type_parameters = None;
 
-    let constructor_id = MethodIdentifier::new(metadata.original_name, word("__construct"));
+    let (constructor_id, invocation_kind) = match constructor {
+        // A named constructor is the class's own: a subclass inherits none, so `new Sub.fromJson(…)` creates no `Sub`.
+        Some(constructor) => {
+            let constructor_id = MethodIdentifier::new(metadata.name, ascii_lowercase_word(constructor.name.value));
+            if !context
+                .codebase
+                .get_method_by_id(&constructor_id)
+                .is_some_and(|method| method.flags.is_named_constructor())
+            {
+                let name = BytesDisplay(constructor.name.value);
+                let inherited = context
+                    .codebase
+                    .get_declaring_method(metadata.name.as_bytes(), constructor.name.value)
+                    .is_some_and(|method| method.flags.is_named_constructor());
+                let issue = match (inherited, &classname.origin, argument_list) {
+                    // `new Self.of(…)` in a class that inherits `of`, whose declaring class semantics can't see.
+                    (true, ResolutionOrigin::Static { .. }, Some(arguments)) => {
+                        let declaring = context.codebase.get_declaring_method_identifier(&constructor_id);
+                        let fix = format!(
+                            "new {}.{name}{}",
+                            sharp_code_class_name(
+                                context.codebase,
+                                &context.imported_names,
+                                &context.scope,
+                                declaring.get_class_name()
+                            ),
+                            BytesDisplay(&context.source_file.contents[arguments.span().to_range_usize()])
+                        );
+
+                        Issue::error("`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.")
+                            .with_annotation(Annotation::primary(instantiation_span).with_message("Created here."))
+                            .with_help(format!("Name its class: write `{fix}`."))
+                    }
+                    (true, ..) => Issue::error(format!(
+                        "`{classname_str}` has no constructor `{name}`: named constructors are not inherited."
+                    ))
+                    .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
+                    _ => Issue::error(format!("`{classname_str}` has no constructor `{name}`."))
+                        .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
+                };
+
+                context.collector.report_with_code(IssueCode::NonExistentMethod, issue);
+
+                argument_list.analyze(context, block_context, artifacts)?;
+
+                return Ok(get_never());
+            }
+
+            (constructor_id, MethodInvocationKind::Static)
+        }
+        None => (MethodIdentifier::new(metadata.original_name, word("__construct")), MethodInvocationKind::Instance),
+    };
     let constructor_declraing_id = context.codebase.get_declaring_method_identifier(&constructor_id);
 
     artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_id);
@@ -345,7 +508,7 @@ where
                 inferred_return_type: None,
                 effective_signature: None,
                 method_context: Some(MethodTargetContext {
-                    invocation_kind: MethodInvocationKind::Instance,
+                    invocation_kind,
                     declaring_method_id: Some(constructor_declraing_id),
                     class_like_metadata: metadata,
                     class_type: StaticClassType::Exact(metadata.original_name),

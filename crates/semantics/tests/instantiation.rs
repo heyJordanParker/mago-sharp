@@ -96,3 +96,11 @@ fn parenthesized_class_expression_is_ok() {
 fn parenthesized_class_followed_by_member_access_is_rejected() {
     assert_reports_semantics("<?php new ($expr)->bar();");
 }
+
+#[test]
+fn an_anonymous_class_with_a_forbidden_or_repeated_modifier_is_rejected() {
+    assert_reports_semantics("<?php new abstract class {};");
+    assert_reports_semantics("<?php new final final class {};");
+    assert_reports_semantics("<?php new readonly readonly class {};");
+    assert_no_semantics("<?php new final readonly class {};");
+}

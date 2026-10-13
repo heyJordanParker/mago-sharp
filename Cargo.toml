@@ -23,6 +23,7 @@ exclude = ["crates/syntax/fuzz", "crates/twig-syntax/fuzz"]
 
 [workspace.lints.rust]
 unknown_lints = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)"] }
 
 [workspace.lints.clippy]
 large_enum_variant = { level = "deny" }
@@ -230,6 +231,7 @@ zip = { version = "6", default-features = false, features = ["deflate"] }
 tempfile = "3.15.0"
 colored = "3.0.0"
 blake3 = "1.8.1"
+sha2 = "0.11"
 memchr = "2.7.4"
 stacker = "0.1.25"
 dialoguer = "0.12.0"

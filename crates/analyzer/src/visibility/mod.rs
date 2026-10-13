@@ -20,6 +20,7 @@ use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::resolve_declared_property;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::names::display_property_name;
 use mago_bytes::BytesDisplay;
 
 /// Checks if a method is visible from the current scope and reports a detailed
@@ -281,6 +282,7 @@ pub(crate) fn check_resolved_property_write_visibility<'ctx, A>(
     resolution: &DeclaredProperty<'_>,
     access_span: Span,
     member_span: Option<Span>,
+    creating: bool,
 ) -> bool
 where
     A: Arena,
@@ -311,6 +313,28 @@ where
         && !property_metadata.hooks.contains_key(&word(b"set"))
         && property_metadata.flags.is_virtual_property()
     {
+        // PHP# states a property get-only with `{ get; }`, and names it as it reads: `orderId` of `OrderEvent`.
+        if context.dialect.is_sharp() {
+            let class = display_class_like_name(context, declaring_class_metadata.original_name);
+            let property = display_property_name(context, property_name);
+
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(format!("`{property}` of `{class}` is get-only."))
+                    .with_annotation(
+                        Annotation::primary(member_span.unwrap_or(access_span)).with_message("Written here."),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(
+                            property_metadata.span.or(property_metadata.name_span).unwrap_or(access_span),
+                        )
+                        .with_message("Declared get-only here."),
+                    ),
+            );
+
+            return false;
+        }
+
         let property = display_member(context, declaring_class_metadata.original_name, property_name);
 
         context.collector.report_with_code(
@@ -331,7 +355,13 @@ where
         return false;
     }
 
-    let visibility = effective_write_visibility(property_metadata, context.settings.version);
+    // `new` with an object initializer and `with` write with the class's own access, spec section 16, so an `init`
+    // property is written at its accessor's level.
+    let visibility = if creating {
+        property_metadata.write_visibility
+    } else {
+        effective_write_visibility(property_metadata, context.settings.version)
+    };
 
     let is_visible = is_visible_from_scope(
         context.codebase,
@@ -340,7 +370,20 @@ where
         block_context.scope.get_class_like_name(),
     );
     if !is_visible {
-        if property_metadata.flags.is_readonly() {
+        if context.dialect.is_sharp() && declaring_class_metadata.flags.is_event() {
+            let event = display_class_like_name(context, declaring_class_metadata.original_name);
+            let property = display_property_name(context, property_name);
+
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(format!("Event `{event}` sets `{property}` once, by `new`."))
+                    .with_annotation(
+                        Annotation::primary(member_span.unwrap_or(access_span)).with_message("Written here."),
+                    )
+                    .with_note("An event's parameters are its properties, and nothing changes them after `new`.")
+                    .with_help("Create a new event with the value instead."),
+            );
+        } else if property_metadata.flags.is_readonly() {
             report_readonly_write_scope_issue(
                 context,
                 block_context.scope.get_class_like_name(),
@@ -456,8 +499,13 @@ fn report_readonly_write_scope_issue<A>(
 }
 
 /// The visibility that governs writes to `property`, which is narrower than the
-/// declared write visibility for `readonly` properties.
+/// declared write visibility for `readonly` properties. A PHP# `init` property runs as
+/// `protected(set)` when its accessor is `public`, spec section 6.1.
 pub(crate) fn effective_write_visibility(property: &PropertyMetadata, version: PHPVersion) -> Visibility {
+    if property.flags.is_init() && property.write_visibility == Visibility::Public {
+        return Visibility::Protected;
+    }
+
     if !property.flags.is_readonly() {
         return property.write_visibility;
     }

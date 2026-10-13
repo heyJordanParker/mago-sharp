@@ -2,6 +2,7 @@ use crate::T;
 use crate::cst::cst::AnonymousClass;
 use crate::cst::cst::AttributeList;
 use crate::cst::cst::Class;
+use crate::cst::cst::ClassLikeMember;
 use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
 use crate::cst::cst::Hint;
@@ -28,6 +29,40 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// A class-like's members up to its `}`. A member that fails to parse is reported and skipped, so the rest still
+    /// parse. `members_of` names the owner in the messages, as `A class` or `An enum`.
+    pub(crate) fn parse_class_like_members(
+        &mut self,
+        members_of: &'static str,
+    ) -> Result<Sequence<'arena, ClassLikeMember<'arena>>, ParseError> {
+        let mut members = self.new_vec();
+        loop {
+            if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
+                break;
+            }
+
+            let position_before = self.stream.current_position();
+            self.state.members_of = members_of;
+            match self.parse_classlike_member() {
+                Ok(member) => members.push(member),
+                Err(err) => self.errors.push(err),
+            }
+            if self.stream.current_position() == position_before {
+                if let Ok(Some(token)) = self.stream.lookahead(0) {
+                    if token.kind == T!["}"] {
+                        break;
+                    }
+                    self.errors.push(self.stream.unexpected(Some(token), &[]));
+                    let _ = self.stream.consume();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(Sequence::new(members))
+    }
+
     pub(crate) fn parse_interface_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -35,13 +70,23 @@ where
         self.parse_interface_with_attributes_and_modifiers(attributes, Sequence::empty())
     }
 
-    /// A class, or in PHP# an interface, an enum or a trait, whose declaration starts with modifiers, as in
+    /// A class, or in PHP# an interface, an enum, a trait or an event, whose declaration starts with modifiers, as in
     /// `public interface Foo {}`.
     pub(crate) fn parse_modified_class_like_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
     ) -> Result<Statement<'arena>, ParseError> {
         let modifiers = self.parse_modifier_sequence()?;
+        if self.is_at_event()? {
+            return Ok(Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
+        }
+
+        if self.is_at_struct()? {
+            return Ok(Statement::Struct(self.parse_struct_with_attributes_and_modifiers(attributes, modifiers)?));
+        }
+
+        self.read_php_type_declaration()?;
+
         if self.dialect.is_sharp() {
             match self.stream.peek_kind(0)? {
                 Some(T!["interface"]) => {
@@ -77,33 +122,7 @@ where
             extends: self.parse_optional_extends()?,
             inheritance: self.parse_optional_inheritance()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("An interface")?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -131,33 +150,7 @@ where
             implements: self.parse_optional_implements()?,
             inheritance: self.parse_optional_inheritance()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("A class")?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -172,33 +165,7 @@ where
             extends: self.parse_optional_extends()?,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("A class")?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -221,32 +188,7 @@ where
             r#trait: self.expect_keyword(T!["trait"])?,
             name: self.parse_local_identifier()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("A trait")?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -276,32 +218,7 @@ where
             inheritance,
             implements: self.parse_optional_implements()?,
             left_brace: self.stream.eat_span(T!["{"])?,
-            members: {
-                let mut members = self.new_vec();
-                loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
-                        break;
-                    }
-
-                    let position_before = self.stream.current_position();
-                    match self.parse_classlike_member() {
-                        Ok(member) => members.push(member),
-                        Err(err) => self.errors.push(err),
-                    }
-                    if self.stream.current_position() == position_before {
-                        if let Ok(Some(token)) = self.stream.lookahead(0) {
-                            if token.kind == T!["}"] {
-                                break;
-                            }
-                            self.errors.push(self.stream.unexpected(Some(token), &[]));
-                            let _ = self.stream.consume();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                Sequence::new(members)
-            },
+            members: self.parse_class_like_members("An enum")?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }
@@ -309,7 +226,7 @@ where
     /// The backing type after `:`, as PHP writes `: string`, and in PHP# the interfaces, as in `: string, HasLabel` or
     /// `: HasLabel`. A leading class name opens the interfaces, and any other type is the backing type, which
     /// `check_enum` holds to `int` or `string`.
-    fn parse_enum_header(
+    pub(crate) fn parse_enum_header(
         &mut self,
     ) -> Result<(Option<EnumBackingTypeHint<'arena>>, Option<Inheritance<'arena>>), ParseError> {
         if !matches!(self.stream.peek_kind(0)?, Some(T![":"])) {

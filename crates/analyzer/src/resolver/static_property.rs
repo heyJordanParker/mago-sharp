@@ -368,6 +368,7 @@ where
             &resolution,
             class_expr.span(),
             Some(name_span),
+            false,
         )
     {
         result.has_error_path = true;
