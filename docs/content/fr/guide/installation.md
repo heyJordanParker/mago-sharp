@@ -94,7 +94,7 @@ Si la limite de taux anonyme de GitHub bloque le premier téléchargement (fréq
 
 ## Vérification des releases en détail
 
-Chaque archive de release (tarball par plateforme et bundle WASM) est signée au moment du build via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). La signature est une attestation [in-toto](https://in-toto.io/) stockée sur GitHub et liée à l'exécution de workflow qui a produit l'artefact, donc un téléchargement vérifié est prouvablement octet-identique à ce qui est sorti du pipeline de release de Mago.
+Chaque archive de release (tarball par plateforme, tarball source, zip source et bundle WASM) est signée au moment du build via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). La signature est une attestation [in-toto](https://in-toto.io/) stockée sur GitHub et liée à l'exécution de workflow qui a produit l'artefact, donc un téléchargement vérifié est prouvablement octet-identique à ce qui est sorti du pipeline de release de Mago.
 
 Le script shell choisit l'un de trois modes selon les drapeaux que vous passez.
 

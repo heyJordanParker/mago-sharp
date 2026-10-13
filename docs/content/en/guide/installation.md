@@ -105,7 +105,7 @@ in order to get all the files necessary for Mago to compile.
 
 ## Verifying releases in detail
 
-Every release archive (per-platform tarball and WASM bundle) is signed at build time via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). The signature is an [in-toto](https://in-toto.io/) attestation stored on GitHub and tied to the workflow run that produced the artifact, so a verified download is provably byte-identical to what came out of Mago's release pipeline.
+Every release archive (per-platform tarball, source tarball, source zip, and WASM bundle) is signed at build time via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). The signature is an [in-toto](https://in-toto.io/) attestation stored on GitHub and tied to the workflow run that produced the artifact, so a verified download is provably byte-identical to what came out of Mago's release pipeline.
 
 The shell installer chooses one of three modes based on the flags you pass.
 

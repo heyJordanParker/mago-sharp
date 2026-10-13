@@ -94,7 +94,7 @@ Composer 包是一个轻量封装。第一次调用 `vendor/bin/mago` 会从 Git
 
 ## 校验发布的细节
 
-每一份发行归档 (各平台的 tarball 以及 WASM 包) 都在构建时通过 [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance) 进行签名。签名是一份存储在 GitHub 上的 [in-toto](https://in-toto.io/) 证明,绑定到生成该工件的工作流运行,因此校验通过的下载,可证明与 Mago 发布流水线产出的字节完全一致。
+每一份发行归档 (各平台的 tarball、源码 tarball、源码 zip,以及 WASM 包) 都在构建时通过 [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance) 进行签名。签名是一份存储在 GitHub 上的 [in-toto](https://in-toto.io/) 证明,绑定到生成该工件的工作流运行,因此校验通过的下载,可证明与 Mago 发布流水线产出的字节完全一致。
 
 shell 安装脚本会根据你传入的参数,在三种模式之间选择。
 
