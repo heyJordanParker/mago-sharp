@@ -13,8 +13,6 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
-use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::union::TUnion;
 
 use mago_names::binding::MethodParts;
@@ -61,10 +59,8 @@ use crate::statement::function_like::unused_parameter;
 use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
 use crate::utils::missing_type_hints;
 use crate::utils::names::display_class_like_name;
-use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
-use crate::utils::names::sharp_collection_name;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
     fn analyze<'ctx, A>(
@@ -165,8 +161,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Extension<'arena> {
 
 /// Reports an extension member named like a real member its receiver's class declares or inherits, or like a method
 /// its `List`, `Map` or `Set` receiver has, spec section 26, as
-/// [`mago_codex::metadata::CodebaseMetadata::get_classes_hidden_by_extension`] finds them. A class's `__call` and
-/// `__get` declare no member, so the extension runs in their place.
+/// [`mago_codex::metadata::CodebaseMetadata::get_classes_hidden_by_extension`] finds them: the real member always wins,
+/// so the extension member never runs. A class's `__call` and `__get` declare no member, so the extension runs in their
+/// place.
 fn check_hidden_member<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, member: &MethodParts<'_, '_>)
 where
     A: Arena,
@@ -184,15 +181,23 @@ where
         context.codebase.get_classes_hidden_by_extension(&receiver.type_union, member.name).first()
     {
         let name = mago_bytes::BytesDisplay(member.name);
-        let real_member = match sharp_collection_name(&TObject::Named(TNamedObject::new(declaring_class))) {
-            Some(collection) => display_sharp_member(collection, name),
-            None => display_member(context, declaring_class, name),
+        let receiver = display_type(context, &receiver.type_union);
+        let property = [b"$", member.name].concat();
+        let codebase = context.codebase;
+        let real_member = if codebase.property_exists(declaring_class.as_bytes(), &property)
+            || codebase.magic_property_exists(declaring_class.as_bytes(), &property)
+        {
+            name.to_string()
+        } else {
+            format!("{name}()")
         };
         context.collector.report_with_code(
             IssueCode::DuplicateDefinition,
-            Issue::error(format!("An extension cannot hide the real member `{real_member}`."))
-                .with_annotation(Annotation::primary(member.name_span).with_message("Declared here."))
-                .with_help("Rename the extension member."),
+            Issue::error(format!(
+                "`{receiver}` already declares `{real_member}`, so this extension member never runs."
+            ))
+            .with_annotation(Annotation::primary(member.name_span).with_message("Declared here."))
+            .with_help("Rename the extension member."),
         );
     }
 }

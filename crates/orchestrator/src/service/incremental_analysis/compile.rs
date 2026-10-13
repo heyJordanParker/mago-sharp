@@ -1772,7 +1772,7 @@ mod tests {
         let mut refusals: Vec<String> = service
             .collect_all_issues()
             .iter()
-            .filter(|issue| issue.message.starts_with("An extension cannot hide"))
+            .filter(|issue| issue.message.ends_with("so this extension member never runs."))
             .map(|issue| {
                 let file = service.database().get(&issue.primary_span().expect("a primary span").file_id);
                 format!("{}: {}", String::from_utf8_lossy(&file.expect("the file exists").name), issue.message)
@@ -1847,9 +1847,9 @@ mod tests {
 
         // Each row: the files without the member, the files with it, and the refusal the member brings, if any.
         let rows = [
-            (wallets(&wallet, plain), wallets(&method, plain), Some("`Wallet.total`")),
-            (wallets(&wallet, plain), wallets(&docblock, plain), Some("`Wallet.total`")),
-            (wallets(&wallet, plain), wallets(&wallet, &above), Some("`Base.total`")),
+            (wallets(&wallet, plain), wallets(&method, plain), Some("`Wallet`")),
+            (wallets(&wallet, plain), wallets(&docblock, plain), Some("`Wallet`")),
+            (wallets(&wallet, plain), wallets(&wallet, &above), Some("`Wallet`")),
             (wallets(&wallet, plain), wallets(&wallet, &below), None),
         ];
 
@@ -1859,9 +1859,9 @@ mod tests {
                 let row = format!("{member:?} {}", if after == with { "added" } else { "removed" });
                 let expected: Vec<String> = member
                     .filter(|_| after == with)
-                    .map(|member| {
+                    .map(|class| {
                         format!(
-                            "app/Wallets/WalletExtensions.sharp: An extension cannot hide the real member {member}."
+                            "app/Wallets/WalletExtensions.sharp: {class} already declares `total()`, so this extension member never runs."
                         )
                     })
                     .into_iter()

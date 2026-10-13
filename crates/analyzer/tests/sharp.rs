@@ -5086,9 +5086,9 @@ fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
     );
 }
 
-/// Spec section 26: an extension is chosen from the receiver's type the code shows, as in C# and Kotlin. It cannot
-/// hide a real member, a method or property that type declares or inherits, in code or in a docblock, or a method a
-/// `List`, `Map` or `Set` has. `__call` declares none. A member only a class derived from the type declares does not
+/// Spec section 26: an extension is chosen from the receiver's type the code shows, as in C# and Kotlin. An extension
+/// member named like a real member, a method or property that type declares or inherits, in code or in a docblock, or a
+/// method a `List`, `Map` or `Set` has, can never run, so it is an error. `__call` declares none. A member only a class derived from the type declares does not
 /// compete: on a value of the type, the extension runs. A receiver with no type, a parse error, hides nothing.
 #[test]
 fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
@@ -5106,13 +5106,13 @@ fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
         ],
         &[
             "41:15 parse: A PHP# parameter needs a type, as in `int extra`.",
-            "7:20 duplicate-definition: An extension cannot hide the real member `Money.total`.",
-            "14:20 duplicate-definition: An extension cannot hide the real member `Wallet.balance`.",
-            "15:20 duplicate-definition: An extension cannot hide the real member `Wallet.owner`.",
-            "21:20 duplicate-definition: An extension cannot hide the real member `List.count`.",
-            "26:21 duplicate-definition: An extension cannot hide the real member `Map.has`.",
-            "31:21 duplicate-definition: An extension cannot hide the real member `Set.add`.",
-            "36:20 duplicate-definition: An extension cannot hide the real member `Money.net`.",
+            "7:20 duplicate-definition: `Money` already declares `total()`, so this extension member never runs.",
+            "14:20 duplicate-definition: `Wallet` already declares `balance()`, so this extension member never runs.",
+            "15:20 duplicate-definition: `Wallet` already declares `owner`, so this extension member never runs.",
+            "21:20 duplicate-definition: `List<int>` already declares `count()`, so this extension member never runs.",
+            "26:21 duplicate-definition: `Map<string, int>` already declares `has()`, so this extension member never runs.",
+            "31:21 duplicate-definition: `Set<string>` already declares `add()`, so this extension member never runs.",
+            "36:20 duplicate-definition: `Coin` already declares `net()`, so this extension member never runs.",
         ],
     );
 }
