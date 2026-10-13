@@ -45,6 +45,13 @@ final class Environment
      * @return string|null the environment variable `$name`, or null when it is not set.
      */
     public function variable(string $name): ?string {}
+
+    /**
+     * @return string the environment variable `$name`.
+     *
+     * @throws \ValueError when it is not set.
+     */
+    public function require(string $name): string {}
 }
 
 final class List

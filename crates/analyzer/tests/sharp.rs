@@ -3024,12 +3024,16 @@ fn position_current_has_the_types_of_the_sharp_library_class() {
     assert_eq!(issues(("src/Demo/Reports.sharp", sharp), &[]), ["13:27 invalid-return-statement"]);
 }
 
-/// `Environment` replaces `$_ENV` and `getenv()`, spec section 29.
+/// `Environment` replaces `$_ENV` and `getenv()`, spec section 29: `variable` gives null for a variable that is not
+/// set, and `require`, which a module binding calls, throws instead.
 #[test]
-fn an_environment_variable_is_a_nullable_string() {
-    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public static Deploy make() => new Deploy(new Environment());\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n}\n";
+fn an_environment_variable_is_a_nullable_string_and_a_required_one_a_string() {
+    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public static Deploy make() => new Deploy(new Environment());\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n\n    public string url() => this.environment.require(\"X\");\n\n    public int port() => this.environment.require(\"X\");\n}\n";
 
-    assert_eq!(issues(("src/Demo/Deploy.sharp", sharp), &[]), ["11:27 invalid-return-statement"]);
+    assert_eq!(
+        issues(("src/Demo/Deploy.sharp", sharp), &[]),
+        ["11:27 invalid-return-statement", "15:26 invalid-return-statement"]
+    );
 }
 
 /// `arguments` and `currentDirectory` are `{ get; }` properties, so the process environment is read, never written.
