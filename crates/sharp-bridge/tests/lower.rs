@@ -239,9 +239,8 @@ fn php_syntax_returns_a_parse_error_and_no_nodes() {
 
 #[test]
 fn a_construct_outside_the_slice_returns_its_not_supported_error() {
-    let lowered = Lowered::new(&method(
-        "        switch (extra) {\n            default: return 1;\n        }\n        return 1;\n",
-    ));
+    let lowered =
+        Lowered::new(&method("        switch (extra) {\n            default: break;\n        }\n        return 1;\n"));
 
     assert_eq!(lowered.diagnostics(), ["9:9 compile error: This statement is not supported yet in PHP#."]);
 }
@@ -9898,8 +9897,10 @@ fn while_and_do_while_are_their_php_kinds() {
 }
 
 /// ```php
-/// while (true) {
+/// while ($again) {
 ///     continue;
+/// }
+/// while (true) {
 ///     break;
 /// }
 /// ```
@@ -9908,19 +9909,27 @@ fn while_and_do_while_are_their_php_kinds() {
 #[test]
 fn break_and_continue_have_a_null_depth() {
     assert_eq!(
-        body("        while (true) {\n            continue;\n            break;\n        }\n        return 1;\n"),
-        indoc! {"
+        body_in(
+            "int run(bool again)",
+            "        while (again) {\n            continue;\n        }\n        while (true) {\n            break;\n        }\n        return 1;\n",
+            &[]
+        ),
+        indoc! {r#"
             STMT_LIST
               WHILE
-                ZVAL true
+                VAR
+                  ZVAL "again"
                 STMT_LIST
                   CONTINUE
                     null
+              WHILE
+                ZVAL true
+                STMT_LIST
                   BREAK
                     null
               RETURN
                 ZVAL 1
-        "}
+        "#}
     );
 }
 
@@ -10296,8 +10305,8 @@ fn a_map_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
 }
 
 /// ```php
-/// throw new \App\Tenant\Failure($extra);
-/// return $extra ?? throw new \App\Tenant\Failure(0);
+/// $code = $extra > 0 ? $extra : throw new \App\Tenant\Failure(0);
+/// throw new \App\Tenant\Failure($code);
 /// ```
 ///
 /// `throw` is an expression, and a `throw` statement is that expression alone.
@@ -10306,7 +10315,7 @@ fn throw_is_a_throw_expression() {
     assert_eq!(
         body_in(
             RUN,
-            "        throw new Failure(extra);\n        return extra ?? throw new Failure(0);\n",
+            "        let code = extra > 0 ? extra : throw new Failure(0);\n        throw new Failure(code);\n",
             &[(
                 "src/App/Tenant/Failure.php",
                 "<?php namespace App\\Tenant; final class Failure extends \\Exception { public function __construct(int $code) { parent::__construct('', $code); } }",
@@ -10314,14 +10323,14 @@ fn throw_is_a_throw_expression() {
         ),
         indoc! {r#"
             STMT_LIST
-              THROW
-                NEW
-                  ZVAL "App\\Tenant\\Failure"
-                  ARG_LIST
+              ASSIGN
+                VAR
+                  ZVAL "code"
+                CONDITIONAL
+                  GREATER
                     VAR
                       ZVAL "extra"
-              RETURN
-                COALESCE
+                    ZVAL 0
                   VAR
                     ZVAL "extra"
                   THROW
@@ -10329,6 +10338,12 @@ fn throw_is_a_throw_expression() {
                       ZVAL "App\\Tenant\\Failure"
                       ARG_LIST
                         ZVAL 0
+              THROW
+                NEW
+                  ZVAL "App\\Tenant\\Failure"
+                  ARG_LIST
+                    VAR
+                      ZVAL "code"
         "#}
     );
 }

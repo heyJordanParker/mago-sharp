@@ -1317,6 +1317,27 @@ fn compile_refuses_a_file_whose_getter_calls_plain_php_without_an_extern() {
     assert!(directory.path().join(".sharp/app/Stubs/Stripe.sharpc").exists(), "{printed}");
 }
 
+/// Spec section 7 refuses a statement that never runs. The analysis never reads one, so `mago compile` refuses its file
+/// before the bridge, which lowers only what the analysis read.
+#[test]
+fn compile_refuses_a_file_with_a_statement_that_never_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
+    write(
+        root,
+        "app/Shop/Stop.sharp",
+        "namespace App.Shop;\n\npublic class Stop\n{\n    public static int run()\n    {\n        global.exit(1);\n        return global.strlen(\"never\");\n    }\n}\n",
+    );
+
+    let output = run(root, "compile", &[]);
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    assert!(printed.contains("This statement never runs, because line 7 ends the block."), "{printed}");
+    assert!(!root.join(".sharp/app/Shop/Stop.sharpc").exists());
+}
+
 /// Spec section 28's `app/Shared/Money.sharp`, whose law holds over its pure `add`.
 #[test]
 fn analyze_finds_no_issues_in_a_class_with_a_law() {

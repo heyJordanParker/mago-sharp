@@ -670,10 +670,16 @@ pub fn analyze_statements<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    for statement in statements {
+    for (index, statement) in statements.iter().enumerate() {
         let is_declaration = statement.is_declaration();
 
         if block.flags.has_returned() {
+            if context.dialect.is_sharp() {
+                report_statement_that_never_runs(context, statement, &statements[..index]);
+
+                continue;
+            }
+
             if context.settings.find_unused_expressions {
                 let is_harmless = match &statement {
                     Statement::Break(_) => true,
@@ -712,6 +718,34 @@ where
     }
 
     Ok(())
+}
+
+/// Refuses `statement`, which never runs because a statement before it in its block ends the block, as Java and Zig
+/// refuse an unreachable statement (spec section 7). The analysis never reads such a statement, so PHP# compiles none.
+/// `before` holds the statements before it in its block, and the last of them is the one that ends it. With none before
+/// it, the code before the block never finishes, as the condition `global.exit(1)` does, and `statement` is the block.
+fn report_statement_that_never_runs<A>(
+    context: &mut Context<'_, '_, A>,
+    statement: &Statement<'_>,
+    before: &[Statement<'_>],
+) where
+    A: Arena,
+{
+    let issue = match before.last() {
+        Some(end) => {
+            let line = context.source_file.line_number(end.span().start.offset) + 1;
+
+            Issue::error(format!("This statement never runs, because line {line} ends the block."))
+                .with_help(format!("Delete it, or move it above line {line}."))
+        }
+        None => {
+            Issue::error("This block never runs, because the code before it never finishes.").with_help("Delete it.")
+        }
+    };
+
+    context
+        .collector
+        .report_with_code(IssueCode::UnevaluatedCode, issue.with_annotation(Annotation::primary(statement.span())));
 }
 
 /// Checks statement expressions for unused results or lack of side effects.
