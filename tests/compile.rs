@@ -2157,12 +2157,14 @@ fn slow(length: u64) -> String {
 /// for the dozen Lean processes the rest of the compile starts on a slow machine: a rule that never ends is refused at
 /// its name, and the other rule of its `Module.lean` still judges `StoreService.sharp`; a `#eval` that never ends
 /// refuses each file its `Module.lean` judges; and a proof that never ends under `set_option maxHeartbeats 0`, which
-/// lifts Lean's own limit, refuses its law's file. Work that waits runs under a limit of 10 seconds, so its deadline is
-/// 40 seconds: a rule that sleeps is refused as waited, and the rule after it still judges `StoreService.sharp`; and a
-/// `#eval` that sleeps refuses each file its `Module.lean` judges. Those rows run at once, each on its own thread.
+/// lifts Lean's own limit, refuses its law's file. Those rows run one at a time, since a Lean that gets under a quarter
+/// of a core reaches its deadline of four limits before its limit. Work that waits runs under a limit of 10 seconds, so
+/// its deadline is 40 seconds: a rule that sleeps is refused as waited, and the rule after it still judges
+/// `StoreService.sharp`; and a `#eval` that sleeps refuses each file its `Module.lean` judges. Those rows use almost no
+/// processor time, so each runs on its own thread meanwhile.
 ///
 /// Then slow rules run under a limit of 10 seconds, one row at a time, since a loaded machine raises the processor time
-/// of each rule. Each takes about 2 processor seconds, so ten of them pass the runner's own limit of twice the limit:
+/// of each rule. Each takes about 3 processor seconds, so ten of them pass the runner's own limit of twice the limit:
 /// a slow rule runs; ten slow rules that one `attribute [rule]` line marks all run; ten slow rules a macro of a helper
 /// file declares all run; and ten shorter rules under a hard limit of 10 seconds, which keeps the runner's own limit
 /// at 9 seconds, all run.
@@ -2231,9 +2233,8 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other
         })
         .collect();
     let shorter_rules = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}{shorter_rules}"));
-    let stopping = [
+    let endless = [
         (
-            30,
             vec![("app/Tenant/Store/Module.lean", endless_rule.as_str())],
             vec![
                 LEDGER_BREAKS.to_owned(),
@@ -2243,17 +2244,16 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other
             ],
         ),
         (
-            30,
             vec![("app/Tenant/Store/Module.lean", endless_eval.as_str())],
             vec![LEDGER_BREAKS.to_owned(), rejected("Receipts", stopped), rejected("StoreService", stopped)],
         ),
         (
-            30,
             vec![("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Money.lean", endless_proof.as_str())],
             vec![LEDGER_BREAKS.to_owned(), money_rejected, store_breaks.to_owned()],
         ),
+    ];
+    let waiting = [
         (
-            10,
             vec![("app/Tenant/Store/Module.lean", sleeping_rule.as_str())],
             vec![
                 LEDGER_BREAKS.to_owned(),
@@ -2264,7 +2264,6 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other
             ],
         ),
         (
-            10,
             vec![("app/Tenant/Store/Module.lean", sleeping_eval.as_str())],
             vec![LEDGER_BREAKS.to_owned(), rejected("Receipts", waited), rejected("StoreService", waited)],
         ),
@@ -2281,26 +2280,22 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other
         ),
         (vec![("app/Tenant/Store/Module.lean", shorter_rules.as_str())], true),
     ];
+    let stops = |limit: u64, files: &[(&str, &str)], expected: &[String]| {
+        let directory = structured(files);
+
+        let (output, seconds) = compile_lines_within(directory.path(), limit, false);
+
+        assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
+        assert!(seconds < 2.0 * limit as f64, "{files:?} used {seconds} processor seconds: {}", printed(&output));
+    };
     std::thread::scope(|scope| {
-        let rows: Vec<_> = stopping
-            .into_iter()
-            .map(|(limit, files, expected)| {
-                scope.spawn(move || {
-                    let directory = structured(&files);
-
-                    let (output, seconds) = compile_lines_within(directory.path(), limit, false);
-
-                    assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
-                    assert!(
-                        seconds < 2.0 * limit as f64,
-                        "{files:?} used {seconds} processor seconds: {}",
-                        printed(&output)
-                    );
-                })
-            })
-            .collect();
-        for row in rows {
-            row.join().unwrap();
+        let waits: Vec<_> =
+            waiting.iter().map(|(files, expected)| scope.spawn(|| stops(10, files, expected))).collect();
+        for (files, expected) in &endless {
+            stops(30, files, expected);
+        }
+        for wait in waits {
+            wait.join().unwrap();
         }
     });
     for (files, hard) in slow {
