@@ -2157,8 +2157,8 @@ fn looping(steps: u64) -> String {
 /// Work that never ends runs under a limit of 30 seconds, and costs the compile less than two limits, which leaves room
 /// for the dozen Lean processes the rest of the compile starts on a slow machine: a rule that never ends is refused at
 /// its name, and the other rule of its `Module.lean` still judges `StoreService.sharp`; a `#eval` that never ends
-/// refuses each file its `Module.lean` judges; and a proof that never ends under `set_option maxHeartbeats 0`, which
-/// lifts Lean's own limit, refuses its law's file. Those rows run one at a time, since a Lean that gets under a quarter
+/// refuses each file its `Module.lean` judges; and a proof whose tactic never ends, which Lean's own heartbeat limit
+/// does not stop, refuses its law's file. Those rows run one at a time, since a Lean that gets under a quarter
 /// of a core reaches its deadline of four limits before its limit. Work that waits runs under a limit of 10 seconds, so
 /// its deadline is 40 seconds: a rule that sleeps is refused as waited, and the rule after it still judges
 /// `StoreService.sharp`; and a `#eval` that sleeps refuses each file its `Module.lean` judges. Those rows use almost no
@@ -2191,9 +2191,12 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other
         &format!("{IMPORTS_ONLY}\n@[rule] def endless : Rule := .imports fun _ _ => {ENDLESS}"),
     );
     let endless_eval = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}\n#eval {ENDLESS}"));
-    let endless_proof = MONEY_PROOF
-        .replace("theorem", "set_option maxHeartbeats 0 in\ntheorem")
-        .replace("  simp [App.Shared.Money.addKeepsCurrency, App.Shared.Money.add]", "  repeat (first | skip)");
+    // The loop holds its memory still: a proof that piles up goals, as `repeat` does, fills a fast machine's memory
+    // before it reaches the limit.
+    let endless_proof = MONEY_PROOF.replace(
+        "  simp [App.Shared.Money.addKeepsCurrency, App.Shared.Money.add]",
+        "  run_tac do\n    let mut n := 0\n    for i in [0:1000000000000] do\n      n := n + i",
+    );
     let money_rejected = format!(
         "app/Shared/Money.sharp:3:14:error - unproven-law: Lean rejected app/Shared/Money.lean: {stopped}. Make its proofs and rules end sooner"
     );
