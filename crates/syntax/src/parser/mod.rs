@@ -41,6 +41,9 @@ pub struct State {
     /// The second `>` of a `>>` that closed two PHP# type argument lists at once, as in `Map<int, List<int>>`, which
     /// the outer list takes as its own `>`.
     pub closing_angle: Option<Span>,
+    /// The class-like whose members the parser reads, as a message names it: `A class`, `An interface`, `An enum`,
+    /// `A trait` or `A module`.
+    pub members_of: &'static str,
 }
 
 /// The main parser for PHP source code.

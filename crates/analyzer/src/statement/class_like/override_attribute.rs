@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
@@ -140,18 +141,25 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         }
 
-        // PHP# implements an interface method without `override`, as it only replaces a parent class's method.
-        let overridden_class = |parent_class_name: &[u8]| {
+        // PHP# implements an interface method without `override`, as it only replaces a parent class's method, and a
+        // parent's named constructor is not inherited, so no method replaces it.
+        let overridden_class = |parent_method_id: &MethodIdentifier| {
             context
                 .codebase
-                .get_class_like(parent_class_name)
+                .get_class_like(parent_method_id.get_class_name().as_bytes())
                 .filter(|parent_metadata| !is_sharp || !parent_metadata.kind.is_interface())
+                .filter(|_| {
+                    !context
+                        .codebase
+                        .get_method_by_id(parent_method_id)
+                        .is_some_and(|parent_method| parent_method.flags.is_named_constructor())
+                })
         };
 
         let has_non_pseudo_parent_method = parent_class_names.values().any(|parent_method_id| {
             let method_name = parent_method_id.get_method_name();
 
-            overridden_class(parent_method_id.get_class_name().as_bytes()).is_some_and(|parent_metadata| {
+            overridden_class(parent_method_id).is_some_and(|parent_metadata| {
                 !parent_metadata.pseudo_methods.contains(&method_name)
                     && !parent_metadata.static_pseudo_methods.contains(&method_name)
             })
@@ -161,10 +169,7 @@ pub fn check_override_attribute<'ctx, 'arena, A>(
             continue;
         }
 
-        let Some(parents_metadata) = parent_class_names
-            .values()
-            .find_map(|parent_method_id| overridden_class(parent_method_id.get_class_name().as_bytes()))
-        else {
+        let Some(parents_metadata) = parent_class_names.values().find_map(overridden_class) else {
             continue;
         };
 

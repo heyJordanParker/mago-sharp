@@ -501,3 +501,12 @@ fn a_function_type_effect_change_changes_the_fingerprint() {
     assert_ne!(pure, http, "Adding an effect should change the fingerprint");
     assert_ne!(http, mail, "Changing an effect should change the fingerprint");
 }
+
+#[test]
+fn a_super_argument_change_changes_the_fingerprint() {
+    let constructor = |code| fingerprint_of(b"src/Order.sharp", code);
+    let row = constructor(b"class Order : Entity\n{\n    public Order(Row row, Row other) : super(row) { }\n}\n");
+    let other = constructor(b"class Order : Entity\n{\n    public Order(Row row, Row other) : super(other) { }\n}\n");
+
+    assert_ne!(row, other, "Changing a `: super(…)` argument should change the fingerprint");
+}

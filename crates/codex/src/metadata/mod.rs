@@ -511,6 +511,17 @@ impl CodebaseMetadata {
         )
     }
 
+    /// Retrieves the constructor `parent::__construct` reaches from `class`: the one its direct parent class declares
+    /// or inherits.
+    #[inline]
+    #[must_use]
+    pub fn get_parent_constructor(&self, class: &[u8]) -> Option<&FunctionLikeMetadata> {
+        let parent = self.get_class_like(class)?.direct_parent_class?;
+        let constructor = self.get_class_like(parent.as_bytes())?.declaring_method_ids.get(&word("__construct"))?;
+
+        self.get_method_by_id(constructor)
+    }
+
     /// Retrieves metadata for any function-like construct (function, method, or closure).
     /// This is a convenience method that delegates to the appropriate getter based on the identifier type.
     #[inline]
@@ -1736,11 +1747,13 @@ fn orphan_patch_constant_diagnostic(meta: &ConstantMetadata) -> Issue {
 /// Determines which metadata value to keep when merging duplicates.
 ///
 /// Priority:
-///   1. user-defined > patch > external > built-in > other.
-///   2. non-polyfill > polyfill — tools like rector/phpstan/psalm ship
+///   1. plain PHP > PHP# module — a PHP# module never changes what plain PHP
+///      code means, so a plain PHP class-like of its name keeps the name.
+///   2. user-defined > patch > external > built-in > other.
+///   3. non-polyfill > polyfill — tools like rector/phpstan/psalm ship
 ///      skeleton stubs gated by `if (!class_exists('X'))` that should never
 ///      shadow a concrete definition.
-///   3. smaller span wins as a deterministic tie-breaker.
+///   4. smaller span wins as a deterministic tie-breaker.
 ///
 /// Returns `true` if the new value should replace the existing one.
 fn should_replace_metadata(
@@ -1749,6 +1762,14 @@ fn should_replace_metadata(
     new_flags: MetadataFlags,
     new_span: Span,
 ) -> bool {
+    if new_flags.is_module() && !existing_flags.is_sharp() {
+        return false;
+    }
+
+    if existing_flags.is_module() && !new_flags.is_sharp() {
+        return true;
+    }
+
     let new_is_user_defined = new_flags.is_user_defined();
     let existing_is_user_defined = existing_flags.is_user_defined();
 

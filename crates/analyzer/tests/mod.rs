@@ -2,6 +2,8 @@
 
 use std::fs;
 
+use mago_analyzer::code::IssueCode;
+
 use crate::framework::default_test_settings;
 
 mod framework;
@@ -2807,5 +2809,16 @@ fn test_all_test_cases_are_ran() {
         let has_test = test_case_file.contains(&format!("test_case!({file_name})"))
             || test_case_file.contains(&format!("test_case!({file_name},"));
         assert!(has_test, "File '{file_name}' was not found as a test case");
+    }
+}
+
+/// Each code `mago analyze` lists parses back from its name, so a configuration or a baseline can name any of them.
+#[test]
+fn every_listed_issue_code_parses_from_its_name() {
+    let codes = IssueCode::all();
+
+    assert!(!codes.is_empty(), "`mago analyze` lists no codes");
+    for code in codes {
+        assert_eq!(code.as_str().parse::<IssueCode>(), Ok(*code), "{code}");
     }
 }

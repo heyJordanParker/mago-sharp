@@ -1010,16 +1010,15 @@ where
         return expression_type;
     }
 
-    let is_sharp_read = context.dialect.is_sharp() && !in_assignment;
+    let is_sharp = context.dialect.is_sharp();
+    let is_sharp_read = is_sharp && !in_assignment;
     let key_parameter = if in_assignment || (block_context.flags.inside_isset() && !is_sharp_read) {
-        // A PHP# `Map` keyed by a backed enum takes the enum alone, which runs as its backing value, and an empty
-        // literal takes the enum its first key gives it.
+        // A PHP# write takes a key of the `Map`'s key type, as a read does. A backed enum key runs as its backing
+        // value, and an empty literal takes the enum its first key gives it.
         let is_backed_enum_key = |key_type: &TUnion| matches!(get_backing_key_type(key_type, context.codebase), Cow::Owned(backing) if backing.is_always_array_key(true));
         match keyed_array.get_generic_parameters() {
-            Some(parameters) if context.dialect.is_sharp() && is_backed_enum_key(parameters.0) => {
-                Cow::Owned(parameters.0.clone())
-            }
-            None if context.dialect.is_sharp() && is_backed_enum_key(index_type) => Cow::Owned(index_type.clone()),
+            Some(parameters) if is_sharp => Cow::Owned(parameters.0.clone()),
+            None if is_sharp && is_backed_enum_key(index_type) => Cow::Owned(index_type.clone()),
             _ => Cow::Owned(get_arraykey()),
         }
     } else {
@@ -1051,7 +1050,7 @@ where
         context.codebase,
         index_type,
         &key_parameter,
-        !is_sharp_read,
+        !is_sharp,
         false,
         false,
         &mut union_comparison_result,
@@ -1065,7 +1064,7 @@ where
     // trivially contained by anything, so allowing it would silently accept indexing an empty
     // array like `[]` with any key.
     let expected_contained_by_index = !index_type_contained_by_expected
-        && !is_sharp_read
+        && !is_sharp
         && !key_parameter.is_never()
         && is_contained_by(
             context.codebase,
@@ -1079,7 +1078,7 @@ where
 
     if index_type_contained_by_expected || expected_contained_by_index {
         *has_valid_expected_index = true;
-    } else if is_sharp_read {
+    } else if is_sharp {
         *has_valid_expected_index = true;
 
         let map_type =
@@ -1234,25 +1233,29 @@ where
 
                 if should_report_error {
                     let never = display_bool(context, false);
+                    // PHP# has no `isset`: a `.sharp` file reaches this check through the `??` or test it wrote.
+                    let (check, checked, checking) = if context.dialect.is_sharp() {
+                        ("check", "A check", "checking it")
+                    } else {
+                        ("`isset` check", "`isset`", "checking `isset`")
+                    };
                     context.collector.report_with_code(
                         IssueCode::ImpossibleNonnullEntryCheck,
                         Issue::warning(format!(
-                            "Impossible `isset` check on key `{}` accessed on `{}`.",
+                            "Impossible {check} on key `{}` accessed on `{}`.",
                             array_key,
                             display_atomic(context, &TAtomic::Array(TArray::Keyed(keyed_array.clone())))
                         ))
                         .with_annotation(
                             Annotation::primary(span)
-                                .with_message(format!("`isset` on key `{array_key}` will always be {never} here."))
+                                .with_message(format!("{checked} on key `{array_key}` will always be {never} here."))
                         )
                         .with_note(
                             format!(
-                                "The analysis determined that the key `{array_key}` definitely does not exist in this array, so checking `isset` is unnecessary."
+                                "The analysis determined that the key `{array_key}` definitely does not exist in this array, so {checking} is unnecessary."
                             )
                         )
-                        .with_help(
-                            "Remove the redundant `isset` check."
-                        ),
+                        .with_help(format!("Remove the redundant {check}.")),
                     );
                 }
 

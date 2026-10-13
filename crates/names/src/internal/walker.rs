@@ -22,6 +22,7 @@ use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Extern;
@@ -46,6 +47,8 @@ use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
@@ -446,6 +449,7 @@ fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<
             Statement::Interface(interface) => Some(IgnoringCase(interface.name.value)),
             Statement::Trait(r#trait) => Some(IgnoringCase(r#trait.name.value)),
             Statement::Enum(r#enum) => Some(IgnoringCase(r#enum.name.value)),
+            Statement::Event(event) => Some(IgnoringCase(event.name.value)),
             _ => None,
         })
         .collect()
@@ -513,7 +517,12 @@ where
         let written = target.value();
         let class = written.split(|byte| *byte == b'.').next().unwrap_or(written);
         let (fqn, imported) = self.resolve_class(context, class);
-        if !target.is_dotted() && !imported && !self.declared_classes.contains(&IgnoringCase(class)) {
+        // An `extern event` always names a class, spec section 15.
+        if r#extern.event.is_none()
+            && !target.is_dotted()
+            && !imported
+            && !self.declared_classes.contains(&IgnoringCase(class))
+        {
             self.resolved_names.insert_at(target.span(), written, false);
 
             return;
@@ -566,6 +575,18 @@ where
         }
     }
 
+    /// An event is a class of its namespace, spec section 15, and its parameters are its constructor's.
+    fn walk_in_event(&mut self, event: &'ast Event<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(event.name.value);
+
+        self.resolved_names.insert_at(event.name.span, classlike, false);
+        self.locals.enter_method();
+    }
+
+    fn walk_out_event(&mut self, _event: &'ast Event<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.locals.exit_method();
+    }
+
     fn walk_in_method(&mut self, _method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.locals.enter_method();
@@ -589,6 +610,31 @@ where
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.locals.exit_method();
+    }
+
+    /// A PHP# named constructor's parameters are its locals, as a constructor's are, spec section 9.1.
+    fn walk_in_named_constructor(
+        &mut self,
+        _named_constructor: &'ast NamedConstructor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_method();
+    }
+
+    fn walk_out_named_constructor(
+        &mut self,
+        _named_constructor: &'ast NamedConstructor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.exit_method();
+    }
+
+    /// A module is the class-like `Module` of its namespace, spec sections 28 and 32, so its keyword holds that full
+    /// name, which names each of its laws.
+    fn walk_in_module(&mut self, module: &'ast Module<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(b"Module");
+
+        self.resolved_names.insert_at(module.module.span, classlike, false);
     }
 
     /// A law binds as a static method does, spec section 28: its parameters are locals of the law alone.
@@ -629,8 +675,8 @@ where
     }
 
     /// A PHP# accessor runs as a function of its own, as PHP runs a hook. Its accessor list declares `field`, the
-    /// storage, apart from any constructor parameter that declares the same property, and `set` declares `value`, the
-    /// incoming value, as PHP's `set` hook declares `$value`.
+    /// storage, apart from any constructor parameter that declares the same property, and `set` or `init` declares
+    /// `value`, the incoming value, as PHP's `set` hook declares `$value`.
     fn walk_in_property_hook(
         &mut self,
         hook: &'ast PropertyHook<'arena>,
@@ -642,7 +688,7 @@ where
 
         self.locals.enter_method();
         self.locals.declare(b"field", Local { declaration: accessors, kind: LocalKind::Parameter });
-        if hook.name.value == b"set" && hook.parameter_list.is_none() {
+        if hook.is_setter() && hook.parameter_list.is_none() {
             self.locals.declare(b"value", Local { declaration: hook.name.span, kind: LocalKind::Parameter });
         }
     }

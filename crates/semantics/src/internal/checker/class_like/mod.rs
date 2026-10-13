@@ -14,6 +14,7 @@ use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Law;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
@@ -122,7 +123,11 @@ pub fn check_class<'ast, 'arena>(class: &'ast Class<'arena>, context: &mut Conte
             // Spec section 5 makes a PHP# class `public` or, by default, `internal`.
             Modifier::Public(_) if context.program.dialect.is_sharp() => {}
             // Only PHP# parses these, and `check_slice` decides them.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => {}
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_) => {}
             Modifier::Public(keyword)
             | Modifier::Protected(keyword)
             | Modifier::Private(keyword)
@@ -741,8 +746,9 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     context,
                 );
             }
-            // Only a PHP# file declares an operator or a law, and `check_slice` refuses either in an interface.
-            ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) => {}
+            // Only a PHP# file declares an operator, a law or a named constructor, and `check_slice` refuses each in an
+            // interface.
+            ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) | ClassLikeMember::NamedConstructor(_) => {}
         }
     }
 }
@@ -1058,7 +1064,11 @@ pub fn check_anonymous_class<'ast, 'arena>(
     for modifier in &anonymous_class.modifiers {
         match &modifier {
             // Only PHP# parses these, and `check_slice` decides them.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => {}
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_) => {}
             Modifier::Static(_)
             | Modifier::Abstract(_)
             | Modifier::PrivateSet(_)
@@ -1271,19 +1281,40 @@ pub fn check_members<'ast, 'arena>(
 ) {
     let class_like_fqcn = context.display_class_like_name(class_like_fqcn);
     let mut method_names: HashMap<Vec<u8>, Span> = HashMap::new();
+    let mut main_constructor: Option<Span> = None;
     let mut constant_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
     let mut property_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
 
     for member in members {
-        // A law shares its class's method names, so a law and a method of one name are declared twice.
+        // A law and a named constructor share their class's method names, as the static method a named constructor
+        // lowers to does, so either and a method of one name are declared twice.
         let callable_name = match member {
             ClassLikeMember::Method(method) => Some(&method.name),
             ClassLikeMember::Law(law) => Some(&law.name),
+            ClassLikeMember::NamedConstructor(named_constructor) => Some(&named_constructor.name),
             _ => None,
         };
         if let Some(name) = callable_name {
             let lowercase_name = name.value.to_ascii_lowercase();
-            if let Some(previous) = method_names.get(&lowercase_name) {
+            let is_sharp_constructor = matches!(member, ClassLikeMember::Method(method)
+                if context.program.dialect.is_sharp()
+                    && method.return_type_hint.is_none()
+                    && method.name.value == class_like_name);
+            if is_sharp_constructor && let Some(main) = main_constructor {
+                context.report(
+                    Issue::error("A class has one main constructor: PHP# has no overloading by argument types.")
+                        .with_annotation(Annotation::primary(name.span()).with_message("A second constructor."))
+                        .with_annotation(Annotation::secondary(main).with_message("The main constructor."))
+                        .with_help(format!(
+                            "Give it a name that passes control to the main constructor, as in `public {}.fromName(…) : this(…) {{ }}`.",
+                            BytesDisplay(class_like_name)
+                        )),
+                );
+            } else if is_sharp_constructor {
+                // The constructor is PHP's `__construct`, so it shares no name with a method, and a method named after
+                // its class has only its own error.
+                main_constructor = Some(name.span());
+            } else if let Some(previous) = method_names.get(&lowercase_name) {
                 let method_display = context.display_member(class_like_name, BytesDisplay(name.value));
                 context.report(
                     Issue::error(format!("{class_like_kind} method `{method_display}` has already been defined"))
@@ -1467,31 +1498,32 @@ pub fn check_members<'ast, 'arena>(
                 }
                 constant_names.insert(case_name_bytes, (false, enum_case.item.name().span()));
             }
-            ClassLikeMember::Law(law) => {
-                for parameter in &law.parameter_list.parameters {
-                    let name = BytesDisplay(parameter.variable.name);
-                    let refusal = if let Some(default_value) = &parameter.default_value {
-                        Some((
-                            format!("so `{name}` cannot have a default"),
-                            default_value.span(),
-                            "Default written here.",
-                        ))
-                    } else {
-                        parameter.ellipsis.map(|ellipsis| {
-                            (format!("so `{name}` cannot be variadic"), ellipsis, "Variadic written here.")
-                        })
-                    };
-
-                    if let Some((reason, span, written)) = refusal {
-                        context.report(
-                            Issue::error(format!("A law's parameters range over every value, {reason}."))
-                                .with_annotation(Annotation::primary(span).with_message(written))
-                                .with_note("A law states a fact about every value of its parameters."),
-                        );
-                    }
-                }
-            }
+            ClassLikeMember::Law(law) => check_law_parameters(law, context),
             _ => {}
+        }
+    }
+}
+
+/// Reports a law parameter with a default or written variadic, spec section 28: a law's parameters range over every
+/// value.
+#[inline]
+pub fn check_law_parameters(law: &Law, context: &mut Context<'_, '_, '_>) {
+    for parameter in &law.parameter_list.parameters {
+        let name = BytesDisplay(parameter.variable.name);
+        let refusal = if let Some(default_value) = &parameter.default_value {
+            Some((format!("so `{name}` cannot have a default"), default_value.span(), "Default written here."))
+        } else {
+            parameter
+                .ellipsis
+                .map(|ellipsis| (format!("so `{name}` cannot be variadic"), ellipsis, "Variadic written here."))
+        };
+
+        if let Some((reason, span, written)) = refusal {
+            context.report(
+                Issue::error(format!("A law's parameters range over every value, {reason}."))
+                    .with_annotation(Annotation::primary(span).with_message(written))
+                    .with_note("A law states a fact about every value of its parameters."),
+            );
         }
     }
 }

@@ -37,6 +37,7 @@ where
                 cst::Modifier::Override(_) => ModifierKind::Override,
                 cst::Modifier::Required(_) => ModifierKind::Required,
                 cst::Modifier::Extern(_) => ModifierKind::Extern,
+                cst::Modifier::Lazy(_) => ModifierKind::Lazy,
             },
         }
     }

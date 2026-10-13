@@ -35,6 +35,8 @@ pub enum Modifier<'arena> {
     Required(Keyword<'arena>),
     /// PHP#'s `extern`, which marks a method whose body is native, compiled into the engine.
     Extern(Keyword<'arena>),
+    /// PHP#'s `lazy`, which marks a property that computes its value on first read.
+    Lazy(Keyword<'arena>),
 }
 
 impl<'arena> Modifier<'arena> {
@@ -55,6 +57,7 @@ impl<'arena> Modifier<'arena> {
             Modifier::Override(k) => k,
             Modifier::Required(k) => k,
             Modifier::Extern(k) => k,
+            Modifier::Lazy(k) => k,
         }
     }
 
@@ -161,7 +164,8 @@ impl HasSpan for Modifier<'_> {
             | Modifier::Virtual(value)
             | Modifier::Override(value)
             | Modifier::Required(value)
-            | Modifier::Extern(value) => value.span(),
+            | Modifier::Extern(value)
+            | Modifier::Lazy(value) => value.span(),
         }
     }
 }

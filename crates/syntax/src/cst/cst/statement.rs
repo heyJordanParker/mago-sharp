@@ -15,6 +15,7 @@ use crate::cst::cst::control_flow::switch::Switch;
 use crate::cst::cst::declare::Declare;
 use crate::cst::cst::echo::Echo;
 use crate::cst::cst::echo::EchoTag;
+use crate::cst::cst::event::Event;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::r#extern::Extern;
 use crate::cst::cst::function_like::function::Function;
@@ -31,6 +32,7 @@ use crate::cst::cst::r#loop::r#for::For;
 use crate::cst::cst::r#loop::for_of::ForOf;
 use crate::cst::cst::r#loop::foreach::Foreach;
 use crate::cst::cst::r#loop::r#while::While;
+use crate::cst::cst::module::Module;
 use crate::cst::cst::namespace::Namespace;
 use crate::cst::cst::r#return::Return;
 use crate::cst::cst::r#static::Static;
@@ -67,10 +69,12 @@ pub enum Statement<'arena> {
     Namespace(Namespace<'arena>),
     Use(Use<'arena>),
     Extern(Extern<'arena>),
+    Module(Module<'arena>),
     Class(Class<'arena>),
     Interface(Interface<'arena>),
     Trait(Trait<'arena>),
     Enum(Enum<'arena>),
+    Event(Event<'arena>),
     Block(Block<'arena>),
     Constant(Constant<'arena>),
     Function(Function<'arena>),
@@ -117,6 +121,7 @@ impl Statement<'_> {
             }
             Statement::Use(r#use) => r#use.terminator.is_closing_tag(),
             Statement::Extern(r#extern) => r#extern.terminator.is_closing_tag(),
+            Statement::Event(event) => event.terminator.is_closing_tag(),
             Statement::Goto(goto) => goto.terminator.is_closing_tag(),
             Statement::Declare(Declare { body: DeclareBody::Statement(b), .. }) => b.terminates_scripting(),
             Statement::Declare(Declare { body: DeclareBody::ColonDelimited(b), .. }) => b.terminator.is_closing_tag(),
@@ -218,10 +223,12 @@ impl HasSpan for Statement<'_> {
             Statement::Namespace(statement) => statement.span(),
             Statement::Use(statement) => statement.span(),
             Statement::Extern(statement) => statement.span(),
+            Statement::Module(statement) => statement.span(),
             Statement::Class(statement) => statement.span(),
             Statement::Interface(statement) => statement.span(),
             Statement::Trait(statement) => statement.span(),
             Statement::Enum(statement) => statement.span(),
+            Statement::Event(statement) => statement.span(),
             Statement::Block(statement) => statement.span(),
             Statement::Constant(statement) => statement.span(),
             Statement::Function(statement) => statement.span(),

@@ -55,6 +55,16 @@ where
             {
                 Statement::Extern(self.parse_extern()?)
             }
+            T![Identifier]
+                if self.dialect.is_sharp()
+                    && token.value == b"module"
+                    && matches!(self.stream.peek_kind(1)?, Some(T!["{" | ":"])) =>
+            {
+                Statement::Module(self.parse_module()?)
+            }
+            T![Identifier] if !self.state.within_block && self.is_at_event()? => {
+                Statement::Event(self.parse_event_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?)
+            }
             T!["const" | Identifier | "list" | "function" | "("] if self.is_at_local_declaration()? => {
                 Statement::LocalDeclaration(self.parse_local_declaration()?)
             }
@@ -84,6 +94,9 @@ where
                         terminator: self.parse_terminator()?,
                     }),
                     kind if kind.is_modifier() => self.parse_modified_class_like_with_attributes(attributes)?,
+                    T![Identifier] if self.is_at_event()? => {
+                        Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, Sequence::empty())?)
+                    }
                     _ => {
                         return Err(self.stream.unexpected(
                             Some(next),

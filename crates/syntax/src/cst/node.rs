@@ -52,6 +52,8 @@ use crate::cst::cst::Constant;
 use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::ConstantItem;
 use crate::cst::cst::Construct;
+use crate::cst::cst::ConstructorInitializer;
+use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Continue;
 use crate::cst::cst::Declare;
 use crate::cst::cst::DeclareBody;
@@ -72,6 +74,7 @@ use crate::cst::cst::EnumCaseBackedItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
 use crate::cst::cst::EvalConstruct;
+use crate::cst::cst::Event;
 use crate::cst::cst::ExitConstruct;
 use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
@@ -156,7 +159,10 @@ use crate::cst::cst::MethodPartialApplication;
 use crate::cst::cst::MissingArrayElement;
 use crate::cst::cst::MixedUseItemList;
 use crate::cst::cst::Modifier;
+use crate::cst::cst::Module;
+use crate::cst::cst::ModuleMember;
 use crate::cst::cst::NamedArgument;
+use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
 use crate::cst::cst::Namespace;
 use crate::cst::cst::NamespaceBody;
@@ -328,6 +334,10 @@ pub enum NodeKind {
     MethodExpressionBody,
     Operator,
     Law,
+    ConstructorInitializer,
+    NamedConstructor,
+    ConstructorName,
+    Event,
     ComputedProperty,
     HookedProperty,
     PlainProperty,
@@ -478,6 +488,8 @@ pub enum NodeKind {
     UseType,
     Extern,
     Uses,
+    Module,
+    ModuleMember,
     Yield,
     YieldFrom,
     YieldPair,
@@ -599,6 +611,10 @@ pub enum Node<'ast, 'arena> {
     MethodExpressionBody(&'ast MethodExpressionBody<'arena>),
     Operator(&'ast Operator<'arena>),
     Law(&'ast Law<'arena>),
+    ConstructorInitializer(&'ast ConstructorInitializer<'arena>),
+    NamedConstructor(&'ast NamedConstructor<'arena>),
+    ConstructorName(&'ast ConstructorName<'arena>),
+    Event(&'ast Event<'arena>),
     ComputedProperty(&'ast ComputedProperty<'arena>),
     HookedProperty(&'ast HookedProperty<'arena>),
     PlainProperty(&'ast PlainProperty<'arena>),
@@ -747,6 +763,8 @@ pub enum Node<'ast, 'arena> {
     UseType(&'ast UseType<'arena>),
     Extern(&'ast Extern<'arena>),
     Uses(&'ast Uses<'arena>),
+    Module(&'ast Module<'arena>),
+    ModuleMember(&'ast ModuleMember<'arena>),
     Yield(&'ast Yield<'arena>),
     YieldFrom(&'ast YieldFrom<'arena>),
     YieldPair(&'ast YieldPair<'arena>),
@@ -837,9 +855,11 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Interface(_)
                 | Self::Trait(_)
                 | Self::Enum(_)
+                | Self::Event(_)
                 | Self::Function(_)
                 | Self::Method(_)
                 | Self::Operator(_)
+                | Self::NamedConstructor(_)
         )
     }
 
@@ -857,10 +877,12 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 | Self::Namespace(_)
                 | Self::Use(_)
                 | Self::Extern(_)
+                | Self::Module(_)
                 | Self::Class(_)
                 | Self::Interface(_)
                 | Self::Trait(_)
                 | Self::Enum(_)
+                | Self::Event(_)
                 | Self::Block(_)
                 | Self::Constant(_)
                 | Self::Function(_)
@@ -951,6 +973,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::MethodExpressionBody(_) => NodeKind::MethodExpressionBody,
             Self::Operator(_) => NodeKind::Operator,
             Self::Law(_) => NodeKind::Law,
+            Self::ConstructorInitializer(_) => NodeKind::ConstructorInitializer,
+            Self::NamedConstructor(_) => NodeKind::NamedConstructor,
+            Self::ConstructorName(_) => NodeKind::ConstructorName,
+            Self::Event(_) => NodeKind::Event,
             Self::ComputedProperty(_) => NodeKind::ComputedProperty,
             Self::HookedProperty(_) => NodeKind::HookedProperty,
             Self::PlainProperty(_) => NodeKind::PlainProperty,
@@ -1098,6 +1124,8 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::UseType(_) => NodeKind::UseType,
             Self::Extern(_) => NodeKind::Extern,
             Self::Uses(_) => NodeKind::Uses,
+            Self::Module(_) => NodeKind::Module,
+            Self::ModuleMember(_) => NodeKind::ModuleMember,
             Self::Yield(_) => NodeKind::Yield,
             Self::YieldFrom(_) => NodeKind::YieldFrom,
             Self::YieldPair(_) => NodeKind::YieldPair,
@@ -1389,6 +1417,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 ClassLikeMember::Method(node) => f(Node::Method(node)),
                 ClassLikeMember::Operator(node) => f(Node::Operator(node)),
                 ClassLikeMember::Law(node) => f(Node::Law(node)),
+                ClassLikeMember::NamedConstructor(node) => f(Node::NamedConstructor(node)),
             },
             Node::ClassLikeMemberExpressionSelector(node) => f(Node::Expression(node.expression)),
             Node::ClassLikeMemberSelector(node) => match node {
@@ -1420,8 +1449,31 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     f(Node::LocalIdentifier(&node.name));
                     f(Node::FunctionLikeParameterList(&node.parameter_list));
                 }
+                for item in node.initializer.iter() {
+                    f(Node::ConstructorInitializer(item));
+                }
                 f(Node::MethodBody(&node.body));
             }
+            Node::ConstructorInitializer(node) => {
+                f(Node::Keyword(&node.keyword));
+                f(Node::ArgumentList(&node.argument_list));
+            }
+            Node::NamedConstructor(node) => {
+                for item in node.attribute_lists.iter() {
+                    f(Node::AttributeList(item));
+                }
+                for item in node.modifiers.iter() {
+                    f(Node::Modifier(item));
+                }
+                f(Node::LocalIdentifier(&node.class));
+                f(Node::LocalIdentifier(&node.name));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+                for item in node.initializer.iter() {
+                    f(Node::ConstructorInitializer(item));
+                }
+                f(Node::MethodBody(&node.body));
+            }
+            Node::ConstructorName(node) => f(Node::LocalIdentifier(&node.name)),
             Node::MethodAbstractBody(node) => {
                 f(Node::Terminator(&node.terminator));
             }
@@ -1449,6 +1501,21 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
                 f(Node::MethodExpressionBody(&node.body));
+            }
+            Node::Event(node) => {
+                for item in node.attribute_lists.iter() {
+                    f(Node::AttributeList(item));
+                }
+                for item in node.modifiers.iter() {
+                    f(Node::Modifier(item));
+                }
+                f(Node::Keyword(&node.event));
+                f(Node::LocalIdentifier(&node.name));
+                f(Node::FunctionLikeParameterList(&node.parameter_list));
+                if let Some(inheritance) = &node.inheritance {
+                    f(Node::Inheritance(inheritance));
+                }
+                f(Node::Terminator(&node.terminator));
             }
             Node::ComputedProperty(node) => {
                 for item in node.attribute_lists.iter() {
@@ -2244,6 +2311,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::Instantiation(node) => {
                 f(Node::Keyword(&node.new));
                 f(Node::Expression(node.class));
+                if let Some(constructor) = &node.constructor {
+                    f(Node::ConstructorName(constructor));
+                }
 
                 if let Some(argument_list) = &node.argument_list {
                     f(Node::ArgumentList(argument_list));
@@ -2287,6 +2357,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Modifier::Override(node) => Node::Keyword(node),
                 Modifier::Required(node) => Node::Keyword(node),
                 Modifier::Extern(node) => Node::Keyword(node),
+                Modifier::Lazy(node) => Node::Keyword(node),
             }),
             Node::Namespace(node) => {
                 f(Node::Keyword(&node.r#namespace));
@@ -2556,6 +2627,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }),
             Node::Extern(node) => {
                 f(Node::Keyword(&node.r#extern));
+                if let Some(event) = &node.event {
+                    f(Node::Keyword(event));
+                }
                 f(Node::Identifier(&node.target));
 
                 if let Some(uses) = &node.uses {
@@ -2571,6 +2645,16 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                     f(Node::LocalIdentifier(name));
                 }
             }
+            Node::Module(node) => {
+                f(Node::Keyword(&node.module));
+
+                for member in &node.members {
+                    f(Node::ModuleMember(member));
+                }
+            }
+            Node::ModuleMember(node) => match node {
+                ModuleMember::Law(node) => f(Node::Law(node)),
+            },
             Node::Yield(node) => f(match node {
                 Yield::Value(node) => Node::YieldValue(node),
                 Yield::Pair(node) => Node::YieldPair(node),
@@ -2599,10 +2683,12 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Statement::Namespace(node) => f(Node::Namespace(node)),
                 Statement::Use(node) => f(Node::Use(node)),
                 Statement::Extern(node) => f(Node::Extern(node)),
+                Statement::Module(node) => f(Node::Module(node)),
                 Statement::Class(node) => f(Node::Class(node)),
                 Statement::Interface(node) => f(Node::Interface(node)),
                 Statement::Trait(node) => f(Node::Trait(node)),
                 Statement::Enum(node) => f(Node::Enum(node)),
+                Statement::Event(node) => f(Node::Event(node)),
                 Statement::Block(node) => f(Node::Block(node)),
                 Statement::Constant(node) => f(Node::Constant(node)),
                 Statement::Function(node) => f(Node::Function(node)),
@@ -2853,6 +2939,10 @@ impl HasSpan for Node<'_, '_> {
             Self::MethodExpressionBody(node) => node.span(),
             Self::Operator(node) => node.span(),
             Self::Law(node) => node.span(),
+            Self::ConstructorInitializer(node) => node.span(),
+            Self::NamedConstructor(node) => node.span(),
+            Self::ConstructorName(node) => node.span(),
+            Self::Event(node) => node.span(),
             Self::ComputedProperty(node) => node.span(),
             Self::HookedProperty(node) => node.span(),
             Self::PlainProperty(node) => node.span(),
@@ -3000,6 +3090,8 @@ impl HasSpan for Node<'_, '_> {
             Self::UseType(node) => node.span(),
             Self::Extern(node) => node.span(),
             Self::Uses(node) => node.span(),
+            Self::Module(node) => node.span(),
+            Self::ModuleMember(node) => node.span(),
             Self::Yield(node) => node.span(),
             Self::YieldFrom(node) => node.span(),
             Self::YieldPair(node) => node.span(),

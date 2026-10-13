@@ -35,13 +35,17 @@ where
         self.parse_interface_with_attributes_and_modifiers(attributes, Sequence::empty())
     }
 
-    /// A class, or in PHP# an interface, an enum or a trait, whose declaration starts with modifiers, as in
+    /// A class, or in PHP# an interface, an enum, a trait or an event, whose declaration starts with modifiers, as in
     /// `public interface Foo {}`.
     pub(crate) fn parse_modified_class_like_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
     ) -> Result<Statement<'arena>, ParseError> {
         let modifiers = self.parse_modifier_sequence()?;
+        if self.is_at_event()? {
+            return Ok(Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
+        }
+
         if self.dialect.is_sharp() {
             match self.stream.peek_kind(0)? {
                 Some(T!["interface"]) => {
@@ -85,6 +89,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "An interface";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -139,6 +144,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A class";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -180,6 +186,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A class";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -229,6 +236,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A trait";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -284,6 +292,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "An enum";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
