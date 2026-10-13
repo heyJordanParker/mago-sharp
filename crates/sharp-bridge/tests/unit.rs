@@ -318,7 +318,8 @@ fn write(root: &Path, name: &str, contents: &str) {
 }
 
 /// A file is there only under its exact name, case included, as on Linux, so a compile on a disk that ignores case
-/// stamps the same inputs as one on Linux.
+/// stamps the same inputs as one on Linux. A missing folder holds no file, and a path through a file fails loudly, for
+/// a file and for a listing alike.
 #[test]
 fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     let directory = tempfile::tempdir().unwrap();
@@ -336,6 +337,11 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
         None,
         "a disk that ignores case still has no report.sharp"
     );
+    assert_eq!(stamp(directory.path(), b"gone/Missing.sharp").unwrap(), None, "a missing folder holds no file");
+    for under_a_file in [&b"app/Report.sharp/Inner.php"[..], b"app/Report.sharp/*.sharp"] {
+        let error = stamp(directory.path(), under_a_file).expect_err("a file is no folder to read");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory, "{}", String::from_utf8_lossy(under_a_file));
+    }
 }
 
 /// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files, so a file appearing, going or being renamed changes

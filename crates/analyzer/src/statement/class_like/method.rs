@@ -189,7 +189,7 @@ where
     }
     parts.sort();
     let Some(((last, declaring_class), rest)) = parts.split_last() else {
-        return;
+        unreachable!("`to_non_nullable` leaves a receiver at least one part, `never` where it held only `null`");
     };
 
     let name = mago_bytes::BytesDisplay(member.name);

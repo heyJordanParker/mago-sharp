@@ -255,7 +255,7 @@ fn listed(items: &[String]) -> String {
     match items.split_last() {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        None => String::new(),
+        None => unreachable!("an ambiguity names two extensions or more, and each list holds one of them at least"),
     }
 }
 

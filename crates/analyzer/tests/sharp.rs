@@ -5080,6 +5080,26 @@ fn an_ambiguous_extension_names_where_each_competitor_comes_from() {
             "5:43 ambiguous-object-method-access The standard library extensions `Words` and `Yells` each add `shout` to `string`. | Import the class of the one to call. An imported extension shadows the standard library's."
         ]
     );
+
+    let global_one = (
+        "src/GlobalOne.sharp",
+        "import Lib.Wallet;\n\npublic static class GlobalOne\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 5;\n    }\n}\n",
+    );
+    let global_two = (
+        "src/GlobalTwo.sharp",
+        "import Lib.Wallet;\n\npublic static class GlobalTwo\n{\n    extension(Wallet wallet)\n    {\n        public int score() => 6;\n    }\n}\n",
+    );
+    let global = (
+        "src/Caller.sharp",
+        "import Lib.Wallet;\n\npublic class Caller\n{\n    public int score(Wallet wallet) => wallet.score();\n}\n",
+    );
+
+    assert_eq!(
+        refusals(global, &[wallet, global_one, global_two]),
+        [
+            "5:47 ambiguous-object-method-access The extensions `GlobalOne` and `GlobalTwo` of the global namespace each add `score` to `Wallet`. | Rename `score` in all but one of them."
+        ]
+    );
 }
 
 /// Decision 040 and spec section 8: a call of a PHP function the standard library wraps names the member to write. An

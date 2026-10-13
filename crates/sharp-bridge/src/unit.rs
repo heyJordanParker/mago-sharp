@@ -320,14 +320,14 @@ pub fn stamp(root: &Path, path: &[u8]) -> io::Result<Option<Input>> {
     }
 
     let full = root.join(String::from_utf8_lossy(path).as_ref());
+    if !folder_holds_name(&full)? {
+        return Ok(None);
+    }
     let contents = match std::fs::read(&full) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    if !folder_holds_name(&full)? {
-        return Ok(None);
-    }
     let mtime_ns = match std::fs::metadata(&full)?.modified()?.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_nanos()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_nanos()).map_or(i64::MIN, |nanos| -nanos),
@@ -339,13 +339,15 @@ pub fn stamp(root: &Path, path: &[u8]) -> io::Result<Option<Input>> {
 /// Whether the folder of the file at `full` holds a file of exactly its name, case included. A disk that ignores case,
 /// as macOS's does by default, opens `environment.php` for `Environment.php`. Linux does not, so a file is there only
 /// under its exact name, and a compile on either disk stamps the same inputs, as the engine's
-/// `sharp_folder_holds_name` reads them.
+/// `sharp_folder_holds_name` reads them. A folder that is not there holds nothing.
 fn folder_holds_name(full: &Path) -> io::Result<bool> {
-    let (Some(folder), Some(name)) = (full.parent(), full.file_name()) else {
-        return Ok(false);
+    let entries = match std::fs::read_dir(full.parent().unwrap_or(full)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
     };
-    for entry in std::fs::read_dir(folder)? {
-        if entry?.file_name() == name {
+    for entry in entries {
+        if Some(entry?.file_name().as_os_str()) == full.file_name() {
             return Ok(true);
         }
     }
