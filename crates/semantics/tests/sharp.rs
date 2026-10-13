@@ -254,6 +254,12 @@ fn a_module_is_declared_only_in_its_folders_module_sharp() {
 
         assert_eq!(issues_in(path, code), Vec::from_iter(expected), "{path}{header}");
     }
+
+    let outside_namespace = "module : App.Shop\n{\n    singleton Mailer = SmtpMailer;\n}\n";
+    assert_eq!(
+        issues_in("app/Shop/Module.Production.sharp", outside_namespace),
+        ["1:10 An environment module overrides its own folder's module, so its file needs a namespace."]
+    );
 }
 
 /// Spec section 32: an environment or test module only overrides services, so the laws that span a namespace's

@@ -92,8 +92,9 @@ where
 
         match &binding_metadata.value {
             BindingValueMetadata::Class(class, span) => {
-                if check_class_value(context, service, *class, *span) {
-                    check_constructor_services(context, &services, *class, *span, binding_metadata.lifetime);
+                if let Some(class) = check_class_value(context, service, *class, *span) {
+                    let builds = Builds::Bound(class.original_name, *span, binding_metadata.lifetime);
+                    check_class_services(context, &services, class, builds);
                 }
             }
             BindingValueMetadata::Classes(classes) => {
@@ -110,17 +111,18 @@ where
                     continue;
                 };
                 for (class, span) in classes {
-                    if check_class_value(context, element, *class, *span) {
-                        check_constructor_services(context, &services, *class, *span, binding_metadata.lifetime);
+                    if let Some(class) = check_class_value(context, element, *class, *span) {
+                        let builds = Builds::Bound(class.original_name, *span, binding_metadata.lifetime);
+                        check_class_services(context, &services, class, builds);
                     }
                 }
             }
             BindingValueMetadata::Expression(lambda) => {
                 let BindingValue::Expression(expression) = binding.value else {
-                    continue;
+                    unreachable!("the scanner records an expression binding only for an expression value");
                 };
                 let Some(lambda) = context.codebase.get_closure(lambda) else {
-                    continue;
+                    unreachable!("the scanner registers the lambda of each expression binding");
                 };
                 let empty;
                 let parameter_list = match &binding.parameter_list {
@@ -205,23 +207,6 @@ where
     Ok(())
 }
 
-/// Spec section 32: PHP# creates the classes a module binds, so the bound `class` is built through its main
-/// constructor, and each parameter needs a binding in the module of the class's namespace or of a namespace above it.
-/// A problem is reported at the binding's class value, `bound`, with a note at the parameter.
-fn check_constructor_services<A>(
-    context: &mut Context<'_, '_, A>,
-    services: &Services<'_>,
-    class: Word,
-    bound: Span,
-    lifetime: Lifetime,
-) where
-    A: Arena,
-{
-    if let Some(metadata) = context.codebase.get_class_like(class.as_bytes()) {
-        check_class_services(context, services, metadata, Builds::Bound(metadata.original_name, bound, lifetime));
-    }
-}
-
 /// Spec sections 15 and 32: PHP# also creates the class of a listener, a new object for every event, so each
 /// parameter of its main constructor needs a binding as a bound class's does, in the base modules. A problem is
 /// reported at the parameter. `event` is the first event the class listens to.
@@ -234,7 +219,10 @@ where
     check_class_services(context, &services, class, Builds::Listener(class.original_name, event));
 }
 
-/// Reports each parameter of `class`'s main constructor that `services` can't fill, as `builds` names the class.
+/// Spec section 32: PHP# creates the classes a module binds and the classes of listeners through their main
+/// constructors, so each parameter needs a binding in the module of the class's namespace or of a namespace above it.
+/// Reports each parameter of `class`'s main constructor that `services` can't fill, as `builds` names the class: a
+/// bound class's at the binding's class value, with a note at the parameter.
 fn check_class_services<A>(
     context: &mut Context<'_, '_, A>,
     services: &Services<'_>,
@@ -560,21 +548,28 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
                 let metadata = codebase.get_class_like(class.as_bytes())?;
                 self.classes.push(metadata.name);
                 let constructor = codebase.get_declaring_method(metadata.name.as_bytes(), b"__construct")?;
-                Some((namespace_of(metadata.name).to_vec(), Some(metadata.name), constructor.parameters.as_slice()))
+                let namespace = namespace_of(metadata.name);
+                Some((namespace, Some(metadata.original_name), constructor.parameters.as_slice()))
             })
             .collect()
     }
 }
 
-/// Spec section 32: a class value is a concrete class of the service, built through its main constructor. Whether it
-/// is one.
-fn check_class_value<A>(context: &mut Context<'_, '_, A>, service: &TUnion, class: Word, span: Span) -> bool
+/// Spec section 32: a class value is a concrete class of the service, built through its main constructor. The class,
+/// when it is one.
+fn check_class_value<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    service: &TUnion,
+    class: Word,
+    span: Span,
+) -> Option<&'ctx ClassLikeMetadata>
 where
     A: Arena,
 {
-    let Some(metadata) = context.codebase.get_class_like(class.as_bytes()) else {
+    let codebase = context.codebase;
+    let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
         report_undefined_type(context, class, span);
-        return false;
+        return None;
     };
 
     let class_name = display_class_like_name(context, metadata.original_name);
@@ -593,7 +588,7 @@ where
                 .with_annotation(Annotation::primary(span).with_message("Bound here."))
                 .with_help(format!("Bind `{service_name}` to a class that the container can build.")),
         );
-        return false;
+        return None;
     }
 
     let value = get_named_object(metadata.name, None);
@@ -605,10 +600,10 @@ where
                 .with_annotation(Annotation::primary(span).with_message("Bound here."))
                 .with_help(format!("Bind `{service_name}` to a class that implements it.")),
         );
-        return false;
+        return None;
     }
 
-    true
+    Some(metadata)
 }
 
 fn report_duplicate_binding<A>(
@@ -638,10 +633,7 @@ where
     let service_name = display_sharp_type(context, &binding.service.type_union);
     let through = cycle
         .iter()
-        .map(|name| match context.codebase.get_class_like(name.as_bytes()) {
-            Some(class) => format!("`{}`", display_class_like_name(context, class.original_name)),
-            None => format!("`{name}`"),
-        })
+        .map(|name| format!("`{}`", display_class_like_name(context, *name)))
         .collect::<Vec<_>>()
         .join(", then ");
     let path = if through.is_empty() { String::new() } else { format!(" through {through}") };

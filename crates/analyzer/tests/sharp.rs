@@ -11840,10 +11840,17 @@ fn shop_module(members: &str) -> (&'static str, &'static str) {
 }
 
 /// Spec section 32: a binding's value is a class the container can build that is its service, a list of such classes
-/// for a `List` service, or one expression over its parameters whose value is its service. Each row is a module's
-/// bindings, from line 15, and the refusals they get.
+/// for a `List` service, or one expression over its parameters whose value is its service, so an interface, an abstract
+/// class and an enum are refused. Each row is a module's bindings, from line 15, and the refusals they get.
 #[test]
 fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_that_service() {
+    let base_mailer = (
+        "app/Shop/BaseMailer.sharp",
+        "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic abstract class BaseMailer : Mailer\n{\n}\n",
+    );
+    let channel = ("app/Shop/Channel.sharp", "namespace App.Shop;\n\npublic enum Channel\n{\n    case Mail;\n}\n");
+    let files: Vec<_> = BOUND_SERVICES.iter().copied().chain([base_mailer, channel]).collect();
+
     for (members, expected) in [
         (
             "    singleton Mailer = SmtpMailer;\n    singleton Mailer for SendReceipt = QueueMailer;\n    singleton List<PriceRule> = [TaxRule, DiscountRule];\n    singleton RedisStore(Config config) = new RedisStore(config.url);\n    scoped QueueMailer = QueueMailer;\n    transient SmtpMailer = SmtpMailer;\n    singleton Config = Config;",
@@ -11857,6 +11864,18 @@ fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_th
             "    singleton Mailer = Mailer;",
             vec![
                 "15:24 invalid-binding `Mailer` is an interface, so the container can't build it. | Bind `Mailer` to a class that the container can build.",
+            ],
+        ),
+        (
+            "    singleton Mailer = BaseMailer;",
+            vec![
+                "15:24 invalid-binding `BaseMailer` is an abstract class, so the container can't build it. | Bind `Mailer` to a class that the container can build.",
+            ],
+        ),
+        (
+            "    singleton Channel = Channel;",
+            vec![
+                "15:25 invalid-binding `Channel` is an enum, so the container can't build it. | Bind `Channel` to a class that the container can build.",
             ],
         ),
         (
@@ -11907,7 +11926,7 @@ fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_th
         ),
     ] {
         let module = shop_module(members);
-        assert_eq!(refusals(module, &BOUND_SERVICES), expected, "{members}");
+        assert_eq!(refusals(module, &files), expected, "{members}");
     }
 }
 
@@ -11938,6 +11957,12 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     let parent = module("app/Module.sharp", "App", "    singleton Mailer = SmtpMailer;");
     let sibling = module("app/Mail/Module.sharp", "App.Mail", "    singleton Mailer = SmtpMailer;");
     let app_flags = module("app/Module.sharp", "App", "    transient Flags = Flags;");
+    // A plain PHP class a module binds, whose constructor takes a parameter with no type.
+    let legacy = (
+        "app/Shop/LegacyMailer.php",
+        "<?php\n\nnamespace App\\Shop;\n\nuse App\\Mail\\Mailer;\n\nfinal class LegacyMailer implements Mailer\n{\n    public function __construct($dsn) { }\n}\n",
+    );
+    let untyped = "13:30 missing-service `LegacyMailer` takes `dsn` with no type, which no binding can give: the container can't build `LegacyMailer`. | Bind `LegacyMailer` to an expression that creates it, as in `singleton LegacyMailer(…) = new LegacyMailer(…);`.";
     let mailer = |line: u32, column: u32| {
         format!(
             "{line}:{column} missing-service `SendReceipt` needs a `Mailer`, and no module binds one: the container can't build `SendReceipt`. | Bind `Mailer` in a module of `SendReceipt`'s namespace or one above it, as in `singleton Mailer = …;`."
@@ -11982,6 +12007,7 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
         (vec![], "    singleton Mailer(string url) = new SmtpMailer();", vec![value.to_owned()]),
         (vec![], store, vec![environment.to_owned()]),
         (vec![library], store, vec![]),
+        (vec![legacy], "    singleton LegacyMailer = LegacyMailer;", vec![untyped.to_owned()]),
     ] {
         let shop = module("app/Shop/Module.sharp", "App.Shop", members);
         let files: Vec<_> =
@@ -12014,7 +12040,14 @@ fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refus
         "app/Mail/Wrapper.sharp",
         "namespace App.Mail;\n\npublic class Wrapper : Mailer\n{\n    public Wrapper(private FlaggedMailer flagged) { }\n}\n",
     );
-    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper]).collect();
+    // A class that needs the service it is bound to twice, so the walk reaches its binding again after the cycle. It
+    // sits in `App`, the module's own namespace, so the module needs no import of it.
+    let twice = (
+        "app/TwiceMailer.sharp",
+        "namespace App;\n\nimport App.Mail.Mailer;\n\npublic class TwiceMailer : Mailer\n{\n    public TwiceMailer(private Mailer first, private Mailer second) { }\n}\n",
+    );
+    let others: Vec<_> = BOUND_SERVICES.iter().copied().chain([looping, flagged, wrapper, twice]).collect();
+    let twice_cycle = "12:5 service-cycle `Mailer` needs itself through `TwiceMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
     let cycle = "12:5 service-cycle `Mailer` needs itself through `LoopMailer`, so the container can never build it. | Break the cycle: one of these services must not take the next one.";
     let captive = |line: u32| {
         format!(
@@ -12028,6 +12061,7 @@ fn a_binding_that_needs_itself_or_holds_a_scoped_service_in_a_singleton_is_refus
 
     for (members, expected) in [
         ("    singleton Mailer = LoopMailer;", vec![cycle.to_owned()]),
+        ("    singleton Mailer = TwiceMailer;", vec![twice_cycle.to_owned()]),
         (
             "    transient LoopMailer = LoopMailer;\n    transient Mailer(LoopMailer loop) = loop;",
             vec![looped.to_owned(), through.to_owned()],
