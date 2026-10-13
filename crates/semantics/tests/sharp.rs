@@ -1026,22 +1026,22 @@ fn a_member_of_self_read_or_written_is_not_supported_yet() {
 /// PHP's `self` is removed, spec section 25: a class writes its own name, or `Self` where `Self` goes.
 #[test]
 fn self_names_the_class_and_self_where_it_goes() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n\nstruct Spot\n{\n    public self moved() => this;\n}\n";
+    let code = "namespace App.Tenant;\n\nstruct Spot\n{\n    public self moved() => this;\n}\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n\ninterface Copyable\n{\n    self copy();\n}\n";
     let without_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class.";
     let with_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.";
 
     assert_eq!(
         issues(code),
         [
-            format!("6:13 {without_self}"),
-            format!("8:28 {without_self}"),
-            format!("12:19 {with_self}"),
-            format!("14:9 {without_self}"),
-            format!("15:20 {with_self}"),
-            format!("16:20 {with_self}"),
-            format!("16:25 {without_self}"),
-            "22:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
-            "27:12 PHP# has no `self`: write the class's own name, `Spot`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            "5:12 PHP# has no `self`: write the class's own name, `Spot`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            format!("11:13 {without_self}"),
+            format!("13:28 {without_self}"),
+            format!("17:19 {with_self}"),
+            format!("19:9 {without_self}"),
+            format!("20:20 {with_self}"),
+            format!("21:20 {with_self}"),
+            format!("21:25 {without_self}"),
+            "27:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
         ]
     );
 }
@@ -1118,11 +1118,11 @@ fn a_struct_property_takes_init_not_set() {
 }
 
 /// Spec section 10: a struct can't be inherited, so a member modifier only a subclass reads is refused, on a property,
-/// a method, an operator, a constant, a named constructor and a main constructor parameter. The fix, `private`, and a
-/// law, which takes no modifier, compile.
+/// a method, a constant, a named constructor and a main constructor parameter. The fix, `private`, and a law, which
+/// takes no modifier, compile. An operator is `public static`, so its own rule refuses any other modifier.
 #[test]
 fn a_struct_member_is_private_where_a_class_would_be_protected() {
-    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    protected int width { get; init; }\n    public virtual int area() => 1;\n    public override string toString() => \"\";\n    private int depth { get; init; }\n    protected const int LIMIT = 1;\n\n    public Size(protected int height { get; }) { }\n\n    protected Size.tall() : this(10) { }\n\n    law positive(int a) => a == a;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic struct Size\n{\n    protected int width { get; init; }\n    public virtual int area() => 1;\n    public override string toString() => \"\";\n    private int depth { get; init; }\n    protected const int LIMIT = 1;\n    protected static Size operator +(Size a, Size b) => a;\n\n    public Size(protected int height { get; }) { }\n\n    protected Size.tall() : this(10) { }\n\n    law positive(int a) => a == a;\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1131,8 +1131,9 @@ fn a_struct_member_is_private_where_a_class_would_be_protected() {
             "6:12 A struct has no subclasses, so write `private`.",
             "7:12 A struct has no subclasses, so write `private`.",
             "9:5 A struct has no subclasses, so write `private`.",
-            "13:5 A struct has no subclasses, so write `private`.",
-            "11:17 A struct has no subclasses, so write `private`.",
+            "14:5 A struct has no subclasses, so write `private`.",
+            "12:17 A struct has no subclasses, so write `private`.",
+            "10:27 An operator is `public static`, as in `public static Size operator +(Size a, Size b)`.",
         ]
     );
 }
@@ -4101,8 +4102,8 @@ fn worded(path: &'static str, code: &'static str) -> Vec<String> {
         .collect()
 }
 
-/// A member defined twice is named as PHP# names a member, `Order.total`, and its class by the name the file writes,
-/// `Order`. The PHP twin keeps Mago's `Order::total`, `Order::$count` and `Demo\Order`.
+/// A member defined twice is named as PHP# names a member, `Order.total`, and its class or struct by the name the file
+/// writes, `Order`. The PHP twin keeps Mago's `Order::total`, `Order::$count` and `Demo\Order`.
 #[test]
 fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
     let code = "namespace Demo;\n\npublic class Order\n{\n    private int count = 0;\n\n    private int count = 1;\n\n    public int total() => 1;\n\n    public int total() => 2;\n}\n";
@@ -4121,6 +4122,13 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
             "property `Order.count` has already been defined | property `Order.count` previously defined here. | class `Order` defined here.",
             "class method `Order.total` has already been defined | previous definition | class `Order` defined here.",
         ]
+    );
+    assert_eq!(
+        worded(
+            "src/Demo/Spot.sharp",
+            "namespace Demo;\n\npublic struct Spot\n{\n    public int x() => 1;\n\n    public int x() => 2;\n}\n"
+        ),
+        ["struct method `Spot.x` has already been defined | previous definition | struct `Spot` defined here."]
     );
 }
 

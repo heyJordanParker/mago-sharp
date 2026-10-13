@@ -1800,7 +1800,6 @@ fn check_struct_declaration(r#struct: &Struct, context: &mut Context<'_, '_, '_>
             ClassLikeMember::Method(method) => method.modifiers.as_slice(),
             ClassLikeMember::Property(property) => property.modifiers().as_slice(),
             ClassLikeMember::Constant(constant) => constant.modifiers.as_slice(),
-            ClassLikeMember::Operator(operator) => operator.modifiers.as_slice(),
             ClassLikeMember::NamedConstructor(constructor) => constructor.modifiers.as_slice(),
             _ => &[],
         })

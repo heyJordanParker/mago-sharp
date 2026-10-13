@@ -13308,20 +13308,23 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
 /// if (\is_int(${'read#N'}) && (${'case#N'} = \App\Rank::tryFrom(${'read#N'})) !== null) { ${'read#N'} = ${'case#N'}; }
 /// \Sharp\Internal\accepts('App.Mood', …);
 /// …Point|List<Point> tries Point, then each element of a list as a Point…
+/// …List<List<Point>> builds each Point of each inner list…
+/// …the property Point|Address corner tries Point first, into ${'properties#4'}['corner']…
 /// ```
 ///
 /// Spec section 10 and generics R3c: `parse` checks each field through the one walk, `\Sharp\Internal\accepts`, with
 /// the field's type text and its key as the path. First it builds what the walk takes only as an object: a backed
 /// enum case from its backing value, and a nested struct through its own `parse`, its problems under the field's path,
-/// where the walk's own problem for it is then dropped, element by element inside a collection. A union of structs
-/// takes the first that builds, in the order the source writes them. Once the walk accepts a value, each `Set` in it
+/// where the walk's own problem for it is then dropped, element by element inside a collection at any depth. A union
+/// of structs takes the first that builds, in the order the field's main constructor parameter or property writes
+/// them, which a method's parameter of the same name doesn't change. Once the walk accepts a value, each `Set` in it
 /// holds its elements under their keys, through nested collections. An `int`-backed enum case is built from its value
 /// uncast, and an enum with no backing value isn't built: the checker refuses `parse` where it is called.
 /// `Any?` takes the value as it is.
 #[test]
 fn parse_reads_each_field_as_its_type() {
     let lowered = Lowered::with(
-        "namespace App;\n\npublic struct Order\n{\n    public Order(public float amount { get; }, public Status status { get; }, public Address address { get; }, public List<Address> addresses { get; }, public Map<Status, int> prices { get; }, public Plan plan { get; }, public Any? extra { get; }, public int|string reference { get; }, public Address|Point place { get; }, public (Point|Address)? spot { get; }, public Map<string, Point|Address> spots { get; }, public Set<Status> seen { get; }, public List<List<Set<int>>> groups { get; }, public Any note { get; }, public bool paid { get; }, public Rank rank { get; }, public Mood mood { get; }, public Point|List<Point> trail { get; }) { }\n}\n",
+        "namespace App;\n\npublic struct Order\n{\n    public Point|Address corner { get; init; }\n\n    public bool near(Point|Address place) => true;\n\n    public Order(public float amount { get; }, public Status status { get; }, public Address address { get; }, public List<Address> addresses { get; }, public Map<Status, int> prices { get; }, public Plan plan { get; }, public Any? extra { get; }, public int|string reference { get; }, public Address|Point place { get; }, public (Point|Address)? spot { get; }, public Map<string, Point|Address> spots { get; }, public Set<Status> seen { get; }, public List<List<Set<int>>> groups { get; }, public Any note { get; }, public bool paid { get; }, public Rank rank { get; }, public Mood mood { get; }, public Point|List<Point> trail { get; }, public List<List<Point>> rows { get; }) { }\n}\n",
         &[
             (
                 "src/App/Status.sharp",
@@ -14867,6 +14870,314 @@ fn parse_reads_each_field_as_its_type() {
                       VAR
                         ZVAL "fields#2"
                       ZVAL "trail"
+                    ZVAL "missing"
+
+            IF
+              IF_ELEM
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    ZVAL "rows"
+                    VAR
+                      ZVAL "input#1"
+                STMT_LIST
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "read#69"
+                      DIM
+                        VAR
+                          ZVAL "input#1"
+                        ZVAL "rows"
+                    ASSIGN
+                      VAR
+                        ZVAL "failed#70"
+                      ARRAY [3]
+                    IF
+                      IF_ELEM
+                        CALL
+                          ZVAL "is_array"
+                          ARG_LIST
+                            VAR
+                              ZVAL "read#69"
+                        STMT_LIST
+                          FOREACH
+                            VAR
+                              ZVAL "read#69"
+                            VAR
+                              ZVAL "element#72"
+                            VAR
+                              ZVAL "key#71"
+                            STMT_LIST
+                              IF
+                                IF_ELEM
+                                  CALL
+                                    ZVAL "is_array"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "element#72"
+                                  STMT_LIST
+                                    FOREACH
+                                      VAR
+                                        ZVAL "element#72"
+                                      VAR
+                                        ZVAL "element#74"
+                                      VAR
+                                        ZVAL "key#73"
+                                      STMT_LIST
+                                        IF
+                                          IF_ELEM
+                                            AND
+                                              UNARY_OP [14]
+                                                INSTANCEOF
+                                                  VAR
+                                                    ZVAL "element#74"
+                                                  ZVAL "App\\Point"
+                                              OR
+                                                CALL
+                                                  ZVAL "is_array"
+                                                  ARG_LIST
+                                                    VAR
+                                                      ZVAL "element#74"
+                                                CALL
+                                                  ZVAL "is_object"
+                                                  ARG_LIST
+                                                    VAR
+                                                      ZVAL "element#74"
+                                            STMT_LIST
+                                              TRY
+                                                STMT_LIST
+                                                  ASSIGN
+                                                    VAR
+                                                      ZVAL "element#74"
+                                                    STATIC_CALL
+                                                      ZVAL "App\\Point"
+                                                      ZVAL "parse"
+                                                      ARG_LIST
+                                                        VAR
+                                                          ZVAL "element#74"
+                                                CATCH_LIST
+                                                  CATCH
+                                                    NAME_LIST
+                                                      ZVAL "Sharp\\InvalidFields"
+                                                    ZVAL "inner#75"
+                                                    STMT_LIST
+                                                      FOREACH
+                                                        PROP
+                                                          VAR
+                                                            ZVAL "inner#75"
+                                                          ZVAL "fields"
+                                                        VAR
+                                                          ZVAL "problem#77"
+                                                        VAR
+                                                          ZVAL "key#76"
+                                                        STMT_LIST
+                                                          ASSIGN
+                                                            DIM
+                                                              VAR
+                                                                ZVAL "fields#2"
+                                                              BINARY_OP [8]
+                                                                BINARY_OP [8]
+                                                                  BINARY_OP [8]
+                                                                    BINARY_OP [8]
+                                                                      BINARY_OP [8]
+                                                                        BINARY_OP [8]
+                                                                          BINARY_OP [8]
+                                                                            BINARY_OP [8]
+                                                                              ZVAL "rows"
+                                                                              ZVAL "["
+                                                                            VAR
+                                                                              ZVAL "key#71"
+                                                                          ZVAL "]"
+                                                                        ZVAL "["
+                                                                      VAR
+                                                                        ZVAL "key#73"
+                                                                    ZVAL "]"
+                                                                  ZVAL "."
+                                                                VAR
+                                                                  ZVAL "key#76"
+                                                            VAR
+                                                              ZVAL "problem#77"
+                                                      ASSIGN
+                                                        DIM
+                                                          VAR
+                                                            ZVAL "failed#70"
+                                                          null
+                                                        BINARY_OP [8]
+                                                          BINARY_OP [8]
+                                                            BINARY_OP [8]
+                                                              BINARY_OP [8]
+                                                                BINARY_OP [8]
+                                                                  BINARY_OP [8]
+                                                                    ZVAL "rows"
+                                                                    ZVAL "["
+                                                                  VAR
+                                                                    ZVAL "key#71"
+                                                                ZVAL "]"
+                                                              ZVAL "["
+                                                            VAR
+                                                              ZVAL "key#73"
+                                                          ZVAL "]"
+                                                null
+                                        ASSIGN
+                                          DIM
+                                            VAR
+                                              ZVAL "element#72"
+                                            VAR
+                                              ZVAL "key#73"
+                                          VAR
+                                            ZVAL "element#74"
+                              ASSIGN
+                                DIM
+                                  VAR
+                                    ZVAL "read#69"
+                                  VAR
+                                    ZVAL "key#71"
+                                VAR
+                                  ZVAL "element#72"
+                    CALL
+                      ZVAL "Sharp\\Internal\\accepts"
+                      ARG_LIST
+                        ZVAL "List<List<App.Point>>"
+                        VAR
+                          ZVAL "read#69"
+                        ZVAL "rows"
+                        VAR
+                          ZVAL "fields#2"
+                    FOREACH
+                      VAR
+                        ZVAL "failed#70"
+                      VAR
+                        ZVAL "path#78"
+                      null
+                      STMT_LIST
+                        UNSET
+                          DIM
+                            VAR
+                              ZVAL "fields#2"
+                            VAR
+                              ZVAL "path#78"
+                    ASSIGN
+                      DIM
+                        VAR
+                          ZVAL "arguments#3"
+                        ZVAL "rows"
+                      VAR
+                        ZVAL "read#69"
+              IF_ELEM
+                null
+                STMT_LIST
+                  ASSIGN
+                    DIM
+                      VAR
+                        ZVAL "fields#2"
+                      ZVAL "rows"
+                    ZVAL "missing"
+
+            IF
+              IF_ELEM
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    ZVAL "corner"
+                    VAR
+                      ZVAL "input#1"
+                STMT_LIST
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "read#79"
+                      DIM
+                        VAR
+                          ZVAL "input#1"
+                        ZVAL "corner"
+                    IF
+                      IF_ELEM
+                        AND
+                          UNARY_OP [14]
+                            INSTANCEOF
+                              VAR
+                                ZVAL "read#79"
+                              ZVAL "App\\Address"
+                          AND
+                            UNARY_OP [14]
+                              INSTANCEOF
+                                VAR
+                                  ZVAL "read#79"
+                                ZVAL "App\\Point"
+                            OR
+                              CALL
+                                ZVAL "is_array"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "read#79"
+                              CALL
+                                ZVAL "is_object"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "read#79"
+                        STMT_LIST
+                          STMT_LIST
+                            TRY
+                              STMT_LIST
+                                ASSIGN
+                                  VAR
+                                    ZVAL "read#79"
+                                  STATIC_CALL
+                                    ZVAL "App\\Point"
+                                    ZVAL "parse"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "read#79"
+                              CATCH_LIST
+                                CATCH
+                                  NAME_LIST
+                                    ZVAL "Sharp\\InvalidFields"
+                                  null
+                                  STMT_LIST
+                                    TRY
+                                      STMT_LIST
+                                        ASSIGN
+                                          VAR
+                                            ZVAL "read#79"
+                                          STATIC_CALL
+                                            ZVAL "App\\Address"
+                                            ZVAL "parse"
+                                            ARG_LIST
+                                              VAR
+                                                ZVAL "read#79"
+                                      CATCH_LIST
+                                        CATCH
+                                          NAME_LIST
+                                            ZVAL "Sharp\\InvalidFields"
+                                          null
+                                          STMT_LIST
+                                      null
+                              null
+                    CALL
+                      ZVAL "Sharp\\Internal\\accepts"
+                      ARG_LIST
+                        ZVAL "App.Address|App.Point"
+                        VAR
+                          ZVAL "read#79"
+                        ZVAL "corner"
+                        VAR
+                          ZVAL "fields#2"
+                    ASSIGN
+                      DIM
+                        VAR
+                          ZVAL "properties#4"
+                        ZVAL "corner"
+                      VAR
+                        ZVAL "read#79"
+              IF_ELEM
+                null
+                STMT_LIST
+                  ASSIGN
+                    DIM
+                      VAR
+                        ZVAL "fields#2"
+                      ZVAL "corner"
                     ZVAL "missing"
         "#}
     );

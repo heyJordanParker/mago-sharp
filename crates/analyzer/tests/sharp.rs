@@ -4880,10 +4880,11 @@ fn every_required_property_is_set_where_its_object_is_created() {
 }
 
 /// Spec section 6.1: a get-only property is set only while its object is created, so one without an initial value
-/// that no constructor sets on every path is an error. A main constructor parameter that declares it sets it.
+/// that no constructor sets on every path is an error. A main constructor parameter that declares it sets it, and an
+/// abstract class leaves its get-only properties to its subclasses.
 #[test]
 fn a_get_only_property_no_constructor_sets_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Total\n{\n    public int amount { get; }\n    public int count { get; }\n    public int size { get; }\n    public int rows { get; } = 0;\n\n    public Total(bool big, public int pages { get; })\n    {\n        if (big) {\n            this.amount = 10;\n        } else {\n            this.amount = 1;\n        }\n        if (big) {\n            this.count = 1;\n        }\n    }\n\n    public Total.sized() : this(true, 1)\n    {\n        this.size = 4;\n    }\n}\n\nstruct Point\n{\n    public int x { get; }\n    public int y { get; }\n\n    public Point(int x)\n    {\n        this.x = x;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Total\n{\n    public int amount { get; }\n    public int count { get; }\n    public int size { get; }\n    public int rows { get; } = 0;\n\n    public Total(bool big, public int pages { get; })\n    {\n        if (big) {\n            this.amount = 10;\n        } else {\n            this.amount = 1;\n        }\n        if (big) {\n            this.count = 1;\n        }\n    }\n\n    public Total.sized() : this(true, 1)\n    {\n        this.size = 4;\n    }\n}\n\nstruct Point\n{\n    public int x { get; }\n    public int y { get; }\n\n    public Point(int x)\n    {\n        this.x = x;\n    }\n}\n\nabstract class Shape\n{\n    public int sides { get; }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Total.sharp", sharp), &[]),
@@ -7263,10 +7264,11 @@ fn a_php_docblock_array_keyed_by_a_backed_enum_agrees_with_the_native_array() {
 /// Spec section 10: any struct keys a `Map` and joins a `Set` by its whole value, unless it holds a class instance at
 /// any depth, through a class, an interface, a function or `Any`, also inside a collection or another struct. The
 /// refusal is where a `Map` or `Set` type is written, where a literal's key infers one, and where `groupBy` keys one by
-/// what its function returns. An enum case is a value, also in a list, and a struct that holds itself keys by the rest.
+/// what its function returns. An enum case is a value, also in a list, a struct that holds itself keys by the rest, and
+/// a computed property holds nothing.
 #[test]
 fn a_struct_keys_a_map_unless_it_holds_a_class_instance() {
-    let sharp = "namespace Demo;\n\ninterface Labeled\n{\n    string label();\n}\n\nclass Plan\n{\n    public Plan() { }\n}\n\nenum Size\n{\n    case Small;\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public Size size { get; }) { }\n}\n\nstruct Route\n{\n    public Route(public List<Spot> stops { get; }, public Map<string, Spot?> named { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public int id { get; }, public Plan plan { get; }) { }\n}\n\nstruct Leg\n{\n    public Leg(public List<Order> orders { get; }) { }\n}\n\nstruct Tagged\n{\n    public Tagged(public Labeled label { get; }) { }\n}\n\nstruct Bag\n{\n    public Bag(public Any data { get; }) { }\n}\n\nstruct Hook\n{\n    public Hook(public Function<int(int)> run { get; }) { }\n}\n\nstruct Mood\n{\n    public Mood(public List<Size> sizes { get; }, public Mood? before { get; }) { }\n}\n\nclass Shop\n{\n    public Map<Spot, int> spots = [:];\n    public Map<Route, int> routes = [:];\n    public Set<Spot> seen = [];\n    public Map<Order, int> orders = [:];\n    public Map<Leg, int> legs = [:];\n    public Map<Tagged, int> tags = [:];\n    public Map<Bag, int> bags = [:];\n    public Map<Hook, int> hooks = [:];\n    public Set<Order> pending = [];\n    public Map<Mood, int> moods = [:];\n\n    public int count(Spot spot)\n    {\n        this.spots[spot] = 1;\n        const placed = [new Spot(1, Size.Small): 2];\n        const ordered = [new Order(1, new Plan()): 3];\n\n        return (this.spots[spot] ?? 0) + (placed[spot] ?? 0);\n    }\n\n    public void group(List<Order> all, List<Spot> spots)\n    {\n        const byOrder = all.groupBy(order => order);\n        const bySpot = spots.groupBy(spot => spot);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\ninterface Labeled\n{\n    string label();\n}\n\nclass Plan\n{\n    public Plan() { }\n}\n\nenum Size\n{\n    case Small;\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public Size size { get; }) { }\n\n    public Plan owner { get => new Plan(); }\n}\n\nstruct Route\n{\n    public Route(public List<Spot> stops { get; }, public Map<string, Spot?> named { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public int id { get; }, public Plan plan { get; }) { }\n}\n\nstruct Leg\n{\n    public Leg(public List<Order> orders { get; }) { }\n}\n\nstruct Tagged\n{\n    public Tagged(public Labeled label { get; }) { }\n}\n\nstruct Bag\n{\n    public Bag(public Any data { get; }) { }\n}\n\nstruct Hook\n{\n    public Hook(public Function<int(int)> run { get; }) { }\n}\n\nstruct Mood\n{\n    public Mood(public List<Size> sizes { get; }, public Mood? before { get; }) { }\n}\n\nclass Shop\n{\n    public Map<Spot, int> spots = [:];\n    public Map<Route, int> routes = [:];\n    public Set<Spot> seen = [];\n    public Map<Order, int> orders = [:];\n    public Map<Leg, int> legs = [:];\n    public Map<Tagged, int> tags = [:];\n    public Map<Bag, int> bags = [:];\n    public Map<Hook, int> hooks = [:];\n    public Set<Order> pending = [];\n    public Map<Mood, int> moods = [:];\n\n    public int count(Spot spot)\n    {\n        this.spots[spot] = 1;\n        const placed = [new Spot(1, Size.Small): 2];\n        const ordered = [new Order(1, new Plan()): 3];\n\n        return (this.spots[spot] ?? 0) + (placed[spot] ?? 0);\n    }\n\n    public void group(List<Order> all, List<Spot> spots)\n    {\n        const byOrder = all.groupBy(order => order);\n        const bySpot = spots.groupBy(spot => spot);\n    }\n}\n";
 
     let note = "A struct key is stored as text built from its values, and a class instance compares through its own `==`, which no text matches.";
     assert_eq!(
@@ -7276,28 +7278,28 @@ fn a_struct_keys_a_map_unless_it_holds_a_class_instance() {
             .collect::<Vec<_>>(),
         [
             format!(
-                "63:12 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
+                "65:12 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
             ),
             format!(
-                "64:12 template-constraint-violation `Leg` can't key a `Map`: `orders` holds a `Plan`, a class, and a key holds only values. | {note}"
+                "66:12 template-constraint-violation `Leg` can't key a `Map`: `orders` holds a `Plan`, a class, and a key holds only values. | {note}"
             ),
             format!(
-                "65:12 template-constraint-violation `Tagged` can't key a `Map`: `label` is a `Labeled`, an interface, and a key holds only values. | {note}"
+                "67:12 template-constraint-violation `Tagged` can't key a `Map`: `label` is a `Labeled`, an interface, and a key holds only values. | {note}"
             ),
             format!(
-                "66:12 template-constraint-violation `Bag` can't key a `Map`: `data` is `Any`, which can be a class instance, and a key holds only values. | {note}"
+                "68:12 template-constraint-violation `Bag` can't key a `Map`: `data` is `Any`, which can be a class instance, and a key holds only values. | {note}"
             ),
             format!(
-                "67:12 template-constraint-violation `Hook` can't key a `Map`: `run` is a `Function<int(int)>`, a function, and a key holds only values. | {note}"
+                "69:12 template-constraint-violation `Hook` can't key a `Map`: `run` is a `Function<int(int)>`, a function, and a key holds only values. | {note}"
             ),
             format!(
-                "68:12 template-constraint-violation `Order` can't be in a `Set`: `plan` is a `Plan`, a class, and a `Set` holds only values. | {note}"
+                "70:12 template-constraint-violation `Order` can't be in a `Set`: `plan` is a `Plan`, a class, and a `Set` holds only values. | {note}"
             ),
             format!(
-                "75:26 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
+                "77:26 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
             ),
             format!(
-                "82:37 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
+                "84:37 template-constraint-violation `Order` can't key a `Map`: `plan` is a `Plan`, a class, and a key holds only values. | {note}"
             ),
         ]
     );
@@ -7396,11 +7398,12 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
 
 /// Spec section 10: every struct has a static `parse` and `tryParse`, and classes don't. `[Key]` renames the key a
 /// struct's main constructor parameter reads, so it is refused anywhere else, and two parameters may not read one key.
-/// A struct with a field no value can give, a pure enum or a function, also nested, compiles, and its `parse` and
-/// `tryParse` are refused where they are called.
+/// A struct with a field no value can give, a pure enum or a function, also in a list or a nested struct, compiles, and
+/// its `parse` and `tryParse` are refused where they are called, while its other static methods are not. A struct that
+/// holds itself parses.
 #[test]
 fn every_struct_parses_and_classes_do_not() {
-    let sharp = "namespace Demo;\n\nimport Sharp.Key;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public void note(Map<string, Any?> input)\n    {\n        Note.parse(input);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Key;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public void note(Map<string, Any?> input)\n    {\n        Note.parse(input);\n    }\n}\n";
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
 
     assert_eq!(
@@ -7410,11 +7413,12 @@ fn every_struct_parses_and_classes_do_not() {
         ),
         [
             "22:75 invalid-struct `code` is read twice, by `plan` and `code`.",
-            "37:18 invalid-struct `Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
-            "46:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
-            "48:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
-            "50:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
-            "54:14 non-existent-method Method `Note.parse` does not exist.",
+            "49:18 invalid-struct `Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
+            "58:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
+            "60:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
+            "62:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "64:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
+            "72:14 non-existent-method Method `Note.parse` does not exist.",
         ]
     );
 }
