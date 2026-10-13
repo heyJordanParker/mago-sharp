@@ -2309,7 +2309,7 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other
 
 /// Each signal that ends a compile from a terminal or `kill` ends the Lean it waits on too, though Mago runs Lake in a
 /// process group of its own so it can end Lake's at the deadline: the signal reaches the compile's group, and Mago
-/// sends it on to Lake's. Its rows are Ctrl-C's SIGINT, Ctrl-\'s SIGQUIT, a closed terminal's SIGHUP, and `kill`'s
+/// ends Lake's before it ends. Its rows are Ctrl-C's SIGINT, Ctrl-\'s SIGQUIT, a closed terminal's SIGHUP, and `kill`'s
 /// SIGTERM.
 #[cfg(unix)]
 #[test]

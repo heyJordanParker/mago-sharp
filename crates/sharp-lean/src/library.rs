@@ -241,8 +241,8 @@ static WAITED_ON: AtomicI32 = AtomicI32::new(0);
 #[cfg(unix)]
 const STARTING: libc::pid_t = -1;
 
-/// The signal `forward` received, which `output_before_deadline` sends on once the group it started is known: a
-/// signal can reach any of Mago's threads while one of them spawns.
+/// The signal `forward` received, which `output_before_deadline` passes back to it once the group it started is known:
+/// a signal can reach any of Mago's threads while one of them spawns.
 #[cfg(unix)]
 static PENDING: AtomicI32 = AtomicI32::new(0);
 
@@ -266,7 +266,7 @@ pub(crate) fn output_before_deadline(command: &mut Command) -> io::Result<(Outpu
     WAITED_ON.store(STARTING, Ordering::SeqCst);
     let spawned = command.spawn();
     // `forward` writes `PENDING` before it reads `WAITED_ON`, and this thread writes `WAITED_ON` before it reads
-    // `PENDING`, so at least one of them sends a signal that arrived during the spawn to the group.
+    // `PENDING`, so at least one of them ends the group for a signal that arrived during the spawn.
     #[cfg(unix)]
     {
         let group = spawned.as_ref().ok().and_then(|child| libc::pid_t::try_from(child.id()).ok()).unwrap_or(0);
@@ -284,7 +284,7 @@ pub(crate) fn output_before_deadline(command: &mut Command) -> io::Result<(Outpu
     output
 }
 
-/// Sends each signal that ends Mago from a terminal or `kill`, which Mago does not ignore, to the group `WAITED_ON`
+/// On each signal that ends Mago from a terminal or `kill`, which Mago does not ignore, ends the group `WAITED_ON`
 /// holds, then ends Mago with it as before.
 #[cfg(unix)]
 fn forward_signals() {
@@ -312,8 +312,9 @@ fn forward_signals() {
     });
 }
 
-/// Sends `signal` to the group `WAITED_ON` holds, then raises it again, which `SA_RESETHAND` made end Mago. While the
-/// group starts, it only records `signal` in `PENDING`, for the spawning thread to send on.
+/// Ends the group `WAITED_ON` holds with `SIGKILL`, as `end_group` does, so no Lean of it dumps a core on `SIGQUIT`,
+/// then raises `signal` again, which `SA_RESETHAND` made end Mago. While the group starts, it only records `signal` in
+/// `PENDING`, for the spawning thread to send on.
 #[cfg(unix)]
 extern "C" fn forward(signal: libc::c_int) {
     PENDING.store(signal, Ordering::SeqCst);
@@ -323,7 +324,7 @@ extern "C" fn forward(signal: libc::c_int) {
     }
     if group != 0 {
         // SAFETY: `kill` is async-signal-safe.
-        unsafe { libc::kill(-group, signal) };
+        unsafe { libc::kill(-group, libc::SIGKILL) };
     }
     // SAFETY: `raise` is async-signal-safe.
     unsafe { libc::raise(signal) };
