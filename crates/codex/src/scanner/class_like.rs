@@ -1657,9 +1657,10 @@ fn add_method(
     codebase.function_likes.insert(method_id, function_like_metadata);
 }
 
-/// Marks each property of a struct written without an initial value as required, spec section 10: a struct has no
-/// default value, so a creation sets every such property, a `T?` one too. Its main constructor's parameters are
-/// registered later, as their own properties, and are never required.
+/// Marks each public `init` property of a struct written without an initial value as required, spec section 10: a
+/// struct has no default value, so a creation sets every such property, a `T?` one too. Only code inside the struct
+/// sets any other property, which is reported where it is declared when nothing sets it. Its main constructor's
+/// parameters are registered later, as their own properties, and are never required.
 fn require_struct_properties(class_like: &mut ClassLikeMetadata, members: &Sequence<ClassLikeMember<'_>>) {
     for member in members {
         let ClassLikeMember::Property(property) = member else {
@@ -1674,7 +1675,10 @@ fn require_struct_properties(class_like: &mut ClassLikeMetadata, members: &Seque
             let Some(metadata) = class_like.properties.get_mut(&name) else {
                 continue;
             };
-            if metadata.flags.is_static() || metadata.flags.is_virtual_property() {
+            if metadata.flags.is_static()
+                || metadata.flags.is_virtual_property()
+                || !metadata.write_visibility.is_public()
+            {
                 continue;
             }
 

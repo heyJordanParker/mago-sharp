@@ -307,6 +307,7 @@ impl<'arena> NameWalker<'arena> {
             b"Position" => b"Sharp\\Position",
             b"List" => b"Sharp\\List",
             b"Replaces" => b"Sharp\\Replaces",
+            b"Key" => b"Sharp\\Key",
             _ => return (fqn, imported),
         };
 

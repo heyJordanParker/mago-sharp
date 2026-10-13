@@ -819,7 +819,7 @@ where
 
     match sharp_refusal(operator, &lhs, &rhs, codebase) {
         Some(Refusal::Instance) => {
-            let class = display_refused_side(context, &lhs, &rhs, |comparand| comparand == Comparand::Instance);
+            let class = display_refused_side(context, &lhs, &rhs, Comparand::is_instance);
 
             format!("`{class}` declares no `operator ==`")
         }
@@ -1104,7 +1104,7 @@ pub(crate) fn report_sharp_refusal<A>(
             .with_help("Compare the elements one by one."),
         ),
         Refusal::Instance => {
-            let class = part(|comparand| comparand == Comparand::Instance);
+            let class = part(Comparand::is_instance);
 
             let issue = if matches!(operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)) {
                 let identity = if operator.is_negated_equality() { "!==" } else { "===" };
@@ -1166,9 +1166,7 @@ where
             different_types_issue(&comparison, "Convert the key so every key has the same type.")
         }
         Some(refusal @ Refusal::Instance) => {
-            let class = display_refused_part(context, &key_type, |comparand| comparand == Comparand::Instance);
-
-            unordered_issue("sortedBy", &class, refusal)
+            unordered_issue("sortedBy", &display_refused_part(context, &key_type, Comparand::is_instance), refusal)
         }
         Some(refusal @ Refusal::UnorderedOperand) => {
             unordered_issue("sortedBy", &display_refused_part(context, &key_type, Comparand::is_unordered), refusal)
@@ -1234,8 +1232,7 @@ pub(crate) fn check_element_equality<A>(
             return;
         }
         Some(Refusal::Instance) => {
-            let class =
-                display_refused_side(context, element_type, value_type, |comparand| comparand == Comparand::Instance);
+            let class = display_refused_side(context, element_type, value_type, Comparand::is_instance);
             let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
             // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses it.
             let initial = class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
@@ -1279,10 +1276,22 @@ pub(crate) fn check_element_equality<A>(
             .with_note("A `List`, `Map` or `Set` is a PHP array at runtime, which `==` cannot compare strictly yet.")
             .with_help("Compare the elements one by one."),
         ),
+        // A struct equals only the same struct, and declares no operator to change that.
+        Some(Refusal::DifferentTypes)
+            if comparands(element_type, context.codebase)
+                .into_iter()
+                .chain(comparands(value_type, context.codebase))
+                .any(|comparand| matches!(comparand, Comparand::Struct(_))) =>
+        {
+            let comparison = format!(
+                "`{method}` compares elements with `==`, which cannot compare `{element_name}` with `{value_name}`"
+            );
+
+            (IssueCode::InvalidArgument, different_types_issue(&comparison, "Search a list of one struct type."))
+        }
         Some(Refusal::DifferentTypes) => {
             // The value is an element, so its class is the one whose operator runs.
-            let class =
-                display_refused_side(context, value_type, element_type, |comparand| comparand == Comparand::Instance);
+            let class = display_refused_side(context, value_type, element_type, Comparand::is_instance);
 
             (
                 IssueCode::InvalidArgument,
@@ -1338,6 +1347,7 @@ fn struct_property_refusal<'codebase>(
 
 /// The issue that refuses `==` on the struct one of `lhs_type` and `rhs_type` holds, naming the first property its own
 /// `==` cannot compare, as "`RenewRequest` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`."
+/// A function has no equality, as "`Spot` can't be compared: `onMove` is a function."
 fn struct_property_issue<A>(context: &Context<'_, '_, A>, lhs_type: &TUnion, rhs_type: &TUnion) -> Issue
 where
     A: Arena,
@@ -1355,10 +1365,19 @@ where
     else {
         unreachable!("`==` is refused for a struct's property only when one of its properties cannot compare");
     };
-    let r#type = property
-        .type_metadata
-        .as_ref()
-        .or(property.type_declaration_metadata.as_ref())
+    let r#struct = display_operand(context, &get_named_object(name, None));
+    let property_name = property.name.0.as_bytes();
+    let property_name = BytesDisplay(property_name.strip_prefix(b"$").unwrap_or(property_name));
+    let declared = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref());
+    if declared
+        .is_some_and(|r#type| r#type.type_union.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_))))
+    {
+        return Issue::error(
+            format!("`{struct}` can't be compared: `{property_name}` is a function.", struct = r#struct),
+        )
+        .with_note("A function value has no equality, so a struct that holds one has none.");
+    }
+    let r#type = declared
         .map_or_else(|| "Any?".to_owned(), |r#type| display_operand(context, &r#type.type_union.to_non_nullable()));
     let article = if r#type.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
     let why = match reason {
@@ -1369,12 +1388,10 @@ where
         Some(_) => "which `==` cannot compare with another of its type",
         None => "which compares by value only with a string, a number or an enum case",
     };
-    let property_name = property.name.0.as_bytes();
 
     Issue::error(format!(
-        "`{}` can't compare by value: `{}` is {article} `{type}`, {why}.",
-        display_operand(context, &get_named_object(name, None)),
-        BytesDisplay(property_name.strip_prefix(b"$").unwrap_or(property_name)),
+        "`{struct}` can't compare by value: `{property_name}` is {article} `{type}`, {why}.",
+        struct = r#struct,
         type = r#type
     ))
     .with_note("A struct compares by value, property by property, with each property's own `==`.")

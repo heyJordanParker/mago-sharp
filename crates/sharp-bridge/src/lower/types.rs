@@ -7,7 +7,6 @@ use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
-use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -265,27 +264,32 @@ impl<'analysis> Types<'analysis> {
 
     /// `r#type` as the type text generics R3c's walk reads, php-sharp's decision 72: a class by its full dotted name as
     /// it is declared, `int`, `float`, `string`, `bool`, `Any`, `List<T>`, `Set<T>`, `Map<K, V>`, and `T?`,
-    /// `A|B` and `(A|B)?` with union members sorted by their text. These are the types a struct's `parse` reads.
-    pub(crate) fn type_text(&self, r#type: &TUnion) -> String {
+    /// `A|B` and `(A|B)?` with union members sorted by their text. These are the types a struct's `parse` reads, so a
+    /// type that holds a function, which no input holds, has none.
+    pub(crate) fn type_text(&self, r#type: &TUnion) -> Option<String> {
         if let Some(TAtomic::Mixed(mixed)) = r#type.types.iter().find(|atomic| atomic.is_mixed()) {
-            return if mixed.is_non_null() { "Any" } else { "Any?" }.to_owned();
+            return Some(if mixed.is_non_null() { "Any" } else { "Any?" }.to_owned());
         }
 
-        let mut members: Vec<String> =
-            r#type.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| self.atomic_text(atomic)).collect();
+        let mut members = r#type
+            .types
+            .iter()
+            .filter(|atomic| !atomic.is_null())
+            .map(|atomic| self.atomic_text(atomic))
+            .collect::<Option<Vec<String>>>()?;
         members.sort_unstable();
         members.dedup();
 
-        match (r#type.has_null(), members.as_slice()) {
+        Some(match (r#type.has_null(), members.as_slice()) {
             (false, _) => members.join("|"),
             (true, [member]) => format!("{member}?"),
             (true, _) => format!("({})?", members.join("|")),
-        }
+        })
     }
 
     /// One member of a union as [`Types::type_text`] writes it.
-    fn atomic_text(&self, atomic: &TAtomic) -> String {
-        match atomic {
+    fn atomic_text(&self, atomic: &TAtomic) -> Option<String> {
+        Some(match atomic {
             TAtomic::Scalar(TScalar::Integer(_)) => "int".to_owned(),
             TAtomic::Scalar(TScalar::Float(_)) => "float".to_owned(),
             TAtomic::Scalar(TScalar::String(_)) => "string".to_owned(),
@@ -296,13 +300,13 @@ impl<'analysis> Types<'analysis> {
             TAtomic::Array(array) => {
                 let (key, element) = self.array_parameters(array);
                 match array {
-                    TArray::List(_) => format!("List<{}>", self.type_text(&element)),
-                    TArray::Set(_) => format!("Set<{}>", self.type_text(&element)),
-                    TArray::Keyed(_) => format!("Map<{}, {}>", self.type_text(&key), self.type_text(&element)),
+                    TArray::List(_) => format!("List<{}>", self.type_text(&element)?),
+                    TArray::Set(_) => format!("Set<{}>", self.type_text(&element)?),
+                    TArray::Keyed(_) => format!("Map<{}, {}>", self.type_text(&key)?, self.type_text(&element)?),
                 }
             }
-            atomic => unreachable!("the checker refuses `parse` of a struct holding `{}`", atomic.get_id()),
-        }
+            _ => return None,
+        })
     }
 
     /// The full dotted name of the class `name`, as it is declared.

@@ -224,7 +224,7 @@ fn check_required_properties<A>(
         Issue::error(format!("`new {}` must set {names}.", display_class_like_name(context, metadata.original_name)))
             .with_annotation(Annotation::primary(span).with_message("Created here."))
             .with_note(
-                "A property written `required`, and a struct's property with no initial value, is set where its object is created: by the constructor that runs, or by the object initializer.",
+                "A property written `required`, and a struct's public `init` property with no initial value, is set where its object is created: by the constructor that runs, or by the object initializer.",
             ),
     );
 }

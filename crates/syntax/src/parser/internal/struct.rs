@@ -39,8 +39,10 @@ where
         let r#struct = self.expect_any_keyword()?;
         let name = self.parse_local_identifier()?;
         // Question 4: a generic struct waits for generics, whose `parse` reads `T` while the code runs, so its type
-        // parameters are skipped and refused whole.
-        if self.stream.is_at(T!["<"])? {
+        // parameters are skipped and it is refused whole: its members parse, and it keeps none, as their types name
+        // the skipped parameters.
+        let generic = self.stream.is_at(T!["<"])?;
+        if generic {
             let open = self.stream.eat_span(T!["<"])?;
             let mut close = open;
             let mut depth = 1;
@@ -56,6 +58,8 @@ where
             self.errors.push(ParseError::NotSupportedYetInSharp("A generic struct", open.join(close)));
         }
         let inheritance = self.parse_struct_header()?;
+        let left_brace = self.stream.eat_span(T!["{"])?;
+        let members = self.parse_class_like_members("A struct")?;
 
         Ok(Struct {
             attribute_lists: attributes,
@@ -63,8 +67,8 @@ where
             r#struct,
             name,
             inheritance,
-            left_brace: self.stream.eat_span(T!["{"])?,
-            members: self.parse_class_like_members("A struct")?,
+            left_brace,
+            members: if generic { Sequence::empty() } else { members },
             right_brace: self.stream.eat_span(T!["}"])?,
         })
     }

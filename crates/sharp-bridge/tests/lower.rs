@@ -13317,14 +13317,15 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
 /// enum case from its backing value, and a nested struct through its own `parse`, its problems under the field's path,
 /// where the walk's own problem for it is then dropped, element by element inside a collection at any depth. A union
 /// of structs takes the first that builds, in the order the field's main constructor parameter or property writes
-/// them, which a method's parameter of the same name doesn't change. Once the walk accepts a value, each `Set` in it
-/// holds its elements under their keys, through nested collections. An `int`-backed enum case is built from its value
+/// them, which a method's parameter of the same name doesn't change. A private field, a get-only property and one whose
+/// `init` is private are no field, and a property the main constructor sets may be left out. Once the walk accepts a value, each `Set` in it holds its elements under
+/// their keys, through nested collections. An `int`-backed enum case is built from its value
 /// uncast, and an enum with no backing value isn't built: the checker refuses `parse` where it is called.
 /// `Any?` takes the value as it is.
 #[test]
 fn parse_reads_each_field_as_its_type() {
     let lowered = Lowered::with(
-        "namespace App;\n\npublic struct Order\n{\n    public Point|Address corner { get; init; }\n\n    public bool near(Point|Address place) => true;\n\n    public Order(public float amount { get; }, public Status status { get; }, public Address address { get; }, public List<Address> addresses { get; }, public Map<Status, int> prices { get; }, public Plan plan { get; }, public Any? extra { get; }, public int|string reference { get; }, public Address|Point place { get; }, public (Point|Address)? spot { get; }, public Map<string, Point|Address> spots { get; }, public Set<Status> seen { get; }, public List<List<Set<int>>> groups { get; }, public Any note { get; }, public bool paid { get; }, public Rank rank { get; }, public Mood mood { get; }, public Point|List<Point> trail { get; }, public List<List<Point>> rows { get; }) { }\n}\n",
+        "namespace App;\n\npublic struct Order\n{\n    public Point|Address corner { get; init; }\n\n    private int secret = 0;\n\n    public int fixed { get; } = 1;\n\n    public int serial { get; private init; } = 0;\n\n    public bool near(Point|Address place) => true;\n\n    public Order(public float amount { get; }, public Status status { get; }, public Address address { get; }, public List<Address> addresses { get; }, public Map<Status, int> prices { get; }, public Plan plan { get; }, public Any? extra { get; }, public int|string reference { get; }, public Address|Point place { get; }, public (Point|Address)? spot { get; }, public Map<string, Point|Address> spots { get; }, public Set<Status> seen { get; }, public List<List<Set<int>>> groups { get; }, public Any note { get; }, public bool paid { get; }, public Rank rank { get; }, public Mood mood { get; }, public Point|List<Point> trail { get; }, public List<List<Point>> rows { get; }) { this.corner = place; }\n}\n",
         &[
             (
                 "src/App/Status.sharp",
@@ -15170,15 +15171,6 @@ fn parse_reads_each_field_as_its_type() {
                         ZVAL "corner"
                       VAR
                         ZVAL "read#79"
-              IF_ELEM
-                null
-                STMT_LIST
-                  ASSIGN
-                    DIM
-                      VAR
-                        ZVAL "fields#2"
-                      ZVAL "corner"
-                    ZVAL "missing"
         "#}
     );
 }
@@ -15513,6 +15505,43 @@ fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
     );
 }
 
+/// Spec section 10: no input holds a function, so a struct with a function field, also in a list, lowers with no
+/// `parse` or `tryParse`, which the checker refuses where they are called. A struct with a pure enum field keeps both,
+/// as the enum has a type text, and the checker refuses those calls too.
+#[test]
+fn a_struct_that_holds_a_function_has_no_parse() {
+    let methods = |code: &str| {
+        let lowered = Lowered::with(
+            code,
+            &[("src/App/Mood.sharp", "namespace App;\n\npublic enum Mood\n{\n    case Calm;\n}\n")],
+        );
+
+        lowered
+            .nodes()
+            .iter()
+            .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
+            .map(|node| lowered.text(node.text))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        methods(
+            "namespace App;\n\npublic struct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n\n    public bool allows(int value) => this.check(value);\n}\n"
+        ),
+        ["__construct", "allows", "op_Equality"]
+    );
+    assert_eq!(
+        methods(
+            "namespace App;\n\npublic struct Makers\n{\n    public Makers(public List<Function<int()>> builders { get; }) { }\n}\n"
+        ),
+        ["__construct", "op_Equality"]
+    );
+    assert_eq!(
+        methods("namespace App;\n\npublic struct Feeling\n{\n    public Feeling(public Mood mood { get; }) { }\n}\n"),
+        ["__construct", "op_Equality", "parse", "tryParse"]
+    );
+}
+
 const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(public int x { get; }, public float y { get; }, public Money? total { get; }) { }\n\n    public Point moved(int dx) => new Point(this.x + dx, this.y, this.total);\n}\n";
 
 /// ```php
@@ -15534,12 +15563,16 @@ const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(
 /// which the engine lets only a `.sharp` class implement, and whose get-only properties are `readonly`, 128. Its `==` is the
 /// `op_Equality` the bridge writes: two instances of the struct are equal when each property equals its pair by the
 /// property's own `==`, and any other pair, `null` included, is equal only when identical. The parameters take `mixed`,
-/// so an `Any?` compares with a struct.
+/// so an `Any?` compares with a struct. A static field and a computed property hold no part of the value, so `==`
+/// compares neither.
 #[test]
 fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
     assert_eq!(
         Lowered::with(
-            &POINT.replace("public struct Point\n", "public struct Point : Shape\n"),
+            &POINT.replace("public struct Point\n", "public struct Point : Shape\n").replace(
+                "    public Point moved(",
+                "    private static int made = 0;\n\n    public float sum { get => this.x + this.y; }\n\n    public Point moved("
+            ),
             &[
                 ("src/App/Money.sharp", MONEY),
                 ("src/App/Shape.sharp", "namespace App;\n\npublic interface Shape\n{\n}\n")
@@ -15558,7 +15591,7 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
               NAMESPACE
                 ZVAL "App"
                 null
-              CLASS [32] "Point" @3-8
+              CLASS [32] "Point" @3-12
                 null
                 NAME_LIST
                   ZVAL "App\\Shape"
@@ -15591,7 +15624,40 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                     STMT_LIST
                     null
                     null
-                  METHOD [1] "moved" @7-7
+                  PROP_GROUP [20]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "made"
+                        ZVAL 0
+                        null
+                        null
+                    null
+                  PROP_GROUP [1]
+                    ZVAL [1] "float"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "sum"
+                        null
+                        null
+                        STMT_LIST
+                          PROPERTY_HOOK "get" @9-9
+                            null
+                            null
+                            PROPERTY_HOOK_SHORT_BODY
+                              BINARY_OP [1]
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "x"
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "y"
+                            null
+                            null
+                    null
+                  METHOD [1] "moved" @11-11
                     PARAM_LIST
                       PARAM
                         ZVAL [1] "int"

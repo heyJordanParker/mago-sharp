@@ -567,8 +567,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             r#struct.right_brace,
         );
         members.push(self.struct_equality(r#struct.name.span));
-        members.push(self.struct_parse(r#struct));
-        members.push(self.struct_try_parse(r#struct.name.span));
+        if let Some(parse) = self.struct_parse(r#struct) {
+            members.push(parse);
+            members.push(self.struct_try_parse(r#struct.name.span));
+        }
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#struct.left_brace), &members);
         let attributes = self.attributes(&r#struct.attribute_lists, None);
         let mut interfaces = Vec::new();
@@ -662,12 +664,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// foreach ($properties#4 as $name#6 => $property#7) { $object#5->$name#6 = $property#7; }
     /// return $object#5;
     /// ```
-    fn struct_parse(&mut self, r#struct: &Struct) -> u32 {
+    ///
+    /// No input holds a function, so a struct with a function field, also inside a collection, has no `parse`, and the
+    /// checker refuses its call.
+    fn struct_parse(&mut self, r#struct: &Struct) -> Option<u32> {
+        let fields = self.types.struct_parse_fields(self.class);
+        let texts = fields.iter().map(|field| self.types.type_text(field.r#type)).collect::<Option<Vec<_>>>()?;
         let span = r#struct.name.span;
         self.enter(b"parse");
         let line = self.line(span);
         let taken = self.temporaries;
-        let [input, fields, arguments, properties, object, name, property] =
+        let [input, problems, arguments, properties, object, name, property] =
             ["input", "fields", "arguments", "properties", "object", "name", "property"].map(|base| self.hidden(base));
         let value = Place::variable(b"value");
 
@@ -677,16 +684,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let itself = self.place(span, &value);
         let read = self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_object, properties_of, itself]);
         statements.push(self.assign(span, &Place::variable(&input), read));
-        for collected in [&fields, &arguments, &properties] {
+        for collected in [&problems, &arguments, &properties] {
             let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
             statements.push(self.assign(span, &Place::variable(collected), empty));
         }
-        for field in self.types.struct_parse_fields(self.class) {
+        for (field, text) in fields.iter().zip(&texts) {
             let collected = if field.is_parameter { &arguments } else { &properties };
             let target = Place::element(collected, Index::Text(field.name.to_vec()));
             let source = Place::element(&input, Index::Text(field.key.to_vec()));
             let hint = written_hint(&r#struct.members, field.name);
-            let read = self.parse_field(span, field.r#type, hint, &source, field.key, &target, &fields);
+            let read = self.parse_field(span, field.r#type, text, hint, &source, field.key, &target, &problems);
             let key = self.string(0, line, field.key);
             let input_read = self.variable(span, &input);
             let present = self.global_call(line, b"array_key_exists", &[key, input_read]);
@@ -697,16 +704,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.assign(span, &target, null)
                 } else {
                     let missing = self.string(0, line, b"missing");
-                    self.assign(span, &Place::element(&fields, Index::Text(field.key.to_vec())), missing)
+                    self.assign(span, &Place::element(&problems, Index::Text(field.key.to_vec())), missing)
                 };
                 branches.push((NULL, missing));
             }
             statements.push(self.if_chain(span, &branches));
         }
 
-        let any_bad = self.not_empty(span, &fields);
+        let any_bad = self.not_empty(span, &problems);
         let exception = self.string(ZEND_NAME_FQ, line, b"Sharp\\InvalidFields");
-        let problems = self.variable(span, &fields);
+        let problems = self.variable(span, &problems);
         let problems = self.node(SHARP_AST_ARG_LIST, 0, line, &[problems]);
         let created = self.node(SHARP_AST_NEW, 0, line, &[exception, problems]);
         let throw = self.node(SHARP_AST_THROW, 0, line, &[created]);
@@ -734,14 +741,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_FQ, line, self.class);
 
-        self.declaration(
+        Some(self.declaration(
             SHARP_AST_METHOD,
             ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
             span,
             span,
             b"parse",
             &[parameters, NULL, body, return_type, NULL],
-        )
+        ))
     }
 
     /// A struct's `tryParse`, spec section 10: its `parse`, giving null where `parse` throws `\Sharp\InvalidFields`.
@@ -819,6 +826,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         &mut self,
         span: Span,
         r#type: &TUnion,
+        text: &str,
         hint: Option<&Hint>,
         source: &Place,
         key: &[u8],
@@ -844,7 +852,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         statements.extend(built);
 
-        let text = self.types.type_text(r#type);
         let arguments = [
             self.string(0, line, text.as_bytes()),
             self.variable(span, &read),

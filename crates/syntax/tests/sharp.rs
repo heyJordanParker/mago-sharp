@@ -555,13 +555,14 @@ fn a_case_that_carries_data_is_one_not_supported_error_and_the_enum_parses_on() 
 }
 
 /// A generic struct waits for generics, spec section 10's question 4, so its type parameters are one error, nested
-/// ones included, and the struct parses on with its members.
+/// ones included, and the struct parses on. It is refused whole, so it keeps no members, whose types name its
+/// parameters, and the file has that one error.
 #[test]
 fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
     for parameters in ["<T>", "<TKey, TValue>", "<T : Box<int>>", "<T : Map<string, List<int>>>"] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
-            format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n")
+            format!("struct Pair{parameters} : HasLabel\n{{\n    public int run() {{ return 1; }}\n}}\n\nstruct Next {{ }}\n")
                 .into_boxed_str(),
         );
         let program = parse(&arena, "src/Pair.sharp", code);
@@ -575,10 +576,11 @@ fn a_generic_struct_is_one_not_supported_error_and_the_struct_parses_on() {
             panic!("expected a struct for `{parameters}`, got {:#?}", program.statements);
         };
         assert!(pair.inheritance.is_some(), "the header after `{parameters}` parses");
-        let [ClassLikeMember::Method(run)] = pair.members.as_slice() else {
-            panic!("expected the method `run` after `{parameters}`, got {:#?}", pair.members);
-        };
-        assert_eq!(run.name.value, b"run");
+        assert!(pair.members.is_empty(), "the struct keeps no members after `{parameters}`");
+        assert!(
+            matches!(program.statements.get(1), Some(Statement::Struct(_))),
+            "the struct after `{parameters}` parses"
+        );
     }
 }
 

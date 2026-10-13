@@ -4854,37 +4854,43 @@ fn a_named_constructor_body_runs_on_this() {
     );
 }
 
-/// Spec sections 6.1 and 10: a property written `required`, and a struct's property with no initial value, is set
-/// where its object is created. The constructor that runs sets the properties it assigns on every path: both arms of an
-/// `if`, every arm of a `match`, or a path that throws. A named constructor runs the main constructor first, and a
-/// helper method it calls counts for nothing. The object initializer sets the rest. A `new` of a class that doesn't
-/// exist is reported once, as a class that cannot be found.
+/// Spec sections 6.1 and 10: a property written `required`, and a struct's public `init` property with no initial
+/// value, is set where its object is created. The constructor that runs sets the properties it assigns on every path:
+/// both arms of an `if`, every arm of a `match`, or a path that throws. A named constructor runs the main constructor
+/// first, and a helper method it calls counts for nothing. The object initializer sets the rest. A `new` of a class
+/// that doesn't exist is reported once, as a class that cannot be found. A struct's private field, private `init`
+/// property or get-only property, which no initializer outside it sets, is reported once where it is declared, and
+/// never at the `new`.
 #[test]
 fn every_required_property_is_set_where_its_object_is_created() {
-    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Label\n{\n    public required string text { get; init; }\n    public required string tone { get; init; }\n    public required int size { get; set; }\n\n    public Label() { }\n\n    public Label.titled(string title) : this()\n    {\n        this.text = title;\n        this.tone = \"plain\";\n        this.size = 1;\n    }\n}\n\nclass Ticket\n{\n    public required string kind { get; init; }\n    public required int price { get; init; }\n    public required int seats { get; init; }\n    public required string note { get; set; }\n\n    public Ticket(int code)\n    {\n        match (code) {\n            1 => { this.kind = \"adult\"; },\n            default => { this.kind = \"child\"; },\n        }\n        match (code) {\n            1 => { this.price = 10; },\n            default => {},\n        }\n        if (code < 0) {\n            throw new RuntimeException(\"negative\");\n        } else {\n            this.seats = code;\n        }\n        this.annotate();\n    }\n\n    public void annotate()\n    {\n        this.note = \"\";\n    }\n}\n\nstruct Point\n{\n    public int x { get; init; }\n    public int? y { get; init; }\n    public string? label { get; init; }\n    public int z { get; init; } = 0;\n}\n\nclass Shop\n{\n    public Label bare() => new Label();\n\n    public Label part() => new Label { text: \"a\" };\n\n    public Label whole() => new Label { text: \"a\", tone: \"b\", size: 1 };\n\n    public Label titled() => new Label.titled(\"t\");\n\n    public Ticket ticket() => new Ticket(1);\n\n    public Ticket priced() => new Ticket(1) { price: 5, note: \"n\" };\n\n    public Point point() => new Point { x: 1 };\n\n    public Point placed() => new Point { x: 1, y: null, label: null };\n\n    public void unknown()\n    {\n        new Missing();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Label\n{\n    public required string text { get; init; }\n    public required string tone { get; init; }\n    public required int size { get; set; }\n\n    public Label() { }\n\n    public Label.titled(string title) : this()\n    {\n        this.text = title;\n        this.tone = \"plain\";\n        this.size = 1;\n    }\n}\n\nclass Ticket\n{\n    public required string kind { get; init; }\n    public required int price { get; init; }\n    public required int seats { get; init; }\n    public required string note { get; set; }\n\n    public Ticket(int code)\n    {\n        match (code) {\n            1 => { this.kind = \"adult\"; },\n            default => { this.kind = \"child\"; },\n        }\n        match (code) {\n            1 => { this.price = 10; },\n            default => {},\n        }\n        if (code < 0) {\n            throw new RuntimeException(\"negative\");\n        } else {\n            this.seats = code;\n        }\n        this.annotate();\n    }\n\n    public void annotate()\n    {\n        this.note = \"\";\n    }\n}\n\nstruct Point\n{\n    public int x { get; init; }\n    public int? y { get; init; }\n    public string? label { get; init; }\n    public int z { get; init; } = 0;\n}\n\nstruct Hidden\n{\n    private int secret;\n    public int serial { get; private init; }\n    public int shown { get; init; }\n\n    public int peek() => this.secret + this.serial;\n}\n\nstruct Fixed\n{\n    public int value { get; }\n}\n\nclass Shop\n{\n    public Label bare() => new Label();\n\n    public Label part() => new Label { text: \"a\" };\n\n    public Label whole() => new Label { text: \"a\", tone: \"b\", size: 1 };\n\n    public Label titled() => new Label.titled(\"t\");\n\n    public Ticket ticket() => new Ticket(1);\n\n    public Ticket priced() => new Ticket(1) { price: 5, note: \"n\" };\n\n    public Point point() => new Point { x: 1 };\n\n    public Point placed() => new Point { x: 1, y: null, label: null };\n\n    public Hidden hidden() => new Hidden { shown: 1 };\n\n    public Fixed fixed() => new Fixed { };\n\n    public void unknown()\n    {\n        new Missing();\n    }\n}\n";
 
-    let note = "A property written `required`, and a struct's property with no initial value, is set where its object is created: by the constructor that runs, or by the object initializer.";
+    let note = "A property written `required`, and a struct's public `init` property with no initial value, is set where its object is created: by the constructor that runs, or by the object initializer.";
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shop.sharp", sharp), &[])
             .iter()
             .map(|issue| format!("{} {} | {}", located(sharp, issue), issue.message, issue.notes.join(" ")))
             .collect::<Vec<_>>(),
         [
-            format!("62:28 missing-required-property `new Label` must set `text`, `tone` and `size`. | {note}"),
-            format!("64:28 missing-required-property `new Label` must set `tone` and `size`. | {note}"),
-            format!("70:31 missing-required-property `new Ticket` must set `price` and `note`. | {note}"),
-            format!("74:29 missing-required-property `new Point` must set `y` and `label`. | {note}"),
-            "80:13 non-existent-class Class `Missing` not found. | ".to_owned(),
+            "62:17 uninitialized-property `secret` is never set: set it in the main constructor, or give it an initial value. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
+            "63:16 uninitialized-property `serial` is never set: set it in the main constructor, or give it an initial value. | Only the struct sets this property, and no constructor sets it on every path.".to_owned(),
+            "71:16 uninitialized-property `value` is get-only and never set: set it in the main constructor, or give it an initial value. | A get-only property is set only while its object is created, and no constructor sets it on every path.".to_owned(),
+            format!("76:28 missing-required-property `new Label` must set `text`, `tone` and `size`. | {note}"),
+            format!("78:28 missing-required-property `new Label` must set `tone` and `size`. | {note}"),
+            format!("84:31 missing-required-property `new Ticket` must set `price` and `note`. | {note}"),
+            format!("88:29 missing-required-property `new Point` must set `y` and `label`. | {note}"),
+            "98:13 non-existent-class Class `Missing` not found. | ".to_owned(),
         ]
     );
 }
 
 /// Spec section 6.1: a get-only property is set only while its object is created, so one without an initial value
 /// that no constructor sets on every path is an error. A main constructor parameter that declares it sets it, and an
-/// abstract class leaves its get-only properties to its subclasses.
+/// abstract class leaves its get-only properties to its subclasses. An `init` property is set where its object is
+/// created, also in a struct written `readonly`, which semantics refuses on its own.
 #[test]
 fn a_get_only_property_no_constructor_sets_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Total\n{\n    public int amount { get; }\n    public int count { get; }\n    public int size { get; }\n    public int rows { get; } = 0;\n\n    public Total(bool big, public int pages { get; })\n    {\n        if (big) {\n            this.amount = 10;\n        } else {\n            this.amount = 1;\n        }\n        if (big) {\n            this.count = 1;\n        }\n    }\n\n    public Total.sized() : this(true, 1)\n    {\n        this.size = 4;\n    }\n}\n\nstruct Point\n{\n    public int x { get; }\n    public int y { get; }\n\n    public Point(int x)\n    {\n        this.x = x;\n    }\n}\n\nabstract class Shape\n{\n    public int sides { get; }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Total\n{\n    public int amount { get; }\n    public int count { get; }\n    public int size { get; }\n    public int rows { get; } = 0;\n\n    public Total(bool big, public int pages { get; })\n    {\n        if (big) {\n            this.amount = 10;\n        } else {\n            this.amount = 1;\n        }\n        if (big) {\n            this.count = 1;\n        }\n    }\n\n    public Total.sized() : this(true, 1)\n    {\n        this.size = 4;\n    }\n}\n\nstruct Point\n{\n    public int x { get; }\n    public int y { get; }\n\n    public Point(int x)\n    {\n        this.x = x;\n    }\n}\n\nabstract class Shape\n{\n    public int sides { get; }\n}\n\nreadonly struct Ro\n{\n    public int x { get; init; }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Total.sharp", sharp), &[]),
@@ -6884,10 +6890,11 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
 /// an `int|float` given an int and an `Any?` given a string, searches with no issue, as does the help's `any` with
 /// `===`, whose lambda names an element by its class's initial unless the call already uses that name, and which keeps
 /// a null-safe call's `?.`. A struct element compares by value, so one with a property `==` can't compare is refused
-/// with that property, and so is a list element whose own elements `==` can't compare.
+/// with that property, and so is a list element whose own elements `==` can't compare. A struct equals only the same
+/// struct, so a search of a struct beside another type, a number or a struct, is refused as `==` refuses it.
 #[test]
 fn a_search_needs_equality_on_the_element_type() {
-    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(l => l === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? false;\n        bool fixed = held?.any(l => l === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n\nclass Line\n{\n}\n\nclass Ticket\n{\n    public Ticket(public int serial { get; })\n    {\n    }\n\n    public static bool operator ==(Ticket a, Ticket b) => a.serial == b.serial;\n\n    public int hash() => this.serial;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n\nstruct Order\n{\n    public Order(public Line line { get; }) { }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves, List<Spot|int> spots, List<Address|Spot> places, Spot spot)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(l => l === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? false;\n        bool fixed = held?.any(l => l === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        bool spotted = spots.contains(spot) || places.contains(spot);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved || spotted ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n\nclass Line\n{\n}\n\nclass Ticket\n{\n    public Ticket(public int serial { get; })\n    {\n    }\n\n    public static bool operator ==(Ticket a, Ticket b) => a.serial == b.serial;\n\n    public int hash() => this.serial;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n\nstruct Order\n{\n    public Order(public Line line { get; }) { }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Shelf.sharp", sharp), &[]),
@@ -6910,6 +6917,8 @@ fn a_search_needs_equality_on_the_element_type() {
             "25:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Line|Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Line|Coin` and `Coin`.",
             "27:40 invalid-argument `contains` compares elements with `==`, and `Order` can't compare by value: `line` is a `Line`, which declares no `operator ==`. | ",
             "28:41 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | ",
+            "29:39 invalid-argument `contains` compares elements with `==`, which cannot compare `int|Spot` with `Spot`. | Search a list of one struct type.",
+            "29:64 invalid-argument `contains` compares elements with `==`, which cannot compare `Address|Spot` with `Spot`. | Search a list of one struct type.",
         ]
     );
 }
@@ -7340,7 +7349,7 @@ fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
         [
             "13:14 invalid-struct A struct can't inherit: `Base` is a class.",
             "25:15 invalid-struct `Name` is a struct, which can't be inherited.",
-            "30:14 non-existent-class-like Class `Odd` cannot implement unknown type `Missing`",
+            "30:14 non-existent-class-like Struct `Odd` cannot implement unknown type `Missing`",
         ]
     );
     assert_eq!(messages(twice, &[]), ["Struct `Dup` is already defined elsewhere."]);
@@ -7350,24 +7359,30 @@ fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
 /// compare is refused at the `==`, naming the property and why: a class with no `operator ==` or one that takes no two
 /// of it, `Any`, a `Set`, a `List` of such, or a struct that can't compare, also as a list's element or beside `Any?`.
 /// A struct equals only the same struct, and `===` is refused with its fix. A struct that holds itself, also in a
-/// `List`, compares by the rest, a struct compares with an `Any?`, and `!=` and the fix compile.
+/// `List`, compares by the rest, a struct compares with an `Any?`, and `!=` and the fix compile. A function has no
+/// equality, so a struct that holds one has none. A struct that declares no `operator <=>` has no order, for `<`, `<=>`
+/// and `sortedBy`.
 #[test]
 fn a_struct_compares_by_value() {
-    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan() { }\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; }) { }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public List<int> path { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public Plan plan { get; }) { }\n}\n\nstruct Node\n{\n    public Node(public int value { get; }, public Node? next { get; }) { }\n}\n\nstruct Bag\n{\n    public Bag(public Any? data { get; }) { }\n}\n\nstruct Pair\n{\n    public Pair(public Order order { get; }) { }\n}\n\nstruct Tagged\n{\n    public Tagged(public Set<int> tags { get; }) { }\n}\n\nstruct Basket\n{\n    public Basket(public List<Plan> plans { get; }) { }\n}\n\nstruct Purse\n{\n    public Purse(public Coin coin { get; }) { }\n}\n\nstruct Tree\n{\n    public Tree(public List<Tree> branches { get; }) { }\n}\n\nclass Compare\n{\n    public bool same(Spot a, Spot b) => a === b;\n\n    public bool equal(Spot a, Spot b) => a == b;\n\n    public bool different(Spot a, Any? b) => a != b;\n\n    public bool orders(Order a, Order b) => a == b;\n\n    public bool loose(Any? a, Order b) => a == b;\n\n    public bool number(Spot a, int b) => a == b;\n\n    public bool lists(List<Order> a, List<Order> b) => a == b;\n\n    public bool chain(Node a, Node b) => a == b;\n\n    public bool bags(Bag a, Bag b) => a == b;\n\n    public bool pairs(Pair a, Pair b) => a == b;\n\n    public bool tagged(Tagged a, Tagged b) => a == b;\n\n    public bool baskets(Basket a, Basket b) => a == b;\n\n    public bool purses(Purse a, Purse b) => a == b;\n\n    public bool trees(Tree a, Tree b) => a == b;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Plan\n{\n    public Plan() { }\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; }) { }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }, public List<int> path { get; }) { }\n}\n\nstruct Order\n{\n    public Order(public Plan plan { get; }) { }\n}\n\nstruct Node\n{\n    public Node(public int value { get; }, public Node? next { get; }) { }\n}\n\nstruct Bag\n{\n    public Bag(public Any? data { get; }) { }\n}\n\nstruct Pair\n{\n    public Pair(public Order order { get; }) { }\n}\n\nstruct Tagged\n{\n    public Tagged(public Set<int> tags { get; }) { }\n}\n\nstruct Basket\n{\n    public Basket(public List<Plan> plans { get; }) { }\n}\n\nstruct Purse\n{\n    public Purse(public Coin coin { get; }) { }\n}\n\nstruct Tree\n{\n    public Tree(public List<Tree> branches { get; }) { }\n}\n\nstruct Moving\n{\n    public Moving(public int x { get; }, public Function<void()> onMove { get; }) { }\n}\n\nclass Compare\n{\n    public bool same(Spot a, Spot b) => a === b;\n\n    public bool equal(Spot a, Spot b) => a == b;\n\n    public bool different(Spot a, Any? b) => a != b;\n\n    public bool orders(Order a, Order b) => a == b;\n\n    public bool loose(Any? a, Order b) => a == b;\n\n    public bool number(Spot a, int b) => a == b;\n\n    public bool lists(List<Order> a, List<Order> b) => a == b;\n\n    public bool chain(Node a, Node b) => a == b;\n\n    public bool bags(Bag a, Bag b) => a == b;\n\n    public bool pairs(Pair a, Pair b) => a == b;\n\n    public bool tagged(Tagged a, Tagged b) => a == b;\n\n    public bool baskets(Basket a, Basket b) => a == b;\n\n    public bool purses(Purse a, Purse b) => a == b;\n\n    public bool trees(Tree a, Tree b) => a == b;\n\n    public bool moving(Moving a, Moving b) => a == b;\n\n    public bool before(Spot a, Spot b) => a < b;\n\n    public int order(Spot a, Spot b) => a <=> b;\n\n    public List<Spot> sorted(List<Spot> spots) => spots.sortedBy(s => s);\n}\n";
 
     assert_eq!(
         written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Compare.sharp", sharp), &[])),
         [
-            "64:41 invalid-operand `===` tests for the same object, and `Spot` is a struct: write `==`.",
-            "70:45 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
-            "72:43 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
-            "74:42 invalid-operand `==` cannot compare `Spot` with `int`.",
-            "76:56 invalid-operand `==` compares `List<Order>` with `List<Order>` element by element, and `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
-            "80:39 invalid-operand `Bag` can't compare by value: `data` is an `Any`, which compares by value only with a string, a number or an enum case.",
-            "82:42 invalid-operand `Pair` can't compare by value: `order` is an `Order`, which can't compare by value.",
-            "84:47 invalid-operand `Tagged` can't compare by value: `tags` is a `Set<int>`, and `==` on a collection is not supported yet.",
-            "86:48 invalid-operand `Basket` can't compare by value: `plans` is a `List<Plan>`, whose elements `==` cannot compare.",
-            "88:45 invalid-operand `Purse` can't compare by value: `coin` is a `Coin`, which `==` cannot compare with another of its type.",
+            "69:41 invalid-operand `===` tests for the same object, and `Spot` is a struct: write `==`.",
+            "75:45 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+            "77:43 invalid-operand `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+            "79:42 invalid-operand `==` cannot compare `Spot` with `int`.",
+            "81:56 invalid-operand `==` compares `List<Order>` with `List<Order>` element by element, and `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
+            "85:39 invalid-operand `Bag` can't compare by value: `data` is an `Any`, which compares by value only with a string, a number or an enum case.",
+            "87:42 invalid-operand `Pair` can't compare by value: `order` is an `Order`, which can't compare by value.",
+            "89:47 invalid-operand `Tagged` can't compare by value: `tags` is a `Set<int>`, and `==` on a collection is not supported yet.",
+            "91:48 invalid-operand `Basket` can't compare by value: `plans` is a `List<Plan>`, whose elements `==` cannot compare.",
+            "93:45 invalid-operand `Purse` can't compare by value: `coin` is a `Coin`, which `==` cannot compare with another of its type.",
+            "97:47 invalid-operand `Moving` can't be compared: `onMove` is a function.",
+            "99:43 invalid-operand `<` cannot compare `Spot` with `Spot`: `Spot` declares no `operator <=>`.",
+            "101:41 invalid-operand `<=>` cannot compare `Spot` with `Spot`: `Spot` declares no `operator <=>`.",
+            "103:66 invalid-argument `sortedBy` orders numbers, strings and classes that declare `operator <=>`, and `Spot` is none of them.",
         ]
     );
 }
@@ -7398,12 +7413,14 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
 
 /// Spec section 10: every struct has a static `parse` and `tryParse`, and classes don't. `[Key]` renames the key a
 /// struct's main constructor parameter reads, so it is refused anywhere else, and two parameters may not read one key.
+/// A bare `Key` is the standard attribute, spec section 23. A property the main constructor sets is read once, by
+/// the parameter of its name, or not at all.
 /// A struct with a field no value can give, a pure enum or a function, also in a list or a nested struct, compiles, and
 /// its `parse` and `tryParse` are refused where they are called, while its other static methods are not. A struct that
 /// holds itself parses.
 #[test]
 fn every_struct_parses_and_classes_do_not() {
-    let sharp = "namespace Demo;\n\nimport Sharp.Key;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public void note(Map<string, Any?> input)\n    {\n        Note.parse(input);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nstruct Temp\n{\n    public Temp(int celsius) { this.celsius = celsius; }\n\n    public int celsius { get; init; }\n}\n\nstruct Gauge\n{\n    public Gauge(int c) { this.celsius = c; }\n\n    public int celsius { get; init; }\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n\n    public void note(Map<string, Any?> input)\n    {\n        Note.parse(input);\n    }\n}\n";
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
 
     assert_eq!(
@@ -7412,13 +7429,13 @@ fn every_struct_parses_and_classes_do_not() {
             &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reads.sharp", sharp), &[("src/Sharp/Key.sharp", key)])
         ),
         [
-            "22:75 invalid-struct `code` is read twice, by `plan` and `code`.",
-            "49:18 invalid-struct `Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
-            "58:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
-            "60:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
-            "62:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
-            "64:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
-            "72:14 non-existent-method Method `Note.parse` does not exist.",
+            "20:75 invalid-struct `code` is read twice, by `plan` and `code`.",
+            "61:18 invalid-struct `Key` renames the key `parse` reads, and only a struct's main constructor parameters are read.",
+            "70:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
+            "72:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
+            "74:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "76:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
+            "88:14 non-existent-method Method `Note.parse` does not exist.",
         ]
     );
 }

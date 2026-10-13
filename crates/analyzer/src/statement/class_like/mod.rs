@@ -1697,7 +1697,8 @@ fn check_class_like_implements<'ctx, 'arena, A>(
         return;
     }
 
-    let using_kind_str = class_like_metadata.kind.as_str();
+    let is_struct = class_like_metadata.flags.is_struct();
+    let using_kind_str = if is_struct { "struct" } else { class_like_metadata.kind.as_str() };
     let using_kind_capitalized =
         format!("{}{}", using_kind_str.chars().next().unwrap().to_uppercase(), &using_kind_str[1..]);
     let using_name = display_class_like_name(context, class_like_metadata.original_name);
@@ -1786,13 +1787,25 @@ fn check_class_like_implements<'ctx, 'arena, A>(
             check_interface_method_signatures(context, class_like_metadata, implemented_metadata, checked_signatures);
         } else {
             let implemented_name = BytesDisplay(implemented_type.value());
+            let (note, help) = if is_struct {
+                ("A struct's header lists the interfaces it implements.", "Check the interface's name and its import.")
+            } else {
+                (
+                    "Mago could not find a definition for this interface. The `implements` keyword is for interfaces only.",
+                    "Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable.",
+                )
+            };
 
             context.collector.report_with_code(
                 IssueCode::NonExistentClassLike,
-                Issue::error(format!("{using_kind_capitalized} `{using_name}` cannot implement unknown type `{implemented_name}`"))
-                    .with_annotation(Annotation::primary(implemented_type.span()).with_message("This type could not be found"))
-                    .with_note("Mago could not find a definition for this interface. The `implements` keyword is for interfaces only.")
-                    .with_help("Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable."),
+                Issue::error(format!(
+                    "{using_kind_capitalized} `{using_name}` cannot implement unknown type `{implemented_name}`"
+                ))
+                .with_annotation(
+                    Annotation::primary(implemented_type.span()).with_message("This type could not be found"),
+                )
+                .with_note(note)
+                .with_help(help),
             );
         }
     }
