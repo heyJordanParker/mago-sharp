@@ -364,21 +364,24 @@ fn a_local_reads_a_missing_property_as_in_php() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// Spec section 23: a bare name reads the code's own constant, of the file's namespace, and PHP's constant is read
+/// through `global`. A missing one is refused as PHP refuses it, and a constant a `.php` file declares in the file's
+/// namespace reads by its bare name.
 #[test]
-fn bare_constants_resolve_as_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total()\n    {\n        return PHP_INT_MAX - MISSING;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function total(): int\n    {\n        return PHP_INT_MAX - MISSING;\n    }\n}\n";
+fn a_bare_constant_is_the_code_s_own_and_a_missing_one_is_refused_as_in_php() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total()\n    {\n        return global.PHP_INT_MAX - MISSING;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function total(): int\n    {\n        return \\PHP_INT_MAX - MISSING;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
     let php_issues = issues(("src/Demo/Report.php", php), &[]);
 
-    assert_eq!(sharp_issues[0], "7:30 non-existent-constant");
+    assert_eq!(sharp_issues[0], "7:37 non-existent-constant");
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[])[..2],
         [
-            "7:30 non-existent-constant Undefined constant: `MISSING`. | Check `MISSING` for typos. PHP# declares no global constant, so a bare name reads a constant declared in a `.php` file, and a class constant is read through its class, as in `Limits.MAX`.",
-            "7:30 mixed-operand Right operand in binary operation has type `Any?`. | Check the right operand with `is` or `match` first, as in `if (value is int n)`, and use `n`.",
+            "7:37 non-existent-constant Undefined constant: `MISSING`. | Check `MISSING` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and PHP's constant through its namespace, as in `global.PHP_EOL`.",
+            "7:37 mixed-operand Right operand in binary operation has type `Any?`. | Check the right operand with `is` or `match` first, as in `if (value is int n)`, and use `n`.",
         ]
     );
     assert_eq!(
@@ -390,8 +393,9 @@ fn bare_constants_resolve_as_in_php() {
         "src/Demo/Limits.php",
         "<?php\n\nnamespace Demo;\n\nfinal class Limits\n{\n    public const int MAX = 10;\n}\n",
     );
-    let fixed = "namespace Demo;\n\nclass Report\n{\n    public static int total()\n    {\n        return PHP_INT_MAX - Limits.MAX;\n    }\n}\n";
-    assert_eq!(issues(("src/Demo/Report.sharp", fixed), &[limits]), Vec::<String>::new());
+    let own = ("src/Demo/constants.php", "<?php\n\nnamespace Demo;\n\nconst LIMIT = 1;\n");
+    let fixed = "namespace Demo;\n\nclass Report\n{\n    public static int total()\n    {\n        return global.PHP_INT_MAX - Limits.MAX - LIMIT;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Report.sharp", fixed), &[limits, own]), Vec::<String>::new());
 }
 
 #[test]
@@ -1815,6 +1819,45 @@ fn a_plain_php_function_is_called_through_its_namespace() {
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/Report.php", php), &others)));
 }
 
+/// Spec section 23 reads a plain PHP constant through its namespace, as it calls a function: `global.PHP_EOL`,
+/// `global.PHP_INT_MAX` and `global.STDERR` read PHP's root constants with their types, and `Pdf.DEFAULT_DPI` after
+/// `import Vendor.Pdf;` the library's. A bare uppercase name is the code's own constant, so a bare PHP constant is
+/// refused with the read to write. A `.php` file reads each.
+#[test]
+fn a_plain_php_constant_is_read_through_its_namespace() {
+    let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n";
+    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Layout\n{\n    public static string line(string text) => text + global.PHP_EOL;\n    public static int largest() => global.PHP_INT_MAX;\n    public static Any? errors() => global.STDERR;\n    public static int dpi() => Pdf.DEFAULT_DPI;\n    public static string bare(string text) => text + PHP_EOL;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Layout\n{\n    public static function line(string $text): string { return $text . \\PHP_EOL; }\n    public static function largest(): int { return \\PHP_INT_MAX; }\n    public static function errors(): mixed { return \\STDERR; }\n    public static function dpi(): int { return \\Vendor\\Pdf\\DEFAULT_DPI; }\n    public static function bare(string $text): string { return $text . PHP_EOL; }\n}\n";
+    let others = [("src/Vendor/Pdf/constants.php", pdf)];
+
+    assert_eq!(
+        refusals(("src/Demo/Layout.sharp", sharp), &others),
+        [
+            "11:54 non-existent-constant `PHP_EOL` is PHP's constant, and a bare name reads only this code's own: write `global.PHP_EOL`. | "
+        ]
+    );
+    assert_eq!(issues(("src/Demo/Layout.php", php), &others), Vec::<String>::new());
+}
+
+/// A `Name.member` read that reaches no constant is refused for what it names: `global.NOPE` names no constant,
+/// `global.strlen` and `Pdf.render` are functions the code calls, and `Nope` names no class and no namespace. The
+/// checker accepted each before, and the compile panicked on it.
+#[test]
+fn a_read_through_a_name_that_reaches_no_constant_is_refused() {
+    let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Reads\n{\n    public static Any? missing() => global.NOPE;\n    public static Any? length() => global.strlen;\n    public static Any? render() => Pdf.render;\n    public static Any? nope() => Nope.render;\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Reads.sharp", sharp), &[("src/Vendor/Pdf/functions.php", pdf)]),
+        [
+            "7:37 non-existent-constant Undefined constant: `global.NOPE`. | Check `NOPE` for typos.",
+            "8:36 non-existent-constant `global.strlen` is a plain PHP function, not a constant: call it, as in `global.strlen(…)`. | ",
+            "9:36 non-existent-constant `Pdf.render` is a plain PHP function, not a constant: call it, as in `Pdf.render(…)`. | ",
+            "10:34 non-existent-class-like `Nope` names no class, and no namespace this file imports. | Check the spelling of `Nope`, or import the class or the namespace whose member this reads.",
+        ]
+    );
+}
+
 /// A member written as an expression, `Pdf.{"render"}(html)`, names no function of the namespace, so the analysis,
 /// which still reads the file, reads it as a static call. The checker refuses the member, and `mago` prints only that.
 #[test]
@@ -1919,7 +1962,7 @@ fn check_throws_skips_sharp_files_and_keeps_reporting_in_php() {
 /// `else` all run. A `.php` file keeps Mago's help.
 #[test]
 fn a_statement_that_can_never_run_is_refused() {
-    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterExit()\n    {\n        global.exit(1);\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            global.printf(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        global.printf(\"one\");\n        global.printf(\"two\");\n        global.printf(\"three\");\n    }\n\n    public static int doNeverEnds(bool again)\n    {\n        do {\n            return 9;\n        } while (again);\n        return 10;\n    }\n\n    public static int loopNeverEnds()\n    {\n        while (true) {\n            global.printf(\"again\");\n        }\n        return 11;\n    }\n\n    public static int finallyAfterReturn()\n    {\n        try {\n            return 12;\n        } finally {\n            global.printf(\"done\");\n        }\n    }\n\n    public static int afterLoopWithBreak()\n    {\n        while (true) {\n            break;\n        }\n        return 13;\n    }\n\n    public static int afterIfWithoutElse(bool up)\n    {\n        if (up) {\n            return 14;\n        }\n        return 15;\n    }\n\n    public static int catchAfterReturningTry()\n    {\n        try {\n            return 16;\n        } catch (RuntimeException failure) {\n            return 17;\n        }\n    }\n\n    public static int doThatBreaks(bool stop, bool again)\n    {\n        do {\n            if (stop) {\n                break;\n            }\n            return 18;\n        } while (again);\n        return 19;\n    }\n\n    public static void conditionNeverFinishesWithElse()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void iterableNeverFinishes()\n    {\n        for (const item of global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterExit()\n    {\n        global.exit(1);\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            global.printf(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        global.printf(\"one\");\n        global.printf(\"two\");\n        global.printf(\"three\");\n    }\n\n    public static int doNeverEnds(bool again)\n    {\n        do {\n            return 9;\n        } while (again);\n        return 10;\n    }\n\n    public static int loopNeverEnds()\n    {\n        while (true) {\n            global.printf(\"again\");\n        }\n        return 11;\n    }\n\n    public static int finallyAfterReturn()\n    {\n        try {\n            return 12;\n        } finally {\n            global.printf(\"done\");\n        }\n    }\n\n    public static int afterLoopWithBreak()\n    {\n        while (true) {\n            break;\n        }\n        return 13;\n    }\n\n    public static int afterIfWithoutElse(bool up)\n    {\n        if (up) {\n            return 14;\n        }\n        return 15;\n    }\n\n    public static int catchAfterReturningTry()\n    {\n        try {\n            return 16;\n        } catch (RuntimeException failure) {\n            return 17;\n        }\n    }\n\n    public static int doThatBreaks(bool stop, bool again)\n    {\n        do {\n            if (stop) {\n                break;\n            }\n            return 18;\n        } while (again);\n        return 19;\n    }\n\n    public static void conditionNeverFinishesWithElse()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void iterableNeverFinishes()\n    {\n        for (const item of global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static void whileConditionNeverFinishes()\n    {\n        while (global.exit(1)) {\n            global.printf(\"never\");\n        }\n        global.printf(\"after\");\n    }\n\n    public static void forConditionNeverFinishes()\n    {\n        for (int step = 0; global.exit(1); step++) {\n            global.printf(\"never\");\n        }\n        global.printf(\"after\");\n    }\n\n    public static void exitInForOfBody(List<int> items)\n    {\n        for (const item of items) {\n            global.exit(1);\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static void exitInWhileBody(bool again)\n    {\n        while (again) {\n            global.exit(1);\n            global.printf(\"never\");\n        }\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Flow\n{\n    public static function afterReturn(): int\n    {\n        return 1;\n        return 2;\n    }\n}\n";
 
     assert_eq!(
@@ -1938,6 +1981,12 @@ fn a_statement_that_can_never_run_is_refused() {
             "85:9 unevaluated-code This statement never runs, because line 82 ends the block. | Delete it, or move it above line 82.",
             "135:13 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `if`.",
             "144:28 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `for`.",
+            "151:16 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `while`.",
+            "154:9 unevaluated-code This statement never runs, because line 151 ends the block. | Delete it, or move it above line 151.",
+            "159:28 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `for`.",
+            "162:9 unevaluated-code This statement never runs, because line 159 ends the block. | Delete it, or move it above line 159.",
+            "169:13 unevaluated-code This statement never runs, because line 168 ends the block. | Delete it, or move it above line 168.",
+            "177:13 unevaluated-code This statement never runs, because line 176 ends the block. | Delete it, or move it above line 176.",
         ]
     );
     assert_eq!(
@@ -2118,7 +2167,7 @@ fn an_int_where_a_float_is_expected_is_refused_in_every_place_with_its_code() {
 /// the cast would bind to less than all of it. A value written over several lines is quoted on one line.
 #[test]
 fn an_int_where_a_float_is_expected_is_refused_with_the_fix_for_the_code_written() {
-    let sharp = "namespace Demo;\n\nclass Line\n{\n    public int quantity = 1;\n}\n\nclass Report\n{\n    private Line line;\n\n    public Report(Line line) { this.line = line; }\n\n    public int size() => 4;\n\n    public float zero() => 0;\n    public float negative() => -3;\n    public float million() => 1_000_000;\n    public float hex() => 0x1F;\n    public float local(int count) => count;\n    public float chain() => this.line.quantity;\n    public float call() => this.size();\n    public float sum(int a, int b) => a + b;\n    public float difference(int a, int b) => (a - b);\n    public float largest() => PHP_INT_MAX;\n    public float negated(int count) => -count;\n    public float chosen(bool flag) => flag ? 3 : 2.0;\n    public float fallback(int? n) => n ?? 0;\n    public float matched(int n) => match (n) {\n        1 => 10,\n        default => 20,\n    };\n}\n";
+    let sharp = "namespace Demo;\n\nclass Line\n{\n    public int quantity = 1;\n}\n\nclass Report\n{\n    private Line line;\n\n    public Report(Line line) { this.line = line; }\n\n    public int size() => 4;\n\n    public float zero() => 0;\n    public float negative() => -3;\n    public float million() => 1_000_000;\n    public float hex() => 0x1F;\n    public float local(int count) => count;\n    public float chain() => this.line.quantity;\n    public float call() => this.size();\n    public float sum(int a, int b) => a + b;\n    public float difference(int a, int b) => (a - b);\n    public float largest() => global.PHP_INT_MAX;\n    public float negated(int count) => -count;\n    public float chosen(bool flag) => flag ? 3 : 2.0;\n    public float fallback(int? n) => n ?? 0;\n    public float matched(int n) => match (n) {\n        1 => 10,\n        default => 20,\n    };\n}\n";
 
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[]),
@@ -2132,7 +2181,7 @@ fn an_int_where_a_float_is_expected_is_refused_with_the_fix_for_the_code_written
             "22:28 invalid-return-statement `int` is not `float`: convert with (float) this.size() | Declared `float`.",
             "23:39 invalid-return-statement `int` is not `float`: convert with (float) (a + b) | Declared `float`.",
             "24:46 invalid-return-statement `int` is not `float`: convert with (float) (a - b) | Declared `float`.",
-            "25:31 invalid-return-statement `int` is not `float`: convert with (float) PHP_INT_MAX | Declared `float`.",
+            "25:31 invalid-return-statement `int` is not `float`: convert with (float) global.PHP_INT_MAX | Declared `float`.",
             "26:40 invalid-return-statement `int` is not `float`: convert with (float) -count | Declared `float`.",
             "27:39 invalid-return-statement `int` is not `float`: convert with (float) (flag ? 3 : 2.0) | Declared `float`.",
             "28:38 invalid-return-statement `int` is not `float`: convert with (float) (n ?? 0) | Declared `float`.",

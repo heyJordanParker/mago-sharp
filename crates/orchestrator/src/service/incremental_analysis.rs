@@ -3220,7 +3220,9 @@ mod tests {
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
         assert_eq!(
             impure_getters(&service),
-            ["Getter `total` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Getters must be pure."]
+            [
+                "Getter `total` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Getters must be pure."
+            ]
         );
         assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
         assert_matches_full(&service, &db, "Order.price calls now");

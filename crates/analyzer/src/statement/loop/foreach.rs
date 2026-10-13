@@ -185,6 +185,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Foreach<'arena> {
             artifacts,
             false,
             always_enters_loop,
+            "for",
         )?;
 
         let refined_entry = if let Some((iterator_id, key_id, value_id, entry_id, original_entry_type)) = foreach_entry

@@ -10,15 +10,15 @@ import Lib.HasLabel;
 public class Report
 {
     public const int MAX = 3;
-    protected const LIMIT = PHP_INT_MAX - 1;
+    protected const LIMIT = global.PHP_INT_MAX - 1;
     protected const int NEXT = Calc.MAX + 1;
     private const string? NAME = "report";
     private static int made = 0;
     public static string? last { get; private set; } = "none";
     [Field] private int count = 0;
-    protected float rate = 2.5 * -PHP_INT_MAX;
+    protected float rate = 2.5 * -global.PHP_INT_MAX;
     private string label;
-    [Field(label: "Views", limit: PHP_INT_MAX)] public int views { get; private set; } = 0;
+    [Field(label: "Views", limit: global.PHP_INT_MAX)] public int views { get; private set; } = 0;
     public string name { get; set; }
     public int id { get; }
     private Calc calc = new Calc(Calc.make(), rate: 2);
@@ -76,7 +76,7 @@ public class Report
         return Report.part(first: extra, second: 2) + this.scale(rate) + this.count;
     }
 
-    public static int part(int first, int second = 2 * 3 - -1, int limit = PHP_INT_MAX)
+    public static int part(int first, int second = 2 * 3 - -1, int limit = global.PHP_INT_MAX)
     {
         return first * second;
     }
@@ -360,7 +360,7 @@ enum Rank : int
 {
     case Ace = 1;
     case Two = 1 + 1;
-    case Top = PHP_INT_MAX;
+    case Top = global.PHP_INT_MAX;
 }
 
 abstract class Shape

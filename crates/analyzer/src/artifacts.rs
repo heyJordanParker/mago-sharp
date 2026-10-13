@@ -94,6 +94,8 @@ pub struct AnalysisArtifacts {
     pub effect_summaries: Vec<EffectSummary>,
     /// What each PHP# call runs, keyed by the call's span.
     pub(crate) call_targets: HashMap<(u32, u32), Vec<CallTarget>>,
+    /// The full name of the plain PHP constant each PHP# read through a namespace reaches, keyed by the read's span.
+    pub(crate) namespace_constants: HashMap<(u32, u32), Word>,
     /// The function values the analysis gave places whose function types list effects, until the body that gives them
     /// records its summary.
     pub(crate) function_values: Vec<FunctionValue>,
@@ -135,6 +137,7 @@ impl AnalysisArtifacts {
             body_returns: HashMap::default(),
             effect_summaries: Vec::new(),
             call_targets: HashMap::default(),
+            namespace_constants: HashMap::default(),
             function_values: Vec::new(),
             variable_definedness: HashMap::default(),
             variable_definedness_targets: None,
@@ -306,6 +309,20 @@ impl AnalysisArtifacts {
         if !recorded.contains(&target) {
             recorded.push(target);
         }
+    }
+
+    /// The full name of the plain PHP constant the PHP# read `read` reaches through its namespace, as `global.PHP_EOL`
+    /// and `Pdf.DEFAULT_DPI` read one, spec section 23. None for any other read.
+    pub fn get_namespace_constant<T>(&self, read: &T) -> Option<Word>
+    where
+        T: HasSpan,
+    {
+        self.namespace_constants.get(&get_expression_range(read)).copied()
+    }
+
+    /// Records that the PHP# read at `span` reaches the plain PHP constant `constant`.
+    pub(crate) fn record_namespace_constant(&mut self, span: Span, constant: Word) {
+        self.namespace_constants.insert((span.start.offset, span.end.offset), constant);
     }
 
     /// Get the type of expression `expression`.

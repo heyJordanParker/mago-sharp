@@ -23,6 +23,7 @@ use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
 use mago_span::HasPosition;
+use mago_syntax::cst::Identifier;
 use mago_syntax_core::utils::is_part_of_identifier;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -748,4 +749,34 @@ where
     T: HasPosition,
 {
     context.resolved_names.is_imported(name) && !context.codebase.class_like_exists(full_name.as_bytes())
+}
+
+/// The namespace whose plain PHP function or constant the PHP# `name.member` names, spec section 23: PHP's root
+/// namespace, the empty word, for `global`, and the namespace `name` resolves to when the file imports it, or when
+/// that namespace has a function or a constant `member`, as long as no class has the namespace's name. None when
+/// `name` is a class.
+#[must_use]
+pub(crate) fn member_namespace<A>(context: &Context<'_, '_, A>, name: &Identifier<'_>, member: &[u8]) -> Option<Word>
+where
+    A: Arena,
+{
+    if name.value() == b"global" {
+        return Some(word(""));
+    }
+
+    let namespace = word(context.resolved_names.get(name));
+    let full_name = namespace_member(namespace, member);
+    let names_member = context.codebase.function_exists(full_name.as_bytes())
+        || context.codebase.constant_exists(full_name.as_bytes());
+
+    ((is_imported_namespace(context, name, namespace) || names_member)
+        && !context.codebase.class_like_exists(namespace.as_bytes()))
+    .then_some(namespace)
+}
+
+/// The full name of the function or constant `member` of `namespace`, which [`member_namespace`] found: the bare
+/// name in PHP's root namespace.
+#[must_use]
+pub(crate) fn namespace_member(namespace: Word, member: &[u8]) -> Word {
+    if namespace.is_empty() { word(member) } else { word([namespace.as_bytes(), b"\\", member].concat()) }
 }

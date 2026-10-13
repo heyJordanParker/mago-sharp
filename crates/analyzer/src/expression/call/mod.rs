@@ -231,6 +231,16 @@ where
         .map(|receiver| block_context.get_class_type_relation_sources(receiver))
         .filter(|variables| !variables.is_empty());
 
+    // A loop's first pass can infer `never` for a call that returns, so a call inferred as `never` ends no block inside
+    // a loop. A function declared to return `never`, as PHP's `exit` is, never returns in any pass, so in a `.sharp`
+    // file it ends its block inside a loop too, and spec section 7 refuses the code after it.
+    let declared_never = context.dialect.is_sharp()
+        && !invocation_targets.is_empty()
+        && invocation_targets.iter().all(|target| {
+            matches!(target, InvocationTarget::FunctionLike { metadata, .. }
+                if metadata.return_type_declaration_metadata.as_ref().is_some_and(|declared| declared.type_union.is_never()))
+        });
+
     let mut resulting_type = None;
     let mut all_targets_non_nullable_return = !invocation_targets.is_empty();
     for target in invocation_targets {
@@ -362,7 +372,7 @@ where
         resulting_type,
     );
 
-    if resulting_type.is_never() && !block_context.flags.inside_loop() {
+    if resulting_type.is_never() && (declared_never || !block_context.flags.inside_loop()) {
         artifacts.set_expression_type(&call_span, resulting_type);
 
         block_context.flags.set_has_returned(true);

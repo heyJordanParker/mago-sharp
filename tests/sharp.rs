@@ -297,7 +297,7 @@ const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    pu
 const TYPE_CLASSES: [(&str, &str); 3] = [
     (
         "Int",
-        "namespace Sharp;\n\nimport ValueError;\n\npublic static class Int\n{\n    public static int parse(Any? value)\n    {\n        const number = Int.tryParse(value);\n        if (number is int) {\n            return number;\n        }\n        throw new ValueError(\"Sharp\\\\Int::parse(): Argument #1 ($value) must hold an int\");\n    }\n\n    public static int? tryParse(Any? value)\n    {\n        return (value is string text) ? global.filter_var(text, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE) : null;\n    }\n}\n",
+        "namespace Sharp;\n\nimport ValueError;\n\npublic static class Int\n{\n    public static int parse(Any? value)\n    {\n        const number = Int.tryParse(value);\n        if (number is int) {\n            return number;\n        }\n        throw new ValueError(\"Sharp\\\\Int::parse(): Argument #1 ($value) must hold an int\");\n    }\n\n    public static int? tryParse(Any? value)\n    {\n        return (value is string text) ? global.filter_var(text, global.FILTER_VALIDATE_INT, global.FILTER_NULL_ON_FAILURE) : null;\n    }\n}\n",
     ),
     (
         "Float",
@@ -305,7 +305,7 @@ const TYPE_CLASSES: [(&str, &str); 3] = [
     ),
     (
         "Bool",
-        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => global.filter_var(value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);\n}\n",
+        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => global.filter_var(value, global.FILTER_VALIDATE_BOOLEAN, global.FILTER_NULL_ON_FAILURE);\n}\n",
     ),
 ];
 
@@ -323,15 +323,15 @@ const WRAPPERS: [(&str, &str); 5] = [
     ),
     (
         "Net/Email",
-        "namespace Sharp.Net;\n\npublic static class Email\n{\n    public static bool isValid(string address) => global.filter_var(address, FILTER_VALIDATE_EMAIL) is string;\n}\n",
+        "namespace Sharp.Net;\n\npublic static class Email\n{\n    public static bool isValid(string address) => global.filter_var(address, global.FILTER_VALIDATE_EMAIL) is string;\n}\n",
     ),
     (
         "Net/Ip",
-        "namespace Sharp.Net;\n\npublic static class Ip\n{\n    public static bool isValid(string address) => global.filter_var(address, FILTER_VALIDATE_IP) is string;\n}\n",
+        "namespace Sharp.Net;\n\npublic static class Ip\n{\n    public static bool isValid(string address) => global.filter_var(address, global.FILTER_VALIDATE_IP) is string;\n}\n",
     ),
     (
         "Net/Url",
-        "namespace Sharp.Net;\n\npublic static class Url\n{\n    public static bool isValid(string url) => global.filter_var(url, FILTER_VALIDATE_URL) is string;\n}\n",
+        "namespace Sharp.Net;\n\npublic static class Url\n{\n    public static bool isValid(string url) => global.filter_var(url, global.FILTER_VALIDATE_URL) is string;\n}\n",
     ),
 ];
 
@@ -722,7 +722,7 @@ fn compile_accepts_a_class_that_renames_an_import_to_keep_the_short_name_free() 
 fn analyze_names_four_methods_that_replace_a_function_in_the_order_the_table_lists_them() {
     assert_eq!(
         page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public bool valid(string address) => filter_var(address, FILTER_VALIDATE_EMAIL) is string;\n}\n"
+            "namespace App;\n\npublic class Page\n{\n    public bool valid(string address) => filter_var(address, global.FILTER_VALIDATE_EMAIL) is string;\n}\n"
         ),
         [
             "src/App/Page.sharp:5:42:error - wrapped-function: `filter_var` is wrapped by the standard library: write `Bool.tryParse(…)`, `Email.isValid(…)`, `Ip.isValid(…)` or `Url.isValid(…)`. Add `import Sharp.Net.Email;`, `import Sharp.Net.Ip;` and `import Sharp.Net.Url;` to the file."
@@ -1387,6 +1387,48 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
 
     assert_eq!(output.status.code(), Some(0), "{printed}");
     assert!(root.join(".sharp/app/Shop/Stop.sharpc").exists());
+}
+
+/// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads
+/// `global.PHP_EOL`, `global.STDERR` and a library's constant. A read that reaches no constant is refused with status
+/// 1, never a panic: a function read without a call, a root constant that does not exist, and a name that is no class
+/// and no namespace.
+#[test]
+fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches_none() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"lib\"]\n");
+    write(
+        root,
+        "lib/Pdf.php",
+        "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n",
+    );
+    write(
+        root,
+        "app/Shop/Reads.sharp",
+        "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Reads\n{\n    public static string line(string text) => text + global.PHP_EOL;\n\n    public static Any? errors() => global.STDERR;\n\n    public static int dpi() => Pdf.DEFAULT_DPI;\n}\n",
+    );
+
+    let output = run(root, "compile", &[]);
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    assert_eq!(output.status.code(), Some(0), "{printed}");
+    assert!(root.join(".sharp/app/Shop/Reads.sharpc").exists());
+
+    for read in ["global.strlen", "global.NOPE", "Pdf.render", "Nope.render"] {
+        write(
+            root,
+            "app/Shop/Reads.sharp",
+            &format!(
+                "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Reads\n{{\n    public static Any? read() => {read};\n}}\n"
+            ),
+        );
+
+        let output = run(root, "compile", &[]);
+        let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+        assert_eq!(output.status.code(), Some(1), "{read}: {printed}");
+    }
 }
 
 /// Spec section 28's `app/Shared/Money.sharp`, whose law holds over its pure `add`.

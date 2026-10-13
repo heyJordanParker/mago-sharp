@@ -1748,6 +1748,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_NEW, 0, line, &[class, arguments])
             }
+            // `global.PHP_EOL` and `Pdf.DEFAULT_DPI` read the plain PHP constant the checker found, spec section 23.
+            Expression::Access(Access::Property(_))
+                if let Some(constant) = self.types.namespace_constant(expression) =>
+            {
+                let constant = self.string(ZEND_NAME_FQ, line, constant.as_bytes());
+
+                self.node(SHARP_AST_CONST, 0, line, &[constant])
+            }
             // `Class.y`, and `y` read through a class value, is the fetch of the member the checker found on the class:
             // a constant or enum case, a static property, or a static method as a first-class callable.
             Expression::Access(Access::Property(access)) => match self.names.static_property_class(access) {

@@ -45,8 +45,8 @@ use crate::utils::names::display_atomic;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
 use crate::utils::names::display_type;
-use crate::utils::names::is_imported_namespace;
-use crate::utils::names::namespace_function;
+use crate::utils::names::member_namespace;
+use crate::utils::names::namespace_member;
 use crate::utils::names::sharp_code_class_name;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
@@ -133,18 +133,9 @@ where
     let ClassLikeMemberSelector::Identifier(member) = &call.method else {
         return None;
     };
-    if name.name.value() == b"global" {
-        return Some(word(member.value));
-    }
+    let namespace = member_namespace(context, &name.name, member.value)?;
 
-    let namespace = word(context.resolved_names.get(&name.name));
-    if !is_imported_namespace(context, &name.name, namespace)
-        && namespace_function(context.codebase, namespace, word(member.value)).is_none()
-    {
-        return None;
-    }
-
-    Some(word([namespace.as_bytes(), b"\\", member.value].concat()))
+    Some(namespace_member(namespace, member.value))
 }
 
 /// Analyzes `Name.member(…)` as a call of the plain PHP function `function`, which [`namespace_function_name`] found.

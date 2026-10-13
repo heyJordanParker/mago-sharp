@@ -2385,14 +2385,14 @@ fn method_modifiers_become_the_method_flags() {
 }
 
 /// ```php
-/// public function make(\Lib\Calc $other, float $rate = 1.5, int $loud = PHP_DEBUG): \Lib\Calc {}
+/// public function make(\Lib\Calc $other, float $rate = 1.5, int $loud = \PHP_DEBUG): \Lib\Calc {}
 /// ```
 ///
-/// A class type is its full name with `ZEND_NAME_FQ`, which is 0.
+/// A class type and PHP's constant are each their full name with `ZEND_NAME_FQ`, which is 0.
 #[test]
 fn parameters_carry_their_type_name_and_default() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public Calc make(Calc other, float rate = 1.5, int loud = PHP_DEBUG) { return other; }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public Calc make(Calc other, float rate = 1.5, int loud = global.PHP_DEBUG) { return other; }\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
     let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
@@ -2419,7 +2419,7 @@ fn parameters_carry_their_type_name_and_default() {
                 ZVAL [1] "int"
                 ZVAL "loud"
                 CONST
-                  ZVAL [1] "PHP_DEBUG"
+                  ZVAL "PHP_DEBUG"
                 null
                 null
                 null
@@ -7052,7 +7052,7 @@ fn typeof_in_an_attribute_argument_is_the_class_name() {
 
 /// ```php
 /// public const int MAX = 3;
-/// protected const LIMIT = PHP_INT_MAX - 1;
+/// protected const LIMIT = \PHP_INT_MAX - 1;
 /// ```
 ///
 /// A constant is a class constant group of one constant, as php-src's grammar builds it: the constant list, no
@@ -7060,7 +7060,7 @@ fn typeof_in_an_attribute_argument_is_the_class_name() {
 #[test]
 fn a_class_constant_is_a_class_constant_group_of_one_constant() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = PHP_INT_MAX - 1;\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = global.PHP_INT_MAX - 1;\n}\n",
     );
     let class = lowered.child(lowered.root(), 2);
 
@@ -7082,7 +7082,7 @@ fn a_class_constant_is_a_class_constant_group_of_one_constant() {
                     ZVAL "LIMIT"
                     BINARY_OP [2]
                       CONST
-                        ZVAL [1] "PHP_INT_MAX"
+                        ZVAL "PHP_INT_MAX"
                       ZVAL 1
                     null
                 null
@@ -9779,16 +9779,24 @@ fn parentheses_only_group() {
 
 /// ```php
 /// {
-///     $inner = PHP_INT_MAX;
+///     $inner = \PHP_INT_MAX;
+///     $own = LIMIT;
 /// }
 /// ```
 ///
-/// `[1]` on the constant's name is `ZEND_NAME_NOT_FQ`: like PHP, the engine looks the constant up in the namespace,
-/// then globally.
+/// `global.PHP_INT_MAX` names PHP's constant by its full name, `ZEND_NAME_FQ`, which is 0, spec section 23. A bare
+/// name is the code's own constant, and `[1]` on its name is `ZEND_NAME_NOT_FQ`: the engine looks it up in the
+/// file's namespace.
 #[test]
-fn a_block_is_a_statement_list_and_a_constant_is_looked_up_by_its_short_name() {
+fn a_block_is_a_statement_list_and_a_constant_is_looked_up_by_the_name_it_is_read_by() {
+    let limit = ("src/App/Tenant/constants.php", "<?php\n\nnamespace App\\Tenant;\n\nconst LIMIT = 3;\n");
+
     assert_eq!(
-        body("        {\n            let inner = PHP_INT_MAX;\n        }\n        return 1;\n"),
+        body_in(
+            RUN,
+            "        {\n            let inner = global.PHP_INT_MAX;\n            let own = LIMIT;\n        }\n        return 1;\n",
+            &[limit]
+        ),
         indoc! {r#"
             STMT_LIST
               STMT_LIST
@@ -9796,7 +9804,12 @@ fn a_block_is_a_statement_list_and_a_constant_is_looked_up_by_its_short_name() {
                   VAR
                     ZVAL "inner"
                   CONST
-                    ZVAL [1] "PHP_INT_MAX"
+                    ZVAL "PHP_INT_MAX"
+                ASSIGN
+                  VAR
+                    ZVAL "own"
+                  CONST
+                    ZVAL [1] "LIMIT"
               RETURN
                 ZVAL 1
         "#}
@@ -10471,6 +10484,34 @@ fn a_call_through_a_namespace_is_a_call_of_its_plain_php_function() {
 }
 
 /// ```php
+/// return \Vendor\Pdf\DEFAULT_DPI + \PHP_INT_SIZE;
+/// ```
+///
+/// Spec section 23 reads a plain PHP constant through its namespace, as it calls a function: `Pdf.DEFAULT_DPI` after
+/// `import Vendor.Pdf;`, and `global.PHP_INT_SIZE` from PHP's root namespace. Each is a read of the constant by its
+/// full name, with `ZEND_NAME_FQ`, which is 0.
+#[test]
+fn a_read_through_a_namespace_is_a_read_of_its_plain_php_constant() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public int run()\n    {\n        return Pdf.DEFAULT_DPI + global.PHP_INT_SIZE;\n    }\n}\n",
+        &[("src/Vendor/Pdf/constants.php", "<?php namespace Vendor\\Pdf; const DEFAULT_DPI = 300;")],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [1]
+                  CONST
+                    ZVAL "Vendor\\Pdf\\DEFAULT_DPI"
+                  CONST
+                    ZVAL "PHP_INT_SIZE"
+        "#}
+    );
+}
+
+/// ```php
 /// return \run($extra);
 /// ```
 ///
@@ -10863,7 +10904,7 @@ fn a_template_over_several_lines_keeps_the_line_of_each_part() {
 ///     {
 ///     }
 ///
-///     #[\Lib\Entity(true, PHP_INT_MAX)]
+///     #[\Lib\Entity(true, \PHP_INT_MAX)]
 ///     public function run(#[\Lib\Field] int $extra): void
 ///     {
 ///     }
@@ -10876,7 +10917,7 @@ fn a_template_over_several_lines_keeps_the_line_of_each_part() {
 #[test]
 fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Field;\nimport Lib.Entity;\n\n[Entity(label: \"Orders\", order: 2 * 3), Searchable]\n[Entity(null)]\nclass Report\n{\n    [Field] private int count = 0;\n\n    public Report([Field(-1.5)] public int total { get; })\n    {\n    }\n\n    [Entity(true, PHP_INT_MAX)]\n    public void run([Field] int extra)\n    {\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Field;\nimport Lib.Entity;\n\n[Entity(label: \"Orders\", order: 2 * 3), Searchable]\n[Entity(null)]\nclass Report\n{\n    [Field] private int count = 0;\n\n    public Report([Field(-1.5)] public int total { get; })\n    {\n    }\n\n    [Entity(true, global.PHP_INT_MAX)]\n    public void run([Field] int extra)\n    {\n    }\n}\n",
         &[common::FIELD, common::ENTITY, common::SEARCHABLE],
     );
 
@@ -10942,7 +10983,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
                         ARG_LIST
                           ZVAL true
                           CONST
-                            ZVAL [1] "PHP_INT_MAX"
+                            ZVAL "PHP_INT_MAX"
               ATTRIBUTE_LIST
                 ATTRIBUTE_GROUP
                   ATTRIBUTE
@@ -12300,10 +12341,10 @@ fn a_form_that_reads_its_slots_in_order_first_inlines_with_any_arguments() {
     );
 }
 
-/// `Sharp\Padding` at the standard library's path, with a method whose body reads the global constant `STR_PAD_LEFT`.
+/// `Sharp\Padding` at the standard library's path, with a method whose body reads PHP's constant `STR_PAD_LEFT`.
 const PADDING: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Padding.sharp",
-    "namespace Sharp;\n\npublic class Padding\n{\n    public static string left(string text, int width) => global.str_pad(text, width, \" \", STR_PAD_LEFT);\n\n    public static string after(string text, int start) => global.substr(text, start, null);\n}\n",
+    "namespace Sharp;\n\npublic class Padding\n{\n    public static string left(string text, int width) => global.str_pad(text, width, \" \", global.STR_PAD_LEFT);\n\n    public static string after(string text, int start) => global.substr(text, start, null);\n}\n",
 );
 
 /// The statements of `run`, declared with `signature` and holding `statements` in a class of `namespace` that imports
@@ -12320,8 +12361,8 @@ fn padded_body(namespace: &str, signature: &str, statements: &str) -> String {
 /// return \str_pad($name, 4, ' ', \STR_PAD_LEFT);
 /// ```
 ///
-/// A form may read a global constant, as it reads a literal. The form is copied out of the standard library file's
-/// namespace, so it names the constant by its full name, `ZEND_NAME_FQ`, which is 0.
+/// A form may read PHP's constant through `global`, as it reads a literal. `global.STR_PAD_LEFT` names the constant by
+/// its full name, `ZEND_NAME_FQ`, which is 0, so the copy of the form in the caller's namespace reads the same one.
 #[test]
 fn a_form_that_reads_a_global_constant_names_it_by_its_full_name() {
     assert_eq!(
@@ -12393,15 +12434,18 @@ fn a_form_that_reads_a_global_constant_inlines_the_same_tree_in_any_namespace() 
 }
 
 /// ```php
-/// return \str_pad($name, PHP_INT_SIZE, ' ', \STR_PAD_LEFT);
+/// return \str_pad($name, WIDTH, ' ', \STR_PAD_LEFT);
 /// ```
 ///
-/// A constant the caller passes keeps the caller's short name, `[1]` `ZEND_NAME_NOT_FQ`, which the engine looks up
-/// in the caller's namespace first, as the caller wrote it. Only the form's own constant takes its full name.
+/// A constant of its own the caller passes keeps the caller's short name, `[1]` `ZEND_NAME_NOT_FQ`, which the engine
+/// looks up in the caller's namespace, as the caller wrote it. The form's PHP constant keeps its full name.
 #[test]
 fn a_constant_the_caller_passes_keeps_its_short_name_beside_the_forms_full_name() {
+    let width = ("src/App/Tenant/constants.php", "<?php\n\nnamespace App\\Tenant;\n\nconst WIDTH = 4;\n");
+    let code = "namespace App.Tenant;\n\nimport Sharp.Padding;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return Padding.left(name, WIDTH);\n    }\n}\n";
+
     assert_eq!(
-        padded_body("App.Tenant", "string run(string name)", "        return Padding.left(name, PHP_INT_SIZE);\n"),
+        Lowered::inlining(code, &[width], &[PADDING]).body(),
         indoc! {r#"
             STMT_LIST
               RETURN
@@ -12411,7 +12455,7 @@ fn a_constant_the_caller_passes_keeps_its_short_name_beside_the_forms_full_name(
                     VAR
                       ZVAL "name"
                     CONST
-                      ZVAL [1] "PHP_INT_SIZE"
+                      ZVAL [1] "WIDTH"
                     ZVAL " "
                     CONST
                       ZVAL "STR_PAD_LEFT"

@@ -39,6 +39,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for For<'arena> {
             self.body.statements(),
             self.span(),
             infinite_loop,
+            "for",
         )?;
 
         // The last condition decides whether the loop runs again, and any before it runs only for its effect.

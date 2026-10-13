@@ -110,6 +110,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for DoWhile<'arena> {
             artifacts,
             true,
             true,
+            "do … while",
         )?;
 
         loop_block_context.loop_bounds = previous_loop_bounds;
