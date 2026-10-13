@@ -1478,7 +1478,25 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // `typeof(X)` is `X::class`, which PHP takes as a constant expression too.
         (Node::Expression(Expression::TypeOf(_)) | Node::TypeOf(_), Body | Constant) => Some(place),
-        // The parser builds a class with type arguments only before `.`, as `Counter<Order>.count`.
+        // The parser builds a class with type arguments only before `.`, as `Counter<Order>.count`. Only a class takes
+        // them, so a type parameter, a local or a constant written so is refused, as C# refuses it (CS0307).
+        (Node::GenericClass(generic_class), Body)
+            if let Expression::ConstantAccess(class) = generic_class.class
+                && context.names.binding(&class.name) != Some(Binding::Class) =>
+        {
+            let name = BytesDisplay(class.name.value());
+            let message = if context.names.is_type_parameter(&class.name) {
+                format!("A type parameter takes no type arguments: write `{name}`.")
+            } else {
+                format!("`{name}` is not a class, so it takes no type arguments.")
+            };
+            context.report(
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(generic_class.type_arguments.span()).with_message("Written here.")),
+            );
+
+            None
+        }
         (Node::Expression(Expression::GenericClass(_)) | Node::GenericClass(_), Body) => Some(Body),
         (Node::ConstantAccess(constant), Constant)
             if context.names.binding(&constant.name) == Some(Binding::Constant) =>
@@ -3050,8 +3068,8 @@ fn report_type_argument_in_constant(span: Span, context: &mut Context<'_, '_, '_
     );
 }
 
-/// Refuses `refused`, a type test or an expression that reads a type argument while the code runs, which R3 compiles,
-/// named as the code writes it.
+/// Refuses `refused`, an expression that reads a type argument while the code runs and that the engine can't run yet,
+/// named as the code writes it: `new TItem.of(…)`, a named constructor of a type parameter.
 fn report_type_argument_read(span: Span, refused: &str, context: &mut Context<'_, '_, '_>) {
     context.report(
         Issue::error(format!("{refused} is not supported yet in PHP#."))
@@ -3082,8 +3100,8 @@ fn static_member_use(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> Option<S
     }
 }
 
-/// The refusal of PHP#'s `Self` at `span` in a constant of a generic class, as a type or in `new Self(…)`: `Self`
-/// carries the class's type parameters, which no constant names.
+/// The refusal of PHP#'s `Self` at `span` in a constant's type in a generic class: `Self` carries the class's type
+/// parameters, which no constant names. A constant's value writes no `new`, so `new Self(…)` never reaches here.
 fn static_self_use(span: Span, context: &Context<'_, '_, '_>) -> Option<String> {
     let class = static_member_class(span, context)?;
     let names: Vec<String> = class
@@ -3461,11 +3479,6 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
                     .with_annotation(Annotation::primary(type_arguments.span()).with_message("Written here."))
                     .with_help(format!("Write `new {name}(…)`.")),
             );
-        }
-        Expression::Self_(keyword) if let Some(refusal) = static_self_use(keyword.span, context) => {
-            report_static_member_use(keyword.span, refusal, context);
-
-            return Some(Place::Instantiation);
         }
         Expression::Self_(_) if let Some(type_arguments) = &instantiation.type_arguments => {
             context.report(

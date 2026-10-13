@@ -573,6 +573,7 @@ where
                     &source_type,
                     source_expression,
                     target_expression_id,
+                    false,
                 )?,
                 None => property_assignment::analyze(
                     context,
@@ -594,6 +595,7 @@ where
             &source_type,
             source_expression,
             target_expression_id,
+            false,
         )?,
         Expression::ArrayAccess(array_access) => {
             array_assignment::analyze(

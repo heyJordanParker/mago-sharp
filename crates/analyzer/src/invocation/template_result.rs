@@ -33,6 +33,8 @@ use crate::invocation::InvocationTarget;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::template_inference::infer_templates_for_method_call;
 use crate::statement::function_like::check_template_arguments;
+use crate::statement::function_like::known_type_or_error;
+use crate::statement::function_like::report_undefined_types;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_hint_type_arguments;
 use crate::utils::names::display_class_like_name;
@@ -337,7 +339,8 @@ pub fn seed_method_type_arguments<'ctx, A>(
 }
 
 /// Converts the type arguments PHP# writes on `new` or a method call with the caller's type parameters in scope,
-/// reports each as a type a body writes, then reports them unless they fit the `templates` that `owner` declares at
+/// reports each as a type a body writes, a type it names that does not exist included, which then has the error type,
+/// then reports them unless they fit the `templates` that `owner` declares at
 /// `owner_span`, and seeds each into
 /// `template_result` as the shallowest bound of its template, so it wins over inference from the arguments as a
 /// receiver's type arguments do. Returns the type arguments when their number fits.
@@ -359,8 +362,10 @@ where
         .iter()
         .map(|argument| {
             report_hint_type_arguments(context, block_context, artifacts, argument);
+            let argument_type = get_type_from_hint(context, block_context, artifacts, argument);
+            report_undefined_types(context, &argument_type, argument.span());
 
-            get_type_from_hint(context, block_context, artifacts, argument)
+            known_type_or_error(argument_type)
         })
         .collect();
 

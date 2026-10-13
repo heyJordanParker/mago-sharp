@@ -58,6 +58,7 @@ use crate::invocation::template_result::seed_type_arguments;
 use crate::resolver::class_name::ResolutionOrigin;
 use crate::resolver::class_name::ResolvedClassname;
 use crate::resolver::class_name::class_value_class;
+use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::statement::function_like::get_this_type;
 use crate::utils::names::display_class_like_name;
@@ -197,7 +198,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
 
 /// `Counter<Order>` read as an expression, before `.count` or `.reset()`, spec section 11: its type is the class with
 /// the type arguments, reported unless they fit its type parameters, as `new` reports them. A static member read through
-/// it takes them from that type.
+/// it takes them from that type. A class that does not exist is reported here, as `typeof` of one is. The checker
+/// refuses type arguments after a name that is not a class's, so that has the error type, and nothing reports again.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for GenericClass<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -208,6 +210,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for GenericClass<'arena> {
     where
         A: Arena,
     {
+        if !matches!(self.class, Expression::ConstantAccess(class)
+            if context.resolved_names.binding(&class.name) == Some(Binding::Class))
+        {
+            artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+            return Ok(());
+        }
+
         let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
         let class_type = match classnames.as_slice() {
             [ResolvedClassname { fqcn: Some(fqcn), .. }]
@@ -230,7 +240,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for GenericClass<'arena> {
                     type_arguments,
                 ))))
             }
-            _ => get_never(),
+            [ResolvedClassname { fqcn: Some(fqcn), .. }] => {
+                report_non_existent_class_like(context, self.class.span(), *fqcn);
+
+                TUnion::from_atomic(TAtomic::Error)
+            }
+            _ => unreachable!("a name bound as a class resolves to the one class it names"),
         };
         artifacts.set_expression_type(self, class_type);
 

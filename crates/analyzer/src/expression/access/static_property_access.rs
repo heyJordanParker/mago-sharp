@@ -2,9 +2,11 @@ use mago_allocator::Arena;
 use std::rc::Rc;
 
 use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_null;
+use mago_codex::ttype::union::TUnion;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::StaticPropertyAccess;
 use mago_word::word;
@@ -14,6 +16,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::record_statics_type_arguments;
 use crate::resolver::static_property::resolve_static_properties;
@@ -65,7 +68,13 @@ where
         return Ok(());
     }
 
-    let resolution_result = resolve_static_properties(context, block_context, artifacts, access, false)?;
+    let resolution_result = resolve_static_properties(context, block_context, artifacts, access, false, false)?;
+    // A refused class, as `Missing<Order>`, reported itself, so what its member gives reports nothing again.
+    if artifacts.get_expression_type(access.class).is_some_and(is_refused_type) {
+        artifacts.set_expression_type(&access.span, TUnion::from_atomic(TAtomic::Error));
+
+        return Ok(());
+    }
 
     let mut resulting_expression_type = None;
     if !resolution_result.has_error_path {

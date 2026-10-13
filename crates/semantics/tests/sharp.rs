@@ -4254,11 +4254,12 @@ fn a_type_argument_of_a_bound_is_never_void() {
 
 /// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
 /// interface or a type parameter, a class value may carry its type arguments, a type argument is never `void`, and a
-/// type parameter takes no type arguments. The analyzer checks a generic class's arity and bounds, and refuses a class
-/// value as a `Map` key as it refuses one in a `Map` literal.
+/// type parameter takes no type arguments, nor does a local before `.`: only a class takes them there. The analyzer
+/// checks a generic class's arity and bounds, and refuses a class value as a `Map` key as it refuses one in a `Map`
+/// literal.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
-    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Order?, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Order?, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        const count = TItem<int>.count;\n        const read = type<int>.count;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -4269,7 +4270,9 @@ fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_tak
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
             "18:43 A type argument cannot be `void`: `void` is only a return type.",
             "19:33 A type parameter takes no type arguments: write `typeof(TItem)`.",
-            "23:29 A type parameter takes no type arguments: write `TItem`.",
+            "20:28 A type parameter takes no type arguments: write `TItem`.",
+            "21:26 `type` is not a class, so it takes no type arguments.",
+            "25:29 A type parameter takes no type arguments: write `TItem`.",
         ]
     );
 }
@@ -4293,9 +4296,10 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
 /// What reads a type argument runs in a body: `is`, `as` and a `match` arm of a type parameter or of a class with type
 /// arguments, `typeof`, `new`, a static member of a type parameter, and a catch clause of one, alone or in a union. A
 /// constant value has no type argument to read, and `new TItem` names none, because its type argument carries its own.
+/// A named constructor of a type parameter, `new TItem.of(…)`, is not supported yet.
 #[test]
 fn a_type_argument_is_read_in_a_body_and_never_in_a_constant() {
-    let code = "namespace App.Tenant;\n\nclass Box<TItem>\n{\n    public bool run<TKey>(Any value, List<TItem> items)\n    {\n        const a = value is TItem item;\n        const b = value as TKey;\n        const c = match (value) { TItem => 1, PaginatedList<Order> page => 2, default => 0 };\n        const d = typeof(TItem);\n        const e = new TKey(value);\n        const f = TItem.make(value);\n        const g = TItem.LIMIT;\n        TKey.count = g;\n        try {\n        } catch (TItem failure) {\n        } catch (RuntimeException | TKey failure) {\n        }\n        return value is PaginatedList<Order> page;\n    }\n\n    public string named(string name = typeof(TItem)) => name;\n\n    public int limit(int size = TItem.LIMIT) => size;\n\n    public Any made(Any value) => new TItem<int>(value);\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Box<TItem>\n{\n    public bool run<TKey>(Any value, List<TItem> items)\n    {\n        const a = value is TItem item;\n        const b = value as TKey;\n        const c = match (value) { TItem => 1, PaginatedList<Order> page => 2, default => 0 };\n        const d = typeof(TItem);\n        const e = new TKey(value);\n        const f = TItem.make(value);\n        const g = TItem.LIMIT;\n        TKey.count = g;\n        try {\n        } catch (TItem failure) {\n        } catch (RuntimeException | TKey failure) {\n        }\n        return value is PaginatedList<Order> page;\n    }\n\n    public string named(string name = typeof(TItem)) => name;\n\n    public int limit(int size = TItem.LIMIT) => size;\n\n    public Any made(Any value) => new TItem<int>(value);\n\n    public Any built(Any value) => new TItem.of(value);\n}\n";
 
     assert_eq!(
         issues(code),
@@ -4303,6 +4307,7 @@ fn a_type_argument_is_read_in_a_body_and_never_in_a_constant() {
             "22:39 `typeof(TItem)` is not a constant: it reads the type argument the code runs with.",
             "24:33 `TItem.LIMIT` is not a constant: it reads the type argument the code runs with.",
             "26:44 `TItem` already carries the type arguments of the type it stands for.",
+            "28:36 `new TItem` is not supported yet in PHP#.",
         ]
     );
 }
@@ -4330,14 +4335,15 @@ fn a_generic_class_declares_a_named_constructor() {
 /// `Self`, which carries them: the refusal names every type parameter `Self` carries.
 #[test]
 fn a_class_constant_cannot_use_its_class_type_parameters() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public const TItem EMPTY = 1;\n\n    public const int SIZE = 1;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public const Self? NONE = null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public const Self? NONE = null;\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public const TItem EMPTY = 1;\n\n    public const int SIZE = 1;\n\n    public const Self? NONE = null;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public const Self? NONE = null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public const Self? NONE = null;\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:18 A constant can't use `TItem`, because every `Box<…>` shares it.",
-            "12:18 A constant can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
-            "17:18 A constant can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
+            "9:18 A constant can't use `Self`, because every `Box<…>` shares it and `Self` carries `TItem`.",
+            "14:18 A constant can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
+            "19:18 A constant can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
         ]
     );
 }
@@ -4870,13 +4876,19 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
 }
 
 /// A construct outside the slice is refused with a note that lists what PHP# has where it is written, so the note of
-/// a refused class member names a class's members and the note of a refused expression names a body's expressions.
+/// a refused class member names a class's members, the note of a refused expression names a body's expressions, and
+/// the note of a refused type in a pattern names the patterns.
 #[test]
 fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
     let body = leak(method("        const copy = clone this;\n        return extra;\n"));
+    let pattern = leak(method("        const called = extra is callable;\n        return extra;\n"));
 
     for (code, note) in [
+        (
+            pattern,
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`.",
+        ),
         (
             class,
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`.",

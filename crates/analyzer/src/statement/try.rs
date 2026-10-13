@@ -489,9 +489,12 @@ where
                 let mut bound_classes: Vec<Word> = parameter
                     .types
                     .iter()
-                    .filter_map(|atomic| match atomic {
-                        TAtomic::GenericParameter(TGenericParameter { constraint, .. }) => Some(constraint),
-                        _ => None,
+                    .map(|atomic| {
+                        let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = atomic else {
+                            unreachable!("a type parameter's hint reads as the type parameter");
+                        };
+
+                        constraint
                     })
                     .flat_map(|constraint| constraint.types.iter())
                     .filter_map(|bound| match bound {

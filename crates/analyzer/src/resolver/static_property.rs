@@ -108,13 +108,15 @@ impl HasSpan for StaticPropertyName<'_, '_> {
 }
 
 /// Resolves all possible static properties of a static property access, checking that the scope may write each one
-/// when `for_assignment` is set.
+/// when `for_assignment` is set. A class a read of the same place already analyzed, as a changed collection's write
+/// back follows its read, is not analyzed again when `class_is_analyzed` is set.
 pub fn resolve_static_properties<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     access: StaticProperty<'_, 'arena>,
     for_assignment: bool,
+    class_is_analyzed: bool,
 ) -> Result<PropertyResolutionResult, AnalysisError>
 where
     A: Arena,
@@ -122,7 +124,8 @@ where
     let mut result = PropertyResolutionResult::default();
     let class_expression = access.class;
 
-    let classnames = resolve_classnames_from_expression(context, block_context, artifacts, class_expression, false)?;
+    let classnames =
+        resolve_classnames_from_expression(context, block_context, artifacts, class_expression, class_is_analyzed)?;
     if let Some(class_type) = artifacts.get_expression_type(class_expression)
         && class_type.is_nullable()
     {
@@ -229,16 +232,17 @@ where
                 for_assignment,
                 &mut result,
             ) {
-                if let Some(declaring_class) = resolved_property.declaring_class_id {
-                    record_statics_type_arguments(
-                        context,
-                        artifacts,
-                        access.span,
-                        fqcn,
-                        declaring_class,
-                        type_arguments.as_deref(),
-                    );
-                }
+                let Some(declaring_class) = resolved_property.declaring_class_id else {
+                    unreachable!("a static property's resolution names the class that declares it");
+                };
+                record_statics_type_arguments(
+                    context,
+                    artifacts,
+                    access.span,
+                    fqcn,
+                    declaring_class,
+                    type_arguments.as_deref(),
+                );
 
                 result.properties.push(resolved_property);
             }

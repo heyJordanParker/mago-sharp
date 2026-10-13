@@ -32,6 +32,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::statement::get_type_from_hint;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
@@ -332,10 +333,14 @@ where
         Expression::Identifier(name_node) => {
             possible_types.push(resolve_named_class(context, block_context, name_node));
         }
-        // `Counter<Order>` names the class `Counter`, and its analysis checks the type arguments.
+        // `Counter<Order>` names the class `Counter`, and its analysis checks the type arguments. One its analysis
+        // refused names no class.
         Expression::GenericClass(generic_class) => {
             if !class_is_analyzed {
                 generic_class.analyze(context, block_context, artifacts)?;
+            }
+            if artifacts.get_expression_type(generic_class).is_some_and(is_refused_type) {
+                return Ok(vec![ResolvedClassname::invalid()]);
             }
 
             possible_types.extend(resolve_classnames_from_expression(

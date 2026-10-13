@@ -259,7 +259,8 @@ pub(crate) struct TemplateUse {
 /// Every use of a type parameter of `class` by a member it declares or by its header, one per member and type
 /// parameter. A method's parameters take their types in and its return type hands its type out, a property hands its
 /// type out and takes it in when another class can write it, and the header hands its type arguments out, as C# and
-/// Kotlin check a base type's. Private members and the constructor are exempt, as in Kotlin, and a private member that
+/// Kotlin check a base type's. Private members and the constructors, main and named, are exempt, as Kotlin exempts its
+/// primary and secondary constructors, and a private member that
 /// breaks a marker is reachable only through `this`, which `check_private_method_reach` and
 /// `check_private_property_reach` check where it is reached. A header entry stands at its span in `header_spans`, by
 /// its parent's lowercase name, or at the class's name without one.
@@ -300,9 +301,11 @@ where
 
     for method_name in &class.methods {
         let Some(method) = codebase.get_method(class.name.as_bytes(), method_name.as_bytes()) else {
-            continue;
+            unreachable!("a class lists only the methods it declares");
         };
-        if method.method_metadata.as_ref().is_some_and(|metadata| metadata.is_constructor) || is_private_method(method)
+        if method.method_metadata.as_ref().is_some_and(|metadata| metadata.is_constructor)
+            || method.flags.is_named_constructor()
+            || is_private_method(method)
         {
             continue;
         }
@@ -640,9 +643,10 @@ where
 
     // A type argument PHP# writes holds no literal, so `wrap(5)`'s `Box<5>` reads as the `Box<int>` code writes.
     let mut written = given_object.clone();
-    if let Some(arguments) = written.type_parameters.as_mut() {
-        arguments.iter_mut().for_each(TUnion::widen_literals);
-    }
+    let Some(arguments) = written.type_parameters.as_mut() else {
+        unreachable!("a blocked substitution differs in a type argument");
+    };
+    arguments.iter_mut().for_each(TUnion::widen_literals);
     let given = display_sharp_type(context, &wrap_atomic(TAtomic::Object(TObject::Named(written))));
     issue.message = format!("{given} cannot be used as {}.", display_sharp_type(context, &wrap_atomic(wanted.clone())));
     for annotation in &mut issue.annotations {

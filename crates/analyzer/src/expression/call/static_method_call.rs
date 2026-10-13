@@ -1,8 +1,10 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -22,6 +24,7 @@ use crate::expression::call::method_call::analyze_undocumented_method_return_typ
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
+use crate::expression::is_refused_type;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::invocation::MethodInvocationKind;
@@ -113,6 +116,12 @@ where
 
     let mut method_resolution =
         resolve_static_method_targets(context, block_context, artifacts, call.class, call.method, call.span)?;
+    // A refused class, as `Missing<Order>`, reported itself, so the call reports nothing again.
+    if artifacts.get_expression_type(call.class).is_some_and(is_refused_type) {
+        artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
+
+        return Ok(());
+    }
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
 

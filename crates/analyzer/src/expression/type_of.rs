@@ -44,12 +44,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for TypeOf<'arena> {
         if context.resolved_names.is_type_parameter(&self.class) {
             let parameter = get_type_from_hint(context, block_context, artifacts, &Hint::Identifier(self.class));
             artifacts.record_tested_type(&self.class, parameter.clone());
-            let class =
-                get_class_strings_of(TClassLikeStringKind::Class, parameter, self.span()).unwrap_or_else(|_| {
-                    TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::any(
-                        TClassLikeStringKind::Class,
-                    ))))
-                });
+            let Ok(class) = get_class_strings_of(TClassLikeStringKind::Class, parameter, self.span()) else {
+                unreachable!("a type parameter's class values are those of its bound, which takes any type");
+            };
             artifacts.set_expression_type(self, class);
 
             return Ok(());

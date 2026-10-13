@@ -683,6 +683,7 @@ where
             let written = match written_static_property(context, block_context, access) {
                 // Reading `Counter.items` reported its missing type arguments, and the write back would again.
                 Some(static_property) if bare_generic_class(context, static_property.class).is_some() => Ok(()),
+                // The read of the collection analyzed its class.
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,
@@ -691,6 +692,7 @@ where
                     &changed_type,
                     None,
                     get_block_expression_id(collection, context, block_context),
+                    true,
                 ),
                 None => property_assignment::analyze(
                     context,

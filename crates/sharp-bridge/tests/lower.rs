@@ -2477,6 +2477,48 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
 }
 
 /// ```php
+/// public static $"\0<sharp>\0statics" = ["" => ["count" => 0, "last" => null]];
+/// ```
+///
+/// Spec section 11: a generic class keeps each type argument's static fields in one hidden static, whose entry under ""
+/// holds each field's initial value, or null for a nullable field written without one. `\Sharp\Internal\statics` copies
+/// that entry the first time a type argument uses its statics. A field that is neither stays out of it, as today.
+#[test]
+fn a_generic_class_keeps_the_initial_values_of_its_static_fields_in_one_hidden_static() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static TItem? last { get; set; }\n\n    public static int total { get; set; }\n}\n",
+    );
+    let store = (0..lowered.nodes().len() as u32)
+        .map(|node| lowered.render(node))
+        .find(|tree| tree.starts_with("PROP_GROUP") && tree.contains(r#"ZVAL "\0<sharp>\0statics""#))
+        .unwrap_or_else(|| panic!("`Counter` declares its statics: {}", lowered.tree()));
+
+    assert_eq!(
+        store,
+        indoc! {r#"
+            PROP_GROUP [8209]
+              null
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "\0<sharp>\0statics"
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL 0
+                          ZVAL "count"
+                        ARRAY_ELEM
+                          ZVAL null
+                          ZVAL "last"
+                      ZVAL ""
+                  null
+                  null
+              null
+        "#}
+    );
+}
+
+/// ```php
 /// $type = /* the class value of "App.Box<App.Order>" */;
 /// $made = new ($type)();
 /// $page = new ($type)(/* type args "App.Order" */);
@@ -11389,6 +11431,92 @@ fn equality_of_strings_ints_and_enums_is_identity() {
     );
 
     assert_eq!(assigned_values(&tree), ["BINARY_OP [16]", "BINARY_OP [17]", "BINARY_OP [16]", "BINARY_OP [16]"]);
+}
+
+/// ```php
+/// $b = \Sharp\Internal\equals($kind, $other); $b = !\Sharp\Internal\equals($kind, $other);
+/// $found = array_find_key($kinds, (fn ($value#1) => fn ($element#2) => \Sharp\Internal\equals($element#2, $value#1))($kind)) !== null;
+/// ```
+///
+/// Spec section 25: `==` compares two class values by their whole type, type arguments included, as C# compares two
+/// `Type`s, so `typeof(Box<Order>) == typeof(Box<Invoice>)` is false though both name `App\Box`. The engine's
+/// `\Sharp\Internal\equals` compares them, `!=` is its `!`, and a search of class values runs it for each element.
+#[test]
+fn equality_of_class_values_compares_their_whole_types() {
+    assert_eq!(
+        body_in(
+            "bool run(Class<Order> kind, Class<Order> other, List<Class<Order>> kinds)",
+            "        let b = kind == other;\n        b = kind != other;\n        return kinds.contains(kind);\n",
+            &[("src/App/Tenant/Order.php", "<?php namespace App\\Tenant; final class Order {}")],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                CALL
+                  ZVAL "Sharp\\Internal\\equals"
+                  ARG_LIST
+                    VAR
+                      ZVAL "kind"
+                    VAR
+                      ZVAL "other"
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                UNARY_OP [14]
+                  CALL
+                    ZVAL "Sharp\\Internal\\equals"
+                    ARG_LIST
+                      VAR
+                        ZVAL "kind"
+                      VAR
+                        ZVAL "other"
+              RETURN
+                BINARY_OP [17]
+                  CALL
+                    ZVAL "array_find_key"
+                    ARG_LIST
+                      VAR
+                        ZVAL "kinds"
+                      CALL
+                        ARROW_FUNC "" @11-11
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "value#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          ARROW_FUNC "" @11-11
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "element#2"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            CALL
+                              ZVAL "Sharp\\Internal\\equals"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#2"
+                                VAR
+                                  ZVAL "value#1"
+                            null
+                            null
+                          null
+                          null
+                        ARG_LIST
+                          VAR
+                            ZVAL "kind"
+                  ZVAL null
+        "#}
+    );
 }
 
 /// ```php

@@ -8261,14 +8261,15 @@ fn a_type_argument_report_names_type_arguments_and_short_class_names() {
 }
 
 /// `out TItem` lets a `Feed<Order>` pass as a `Feed<DatabaseEntity>`, `in TItem` lets a `Validator<DatabaseEntity>`
-/// pass as a `Validator<Order>`, and an invariant `PaginatedList<Order>` passes as neither, spec section 11.1.
+/// pass as a `Validator<Order>`, and an invariant `PaginatedList<Order>` passes as neither, spec section 11.1. A
+/// `Feed<DatabaseEntity>` never passes as a `Feed<Order>`, and that keeps its own issue, since `out` is there.
 #[test]
 fn variance_decides_which_type_arguments_substitute() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any feed(Feed<DatabaseEntity> feed) => feed;\n\n    public static Any page(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any check(Validator<Order> validator) => validator;\n\n    public static Any covariant(Feed<Order> feed) => Report.feed(feed);\n\n    public static Any invariant(PaginatedList<Order> page) => Report.page(page);\n\n    public static Any contravariant(Validator<DatabaseEntity> validator) => Report.check(validator);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any feed(Feed<DatabaseEntity> feed) => feed;\n\n    public static Any page(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any check(Validator<Order> validator) => validator;\n\n    public static Any covariant(Feed<Order> feed) => Report.feed(feed);\n\n    public static Any invariant(PaginatedList<Order> page) => Report.page(page);\n\n    public static Any contravariant(Validator<DatabaseEntity> validator) => Report.check(validator);\n\n    public static Any ordered(Feed<Order> feed) => feed;\n\n    public static Any narrowed(Feed<DatabaseEntity> feed) => Report.ordered(feed);\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        ["13:75 invalid-argument"]
+        ["13:75 invalid-argument", "19:77 less-specific-argument"]
     );
 }
 
@@ -8372,10 +8373,11 @@ fn a_type_parameter_before_a_dot_is_not_read_as_a_constant() {
 }
 
 /// `TItem.member` reads the member of the type argument's class, which its bound declares, so a missing member is
-/// reported on the bound. A type parameter that can stand for a type that is not a class has no members to read.
+/// reported on the bound. A type parameter that can stand for a type that is not a class has no members to read, so a
+/// property read on it reports that once and reads nothing.
 #[test]
 fn a_static_member_of_a_type_parameter_is_its_bounds() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public abstract TItem made(TAny value);\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public abstract TItem made(TAny value);\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Builder.sharp", sharp), &[]),
@@ -8384,6 +8386,7 @@ fn a_static_member_of_a_type_parameter_is_its_bounds() {
             "Could not infer a precise return type for method `Builder.missing`. Saw type `Any?`.",
             "`TAny` can stand for a type that is not a class.",
             "Could not infer a precise return type for method `Builder.open`. Saw type `Any?`.",
+            "`TAny` can stand for a type that is not a class.",
         ]
     );
 }
@@ -8485,6 +8488,16 @@ fn an_erased_parameter_help_names_a_bound_only_where_one_fits() {
         [
             "29:37 incompatible-parameter-type Parameter `item` of `StatusBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Box<TItem : Status>`, so both sides erase to the bound.",
             "36:41 incompatible-parameter-type Parameter `item` of `PairBox.put` must take at least `Any?`, the type `Box.put` erases it to. Write `item` with a type that erases to `Any?`.",
+        ]
+    );
+
+    let sharp_feed = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic interface Feed<out TItem>\n{\n    void take(TItem item);\n}\n\npublic class OrderFeed : Feed<Order>\n{\n    public void take(Order item)\n    {\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Feed.sharp", sharp_feed), &[]),
+        [
+            "9:10 invalid-template-parameter `TItem` is declared `out`, so `take` cannot take it in.",
+            "14:28 incompatible-parameter-type Parameter `item` of `OrderFeed.take` must take at least `Any?`, the type `Feed.take` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Feed<out TItem : Order>`, so both sides erase to the bound.",
         ]
     );
 }
@@ -8806,10 +8819,11 @@ fn the_type_arguments_written_from_sharp_fix_a_php_template() {
 
 /// Spec section 11.1 checks `out` and `in` on every member another class reaches: a parameter takes its type in, a
 /// return hands it out, a property hands it out and takes it in when its `set` is reachable, and a type argument keeps,
-/// flips or doubles the position by the variance of its type parameter. A private member and the constructor are exempt.
+/// flips or doubles the position by the variance of its type parameter. A private member and the constructors, main and
+/// named, are exempt.
 #[test]
 fn out_and_in_are_checked_on_every_member() {
-    let sharp = "namespace Demo;\n\npublic abstract class Feed<out TItem>\n{\n    private List<TItem> items;\n\n    public Feed(List<TItem> items)\n    {\n        this.items = this.kept(items);\n    }\n\n    public abstract void add(TItem item);\n\n    public abstract void each(Function<void(TItem)> visit);\n\n    public List<TItem> all() => this.items;\n\n    public abstract void addAll(List<TItem> items);\n\n    public TItem? current { get; set; }\n\n    private List<TItem> kept(List<TItem> items) => items;\n}\n\npublic interface Validator<in TItem>\n{\n    TItem last();\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Feed<out TItem>\n{\n    private List<TItem> items;\n\n    public Feed(List<TItem> items)\n    {\n        this.items = this.kept(items);\n    }\n\n    public abstract void add(TItem item);\n\n    public abstract void each(Function<void(TItem)> visit);\n\n    public List<TItem> all() => this.items;\n\n    public abstract void addAll(List<TItem> items);\n\n    public TItem? current { get; set; }\n\n    private List<TItem> kept(List<TItem> items) => items;\n}\n\npublic interface Validator<in TItem>\n{\n    TItem last();\n}\n\npublic class Single<out TItem>\n{\n    public Single(private TItem item) { }\n\n    public Single.of(TItem item) : this(item) { }\n\n    public TItem get() => this.item;\n}\n";
 
     assert_eq!(
         explained(("src/Demo/Feed.sharp", sharp), &[]),
@@ -8827,31 +8841,36 @@ fn out_and_in_are_checked_on_every_member() {
 /// A header hands its type arguments out, as C# (CS1961) and Kotlin check a base type's: `Sink<in TItem> :
 /// Source<TItem>` hands `TItem` out through `Source<out TItem>`, and `Reader<out TItem> : Slot<TItem>` passes it to an
 /// invariant type parameter, which takes it in too, so each is reported once on its header. `Feed<out TItem> :
-/// Source<TItem>` and `Check<in TItem> : Validator<TItem>` keep their markers.
+/// Source<TItem>` and `Check<in TItem> : Validator<TItem>` keep their markers. A type argument that holds the type
+/// parameter is named as written, and a header naming no class has no type parameter to check against.
 #[test]
 fn out_and_in_are_checked_on_the_type_arguments_of_the_header() {
-    let sharp = "namespace Demo;\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Slot<TItem>\n{\n    TItem get();\n}\n\npublic interface Sink<in TItem> : Source<TItem>\n{\n}\n\npublic interface Reader<out TItem> : Slot<TItem>\n{\n}\n\npublic interface Feed<out TItem> : Source<TItem>\n{\n}\n\npublic interface Check<in TItem> : Validator<TItem>\n{\n}\n";
+    let sharp = "namespace Demo;\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Slot<TItem>\n{\n    TItem get();\n}\n\npublic interface Sink<in TItem> : Source<TItem>\n{\n}\n\npublic interface Reader<out TItem> : Slot<TItem>\n{\n}\n\npublic interface Feed<out TItem> : Source<TItem>\n{\n}\n\npublic interface Check<in TItem> : Validator<TItem>\n{\n}\n\npublic interface Pages<in TItem> : Source<List<TItem>>\n{\n}\n\npublic interface Lost<out TItem> : Missing<TItem>\n{\n}\n";
 
     assert_eq!(
         explained(("src/Demo/Streams.sharp", sharp), &[]),
         [
             "18:35 invalid-template-parameter `TItem` is declared `in`, so the header `Source<TItem>` cannot hand it out.",
             "22:38 invalid-template-parameter `TItem` is declared `out`, so the header `Slot<TItem>` cannot take it in.",
+            "34:36 invalid-template-parameter `TItem` is declared `in`, so the header `Source<List<TItem>>` cannot hand it out.",
+            "38:36 non-existent-class-like Interface `Lost` cannot extend unknown type `Missing` Ensure the name is correct, including its namespace, and that it is properly defined and autoloadable.",
         ]
     );
 }
 
 /// `Class<TItem>` hands `TItem` out, as `typeof` of a subclass passes where the class is expected, so `out TItem`
-/// refuses it as a parameter type and `in TItem` as a return type.
+/// refuses it as a parameter type and `in TItem` as a return type. `Class<Maker<TItem>>` keeps the position of
+/// `Maker`'s own type argument, so it is refused as a parameter type too.
 #[test]
 fn out_and_in_are_checked_on_a_class_type() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker<out TItem>\n{\n    public abstract TItem make(Class<TItem> type);\n}\n\npublic abstract class Kind<in TItem>\n{\n    public abstract Class<TItem> kind();\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Maker<out TItem>\n{\n    public abstract TItem make(Class<TItem> type);\n\n    public abstract void copy(Class<Maker<TItem>> type);\n}\n\npublic abstract class Kind<in TItem>\n{\n    public abstract Class<TItem> kind();\n}\n";
 
     assert_eq!(
         explained(("src/Demo/Makers.sharp", sharp), &[]),
         [
             "5:27 invalid-template-parameter `TItem` is declared `out`, so `make` cannot take it in.",
-            "10:34 invalid-template-parameter `TItem` is declared `in`, so `kind` cannot hand it out.",
+            "7:26 invalid-template-parameter `TItem` is declared `out`, so `copy` cannot take it in.",
+            "12:34 invalid-template-parameter `TItem` is declared `in`, so `kind` cannot hand it out.",
         ]
     );
 }
@@ -8878,6 +8897,97 @@ fn a_variance_breaking_private_member_is_reachable_only_through_this() {
     assert!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Cell.sharp", sharp), &[]).iter().all(|issue| issue.notes
             == ["A private member may break the marker, and is then reachable only through `this`."]),
+    );
+}
+
+/// A field the parser refuses for its missing type holds no type parameter, so it breaks no marker, public or private,
+/// and reading it through another instance reports only the parser's refusal.
+#[test]
+fn a_field_without_a_type_breaks_no_marker() {
+    let sharp = "namespace Demo;\n\npublic class Tally<out TItem>\n{\n    private count = 0;\n\n    public total = 0;\n\n    public TItem? first() => null;\n\n    public Any? counted(Tally<Any?> other) => other.count;\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Tally.sharp", sharp), &[]),
+        [
+            "5:13 parse A PHP# field needs a type, as in `private int count = 0;`.",
+            "7:12 parse A PHP# field needs a type, as in `private int count = 0;`.",
+        ]
+    );
+}
+
+/// A type parameter no member uses breaks no marker, so a substitution its invariance blocks names the marker that lets
+/// it through: `out` when the given type argument is held by the wanted one.
+#[test]
+fn a_substitution_of_a_type_parameter_no_member_uses_names_the_marker() {
+    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class Tag<TItem>\n{\n}\n\npublic class Report\n{\n    public static Any tag(Tag<DatabaseEntity> tag) => tag;\n\n    public static Any tagged(Tag<Order> tag) => Report.tag(tag);\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "11:14 unused-template-parameter Type parameter `TItem` is never used in class `Tag`. Remove `TItem` from `Tag<…>`.",
+            "19:60 invalid-argument Tag<Order> cannot be used as Tag<DatabaseEntity>. TItem is neither taken in nor returned by Tag, so declare it `out TItem`.",
+        ]
+    );
+}
+
+/// A function type in a member of a generic class names no type parameter when it is written bare, so it breaks no
+/// marker.
+#[test]
+fn a_bare_function_type_breaks_no_marker() {
+    let sharp = "namespace Demo;\n\npublic abstract class Feed<out TItem>\n{\n    public abstract TItem next();\n\n    public abstract void run(Function task);\n}\n";
+
+    assert_eq!(explained(("src/Demo/Feed.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A static member read or call through a class with type arguments that does not exist reports the class, as `typeof`
+/// of one does, and a type argument that does not exist is reported once wherever type arguments are written, a
+/// collection's write back after a change included. Type arguments after a type parameter or a local are the checker's
+/// to refuse, so the analysis reports nothing more on them.
+#[test]
+fn a_missing_class_with_type_arguments_is_reported() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n}\n\npublic class Report\n{\n    public static Any read() => Missing<Order>.count;\n\n    public static Any call() => Missing<Order>.make();\n\n    public static Any argument() => Counter<Missing>.count;\n\n    public static Any made() => new Counter<Missing>();\n\n    public static Any type() => typeof(Counter<Missing>);\n\n    public static void write()\n    {\n        Counter<List<Missing>>.items.add([]);\n        Report.take<Missing>();\n    }\n\n    public static T? take<T>() => null;\n\n    public static Any parameter<TItem>() => TItem<Order>.count;\n\n    public static Any local()\n    {\n        const counter = 5;\n        return counter<Order>.count;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "16:33 non-existent-class-like",
+            "18:33 non-existent-class-like",
+            "20:45 non-existent-class-like",
+            "22:45 non-existent-class-like",
+            "24:48 non-existent-class-like",
+            "28:17 non-existent-class-like",
+            "29:21 non-existent-class-like",
+        ]
+    );
+}
+
+/// A type test PHP# refuses still declares the name it binds, typed as written, so a use of the name reports nothing
+/// more than the refusal.
+#[test]
+fn a_refused_type_test_still_declares_its_name() {
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static Any? kind(Any value) => value is Class<Box<int>> type ? type : null;\n}\n";
+
+    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// A class value of an enum reads the enum's static members, as a class value of a class does.
+#[test]
+fn a_class_value_of_an_enum_reads_its_static_members() {
+    let sharp = "namespace Demo;\n\npublic enum Status : string\n{\n    case Paid = \"paid\";\n}\n\npublic class Report\n{\n    public static Status? status(Class<Status> type) => type.tryFrom(\"paid\");\n}\n";
+
+    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
+/// Each type argument of a generic PHP# class keeps its own statics, which plain PHP can't name, so a plain PHP
+/// subclass reads none of them.
+#[test]
+fn plain_php_reads_no_static_field_of_a_generic_class() {
+    let counter = "namespace Demo;\n\npublic class Counter<TItem>\n{\n    protected static int count = 0;\n\n    public TItem? first() => null;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\n/** @extends Counter<int> */\nclass OrderCounter extends Counter\n{\n    public static function read(): int\n    {\n        return Counter::$count;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/OrderCounter.php", php), &[("src/Demo/Counter.sharp", counter)]),
+        ["10:25 non-existent-property", "10:16 invalid-return-statement"]
     );
 }
 
@@ -9069,11 +9179,12 @@ fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_gener
 
 /// A static member of `Counter<Order>` has `Order` for `TItem`, spec section 11: a static property read, a collection
 /// call on it, a write and a static call's argument and result are checked against `Order`, through the class's own
-/// `Counter<TItem>` too, and against `List<Order>` for a nested type argument.
+/// `Counter<TItem>` too, and against `List<Order>` for a nested type argument. A write by index into it is refused as
+/// any `List`'s is.
 #[test]
 fn a_static_member_of_a_class_with_type_arguments_has_its_type_arguments_for_its_type_parameters() {
     let counter = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Customer\n{\n}\n\npublic class Counter<TItem>\n{\n    public static List<TItem> items { get; set; } = [];\n\n    public static TItem? latest { get; set; }\n\n    public static void track(TItem item)\n    {\n        Counter<TItem>.items.add(item);\n        Counter<TItem>.latest = item;\n    }\n\n    public static TItem? last() => Counter<TItem>.items.last();\n}\n";
-    let usage = "namespace Demo;\n\npublic class Report\n{\n    public static void run()\n    {\n        Counter<Order>.items.add(new Order());\n        Counter<Order>.items.add(new Customer());\n        Counter<Order>.latest = new Customer();\n        Counter<Order>.track(new Customer());\n        Counter<List<Order>>.items.add([new Order()]);\n        Counter<List<Order>>.items.add(new Order());\n    }\n\n    public static Order? latest() => Counter<Order>.latest;\n\n    public static Customer? wrong() => Counter<Order>.last();\n}\n";
+    let usage = "namespace Demo;\n\npublic class Report\n{\n    public static void run()\n    {\n        Counter<Order>.items.add(new Order());\n        Counter<Order>.items.add(new Customer());\n        Counter<Order>.latest = new Customer();\n        Counter<Order>.track(new Customer());\n        Counter<List<Order>>.items.add([new Order()]);\n        Counter<List<Order>>.items.add(new Order());\n        Counter<Order>.items[0] = new Order();\n    }\n\n    public static Order? latest() => Counter<Order>.latest;\n\n    public static Customer? wrong() => Counter<Order>.last();\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Report.sharp", usage), &[("src/Demo/Counter.sharp", counter)]),
@@ -9082,6 +9193,7 @@ fn a_static_member_of_a_class_with_type_arguments_has_its_type_arguments_for_its
             "Invalid property assignment value",
             "Invalid argument type for argument #1 of `Counter.track`: expected `Order`, but found `Customer`.",
             "Invalid argument type for argument #1 of `List<List<Order>>.add`: expected `List<Order>`, but found `Order`.",
+            "A `List` is not written by index, because a write could leave a gap in its keys.",
             "Invalid return type for method `Report.wrong`: expected `Customer?`, but found `Order?`.",
         ]
     );
