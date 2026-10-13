@@ -964,15 +964,15 @@ fn compile_proves_spec_section_28_s_state_machine_law_with_a_class_as_its_event(
     );
 }
 
-/// A law never calls an interface's method, since an implementation can have effects: `Card.amount` returns a random
-/// number, so `Card.same` is false on almost every run, and a law must not prove it. A call through `?.` is refused too.
+/// A law never calls an interface's method, which Mago does not translate to Lean, even when every implementation is
+/// pure as spec section 29 holds `Card.amount` to. A call through `?.` is refused too.
 #[test]
 fn a_law_that_calls_an_interface_method_is_refused() {
     let payment = "namespace App.Shop;\n\npublic interface Payment\n{\n    int amount();\n}\n";
     for (file, source, law, calls) in [
         (
             "app/Shop/Card.sharp",
-            "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    public int amount() => random_int(1, 1000000);\n\n    public static bool same(Payment p) => p.amount() == p.amount();\n\n    law alwaysSame(Payment p) => Card.same(p);\n}\n",
+            "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    public int amount() => this.cents;\n\n    public static bool same(Payment p) => p.amount() == p.amount();\n\n    law alwaysSame(Payment p) => Card.same(p);\n}\n",
             "alwaysSame reaches the interface method Payment.amount in Card.same",
             ["9:43", "9:57"],
         ),
