@@ -365,6 +365,14 @@ final class AnalyzerCodeModuleGenerator
         'non-existent-law',
         'missing-lean',
         'unmodeled-construct',
+        'broken-rule',
+        'missing-super-call',
+        'named-constructor-without-new',
+        'named-constructor-clash',
+        'invalid-event',
+        'invalid-effect',
+        'foreign-in-static',
+        'incompatible-effects',
     ];
 
     /**

@@ -29,6 +29,8 @@ use mago_syntax::cst::Call as CallExpression;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::ConstructorInitializer;
+use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::FunctionLikeParameterList;
@@ -65,14 +67,15 @@ use crate::utils::names::is_prelude_stub;
 
 /// Records the summary of the method, accessor or initial value `body`, which messages name by `member`, and whose
 /// parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with
-/// the function values the analysis gave places since the last body.
-pub(crate) fn record<'arena, A>(
+/// the function values the analysis gave places since the last body. A constructor's `initializer` runs before `code`.
+pub(crate) fn record<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
     body: Body,
     member: Word,
     parameters: Vec<Span>,
-    code: FunctionLikeBody<'_, 'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
+    code: FunctionLikeBody<'ast, 'arena>,
 ) where
     A: Arena,
 {
@@ -82,7 +85,7 @@ pub(crate) fn record<'arena, A>(
     };
 
     let function_values = std::mem::take(&mut artifacts.function_values);
-    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, code);
+    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
     summary.function_values = function_values;
     artifacts.effect_summaries.push(summary);
     artifacts.effect_summaries.append(&mut lambdas);
@@ -148,21 +151,28 @@ pub(crate) fn record_function_values<A>(
                     continue;
                 };
 
+                // `class` is the class the value is read through, where a call's `extern` lookup starts too.
+                let class_name =
+                    codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+                let callee = (class_name, metadata.original_name);
                 let lowercase_method = ascii_lowercase_word(method.as_bytes());
-                if declaring.flags.is_sharp() {
+                if let Some(effect) = foreign_class(codebase, class) {
+                    Runs::Foreign { callee, effects: vec![Effect::Foreign(effect)] }
+                } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract)
+                {
+                    Runs::Foreign {
+                        callee,
+                        effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect(),
+                    }
+                } else if declaring.flags.is_sharp() {
                     Runs::Body(Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), lowercase_method))
+                } else if is_prelude_stub(declaring_class) {
+                    Runs::Foreign { callee, effects: Vec::new() }
                 } else {
-                    // `class` is the class the value is read through, where a call's `extern` lookup starts too.
-                    let class_name =
-                        codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-                    let callee = (class_name, metadata.original_name);
-                    let effects = if is_prelude_stub(declaring_class) || is_prelude_stub(class) {
-                        prelude_stub_effects(class)
-                    } else {
-                        plain_php_effects(extern_of(codebase, class, lowercase_method), callee)
-                    };
-
-                    Runs::Foreign { callee, effects }
+                    Runs::Foreign {
+                        callee,
+                        effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee),
+                    }
                 }
             }
             Some(FunctionLikeIdentifier::Function(_)) | None => continue,
@@ -179,14 +189,16 @@ pub(crate) fn record_function_values<A>(
 }
 
 /// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
-fn summarize<'arena, A>(
+#[allow(clippy::too_many_arguments)]
+fn summarize<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &AnalysisArtifacts,
     class: Word,
     body: Body,
     member: Word,
     parameters: Vec<Span>,
-    code: FunctionLikeBody<'_, 'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
+    code: FunctionLikeBody<'ast, 'arena>,
 ) -> (EffectSummary, Vec<EffectSummary>)
 where
     A: Arena,
@@ -223,6 +235,9 @@ where
     loop {
         recorder.grew = false;
         recorder.summary = empty_summary();
+        if let Some(initializer) = initializer {
+            SummaryWalker.walk_constructor_initializer(initializer, &mut recorder);
+        }
         match code {
             FunctionLikeBody::Statements(statements, _) => {
                 for statement in statements {
@@ -468,6 +483,19 @@ where
     }
 
     fn read_property(&mut self, object: &Expression<'arena>, property: &ClassLikeMemberSelector<'arena>, span: Span) {
+        // A member named at run time, as `payments.{name}`, still reaches the object.
+        let member = match property {
+            ClassLikeMemberSelector::Identifier(name) => word(name.value),
+            _ => empty_word(),
+        };
+        let codebase = self.codebase();
+        for class in self.object_classes(object) {
+            if let Some(effect) = foreign_class(codebase, class) {
+                let class = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+                self.summary.effects.push((Effect::Foreign(effect), span, (class, member)));
+            }
+        }
+
         let receiver = self.roots(object);
         for callee in self.accessors(object, property, b"get") {
             self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments: Vec::new() });
@@ -575,7 +603,7 @@ where
 
         let parameters = parameters.parameters.iter().map(|parameter| parameter.variable.span).collect();
         let (summary, lambdas) =
-            summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, code);
+            summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, None, code);
         self.lambda_summaries.push(summary);
         for lambda in lambdas {
             if !self.lambda_summaries.iter().any(|summary| summary.body == lambda.body) {
@@ -611,6 +639,16 @@ where
             }
         }
 
+        self.call_targets(span, receiver, arguments);
+    }
+
+    /// Records the functions and methods the analysis resolved the call at `span` to, with `receiver` and `arguments`.
+    fn call_targets(
+        &mut self,
+        span: Span,
+        receiver: Option<&'ast Expression<'arena>>,
+        arguments: &'ast ArgumentList<'arena>,
+    ) {
         let artifacts = self.artifacts;
         let Some(targets) = artifacts.call_targets.get(&(span.start.offset, span.end.offset)) else {
             return;
@@ -717,7 +755,25 @@ where
             return;
         };
 
+        let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+        let cause = (class_name, metadata.original_name);
+        if let Some(effect) = foreign_class(codebase, class) {
+            self.summary.effects.push((Effect::Foreign(effect), span, cause));
+
+            return;
+        }
+
         if codebase.get_class_like(declaring_class.as_bytes()).is_some_and(|declaring| declaring.flags.is_sharp()) {
+            // A method without a body has the effects its `uses` lists, which each implementation is held to, spec
+            // section 29.
+            if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
+                for effect in &metadata.uses {
+                    self.summary.effects.push((Effect::Foreign(*effect), span, cause));
+                }
+
+                return;
+            }
+
             let callee = Body::Method(
                 ascii_lowercase_word(declaring_class.as_bytes()),
                 ascii_lowercase_word(method_name.as_bytes()),
@@ -729,18 +785,23 @@ where
             return;
         }
 
-        let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
-        let cause = (class_name, metadata.original_name);
-        if is_prelude_stub(declaring_class) || is_prelude_stub(class) {
-            self.prelude_stub_call(class, metadata, span, receiver, arguments, cause);
+        if is_prelude_stub(declaring_class) {
+            self.prelude_stub_call(metadata, span, receiver, arguments);
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
         }
     }
 
-    /// Records a `new`: a PHP# class runs its constructor's body on a fresh object, and plain PHP has the effects
-    /// its `extern` declares.
+    /// Records `: super(…)`: the call of the base class's constructor the analysis resolved at its span.
+    fn constructor_initializer(&mut self, initializer: &'ast ConstructorInitializer<'arena>) {
+        self.call_targets(initializer.span(), None, &initializer.argument_list);
+    }
+
+    /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
+    /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
+    /// the class `new` names decides when no class declares one. A named constructor is the class's own, spec section
+    /// 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
         let class_name = match instantiation.class.unparenthesized() {
@@ -754,14 +815,20 @@ where
         };
 
         let span = instantiation.span();
-        let constructor = word(b"__construct");
-        if class.flags.is_sharp() {
-            let Some(declaring_class) =
-                codebase.get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
-            else {
-                return;
-            };
-            let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), constructor.as_bytes()) else {
+        let (declaring, constructor) = match &instantiation.constructor {
+            Some(constructor) => (class, ascii_lowercase_word(constructor.name.value)),
+            None => {
+                let constructor = word(b"__construct");
+                let declaring = codebase
+                    .get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
+                    .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
+                    .unwrap_or(class);
+
+                (declaring, constructor)
+            }
+        };
+        if declaring.flags.is_sharp() {
+            let Some(metadata) = codebase.get_method(declaring.name.as_bytes(), constructor.as_bytes()) else {
                 return;
             };
 
@@ -770,11 +837,21 @@ where
                 .as_ref()
                 .map(|arguments| self.argument_roots(arguments, &metadata.parameters))
                 .unwrap_or_default();
-            let callee = Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), constructor);
+            let callee = Body::Method(ascii_lowercase_word(declaring.name.as_bytes()), constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
-            self.plain_php(declaration, span, (class.original_name, empty_word()));
+            self.plain_php(declaration, span, (declaring.original_name, empty_word()));
+        }
+    }
+
+    /// Records an `emit`, which has the effect `Sharp\Events` for each class its event may be.
+    fn emit(&mut self, emit: &'ast Emit<'arena>) {
+        let span = emit.span();
+        for class in self.object_classes(emit.value) {
+            let class =
+                self.codebase().get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+            self.summary.effects.push((Effect::Emit, span, (class, empty_word())));
         }
     }
 
@@ -788,17 +865,11 @@ where
     // Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
     fn prelude_stub_call(
         &mut self,
-        class: Word,
         metadata: &FunctionLikeMetadata,
         span: Span,
         receiver: Option<&'ast Expression<'arena>>,
         arguments: &'ast ArgumentList<'arena>,
-        cause: (Word, Word),
     ) {
-        for effect in prelude_stub_effects(class) {
-            self.summary.effects.push((effect, span, cause));
-        }
-
         // A function passed to the stub runs on the receiver's elements, as `uses f` will declare.
         let elements = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
         for argument in &arguments.arguments {
@@ -957,6 +1028,18 @@ where
         recorder.instantiate(instantiation);
     }
 
+    fn walk_in_emit(&self, emit: &'ast Emit<'arena>, recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>) {
+        recorder.emit(emit);
+    }
+
+    fn walk_in_constructor_initializer(
+        &self,
+        initializer: &'ast ConstructorInitializer<'arena>,
+        recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
+    ) {
+        recorder.constructor_initializer(initializer);
+    }
+
     fn walk_in_property_access(
         &self,
         access: &'ast PropertyAccess<'arena>,
@@ -1041,14 +1124,15 @@ fn plain_php_effects(declaration: Option<&ExternMetadata>, cause: (Word, Word)) 
     }
 }
 
-/// The effects of a call of a method of the prelude stub `class`: a `Sharp\Environment` method reads the environment.
-// Deleted once the standard library's `.sharp` sources replace the prelude stubs (php-sharp issue #60).
-fn prelude_stub_effects(class: Word) -> Vec<Effect> {
-    if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Environment") {
-        vec![Effect::Foreign(word(b"Sharp\\Environment"))]
-    } else {
-        Vec::new()
-    }
+/// The `foreign` class an object of `class` is, spec section 29: `class` itself or a parent marked `foreign`, by its
+/// original name. Code that reaches such an object has that class's effect, whatever its members do.
+fn foreign_class(codebase: &CodebaseMetadata, class: Word) -> Option<Word> {
+    let metadata = codebase.get_class_like(class.as_bytes())?;
+
+    std::iter::once(metadata)
+        .chain(metadata.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(parent.as_bytes())))
+        .find(|metadata| metadata.flags.is_foreign())
+        .map(|metadata| metadata.original_name)
 }
 
 /// The lambda an expression is, unparenthesized.

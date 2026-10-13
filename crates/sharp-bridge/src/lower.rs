@@ -17,6 +17,7 @@ use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Array;
+use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Assignment;
@@ -35,20 +36,22 @@ use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::ExitConstruct;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOfTarget;
-use mago_syntax::cst::ForOfVariable;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Inheritance;
@@ -65,6 +68,7 @@ use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::NamedArgument;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafePropertyAccess;
@@ -222,6 +226,7 @@ const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
 const IS_STATIC: u32 = 15;
 const ZEND_PARAM_VARIADIC: u32 = 1 << 4;
 const ZEND_PARENTHESIZED_CONDITIONAL: u32 = 1;
+const ZEND_DIM_IS: u32 = 1;
 const ZEND_BIND_REF: u32 = 1;
 const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
@@ -256,8 +261,6 @@ const NULL: u32 = u32::MAX;
 enum Operands {
     Strings,
     Ints,
-    /// An int and a float, which spec section 19 compares by value as two floats.
-    Numbers,
     Other,
 }
 
@@ -324,8 +327,27 @@ enum CollectionReceiver<'receiver, 'ast> {
     Place(&'receiver Expression<'ast>),
     /// A property of an object, which the method reads again.
     Property(Reread<'receiver, 'ast>, &'receiver ClassLikeMemberSelector<'ast>),
+    /// An index of a `List`, a place by spec section 12, which a change reaches only through a `Sharp\Collection`
+    /// method: the engine reads the element of a method call's receiver index through the list's collection.
+    Index(Box<CollectionReceiver<'receiver, 'ast>>, Reread<'receiver, 'ast>),
     /// Any other value, which lives nowhere, so a change changes a copy.
     Value(Reread<'receiver, 'ast>),
+}
+
+/// What a `List`'s search by `==` gives: whether an element equals the value, the index of the first one that does, or
+/// whether `remove` removed it.
+#[derive(Clone, Copy)]
+enum Search {
+    Contains,
+    IndexOf,
+    Remove,
+}
+
+/// One side of an `==` the lowering writes: an expression of the source, or the hidden variable `name` holding a value
+/// of `r#type`, read on the line of `span`, as the element and the value a collection search compares.
+enum Side<'side, 'ast> {
+    Expression(&'side Expression<'ast>),
+    Hidden { span: Span, name: Vec<u8>, r#type: &'side TUnion },
 }
 
 /// Lowers one checked file. Every node is pushed after its children, and each node's children are contiguous.
@@ -431,26 +453,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.file_statement(statement, statements);
                 }
             }
-            // An `extern` declaration tells only the checker what plain PHP does.
-            Statement::Use(_) | Statement::Extern(_) => {}
+            // An `extern` declaration tells only the checker what plain PHP does, and a module's laws are checked and
+            // never run.
+            Statement::Use(_) | Statement::Extern(_) | Statement::Module(_) => {}
             Statement::Class(class) => statements.push(self.class(class)),
             Statement::Interface(interface) => statements.push(self.interface(interface)),
             Statement::Enum(r#enum) => statements.push(self.r#enum(r#enum)),
+            Statement::Event(event) => statements.push(self.event(event)),
             _ => unreachable!("check_slice refuses the file statement `{statement}`"),
         }
     }
 
     /// A class sets the initial values PHP takes as no default, those that are not constant or belong to a `readonly`
     /// property, at the start of its constructor, in declaration order. A class without a constructor gets a public
-    /// one that spans the class. The property of each promoted `Set` parameter comes just before the constructor.
+    /// one that spans the class, and calls `parent::__construct()` after them when a constructor exists above the
+    /// class, which the checker allows only when that constructor takes no parameters. The property of each promoted
+    /// `Set` parameter comes just before the constructor.
     fn class(&mut self, class: &Class) -> u32 {
         self.class = self.names.get(&class.name);
         self.enter(class.name.value);
         let mut initial_values = Vec::new();
         for member in &class.members {
             if let ClassLikeMember::Property(property) = member
+                && property.initial_value_runs_in_constructor()
                 && let Some(value) = property.initial_value()
-                && !is_default(property, value)
             {
                 initial_values.push(self.initial_value(property.first_variable(), value));
             }
@@ -489,6 +515,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 ClassLikeMember::Method(method) => self.method(method, modifier_flags(&method.modifiers), &[]),
                 ClassLikeMember::Operator(operator) => self.operator(operator),
+                ClassLikeMember::NamedConstructor(
+                    constructor @ NamedConstructor { initializer: Some(initializer), .. },
+                ) => self.named_constructor(constructor, initializer),
                 ClassLikeMember::Property(property) => self.property(property, parent_name),
                 ClassLikeMember::Constant(constant) => self.constant(constant),
                 _ => unreachable!("check_slice refuses the class member `{member}`"),
@@ -498,6 +527,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         if !has_constructor && !initial_values.is_empty() {
             let line = self.line(class.left_brace);
+            if self.types.parent_constructor(self.class).is_some() {
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+                initial_values.push(self.parent_construct(line, arguments));
+            }
             let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
             let body = self.node(SHARP_AST_STMT_LIST, 0, line, &initial_values);
 
@@ -567,6 +600,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
         for member in &interface.members {
+            if let ClassLikeMember::Property(Property::Hooked(property)) = member {
+                members.push(self.interface_property(property));
+                continue;
+            }
             let ClassLikeMember::Method(method) = member else {
                 unreachable!("check_slice refuses the interface member `{member}`");
             };
@@ -583,6 +620,64 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             interface.interface.span,
             interface.right_brace,
             interface.name.value,
+            &[NULL, header, members, NULL, NULL],
+        )
+    }
+
+    /// An interface property is `public` with the abstract hook `get`, as php-src's grammar builds
+    /// `public int $orderId { get; }`. PHP has no `readonly` interface property, and a `readonly` property implements
+    /// it.
+    fn interface_property(&mut self, property: &HookedProperty) -> u32 {
+        let variable = property.item.variable();
+        let line = self.line(variable);
+        let hint = property.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
+        let name = self.string(0, line, variable.name);
+        let mut hooks = Vec::new();
+        for accessor in &property.hook_list.hooks {
+            hooks.push(self.hook(accessor.name.value, accessor.name, accessor, NULL));
+        }
+
+        let hooks = self.node(SHARP_AST_STMT_LIST, 0, self.line(&property.hook_list), &hooks);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
+    }
+
+    /// An event is a final class, whose constructor promotes each parameter to a `public readonly` property, with its
+    /// header as its interface list, as php-src's grammar builds
+    /// `final class OrderPaid implements \App\OrderEvent { public function __construct(public readonly int $orderId) {} }`.
+    /// The constructor spans the event's name and parameters.
+    fn event(&mut self, event: &Event) -> u32 {
+        self.class = self.names.get(&event.name);
+        self.enter(b"__construct");
+        let mut parameters = Vec::new();
+        for parameter in &event.parameter_list.parameters {
+            let index = self.parameter(parameter);
+            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            parameters.push(index);
+        }
+
+        let line = self.line(&event.parameter_list);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+        let constructor = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            event.name.span,
+            &event.parameter_list,
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        );
+        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &[constructor]);
+        let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+
+        self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_FINAL,
+            event.event.span,
+            event.terminator,
+            event.name.value,
             &[NULL, header, members, NULL, NULL],
         )
     }
@@ -638,7 +733,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// no return type. Its body starts with `first_statements`: the class's initial values that are not constant in
     /// the constructor, or the call of an `extern` method's native function, which is that method's whole body. Any
     /// other abstract method has no statement list. A method with statements makes each `Set` parameter a `Set` before
-    /// them.
+    /// them. A constructor's `: super(…)` runs after them as `parent::__construct(…)`, and does nothing when no
+    /// constructor exists above the class.
     fn method(&mut self, method: &Method, flags: u32, first_statements: &[u32]) -> u32 {
         if flags & (ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE) == 0 {
             unreachable!("check_slice refuses a method without an access modifier");
@@ -657,6 +753,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.set_parameters(&method.parameter_list)
         };
         statements.extend_from_slice(first_statements);
+        if let Some(initializer) = &method.initializer
+            && self.types.parent_constructor(self.class).is_some()
+        {
+            let arguments = self.arguments(&initializer.argument_list, &[]);
+            statements.push(self.parent_construct(self.line(initializer), arguments));
+        }
         let body = self.method_body(&method.body, method.returns_value(), statements);
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
@@ -673,6 +775,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             php_method_name(method),
             &[parameters, NULL, body, return_type, attributes],
         )
+    }
+
+    /// `parent::__construct(…)` with `arguments`, the call `: super(…)` runs as, a static call of `parent` as
+    /// `super.m()`'s is.
+    fn parent_construct(&mut self, line: u32, arguments: u32) -> u32 {
+        let class = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
+        let method = self.string(0, line, b"__construct");
+
+        self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
     }
 
     /// A method's statement list: `statements`, then its block's statements, or its expression body, which it returns
@@ -741,6 +852,81 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             &operator.return_type_hint,
             operator.body.span(),
             name,
+            &[parameters, NULL, body, return_type, attributes],
+        )
+    }
+
+    /// A named constructor is the static method it runs as, spec section 9.1, as php-src's grammar builds
+    /// `public static function fromJson(string $json): \Demo\Artifact { ${'this#1'} = new \Demo\Artifact(…);
+    /// (function ($json) { … })->call(${'this#1'}, $json); return ${'this#1'}; }`: its `: this(…)` creates the object
+    /// with the main constructor, and its body is a closure bound to that object, so it runs as a method body on a real
+    /// `$this`, where `super.m()` and `return;` run as they do in a method.
+    fn named_constructor(&mut self, constructor: &NamedConstructor, initializer: &ConstructorInitializer) -> u32 {
+        self.enter(constructor.name.value);
+        let mut parameters = Vec::new();
+        for parameter in &constructor.parameter_list.parameters {
+            parameters.push(self.parameter(parameter));
+        }
+
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&constructor.parameter_list), &parameters);
+        let mut statements = self.set_parameters(&constructor.parameter_list);
+        let line = self.line(initializer);
+        let object = self.variable(initializer.keyword.span, b"this#1");
+        let class = self.string(ZEND_NAME_FQ, line, self.class);
+        let arguments = self.arguments(&initializer.argument_list, &[]);
+        let new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
+        statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[object, new]));
+
+        // The closure takes the method's parameters untyped, as the method already checked and converted each one.
+        let line = self.line(&constructor.body);
+        let mut closure_parameters = Vec::new();
+        let mut arguments = vec![self.variable(constructor.body.span(), b"this#1")];
+        for parameter in &constructor.parameter_list.parameters {
+            let parameter_line = self.line(parameter);
+            let name = self.string(0, parameter_line, parameter.variable.name);
+            let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
+            closure_parameters.push(self.node(
+                SHARP_AST_PARAM,
+                variadic_flag,
+                parameter_line,
+                &[NULL, name, NULL, NULL, NULL, NULL],
+            ));
+
+            let argument = self.variable(parameter.variable.span, parameter.variable.name);
+            arguments.push(if parameter.is_variadic() {
+                self.node(SHARP_AST_UNPACK, 0, parameter_line, &[argument])
+            } else {
+                argument
+            });
+        }
+
+        let closure_parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &closure_parameters);
+        let body = self.method_body(&constructor.body, false, Vec::new());
+        let closure = self.declaration(
+            SHARP_AST_CLOSURE,
+            0,
+            &constructor.body,
+            &constructor.body,
+            b"",
+            &[closure_parameters, NULL, body, NULL, NULL],
+        );
+        let call = self.string(0, line, b"call");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+        statements.push(self.node(SHARP_AST_METHOD_CALL, 0, line, &[closure, call, arguments]));
+
+        let end = self.lines.line(constructor.body.span().end.offset);
+        let object = self.variable(constructor.body.span(), b"this#1");
+        statements.push(self.node(SHARP_AST_RETURN, 0, end, &[object]));
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        let return_type = self.string(ZEND_NAME_FQ, self.line(constructor.class), self.class);
+        let attributes = self.attributes(&constructor.attribute_lists, None);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            modifier_flags(&constructor.modifiers) | ZEND_ACC_STATIC,
+            constructor.class,
+            constructor.body.span(),
+            constructor.name.value,
             &[parameters, NULL, body, return_type, attributes],
         )
     }
@@ -920,7 +1106,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let name = self.string(0, line, variable.name);
         let default = match property.initial_value() {
-            Some(value) if is_default(property, value) => self.expression(value),
+            Some(value) if !property.initial_value_runs_in_constructor() => self.expression(value),
             None if is_null_by_default(property, self.names) => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
             _ => NULL,
         };
@@ -953,7 +1139,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     PropertyHookBody::Abstract(_) if uses_field => continue,
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
-                hooks.push(lowering.hook(accessor.name.value, accessor.name, accessor, body));
+                // An `init` body is the `set` hook, and the property's set visibility keeps it to object creation.
+                let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
+                hooks.push(lowering.hook(name, accessor.name, accessor, body));
             }
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
@@ -1141,6 +1329,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
             }
+            // `emit e;` is `\Sharp\Internal\emit($e);`, which runs every listener of the event before it returns.
+            Statement::Emit(emit) => {
+                let line = self.line(emit);
+                let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\emit");
+                let event = self.expression(emit.value);
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[event]);
+
+                self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+            }
             Statement::LocalDeclaration(local) => self.local(local),
             Statement::If(r#if) => self.r#if(r#if),
             Statement::For(r#for) => self.r#for(r#for),
@@ -1160,7 +1357,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 // `(string)`, as spec section 12 reads it. Both follow the `Map`'s key type, written on the key or not.
                 if let ForOfTarget::KeyValue(pair) = &for_of.target
                     && let Some(key_type) = self.types.map_key_type(self.types.expression_type(for_of.expression))
-                    && let Some(read_back) = self.key_read_back(&pair.key, &key_type)
+                    && let Some(read_back) = self.key_read_back(pair.key.name.span, pair.key.name.value, &key_type)
                 {
                     let line = self.line(&pair.key);
                     let key = self.variable(pair.key.name.span, pair.key.name.value);
@@ -1381,6 +1578,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // orders two strings by their bytes and compares an int with a float as two floats, and an operator on
             // instances runs the one their class declares.
             Expression::Binary(binary) => {
+                if matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)) {
+                    let negated = binary.operator.is_negated_equality();
+
+                    return self.equality(line, Side::Expression(binary.lhs), Side::Expression(binary.rhs), negated);
+                }
                 if let Some(call) = self.declared_operator(line, binary) {
                     return call;
                 }
@@ -1388,9 +1590,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let operands = match binary.operator {
                     BinaryOperator::Addition(_) | BinaryOperator::Division(_) => {
                         self.operand_types(binary.lhs, binary.rhs)
-                    }
-                    BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) if self.mixes_numbers(binary) => {
-                        Operands::Numbers
                     }
                     BinaryOperator::LessThan(_)
                     | BinaryOperator::LessThanOrEqual(_)
@@ -1403,9 +1602,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
                     _ => Operands::Other,
                 };
-                if matches!(operands, Operands::Numbers) {
-                    return self.float_equality(binary, line);
-                }
 
                 let lhs = self.expression(binary.lhs);
                 let rhs = self.expression(binary.rhs);
@@ -1426,7 +1622,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::UnaryPrefix(unary) => {
                 if let UnaryPrefixOperator::Negation(operator) = unary.operator
                     && let Some(name) = php_operator_name(&BinaryOperator::Subtraction(operator), 1)
-                    && let Some(class) = self.types.operator_class(name, &[unary.operand])
+                    && let Some(class) = self.types.operator_class(name, &[self.types.expression_type(unary.operand)])
                 {
                     let operand = self.expression(unary.operand);
 
@@ -1452,10 +1648,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(kind, 0, line, &[operand])
             }
             Expression::Assignment(assignment) => {
+                if let Expression::ArrayAccess(access) = assignment.lhs
+                    && match access.array.unparenthesized() {
+                        Expression::ArrayAccess(element) => self.is_list(element.array),
+                        Expression::Access(Access::Property(PropertyAccess {
+                            object,
+                            property: ClassLikeMemberSelector::Identifier(name),
+                            ..
+                        })) => self.types.property_has_hooks(self.types.expression_type(object), name.value),
+                        _ => false,
+                    }
+                {
+                    return self.element_write(line, assignment, access);
+                }
+
                 // A compound assignment to an instance assigns what the operator its class declares returns.
                 if let Some(operator) = compound_operator(&assignment.operator)
                     && let Some(name) = php_operator_name(&operator, 2)
-                    && let Some(class) = self.types.operator_class(name, &[assignment.lhs, assignment.rhs])
+                    && let Some(class) = self.types.operator_class(
+                        name,
+                        &[self.types.expression_type(assignment.lhs), self.types.expression_type(assignment.rhs)],
+                    )
                 {
                     return self.compound_assignment(line, assignment, |this, target, value| {
                         this.operator_call(line, class, name, &[target, value])
@@ -1504,8 +1717,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
             }
+            // `new Artifact.fromJson(…)` calls the static method the named constructor runs as, spec section 9.1.
             Expression::Instantiation(Instantiation {
                 class: Expression::Identifier(class),
+                constructor: Some(constructor),
+                argument_list: Some(arguments),
+                ..
+            }) => {
+                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+                let method = self.string(0, self.line(constructor), constructor.name.value);
+                let arguments = self.arguments(arguments, &[]);
+
+                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+            }
+            Expression::Instantiation(Instantiation {
+                class: Expression::Identifier(class),
+                constructor: None,
                 argument_list: Some(arguments),
                 ..
             }) => {
@@ -1730,16 +1957,65 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(kind, attr, line, &[comparison, zero])
     }
 
-    /// Whether `==` or `!=` compares an int with a float: both sides are numbers, `null` aside, and one may hold an
-    /// int where one may hold a float. The checker refuses every other pair of two different number kinds.
-    fn mixes_numbers(&self, binary: &Binary) -> bool {
-        let [Some([lhs_int, lhs_float]), Some([rhs_int, rhs_float])] =
-            [binary.lhs, binary.rhs].map(|operand| number_kinds(self.types.expression_type(operand)))
-        else {
-            return false;
-        };
+    /// `lhs == rhs`, or `lhs != rhs` when `negated`, as spec section 19 compares a value of `lhs`'s type with one of
+    /// `rhs`'s: the `op_Equality` the class of an instance side declares, which lifts a null side itself, an int and a
+    /// float as two floats, and `===` otherwise. `== null` tests for null and runs no operator. A collection search
+    /// compares each element with its value through it, so a search never compares differently from `==`.
+    fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
+        let (lhs_type, rhs_type) = (self.side_type(&lhs), self.side_type(&rhs));
+        if let Some((class, name)) = self.declared_equality(lhs_type, rhs_type) {
+            let lhs = self.side(&lhs);
+            let rhs = self.side(&rhs);
+            let call = self.operator_call(line, class, name, &[lhs, rhs]);
 
-        (lhs_int || rhs_int) && (lhs_float || rhs_float)
+            return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
+        }
+        if mixes_numbers(lhs_type, rhs_type) {
+            return self.float_equality(line, &lhs, &rhs, negated);
+        }
+
+        let lhs = self.side(&lhs);
+        let rhs = self.side(&rhs);
+        let attr = if negated { ZEND_IS_NOT_IDENTICAL } else { ZEND_IS_IDENTICAL };
+
+        self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs])
+    }
+
+    /// The class whose `op_Equality` `==` runs on a value of `lhs_type` and one of `rhs_type`, as the checker chose it,
+    /// with the method's name, or none when `==` on them is `===` or two floats. `== null` runs none.
+    fn declared_equality(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<(Word, &'static [u8])> {
+        if lhs_type.is_null() || rhs_type.is_null() {
+            return None;
+        }
+        let name = php_operator_name(&BinaryOperator::Equal(Span::zero()), 2)?;
+
+        Some((self.types.operator_class(name, &[lhs_type, rhs_type])?, name))
+    }
+
+    /// The type of the value `side` holds.
+    fn side_type<'side>(&self, side: &Side<'side, '_>) -> &'side TUnion
+    where
+        'lowering: 'side,
+    {
+        match side {
+            Side::Expression(expression) => self.types.expression_type(expression),
+            Side::Hidden { r#type, .. } => r#type,
+        }
+    }
+
+    /// A read of `side`: the expression, lowered, or its hidden variable.
+    fn side(&mut self, side: &Side) -> u32 {
+        match side {
+            Side::Expression(expression) => self.expression(expression),
+            Side::Hidden { span, name, .. } => self.variable(*span, name),
+        }
+    }
+
+    fn side_span(side: &Side) -> Span {
+        match side {
+            Side::Expression(expression) => expression.span(),
+            Side::Hidden { span, .. } => *span,
+        }
     }
 
     /// `lhs == rhs` of an int and a float as two floats, `(float) $count === $ratio`, as spec section 19 compares
@@ -1748,50 +2024,46 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `(($operand#1 = lhs) === null) === (($operand#2 = rhs) === null) && ($operand#1 === null || (float) $operand#1
     /// === $operand#2)`, so `(float) null`, which is `0.0`, never compares. `!=` is its `!`. The names are taken
     /// before the operands are lowered, so an equality inside an operand takes the next ones.
-    fn float_equality(&mut self, binary: &Binary, line: u32) -> u32 {
-        let types = self.types;
-        let (lhs_type, rhs_type) = (types.expression_type(binary.lhs), types.expression_type(binary.rhs));
+    fn float_equality(&mut self, line: u32, lhs: &Side, rhs: &Side, negated: bool) -> u32 {
+        let (lhs_type, rhs_type) = (self.side_type(lhs), self.side_type(rhs));
         let [cast_lhs, cast_rhs] = [lhs_type, rhs_type].map(|r#type| number_kinds(r#type).is_some_and(|[int, _]| int));
         if !lhs_type.is_nullable() && !rhs_type.is_nullable() {
-            let lhs = self.expression(binary.lhs);
+            let lhs = self.side(lhs);
             let lhs = self.float(line, lhs, cast_lhs);
-            let rhs = self.expression(binary.rhs);
+            let rhs = self.side(rhs);
             let rhs = self.float(line, rhs, cast_rhs);
-            let (kind, attr) = binary_kind(binary);
+            let attr = if negated { ZEND_IS_NOT_IDENTICAL } else { ZEND_IS_IDENTICAL };
 
-            return self.node(kind, attr, line, &[lhs, rhs]);
+            return self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs]);
         }
 
         self.temporaries += 2;
         let lhs_name = format!("operand#{}", self.temporaries - 1).into_bytes();
         let rhs_name = format!("operand#{}", self.temporaries).into_bytes();
-        let lhs = self.expression(binary.lhs);
-        let rhs = self.expression(binary.rhs);
+        let (lhs_span, rhs_span) = (Self::side_span(lhs), Self::side_span(rhs));
+        let lhs = self.side(lhs);
+        let rhs = self.side(rhs);
 
-        let lhs_variable = self.variable(binary.lhs.span(), &lhs_name);
+        let lhs_variable = self.variable(lhs_span, &lhs_name);
         let lhs_stored = self.node(SHARP_AST_ASSIGN, 0, line, &[lhs_variable, lhs]);
         let lhs_is_null = self.is_null(line, lhs_stored);
-        let rhs_variable = self.variable(binary.rhs.span(), &rhs_name);
+        let rhs_variable = self.variable(rhs_span, &rhs_name);
         let rhs_stored = self.node(SHARP_AST_ASSIGN, 0, line, &[rhs_variable, rhs]);
         let rhs_is_null = self.is_null(line, rhs_stored);
         let same_nulls = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[lhs_is_null, rhs_is_null]);
 
-        let lhs_read = self.variable(binary.lhs.span(), &lhs_name);
+        let lhs_read = self.variable(lhs_span, &lhs_name);
         let both_null = self.is_null(line, lhs_read);
-        let lhs_read = self.variable(binary.lhs.span(), &lhs_name);
+        let lhs_read = self.variable(lhs_span, &lhs_name);
         let lhs_float = self.float(line, lhs_read, cast_lhs);
-        let rhs_read = self.variable(binary.rhs.span(), &rhs_name);
+        let rhs_read = self.variable(rhs_span, &rhs_name);
         let rhs_float = self.float(line, rhs_read, cast_rhs);
         let same_floats = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[lhs_float, rhs_float]);
         let same_values = self.node(SHARP_AST_OR, 0, line, &[both_null, same_floats]);
         let equality = self.node(SHARP_AST_AND, 0, line, &[same_nulls, same_values]);
         self.temporaries -= 2;
 
-        if binary.operator.is_negated_equality() {
-            self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[equality])
-        } else {
-            equality
-        }
+        if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[equality]) } else { equality }
     }
 
     /// `value === null`.
@@ -1812,6 +2084,43 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[lhs, rhs]);
 
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// A write into the element of a `List`, a place by spec section 12, or into a `Map` a hooked property holds, which
+    /// PHP gives no reference to. Only the engine's collection of the element or the property reaches where it is
+    /// stored, through the property's hooks: `list[i][key] = value` is `$list[$i]->put($key, $value)`, which gives the
+    /// value, and `list[i][key] ??= value` is `$list[$i][$key] ?? $list[$i]->put($key, $value)`, which holds the index
+    /// and the key that run something in hidden variables. `this.hooked[key] = value` is
+    /// `$this->hooked->put($key, $value)`. The checker refuses every other operator there, since it reads the element
+    /// of the `Map` bare.
+    fn element_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
+        let coalesce = match assignment.operator {
+            AssignmentOperator::Assign(_) => false,
+            AssignmentOperator::Coalesce(_) => true,
+            _ => unreachable!("the checker refuses `{}` on a `Map` element, which reads it bare", assignment.operator),
+        };
+        let mut element = self.collection_receiver(access.array, coalesce);
+        let mut key = if coalesce { self.reread(access.index, "key") } else { Reread::once(access.index) };
+        let held = coalesce.then(|| {
+            let element = self.read_collection(&mut element, line, false);
+            let key = self.read_key(&mut key);
+
+            self.node(SHARP_AST_DIM, 0, line, &[element, key])
+        });
+        let place = self.read_collection(&mut element, line, false);
+        let read = self.read_key(&mut key);
+        // The variables stay taken until the value is lowered, as in a compound assignment.
+        let value = self.expression(assignment.rhs);
+        self.release(key);
+        self.release_collection(element);
+        let put = self.string(0, line, b"put");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[read, value]);
+        let put = self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, put, arguments]);
+
+        match held {
+            Some(held) => self.node(SHARP_AST_COALESCE, 0, line, &[held, put]),
+            None => put,
+        }
     }
 
     /// `target op= value` as `target = operation(target, value)`, for an operator that differs from PHP's: `/=` on ints
@@ -1863,18 +2172,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The call of the static method a PHP# operator on instances runs, as `\App\Money::op_Addition($a, $b)` for
-    /// `a + b`: `!=` is the `!` of `op_Equality`, and an ordering compares what `op_Comparison` returns with 0. `== null`
-    /// and operands with no instance run none.
+    /// `a + b`: an ordering compares what `op_Comparison` returns with 0, and `==` and `!=` are [`Self::equality`]'s.
+    /// Operands with no instance run none.
     fn declared_operator(&mut self, line: u32, binary: &Binary) -> Option<u32> {
         let declared = match binary.operator {
-            BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)
-                if [binary.lhs, binary.rhs]
-                    .into_iter()
-                    .any(|operand| self.types.expression_type(operand).is_null()) =>
-            {
-                return None;
-            }
-            BinaryOperator::Equal(span) | BinaryOperator::NotEqual(span) => BinaryOperator::Equal(span),
             BinaryOperator::LessThan(span)
             | BinaryOperator::LessThanOrEqual(span)
             | BinaryOperator::GreaterThan(span)
@@ -1884,14 +2185,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => return None,
         };
         let name = php_operator_name(&declared, 2)?;
-        let class = self.types.operator_class(name, &[binary.lhs, binary.rhs])?;
+        let types = self.types;
+        let class =
+            types.operator_class(name, &[types.expression_type(binary.lhs), types.expression_type(binary.rhs)])?;
 
         let lhs = self.expression(binary.lhs);
         let rhs = self.expression(binary.rhs);
         let call = self.operator_call(line, class, name, &[lhs, rhs]);
 
         Some(match binary.operator {
-            BinaryOperator::NotEqual(_) => self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]),
             BinaryOperator::LessThan(_)
             | BinaryOperator::LessThanOrEqual(_)
             | BinaryOperator::GreaterThan(_)
@@ -2016,11 +2318,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[condition, null, rest])
     }
 
-    /// The object of `?.`. An index there reads a missing key as null, as `??` does, so `x[k]?.name` is
-    /// `($x[$k] ?? null)?->name`, where a bare `x[k]` throws on a missing key (spec section 12).
+    /// The object of `?.`. An index there reads a missing key as null, which `?.` skips, where a bare read throws on a
+    /// missing key (spec section 12). A `List` index is the index itself, marked with `ZEND_DIM_IS`, the mark php-src
+    /// gives an index `??` reads: a change after `?.` then reaches the element the list stores, as `rows[0]?.add(5)`
+    /// does, and only that index reads quietly, so `cube[9][0]?.x` still throws on `cube[9]`. A `Map` index, which no
+    /// change runs through, is `($x[$k] ?? null)?->name`.
     fn null_safe_object(&mut self, object: &Expression) -> u32 {
         let value = self.expression(object);
-        if !matches!(object.unparenthesized(), Expression::ArrayAccess(_)) {
+        let Expression::ArrayAccess(access) = object.unparenthesized() else {
+            return value;
+        };
+        if self.is_list(access.array) {
+            self.nodes[value as usize].attr |= ZEND_DIM_IS;
+
             return value;
         }
 
@@ -2054,7 +2364,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let parameters = self.lambda_parameters(&arrow_function.parameter_list);
-        let uses = self.closure_uses(lambda);
+        let uses = self.closure_uses(Node::ArrowFunction(arrow_function));
         let body = self.lambda_body(|lowering| {
             let line = lowering.line(arrow_function.expression);
             let mut statements = lowering.set_parameters(&arrow_function.parameter_list);
@@ -2072,7 +2382,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn closure(&mut self, closure: &Closure) -> u32 {
         let lambda = closure.span();
         let parameters = self.lambda_parameters(&closure.parameter_list);
-        let uses = self.closure_uses(lambda);
+        let uses = self.closure_uses(Node::Closure(closure));
         let body = self.lambda_body(|lowering| {
             let mut statements = lowering.set_parameters(&closure.parameter_list);
             for statement in &closure.body.statements {
@@ -2098,10 +2408,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The `use` list of a `CLOSURE`: each local the lambda captures, in first-use order, by reference with
     /// `ZEND_BIND_REF` when code writes it and by value otherwise, or null when it captures none.
-    fn closure_uses(&mut self, lambda: Span) -> u32 {
-        let line = self.line(lambda);
+    fn closure_uses(&mut self, lambda: Node) -> u32 {
+        let line = self.line(lambda.span());
         let mut uses = Vec::new();
-        for &(name, local) in self.names.captures(&lambda) {
+        for &(name, local) in self.names.captures(&lambda.span()) {
             let attr = if self.names.is_written(&local) { ZEND_BIND_REF } else { 0 };
             uses.push(self.string(attr, line, name));
         }
@@ -2164,12 +2474,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP, 0, line, &[lowered, value])
     }
 
-    /// The loop key `key` of a `Map` keyed by `key_type`, read back as the value the `Map` was given: the case of a
-    /// backed enum through its `from`, or a `string` through `(string)`. None when the stored key is that value.
-    fn key_read_back(&mut self, key: &ForOfVariable, key_type: &TUnion) -> Option<u32> {
-        let line = self.line(key);
+    /// The variable `key`, written at `span`, holding a key a `Map` keyed by `key_type` stores, read back as the value
+    /// the `Map` was given: the case of a backed enum through its `from`, or a `string` through `(string)`. None when
+    /// the stored key is that value.
+    fn key_read_back(&mut self, span: Span, key: &[u8], key_type: &TUnion) -> Option<u32> {
+        let line = self.line(span);
         if let Some(class) = self.backed_enum(key_type) {
-            let stored_key = self.variable(key.name.span, key.name.value);
+            let stored_key = self.variable(span, key);
             let class = self.string(ZEND_NAME_FQ, line, class);
             let from = self.string(0, line, b"from");
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[stored_key]);
@@ -2180,9 +2491,29 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return None;
         }
 
-        let stored_key = self.variable(key.name.span, key.name.value);
+        let stored_key = self.variable(span, key);
 
         Some(self.node(SHARP_AST_CAST, IS_STRING, line, &[stored_key]))
+    }
+
+    /// `keys`, the list of the keys of `key_type` a `Map` stores, each read back as [`Self::key_read_back`] reads a
+    /// loop's key, as in `\array_map(fn ($key#N) => (string) $key#N, $keys)` for a `Map<string, V>`. `keys` alone
+    /// where each stored key is the key the `Map` was given.
+    fn keys_read_back(&mut self, span: Span, key_type: &TUnion, keys: u32) -> u32 {
+        self.temporaries += 1;
+        let key = format!("key#{}", self.temporaries).into_bytes();
+        let read_back = self.key_read_back(span, &key, key_type);
+        self.temporaries -= 1;
+        let Some(read_back) = read_back else {
+            return keys;
+        };
+
+        let line = self.line(span);
+        let read_back = self.hidden_arrow_function(span, &key, read_back);
+        let function = self.string(ZEND_NAME_FQ, line, b"array_map");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[read_back, keys]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
     /// The backed enum every value of `r#type` is a case of, if there is one.
@@ -2239,6 +2570,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
     }
 
+    /// Whether the analysis gave `expression` a `List` type, whose index spec section 12 makes a place.
+    fn is_list(&self, expression: &Expression) -> bool {
+        self.types
+            .expression_type(expression)
+            .types
+            .iter()
+            .any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+    }
+
     /// Spec section 12 stores a `Set` as the array of its elements, each under its key, so a `Set` literal is
     /// `["vip" => "vip"]`. One with a spread is `\Sharp\Set::from` of the list literal.
     fn set_literal(&mut self, array: &Array) -> u32 {
@@ -2255,7 +2595,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 unreachable!("the checker refuses a `Map` literal where a `Set` is declared");
             };
             let mut value = self.reread(element.value, "element");
-            let key = self.set_key(&mut value);
+            let key = self.read_key(&mut value);
             let read = self.read(&mut value);
             self.release(value);
             entries.push(self.node(SHARP_AST_ARRAY_ELEM, 0, self.line(element), &[read, key]));
@@ -2353,8 +2693,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The PHP a call of one of the [`INLINED_COLLECTION_METHODS`] runs on the array, or none for any other call. A
-    /// change reaches a property through the property, which runs its hooks, and a value that lives nowhere changes as
-    /// a copy. A null-safe call tests its receiver first and gives null for null.
+    /// change reaches a property through the property, which runs its hooks, an element of a `List` through a
+    /// `Sharp\Collection` method, and a value that lives nowhere changes as a copy. A null-safe call tests its
+    /// receiver first and gives null for null, which a missing key of a `Map` reads as.
     fn collection_call(
         &mut self,
         call: &Expression,
@@ -2369,7 +2710,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 .arguments
                 .first()
                 .map(Argument::value)
-                .unwrap_or_else(|| unreachable!("the checker refuses a `Set` method call without its element"))
+                .unwrap_or_else(|| unreachable!("the checker refuses a collection method call without its element"))
         };
 
         let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
@@ -2378,41 +2719,68 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             self.is_null(line, receiver)
         });
-        let lowered = match method.as_slice() {
-            b"contains" => {
-                let set = self.read_collection(&mut collection, line, false);
-                let key = self.key(element());
-                let entry = self.node(SHARP_AST_DIM, 0, line, &[set, key]);
+        let lowered = match (collection_name, method.as_slice()) {
+            ("List", b"contains" | b"indexof" | b"remove") => {
+                let element_type = self.types.element_type(self.types.expression_type(receiver));
+                let search = match method.as_slice() {
+                    b"contains" => Search::Contains,
+                    b"indexof" => Search::IndexOf,
+                    _ => Search::Remove,
+                };
 
-                self.node(SHARP_AST_ISSET, 0, line, &[entry])
+                self.element_search(call.span(), &mut collection, &element_type, element(), search)
             }
-            b"add" => {
+            ("List", b"last") => {
+                let list = self.read_collection(&mut collection, line, false);
+                let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
+                let is_empty = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[list, empty]);
+                let class = self.string(ZEND_NAME_FQ, line, b"OutOfRangeException");
+                let message = self.string(0, line, b"The list is empty.");
+                let message = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
+                let exception = self.node(SHARP_AST_NEW, 0, line, &[class, message]);
+                let throw = self.node(SHARP_AST_THROW, 0, line, &[exception]);
+                let list = self.read_collection(&mut collection, line, false);
+                let function = self.string(ZEND_NAME_FQ, line, b"array_last");
+                let list = self.node(SHARP_AST_ARG_LIST, 0, line, &[list]);
+                let element = self.node(SHARP_AST_CALL, 0, line, &[function, list]);
+
+                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_empty, throw, element])
+            }
+            ("Set", b"contains") | ("Map", b"has") => {
+                self.holds_key(collection_name, &mut collection, &mut Reread::once(element()), line)
+            }
+            ("Set", b"add") => {
                 let mut element = self.reread(element(), "element");
-                let held = self.read_collection(&mut collection, line, false);
-                let key = self.set_key(&mut element);
-                let entry = self.node(SHARP_AST_DIM, 0, line, &[held, key]);
-                let held = self.node(SHARP_AST_ISSET, 0, line, &[entry]);
+                let held = self.holds_key(collection_name, &mut collection, &mut element, line);
                 let absent = self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[held]);
                 let place = self.read_collection(&mut collection, line, false);
-                let key = self.set_key(&mut element);
+                let key = self.read_key(&mut element);
                 let value = self.read(&mut element);
                 self.release(element);
-                let entry = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key]);
-                let entries = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[entry]);
-                let added = self.node(SHARP_AST_ASSIGN_OP, ZEND_ADD, line, &[place, entries]);
+                let added = if matches!(collection, CollectionReceiver::Index(..)) {
+                    // `$list[$i]->put($key, $value) !== null`, which gives the element, never null in a `Set`.
+                    let put = self.string(0, line, b"put");
+                    let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[key, value]);
+                    let put = self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, put, arguments]);
+                    let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+                    self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[put, null])
+                } else {
+                    let entry = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key]);
+                    let entries = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[entry]);
+
+                    self.node(SHARP_AST_ASSIGN_OP, ZEND_ADD, line, &[place, entries])
+                };
 
                 self.node(SHARP_AST_AND, 0, line, &[absent, added])
             }
-            b"remove" => {
-                let mut element = self.reread(element(), "element");
-                let held = self.read_collection(&mut collection, line, false);
-                let key = self.set_key(&mut element);
-                let entry = self.node(SHARP_AST_DIM, 0, line, &[held, key]);
-                let held = self.node(SHARP_AST_ISSET, 0, line, &[entry]);
+            ("Set" | "Map", b"remove") => {
+                let mut removed = self.reread(element(), if collection_name == "Set" { "element" } else { "key" });
+                let held = self.holds_key(collection_name, &mut collection, &mut removed, line);
                 let place = self.read_collection(&mut collection, line, false);
                 let delete = self.string(0, line, b"delete");
-                let key = self.set_key(&mut element);
-                self.release(element);
+                let key = self.read_key(&mut removed);
+                self.release(removed);
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[key]);
                 let deleted = self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, delete, arguments]);
                 let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
@@ -2420,31 +2788,48 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_AND, 0, line, &[held, deleted])
             }
-            b"clear" => {
+            ("List" | "Set", b"clear") => {
                 let place = self.read_collection(&mut collection, line, false);
-                if matches!(collection, CollectionReceiver::Value(Reread { hidden: None, .. })) {
-                    // The receiver lives nowhere, so clearing it changes nothing anyone reads.
-                    place
-                } else {
-                    let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
+                match collection {
+                    CollectionReceiver::Value(_) => {
+                        unreachable!("the checker refuses a change to a value with no place")
+                    }
+                    CollectionReceiver::Index(..) => {
+                        let clear = self.string(0, line, b"clear");
+                        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
 
-                    self.node(SHARP_AST_ASSIGN, 0, line, &[place, empty])
+                        self.node(SHARP_AST_METHOD_CALL, 0, line, &[place, clear, arguments])
+                    }
+                    _ => {
+                        let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
+
+                        self.node(SHARP_AST_ASSIGN, 0, line, &[place, empty])
+                    }
                 }
             }
-            b"count" | b"tolist" => {
-                let function = if method == b"count" { b"count".as_slice() } else { b"array_values" };
+            (_, b"count") | ("Set", b"tolist") | ("Map", b"keys") => {
+                let function = match method.as_slice() {
+                    b"count" => b"count".as_slice(),
+                    b"tolist" => b"array_values",
+                    _ => b"array_keys",
+                };
                 let array = self.read_collection(&mut collection, line, false);
                 let function = self.string(ZEND_NAME_FQ, line, function);
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[array]);
-
-                self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+                let called = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+                if method == b"keys" {
+                    let key_type = self.types.element_type(self.types.expression_type(call));
+                    self.keys_read_back(call.span(), &key_type, called)
+                } else {
+                    called
+                }
             }
-            b"filter" => {
-                let set = self.read_collection(&mut collection, line, false);
+            ("Set" | "Map", b"filter") => {
+                let filtered = self.read_collection(&mut collection, line, false);
                 let filter = self.string(0, line, b"filterValues");
                 let arguments = self.arguments(arguments, &[]);
 
-                self.node(SHARP_AST_METHOD_CALL, 0, line, &[set, filter, arguments])
+                self.node(SHARP_AST_METHOD_CALL, 0, line, &[filtered, filter, arguments])
             }
             _ => unreachable!(
                 "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
@@ -2463,6 +2848,158 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
+    /// A `List`'s `contains(value)`, `indexOf(value)` or `remove(value)`, as `search` names it: whether an element of
+    /// `element_type` equals `value` by spec section 19's `==`, the index of the first one that does or null, or whether
+    /// `remove` removed it. Where `==` on them is `===` and neither the receiver nor the value runs code, so the value
+    /// may be read first, the search is PHP's strict `\in_array($value, $list, true)` or
+    /// `\array_search($value, $list, true)`. Otherwise it runs [`Self::equality`] on each element:
+    /// `\array_find_key($list, (fn ($value#N) => fn ($element#M) => $element#M == $value#N)($value))`, which reads
+    /// the receiver before the value, as the call does, and the value once. An index the search found goes into a
+    /// hidden `$index#N`, since index 0 is falsy: `indexOf` reads `\array_search`'s false as null, and `remove` gives
+    /// `($index#N = …) !== false && $list->removeAt($index#N) === null`, so `Sharp\Collection::removeAt` removes the
+    /// element, renumbers the list and writes it back where it lives.
+    fn element_search(
+        &mut self,
+        call: Span,
+        collection: &mut CollectionReceiver,
+        element_type: &TUnion,
+        value: &Expression,
+        search: Search,
+    ) -> u32 {
+        let line = self.line(call);
+        let value_type = self.types.expression_type(value);
+        // `\in_array` and `\array_search` read the value before the list, so they run only where neither side runs code.
+        let strict = self.declared_equality(element_type, value_type).is_none()
+            && !mixes_numbers(element_type, value_type)
+            && self.is_pure(value)
+            && self.runs_nothing(collection);
+        let hidden = (matches!(search, Search::Remove) || (strict && matches!(search, Search::IndexOf))).then(|| {
+            self.temporaries += 1;
+
+            format!("index#{}", self.temporaries).into_bytes()
+        });
+        let found = if strict {
+            let value = self.expression(value);
+            let list = self.read_collection(collection, line, false);
+            let strict = self.zval(line, sharp_value::SHARP_TRUE, |_| {});
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value, list, strict]);
+            let function = if matches!(search, Search::Contains) { b"in_array".as_slice() } else { b"array_search" };
+            let function = self.string(ZEND_NAME_FQ, line, function);
+
+            self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+        } else {
+            self.temporaries += 2;
+            let value_name = format!("value#{}", self.temporaries - 1).into_bytes();
+            let element_name = format!("element#{}", self.temporaries).into_bytes();
+            let list = self.read_collection(collection, line, false);
+            let element = Side::Hidden { span: call, name: element_name.clone(), r#type: element_type };
+            let held = Side::Hidden { span: call, name: value_name.clone(), r#type: value_type };
+            let equality = self.equality(line, element, held, false);
+            let compare = self.hidden_arrow_function(call, &element_name, equality);
+            let compare_with = self.hidden_arrow_function(call, &value_name, compare);
+            let value = self.expression(value);
+            let value = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+            let predicate = self.node(SHARP_AST_CALL, 0, line, &[compare_with, value]);
+            self.temporaries -= 2;
+
+            let function = self.string(ZEND_NAME_FQ, line, b"array_find_key");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[list, predicate]);
+
+            self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+        };
+        let Some(hidden) = hidden else {
+            if strict || matches!(search, Search::IndexOf) {
+                return found;
+            }
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+            return self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, null]);
+        };
+
+        let variable = self.variable(call, &hidden);
+        let found = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, found]);
+        let missed = if strict { sharp_value::SHARP_FALSE } else { sharp_value::SHARP_NULL };
+        let missed = self.zval(line, missed, |_| {});
+        let lowered = if matches!(search, Search::Remove) {
+            let found = self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[found, missed]);
+            let list = self.read_collection(collection, line, false);
+            let remove_at = self.string(0, line, b"removeAt");
+            let index = self.variable(call, &hidden);
+            let index = self.node(SHARP_AST_ARG_LIST, 0, line, &[index]);
+            let removed = self.node(SHARP_AST_METHOD_CALL, 0, line, &[list, remove_at, index]);
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+            let removed = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[removed, null]);
+
+            self.node(SHARP_AST_AND, 0, line, &[found, removed])
+        } else {
+            let missed = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[found, missed]);
+            let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+            let index = self.variable(call, &hidden);
+
+            self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[missed, null, index])
+        };
+        self.temporaries -= 1;
+
+        lowered
+    }
+
+    /// Whether the `Map` or the `Set` a method call runs on holds `key`: `isset($set[$key])` for a `Set`, whose elements
+    /// are never null, and `\array_key_exists($key, $map)` for a `Map`, whose values may be. `\array_key_exists` reads
+    /// its arguments in the order they are written, so where the key or the receiver runs code, they go in by name, the
+    /// receiver first, as the call reads them: `\array_key_exists(array: $map, key: $key)`.
+    fn holds_key(
+        &mut self,
+        collection_name: &str,
+        collection: &mut CollectionReceiver,
+        key: &mut Reread,
+        line: u32,
+    ) -> u32 {
+        let in_order = self.is_pure(key.expression) && self.runs_nothing(collection);
+        let held = self.read_collection(collection, line, false);
+        let key = self.read_key(key);
+        if collection_name == "Set" {
+            let entry = self.node(SHARP_AST_DIM, 0, line, &[held, key]);
+
+            return self.node(SHARP_AST_ISSET, 0, line, &[entry]);
+        }
+
+        let arguments = if in_order {
+            vec![key, held]
+        } else {
+            let array = self.string(0, line, b"array");
+            let held = self.node(SHARP_AST_NAMED_ARG, 0, line, &[array, held]);
+            let name = self.string(0, line, b"key");
+
+            vec![held, self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, key])]
+        };
+        let function = self.string(ZEND_NAME_FQ, line, b"array_key_exists");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+
+        self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+    }
+
+    /// Whether reading the receiver `collection` runs no code: a local, a field or a static property, or a property of
+    /// or a value that [`Self::is_pure`] reads.
+    fn runs_nothing(&self, collection: &CollectionReceiver) -> bool {
+        match collection {
+            CollectionReceiver::Place(_) => true,
+            CollectionReceiver::Property(object, _) | CollectionReceiver::Value(object) => {
+                self.is_pure(object.expression)
+            }
+            CollectionReceiver::Index(list, index) => self.runs_nothing(list) && self.is_pure(index.expression),
+        }
+    }
+
+    /// `fn ($parameter) => body`, an arrow function of one untyped hidden parameter, on the line of `span`.
+    fn hidden_arrow_function(&mut self, span: Span, parameter: &[u8], body: u32) -> u32 {
+        let line = self.line(span);
+        let name = self.string(0, line, parameter);
+        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[NULL, name, NULL, NULL, NULL, NULL]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+
+        self.declaration(SHARP_AST_ARROW_FUNC, 0, span, span, b"", &[parameters, NULL, body, NULL, NULL])
+    }
+
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the method the method call `call` runs as
     /// PHP on the array, one of the [`INLINED_COLLECTION_METHODS`], and whether that PHP reads the receiver twice. None
     /// for a call of any other method.
@@ -2473,7 +3010,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }) {
             return None;
         }
-        let reads_twice = matches!(method.as_slice(), b"add" | b"remove");
+        let reads_twice =
+            matches!((collection, method.as_slice()), (_, b"remove") | ("Set", b"add") | ("List", b"last"));
 
         Some((collection, method, reads_twice))
     }
@@ -2505,12 +3043,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             {
                 CollectionReceiver::Property(hold(self, object), property)
             }
+            Expression::ArrayAccess(access) if self.is_list(access.array) => {
+                let list = self.collection_receiver(access.array, twice);
+                let index = if twice { self.reread(access.index, "index") } else { Reread::once(access.index) };
+
+                CollectionReceiver::Index(Box::new(list), index)
+            }
             _ => CollectionReceiver::Value(hold(self, receiver)),
         }
     }
 
     /// A read of the collection a method call runs on, which is also where the method writes it. The read that tests
-    /// a null-safe call's receiver reads a property with `?->`.
+    /// a null-safe call's receiver reads a property with `?->`, and marks a `List` index with `ZEND_DIM_IS`, as
+    /// `null_safe_object` does, so a missing index skips the call as a null element does while the indexes before it
+    /// stay bare reads (spec section 12).
     fn read_collection(&mut self, collection: &mut CollectionReceiver, line: u32, null_safe: bool) -> u32 {
         match collection {
             CollectionReceiver::Place(place) => self.target(place),
@@ -2521,14 +3067,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(kind, 0, line, &[object, property])
             }
+            CollectionReceiver::Index(list, index) => {
+                let list = self.read_collection(list, line, false);
+                let index = self.read(index);
+
+                self.node(SHARP_AST_DIM, if null_safe { ZEND_DIM_IS } else { 0 }, line, &[list, index])
+            }
+            CollectionReceiver::Value(value) if null_safe => self.read_as(value, Self::null_safe_object),
             CollectionReceiver::Value(value) => self.read(value),
         }
     }
 
+    /// Frees the hidden variables of `collection`, the last ones taken first.
     fn release_collection(&mut self, collection: CollectionReceiver) {
         match collection {
             CollectionReceiver::Place(_) => {}
             CollectionReceiver::Property(object, _) => self.release(object),
+            CollectionReceiver::Index(list, index) => {
+                self.release(index);
+                self.release_collection(*list);
+            }
             CollectionReceiver::Value(value) => self.release(value),
         }
     }
@@ -2548,8 +3106,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A read of `value`, whose first read assigns its hidden variable.
     fn read(&mut self, value: &mut Reread) -> u32 {
+        self.read_as(value, Self::expression)
+    }
+
+    /// A read of `value` as `lower` lowers it, whose first read assigns its hidden variable.
+    fn read_as(&mut self, value: &mut Reread, lower: fn(&mut Self, &Expression) -> u32) -> u32 {
         let Some(name) = value.hidden.clone() else {
-            return self.expression(value.expression);
+            return lower(self, value.expression);
         };
         let variable = self.variable(value.expression.span(), &name);
         if value.assigned {
@@ -2557,13 +3120,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         value.assigned = true;
-        let lowered = self.expression(value.expression);
+        let lowered = lower(self, value.expression);
 
         self.node(SHARP_AST_ASSIGN, 0, self.line(value.expression), &[variable, lowered])
     }
 
-    /// A read of the element `value` as the key a `Set` holds it under.
-    fn set_key(&mut self, value: &mut Reread) -> u32 {
+    /// A read of `value` as the key a `Map` or a `Set` holds it under.
+    fn read_key(&mut self, value: &mut Reread) -> u32 {
         let read = self.read(value);
 
         self.stored_key(value.expression, read)
@@ -2691,7 +3254,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(name);
 
         match self.names.binding(&name.name) {
-            Some(Binding::Local(_) | Binding::This) => self.variable(name.span(), name.name.value()),
+            Some(Binding::Local(_)) => self.variable(name.span(), name.name.value()),
+            Some(Binding::This) => self.variable(name.span(), b"this"),
             Some(Binding::Field) => self.storage(line),
             Some(Binding::Constant) => {
                 let constant = self.string(ZEND_NAME_NOT_FQ, line, name.name.value());
@@ -2975,20 +3539,23 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Readonly(_)
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
-            | Modifier::PrivateSet(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
+            | Modifier::PrivateSet(_)
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_)
+            | Modifier::Foreign(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
         };
     }
 
     flags
 }
 
-/// The flags of a class's modifiers. `public` adds none, because every PHP class is public. A static class, whose
-/// members are all static, runs as a final PHP class.
+/// The flags of a class's modifiers. `public` adds none, because every PHP class is public, and `foreign` adds none,
+/// because only the checker reads it. A static class, whose members are all static, runs as a final PHP class.
 fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
     for modifier in modifiers {
         flags |= match modifier {
-            Modifier::Public(_) => 0,
+            Modifier::Public(_) | Modifier::Foreign(_) => 0,
             Modifier::Abstract(_) => ZEND_ACC_EXPLICIT_ABSTRACT_CLASS,
             Modifier::Final(_) | Modifier::Static(_) => ZEND_ACC_FINAL,
             Modifier::Protected(_)
@@ -3000,18 +3567,13 @@ fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::Virtual(_)
             | Modifier::Override(_)
             | Modifier::Required(_)
-            | Modifier::Extern(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => unreachable!("check_slice refuses the class modifier `{modifier}`"),
         };
     }
 
     flags
-}
-
-/// Whether PHP takes an initial value as the property's default: a constant expression without `new`, on a property
-/// that is not `readonly`, which takes no default.
-fn is_default(property: &Property, value: &Expression) -> bool {
-    !matches!(property, Property::Hooked(hooked) if is_readonly(&hooked.hook_list))
-        && value.is_constant(&PHPVersion::PHP85, false)
 }
 
 /// Whether `parameter` is a `Set`, as `Some` of whether it is nullable.
@@ -3023,13 +3585,6 @@ fn set_parameter(parameter: &FunctionLikeParameter) -> Option<bool> {
         }
         _ => None,
     }
-}
-
-/// Whether a property runs as `readonly`: a get-only auto-property, which spec section 6.1 sets in the constructor.
-/// PHP refuses hooks on a `readonly` property.
-fn is_readonly(accessors: &PropertyHookList) -> bool {
-    accessors.is_get_only()
-        && !accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
 }
 
 /// Whether a member without an initial value starts as null, as in C# and Swift: a field, or a property with storage
@@ -3046,20 +3601,24 @@ fn is_null_by_default(property: &Property, names: &ResolvedNames) -> bool {
 }
 
 /// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the
-/// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` accessor's
-/// access modifier. A get-only property whose body uses `field` takes `protected(set)`, the set visibility of
-/// `readonly`, and one without storage takes none, because PHP refuses a set visibility on a read-only virtual
-/// property. PHP drops a set visibility equal to the property's own, so a private property, or a protected one with
-/// `protected(set)`, takes none, and the flags carry only what the engine keeps.
+/// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` or `init`
+/// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property whose body uses
+/// `field` takes `protected(set)`, the set visibility of `readonly`, and one without storage takes none, because PHP
+/// refuses a set visibility on a read-only virtual property. PHP drops a set visibility equal to the property's own,
+/// so a private property, or a protected one with `protected(set)`, takes none, and the flags carry only what the
+/// engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
-    if is_readonly(accessors) {
+    if accessors.is_readonly() {
         return ZEND_ACC_READONLY;
     }
 
-    let flags = match accessors.hooks.iter().find(|accessor| accessor.name.value == b"set") {
+    let flags = match accessors.setter() {
         None if names.uses_field(accessors) => ZEND_ACC_PROTECTED_SET,
         None => 0,
-        Some(set) => match set.modifiers.first() {
+        Some(setter) => match setter.modifiers.first() {
+            // `init` sets the property while the object is created, in the constructors of its class and its
+            // subclasses, so it runs as `protected(set)`, and the analyzer refuses every write after that.
+            None if setter.name.value == b"init" => ZEND_ACC_PROTECTED_SET,
             None => 0,
             Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED_SET,
             Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE_SET,
@@ -3072,6 +3631,16 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
     } else {
         flags
     }
+}
+
+/// Whether `==` compares a value of `lhs` with one of `rhs` as an int and a float: both are numbers, `null` aside, and
+/// one may hold an int where one may hold a float. The checker refuses every other pair of two different number kinds.
+fn mixes_numbers(lhs: &TUnion, rhs: &TUnion) -> bool {
+    let [Some([lhs_int, lhs_float]), Some([rhs_int, rhs_float])] = [lhs, rhs].map(number_kinds) else {
+        return false;
+    };
+
+    (lhs_int || rhs_int) && (lhs_float || rhs_float)
 }
 
 /// The kinds of number the values of `union` are, `null` aside, as `[may hold an int, may hold a float]`, or `None`

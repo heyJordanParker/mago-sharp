@@ -35,6 +35,9 @@ use mago_syntax::parser::parse_file_with_dialect;
 use mago_syntax::settings::ParserSettings;
 use mago_word::WordSet;
 
+#[path = "../../../../tests/support/sharp_words.rs"]
+mod sharp_words;
+
 /// `Lib\Model`, a plain PHP parent whose accessors read and write an attribute by name, as Eloquent's do.
 pub const MODEL: (&str, &str) = (
     "src/Lib/Model.php",
@@ -76,6 +79,13 @@ pub const INT: (&str, &str) = (
 pub const FLOAT: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Float.sharp",
     "namespace Sharp;\n\npublic static class Float\n{\n    public static float parse(Any? value) => 0.0;\n\n    public static float? tryParse(Any? value) => null;\n}\n",
+);
+
+/// The standard library's `Sharp\Environment`, the `foreign` class of the effect `Environment`, with the signature of
+/// its `variable`.
+pub const ENVIRONMENT: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
+    "namespace Sharp;\n\npublic foreign class Environment\n{\n    public string? variable(string name) => null;\n}\n",
 );
 
 /// The standard library's package in `vendor/`. A checked file under it is the standard library's, as the loader marks
@@ -122,7 +132,8 @@ pub fn checked_inlining<R>(
     checked_file(&file, library, forms, then)
 }
 
-/// [`checked_inlining`] of `file` as the test builds it, such as a file a workspace root holds.
+/// [`checked_inlining`] of `file` as the test builds it, such as a file a workspace root holds. Panics when an issue of
+/// the file names a word only PHP has, in its message, help, notes or annotations.
 pub fn checked_file<R>(
     file: &File,
     library: &[(&str, &str)],
@@ -152,6 +163,16 @@ pub fn checked_file<R>(
         .analyze_with_artifacts(program, &mut result)
         .expect("the analysis runs");
     let issues: Vec<Issue> = semantic_issues.into_iter().chain(result.issues).collect();
+    let parse_errors: Vec<Issue> = program.errors.iter().map(Issue::from).collect();
+    let leaks: Vec<String> = parse_errors
+        .iter()
+        .chain(&issues)
+        .filter_map(|issue| {
+            let (text, word) = sharp_words::banned_word(issue)?;
+            Some(format!("`{}` says {text:?}, which names {word}", issue.code.as_deref().unwrap_or("none")))
+        })
+        .collect();
+    assert!(leaks.is_empty(), "A `.sharp` message speaks PHP#.\n{}", leaks.join("\n"));
 
     match check(file, program, names, &artifacts, &metadata, forms, &issues) {
         Ok(checked) => Ok(then(&checked)),

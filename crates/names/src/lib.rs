@@ -32,16 +32,26 @@ mod internal;
 /// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
 /// [`ResolvedNames::is_written`] reports. The binder knows no types, so a call of a method of these names on an object
 /// writes its local too, which captures it by reference, as harmless.
-pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "delete", "remove", "clear"];
+pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "insert", "remove", "clear"];
 
-/// The methods of a PHP# `List`, `Map` or `Set` that run as PHP functions or operators on the array, not as
-/// `Sharp\Collection` methods, as `(collection, method)` pairs.
+/// The methods of a PHP# `List`, `Map` or `Set` the bridge lowers from the checker's types, as `(collection, method)`
+/// pairs.
 ///
-/// The bridge lowers each of them from the checker's types, so the checker refuses one on a value that can also be an
+/// Each lowers to PHP functions or operators on the array, or to the `Sharp\Collection` method that runs it for that
+/// collection, as a `Map`'s `filter` runs as `filterValues`. The checker refuses one on a value that can also be an
 /// object, whose own method would not run.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 9] = [
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 18] = [
     ("List", "count"),
+    ("List", "contains"),
+    ("List", "indexOf"),
+    ("List", "last"),
+    ("List", "remove"),
+    ("List", "clear"),
     ("Map", "count"),
+    ("Map", "has"),
+    ("Map", "keys"),
+    ("Map", "remove"),
+    ("Map", "filter"),
     ("Set", "count"),
     ("Set", "add"),
     ("Set", "remove"),
@@ -49,22 +59,6 @@ pub const INLINED_COLLECTION_METHODS: [(&str, &str); 9] = [
     ("Set", "clear"),
     ("Set", "toList"),
     ("Set", "filter"),
-];
-
-/// The effects a PHP# `uses` takes, spec section 29, by the full names a bare effect name resolves to in a `.sharp`
-/// file: the standard library's ten, then `Events`, the effect of `emit`.
-pub const STANDARD_EFFECTS: [&str; 11] = [
-    "Sharp\\Database",
-    "Sharp\\Http",
-    "Sharp\\Files",
-    "Sharp\\Console",
-    "Sharp\\Process",
-    "Sharp\\Clock",
-    "Sharp\\Random",
-    "Sharp\\Cache",
-    "Sharp\\Mail",
-    "Sharp\\Environment",
-    "Sharp\\Events",
 ];
 
 /// The last segment of the full name `name`, as a PHP# import writes it.

@@ -47,7 +47,10 @@ pub fn check_top_level_statements<'ast, 'arena>(
             continue;
         }
 
-        if let Statement::Declare(declare) = statement {
+        // A `.sharp` file has no `declare`, and the PHP# checker refuses it whole.
+        if let Statement::Declare(declare) = statement
+            && !program.dialect.is_sharp()
+        {
             for item in &declare.items {
                 if item.name.value.eq_ignore_ascii_case(STRICT_TYPES_DECLARE_DIRECTIVE) {
                     context.report(

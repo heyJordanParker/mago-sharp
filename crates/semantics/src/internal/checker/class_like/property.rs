@@ -300,7 +300,13 @@ pub fn check_property(
                 last_write_visibility = Some(modifier.span());
             }
             // Only PHP# parses these, and `check_slice` decides them.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => {}
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_)
+            | Modifier::Foreign(_) => {}
         }
     }
 

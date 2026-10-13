@@ -5,6 +5,12 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::Span;
 
+use crate::library;
+use crate::library::Stop;
+use crate::package;
+use crate::package::Message;
+use crate::runner::Refusal;
+use crate::runner::Refused;
 use crate::translate::Law;
 use crate::translate::Unmodeled;
 
@@ -25,6 +31,8 @@ pub(crate) const LOOP: &str = "Mago does not translate loops to Lean.";
 pub(crate) const RECURSION: &str = "Mago does not translate recursion to Lean.";
 pub(crate) const LAMBDA: &str = "Mago does not translate lambdas to Lean.";
 pub(crate) const INHERITANCE: &str = "Mago does not translate inheritance to Lean.";
+pub(crate) const INTERFACE_METHOD: &str =
+    "Mago does not translate interface methods to Lean, because the implementation that runs is chosen at run time.";
 pub(crate) const ACCESSOR: &str = "Mago does not translate accessor bodies to Lean.";
 pub(crate) const CONSTRUCTOR_BODY: &str = "Mago does not translate constructor bodies to Lean.";
 pub(crate) const NOT_TRANSLATED: &str = "Mago does not translate it to Lean.";
@@ -135,42 +143,205 @@ pub(crate) fn axiom(law: &Law, proof: &str, axiom: &str) -> Issue {
 /// A law whose generated module Lean refused: a bug in Mago's translation, never in the project.
 pub(crate) fn generated_module_refused(law: &Law, module: &str, line: u32, message: &str) -> Issue {
     let first = message.lines().next().unwrap_or(message);
+    let place = if line == 0 { String::new() } else { format!(", at line {line}") };
 
     unproven(
         law,
         format!(
-            "Law {} is not proven: Lean refused the module {module} that Mago generated for it, at line {line}: {first}. This is a bug in Mago; report it to Mago's maintainers.",
+            "Law {} is not proven: Lean refused the module {module} that Mago generated for it{place}: {first}. This is a bug in Mago; report it to Mago's maintainers.",
             law.name
         ),
     )
     .with_note(message.to_owned())
 }
 
-/// An error in a proof file that no theorem for a law holds.
+/// An error in a proof file that no theorem for a law holds, or, at line 0, of the whole file.
 pub(crate) fn rejected_file(span: Span, proof: &str, line: u32, message: &str) -> Issue {
     let first = message.lines().next().unwrap_or(message);
+    let place = if line == 0 { String::new() } else { format!(" line {line}") };
 
-    Issue::error(format!("Lean rejected {proof} line {line}: {first}"))
+    Issue::error(format!("Lean rejected {proof}{place}: {first}"))
         .with_code(IssueCode::UnprovenLaw.as_str())
         .with_annotation(Annotation::primary(span))
         .with_note(message.to_owned())
 }
 
-/// A proof of a law the `.sharp` file no longer states, on the class's name.
-pub(crate) fn deleted_law(class: Span, proof: &str, line: u32, statement: &str, source: &str) -> Issue {
+/// A proof of a law the `.sharp` file no longer states, on the class's name, or at the start of a file that states no
+/// class-like any more.
+pub(crate) fn deleted_law(span: Span, proof: &str, line: u32, statement: &str, source: &str) -> Issue {
     Issue::error(format!(
         "{proof} line {line} proves {statement}, which {source} no longer states. Delete the proof, or restore the law."
     ))
     .with_code(IssueCode::NonExistentLaw.as_str())
-    .with_annotation(Annotation::primary(class))
+    .with_annotation(Annotation::primary(span))
 }
 
-pub(crate) fn lake_not_found(span: Span) -> Issue {
-    Issue::error(
-        "Laws and structure rules need Lean 4.34.1, and lake was not found. Install elan from https://lean-lang.org/install, then run vendor/bin/mago compile again.",
+/// A fact that breaks a structure rule, on the code that holds it: `This import of App.Tenant.Store.Receipts breaks
+/// the structure rule neverReachesTenant in app/Shared/Module.lean.`
+pub(crate) fn broken_rule(span: Span, fact: &str, rule: &str, rules: &str) -> Issue {
+    Issue::error(format!("This {fact} breaks the structure rule {rule} in {rules}."))
+        .with_code(IssueCode::BrokenRule.as_str())
+        .with_annotation(Annotation::primary(span))
+}
+
+/// A rule of the `Module.lean` `rules` that the runner did not run, on each file of the namespace it constrains, since
+/// the rule cannot check them.
+pub(crate) fn refused_rule(span: Span, rules: &str, namespace: &str, rule: &str, refused: &Refused) -> Issue {
+    let reason = match &refused.refusal {
+        Refusal::Gap => "it uses sorry. Write the rule out".to_owned(),
+        Refusal::Axiom(axiom) => format!("it uses the axiom {axiom}, which Lean's kernel does not check"),
+        Refusal::Unsafe(name) => format!("it reaches {name}, which is unsafe, so Lean's kernel does not check it"),
+        Refusal::ImplementedBy(name) => {
+            format!("it reaches {name}, whose compiled code is not the definition Lean checked")
+        }
+        Refusal::Reserved(name) => format!(
+            "it reaches {name}, which makes a namespace from a string. Name the namespace by its full name, as App.Shared.Schema"
+        ),
+        Refusal::Unevaluable(message) => format!("Lean cannot evaluate it: {}", one_line(message)),
+        Refusal::Stopped(stop) => stopped(*stop, "the rule"),
+    };
+
+    Issue::error(format!(
+        "This file is in {namespace}, whose structure rules {rules} holds, and its rule {rule} at line {}, column {} does not run: {reason}.",
+        refused.line,
+        refused.column + 1
+    ))
+    .with_code(IssueCode::BrokenRule.as_str())
+    .with_annotation(Annotation::primary(span))
+}
+
+/// An error of a `Module.lean` Lean rejected, on each file of the namespace its rules constrain, since no rule of it can
+/// check them.
+pub(crate) fn rejected_rules(span: Span, rules: &str, namespace: &str, error: &Message) -> Issue {
+    rejected_lean_error(
+        span,
+        format!("This file is in {namespace}, whose structure rules {rules} holds, and Lean rejected {rules}"),
+        "",
+        error,
     )
+}
+
+/// An error of the workspace Lean file `imported` that a `Module.lean` imports, on each file of the namespace its rules
+/// constrain.
+pub(crate) fn rejected_rules_import(
+    span: Span,
+    rules: &str,
+    namespace: &str,
+    imported: &str,
+    error: &Message,
+) -> Issue {
+    rejected_lean_error(
+        span,
+        format!(
+            "This file is in {namespace}, whose structure rules {rules} holds, and {rules} imports {imported}, which Lean rejected"
+        ),
+        " at",
+        error,
+    )
+}
+
+/// An error of a Lean file in a PSR-4 folder that no Lean file imports and Lean rejected, such as one that holds a
+/// `@[rule]` but is no `Module.lean`, on each file of the namespace of its folder.
+pub(crate) fn rejected_lean(span: Span, file: &str, namespace: &str, error: &Message) -> Issue {
+    rejected_lean_error(span, format!("This file is in {namespace}, and Lean rejected {file}"), "", error)
+}
+
+/// `rejection` followed by where Lean reported `error`, after `at`, with its column counted from 1, and its whole
+/// message, each line joined to the next by one space. An error of a whole file, at line 0, has no place.
+fn rejected_lean_error(span: Span, rejection: String, at: &str, error: &Message) -> Issue {
+    let place = if error.pos.line == 0 {
+        String::new()
+    } else {
+        format!("{at} line {}, column {}", error.pos.line, error.pos.column + 1)
+    };
+
+    Issue::error(format!("{rejection}{place}: {}.", one_line(&error.data)))
+        .with_code(IssueCode::BrokenRule.as_str())
+        .with_annotation(Annotation::primary(span))
+}
+
+/// Why Lean did not finish a file or a rule: it ran past the processor-time limit Mago sets on each Lean process, or it
+/// waited until Mago's deadline. `what` names what to make end sooner, such as "the rule".
+pub(crate) fn stopped(stop: Stop, what: &str) -> String {
+    match stop {
+        Stop::Processor => format!(
+            "it ran past {} processor seconds, the limit Mago sets on each Lean process. Make {what} end sooner",
+            library::processor_seconds()
+        ),
+        Stop::Waited => {
+            format!("it waited {} seconds without finishing. Make {what} end sooner", library::deadline().as_secs())
+        }
+    }
+}
+
+/// Lean's `message` on one line: each line trimmed and joined to the next by one space, without its final period.
+fn one_line(message: &str) -> String {
+    let lines: Vec<&str> = message.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    let message = lines.join(" ");
+
+    message.strip_suffix('.').unwrap_or(&message).to_owned()
+}
+
+/// Why the workspace Lean file `file`, in the PSR-4 folder of `namespace`, cannot be built: Lean or Mago owns the root of
+/// `namespace`, in this case or in another, which names the same build folder on a disk that ignores case.
+pub(crate) fn owned_root(namespace: &str, file: &str) -> String {
+    let first = namespace.split('.').next().unwrap_or(namespace);
+    let kept = match package::owner(namespace) {
+        Some(owner) if owner != first => format!(
+            "`{first}` names the same folder as `{owner}` on a disk that ignores case, and `{owner}` is a name Lean or Mago keeps"
+        ),
+        _ => format!("`{first}` is a name Lean or Mago keeps"),
+    };
+
+    format!(
+        "{kept}, so Lean files under the `{}\\` root, such as {file}, can't be built. Move them under one of your own namespaces",
+        namespace.replace('.', "\\")
+    )
+}
+
+/// A Lean file under a root Lean or Mago owns, on each file under its folder, since none of its rules can run.
+pub(crate) fn owned_lean(span: Span, namespace: &str, file: &str) -> Issue {
+    Issue::error(format!("{}.", owned_root(namespace, file)))
+        .with_code(IssueCode::BrokenRule.as_str())
+        .with_annotation(Annotation::primary(span))
+}
+
+/// A law whose proof file sits under a root Lean or Mago owns, so it cannot be built.
+pub(crate) fn owned_proof(law: &Law, namespace: &str, file: &str) -> Issue {
+    unproven(law, format!("Law {} is not proven: {}.", law.name, owned_root(namespace, file)))
+}
+
+/// A `Module.lean` in no PSR-4 folder, on each file under its folder, since none of its rules can run.
+pub(crate) fn no_rules_module(span: Span, rules: &str) -> Issue {
+    Issue::error(format!(
+        "{rules} is in no PSR-4 folder of composer.json, so its structure rules have no Lean module name and cannot run."
+    ))
+    .with_code(IssueCode::BrokenRule.as_str())
+    .with_annotation(Annotation::primary(span))
+}
+
+/// No `lake` is on the `PATH`, and Mago could not install Lean, with what failed.
+pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
+    Issue::error(format!(
+        "Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {failure}. Run vendor/bin/mago compile again to retry."
+    ))
     .with_code(IssueCode::MissingLean.as_str())
     .with_annotation(Annotation::primary(span))
+}
+
+/// No `lake` is on the `PATH`, and the Mago build pins no elan for its target, so it cannot install Lean. The message
+/// describes the build, never the host, and gives only advice true on every host it runs on: a musl build also runs on
+/// glibc Linux, where Lean runs, and on Alpine, where neither Mago's glibc build nor Lean starts.
+pub(crate) fn uninstallable_lean(span: Span) -> Issue {
+    let reason = if cfg!(target_env = "musl") {
+        "This musl build of Mago can't install Lean, because Lean has no musl build. On glibc Linux, Mago's glibc build installs Lean itself.".to_owned()
+    } else {
+        format!("This {} {} build of Mago can't install Lean.", std::env::consts::OS, std::env::consts::ARCH)
+    };
+
+    Issue::error(format!("Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {reason}"))
+        .with_code(IssueCode::MissingLean.as_str())
+        .with_annotation(Annotation::primary(span))
 }
 
 pub(crate) fn elan_failed(span: Span, message: &str) -> Issue {

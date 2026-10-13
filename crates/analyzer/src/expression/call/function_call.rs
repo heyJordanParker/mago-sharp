@@ -313,6 +313,7 @@ fn report_namespaced_function_call<A>(context: &mut Context<'_, '_, A>, name: Wo
 where
     A: Arena,
 {
+    let name = name.to_string().replace('\\', ".");
     context.collector.report_with_code(
         IssueCode::NotSupportedYet,
         Issue::error(format!("Calling the namespaced function `{name}` is not supported yet in PHP#."))

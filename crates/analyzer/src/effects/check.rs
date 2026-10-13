@@ -1,28 +1,47 @@
-//! The rules effects decide: an `extern` declaration's own checks, and the rules over solved effects.
+//! The rules effects decide: an `extern` declaration's own checks, what a `uses` names and what a static holds, and
+//! the rules over solved effects.
 
 use std::cell::OnceCell;
 
 use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_names::display_sharp_member;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Extern;
+use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::Method;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::Uses;
+use mago_syntax::walker::Walker;
 use mago_word::Word;
+use mago_word::ascii_lowercase_word;
 
+use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::context::block::BlockContext;
 use crate::effects::Body;
 use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
+use crate::effects::NAMED_EFFECTS;
 use crate::effects::Runs;
+use crate::effects::events;
+use crate::effects::is_effect;
+use crate::utils::names::display_member;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
+use crate::utils::names::sharp_effect_name;
 use crate::utils::names::sharp_missing_imports;
 
 /// Spec section 29: a getter reads, so it has no effect and changes nothing.
@@ -36,12 +55,13 @@ pub(crate) fn getters_must_be_pure(
         .filter(|(body, ..)| matches!(body, Body::Accessor(_, _, accessor) if accessor.as_bytes() == b"get"))
         .map(|(_, member, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
             impure(
                 IssueCode::ImpureGetter,
-                format!("Getter `{member}` {}. Getters must be pure.", impurity.describe(&class_name)),
+                format!("Getter `{member}` {}. Getters must be pure.", impurity.describe(&class_name, &effect_name)),
                 impurity.span,
                 "getter",
                 &impurity,
@@ -67,12 +87,16 @@ pub(crate) fn laws_must_be_pure(
         })
         .map(|(_, member, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
             impure(
                 IssueCode::ImpureLaw,
-                format!("Law `{member}` {}. Laws hold only over pure code.", impurity.describe(&class_name)),
+                format!(
+                    "Law `{member}` {}. Laws hold only over pure code.",
+                    impurity.describe(&class_name, &effect_name)
+                ),
                 impurity.span,
                 "law",
                 &impurity,
@@ -96,14 +120,17 @@ pub(crate) fn function_values_must_fit_their_types(
         .unfit_function_values()
         .map(|(value, name, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
             let method = || format!("`{}`", display_sharp_member(class_name(name.0), name.1));
             let reason = match (&value.runs, impurity.effect) {
-                (Runs::Body(Body::Lambda(_)), _) => format!("This lambda {}", impurity.describe(&class_name)),
-                (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name)),
+                (Runs::Body(Body::Lambda(_)), _) => {
+                    format!("This lambda {}", impurity.describe(&class_name, &effect_name))
+                }
+                (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name, &effect_name)),
                 (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
-                    format!("{} has the effect `{}`", method(), class_name(effect))
+                    format!("{} has the effect `{}`", method(), effect_name(effect))
                 }
                 (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
             };
@@ -124,6 +151,49 @@ pub(crate) fn function_values_must_fit_their_types(
                 Runs::Body(_) => issue.with_annotation(Annotation::secondary(impurity.span)),
                 Runs::Foreign { .. } => issue,
             }
+        })
+        .collect()
+}
+
+/// Spec section 29: a method without a body is pure unless it says `uses`, and every implementation is held to what
+/// the declaration allows.
+pub(crate) fn implementations_must_fit_their_declarations(
+    effects: &Effects,
+    codebase: &CodebaseMetadata,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+) -> IssueCollection {
+    effects
+        .unfit_implementations(codebase)
+        .map(|((class, member), ancestor, declaration, imports, scope, impurity)| {
+            let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
+            let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
+            let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
+            let ancestor =
+                codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name);
+            let declared = display_sharp_member(class_name(ancestor), declaration.original_name);
+            let allows = if declaration.uses.is_empty() {
+                format!("the pure `{declared}`")
+            } else {
+                let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
+
+                format!("`uses {}` on `{declared}`", uses.join(", "))
+            };
+
+            impure(
+                IssueCode::IncompatibleEffects,
+                format!(
+                    "`{}` {}, so {allows} cannot accept it.",
+                    display_sharp_member(class_name(class), member),
+                    impurity.describe(&class_name, &effect_name)
+                ),
+                impurity.span,
+                "method",
+                &impurity,
+                &class_name,
+                &code_class_name,
+                &missing_import,
+            )
         })
         .collect()
 }
@@ -230,11 +300,146 @@ where
             Issue::error(format!("`{written}` is PHP# code, so it needs no `extern`: PHP# infers its effects."))
                 .with_annotation(Annotation::primary(target)),
         );
+    } else if own.event && !class_metadata.kind.is_class() {
+        // Spec section 15: only a class is an event, so `emit` never takes a value plain PHP fills with a non-event.
+        let kind = if class_metadata.kind.is_interface() {
+            "an interface"
+        } else if class_metadata.kind.is_trait() {
+            "a trait"
+        } else {
+            "an enum"
+        };
+
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!("`extern event` marks a class, and `{written}` is {kind}."))
+                .with_annotation(Annotation::primary(target)),
+        );
     } else if !member.is_empty() && context.codebase.get_declaring_method(class.as_bytes(), member.as_bytes()).is_none()
     {
         context.collector.report_with_code(
             IssueCode::NonExistentMethod,
             Issue::error(format!("Method `{written}` does not exist.")).with_annotation(Annotation::primary(target)),
+        );
+    }
+}
+
+/// Spec section 29: each name a `uses` writes is an effect. Any file may declare a `foreign` class, so the check
+/// reads the codebase, and the file depends on each class it names.
+pub(crate) fn check_uses<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    program: &Program<'_>,
+) where
+    A: Arena,
+{
+    let mut found = UsesNames::default();
+    UsesWalker.walk_program(program, &mut found);
+
+    for name in found.names {
+        let effect = context.resolved_names.get(name);
+        artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, ascii_lowercase_word(effect), false);
+        if is_effect(context.codebase, effect) {
+            continue;
+        }
+
+        let mut foreign: Vec<String> = context
+            .codebase
+            .class_likes
+            .values()
+            .filter(|class| class.flags.is_foreign())
+            .map(|class| {
+                sharp_class_like_name(
+                    context.codebase,
+                    &context.imported_names,
+                    &context.short_name_counts,
+                    class.original_name,
+                )
+            })
+            .collect();
+        foreign.sort_unstable();
+        let effects: Vec<String> = NAMED_EFFECTS.iter().map(short_name).chain(foreign).collect();
+
+        context.collector.report_with_code(
+            IssueCode::InvalidEffect,
+            Issue::error(format!(
+                "`{}` is not an effect: `uses` takes {} or {}.",
+                String::from_utf8_lossy(name.value),
+                effects.join(", "),
+                short_name(events()),
+            ))
+            .with_annotation(Annotation::primary(name.span).with_message("Written here."))
+            .with_note("An effect is a standard effect, a `foreign` class, or `Events`, the effect of `emit`."),
+        );
+    }
+}
+
+/// The names every effect `uses` of a program writes. A method with a body names only its function parameters in
+/// `uses`, as the semantics checker holds it to, so its `uses` names no effect.
+struct UsesWalker;
+
+/// The names [`UsesWalker`] collects, and the `uses` of the methods with a body it skips.
+#[derive(Default)]
+struct UsesNames<'ast, 'arena> {
+    names: Vec<&'ast LocalIdentifier<'arena>>,
+    parameters: Vec<Span>,
+}
+
+impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker {
+    fn walk_in_method(&self, method: &'ast Method<'arena>, found: &mut UsesNames<'ast, 'arena>) {
+        if let Some(uses) = method.uses
+            && !method.is_abstract()
+        {
+            found.parameters.push(uses.span());
+        }
+    }
+
+    fn walk_in_uses(&self, uses: &'ast Uses<'arena>, found: &mut UsesNames<'ast, 'arena>) {
+        if !found.parameters.contains(&uses.span()) {
+            found.names.extend(uses.names.iter());
+        }
+    }
+}
+
+/// Spec section 29: a `foreign` object reaches code only through constructors, so a static property of `class` holds
+/// none, alone or inside a collection.
+pub(crate) fn check_foreign_statics<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    for property in class.properties.values() {
+        if !property.flags.is_static() {
+            continue;
+        }
+        let Some(declared) = &property.type_declaration_metadata else {
+            continue;
+        };
+
+        let held = declared.type_union.get_all_child_nodes().into_iter().find_map(|node| match node {
+            TypeRef::Atomic(TAtomic::Object(object)) => object
+                .get_name()
+                .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
+                .filter(|held| held.flags.is_foreign()),
+            _ => None,
+        });
+        let Some(held) = held else {
+            continue;
+        };
+
+        let held = sharp_class_like_name(
+            context.codebase,
+            &context.imported_names,
+            &context.short_name_counts,
+            held.original_name,
+        );
+        let property_name = display_member(context, class.original_name, property.name.0);
+        context.collector.report_with_code(
+            IssueCode::ForeignInStatic,
+            Issue::error(format!("`{property_name}` is static, so it cannot hold a `{held}`."))
+                .with_annotation(Annotation::primary(property.name_span.unwrap_or(declared.span)))
+                .with_note("A `foreign` object reaches code only through constructors, so no static holds one.")
+                .with_help(format!("Take the `{held}` as a constructor parameter instead.")),
         );
     }
 }

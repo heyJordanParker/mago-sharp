@@ -38,6 +38,8 @@ class Report {
     public function other(): void {}
     public function RUN(): void {}
     public function Run(): void {}
+    public function Report() {}
+    public function Report() {}
 }
 ";
 
@@ -46,6 +48,7 @@ class Report {
         [
             "5 class method `Report::RUN` has already been defined (3)",
             "6 class method `Report::Run` has already been defined (3)",
+            "8 class method `Report::Report` has already been defined (7)",
         ]
     );
 }
