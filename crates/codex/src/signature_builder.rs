@@ -12,6 +12,8 @@ use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Property;
@@ -144,6 +146,16 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for SignatureBuilder<'arena> {
         }
     }
 
+    /// A PHP# module is the class-like `<Namespace>\Module`, whose laws its hash covers.
+    fn walk_in_module(&mut self, module: &'ast Module<'arena>, _context: &mut ()) {
+        let name = self.resolved_names.get(&module.module);
+        let hash = module.fingerprint(self.resolved_names, &self.fingerprint_options);
+        let signature_hash = module.fingerprint(self.resolved_names, &self.sig_only_options);
+
+        let node = self.create_node(name, false, false, false, hash, signature_hash);
+        self.ast_nodes.push(node);
+    }
+
     fn walk_in_function(&mut self, function: &'ast Function<'arena>, _context: &mut ()) {
         let name = self.resolved_names.get(&function.name);
         let hash = function.fingerprint(self.resolved_names, &self.fingerprint_options);
@@ -188,6 +200,17 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for SignatureBuilder<'arena> {
         let signature_hash = operator.fingerprint(self.resolved_names, &self.sig_only_options);
 
         let node = self.create_node(name, true, false, false, hash, signature_hash);
+        if let Some(class_node) = self.class_stack.last_mut() {
+            class_node.children.push(node);
+        }
+    }
+
+    /// A PHP# named constructor is the static method of its name, spec section 9.1.
+    fn walk_in_named_constructor(&mut self, named_constructor: &'ast NamedConstructor<'arena>, _context: &mut ()) {
+        let hash = named_constructor.fingerprint(self.resolved_names, &self.fingerprint_options);
+        let signature_hash = named_constructor.fingerprint(self.resolved_names, &self.sig_only_options);
+
+        let node = self.create_node(named_constructor.name.value, true, false, false, hash, signature_hash);
         if let Some(class_node) = self.class_stack.last_mut() {
             class_node.children.push(node);
         }

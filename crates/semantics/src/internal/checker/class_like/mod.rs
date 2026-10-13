@@ -14,6 +14,7 @@ use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Law;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
@@ -41,6 +42,17 @@ mod constant;
 mod inheritance;
 mod method;
 mod property;
+
+/// Whether PHP refuses `name` for a class-like as a keyword. A `.sharp` file reads a PHP keyword that PHP# doesn't
+/// use as a plain name, spec section 2, so a PHP# type may take it, and `check_class_name` refuses the type names the
+/// engine reserves.
+fn is_php_keyword_name(name: &[u8], context: &Context<'_, '_, '_>) -> bool {
+    !context.program.dialect.is_sharp()
+        && RESERVED_KEYWORDS
+            .iter()
+            .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
+            .any(|keyword| keyword.eq_ignore_ascii_case(name))
+}
 
 #[inline]
 pub fn check_trait_use_alias_adaptation<'ast, 'arena>(
@@ -80,11 +92,7 @@ pub fn check_class<'ast, 'arena>(class: &'ast Class<'arena>, context: &mut Conte
     let class_name = BytesDisplay(class_name_bytes);
     let class_fqcn = context.display_class_like_name(class_fqcn_bytes);
 
-    if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(class_name_bytes))
-        || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-            .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case(class_name_bytes))
-    {
+    if is_php_keyword_name(class_name_bytes, context) {
         context.report(
             Issue::error(format!("Class `{class_name}` name cannot be a reserved keyword."))
                 .with_annotation(
@@ -122,7 +130,12 @@ pub fn check_class<'ast, 'arena>(class: &'ast Class<'arena>, context: &mut Conte
             // Spec section 5 makes a PHP# class `public` or, by default, `internal`.
             Modifier::Public(_) if context.program.dialect.is_sharp() => {}
             // Only PHP# parses these, and `check_slice` decides them.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => {}
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => {}
             Modifier::Public(keyword)
             | Modifier::Protected(keyword)
             | Modifier::Private(keyword)
@@ -357,11 +370,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
     let interface_name = BytesDisplay(interface_name_bytes);
     let interface_fqcn = context.display_class_like_name(interface_fqcn_bytes);
 
-    if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(interface_name_bytes))
-        || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-            .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case(interface_name_bytes))
-    {
+    if is_php_keyword_name(interface_name_bytes, context) {
         context.report(
             Issue::error(format!("Interface `{interface_name}` name cannot be a reserved keyword."))
                 .with_annotation(
@@ -427,9 +436,12 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                 let method_name_bytes: &[u8] = method.name.value;
                 let method_display = context.display_member(interface_name_bytes, BytesDisplay(method_name_bytes));
 
+                // A PHP# interface member is public, written bare, and `check_slice` refuses any access modifier on it.
                 let mut visibilities = vec![];
                 for modifier in &method.modifiers {
-                    if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)) {
+                    if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_))
+                        && !context.program.dialect.is_sharp()
+                    {
                         visibilities.push(modifier);
                     }
                 }
@@ -526,6 +538,9 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                         let property_display = context
                             .display_member(interface_name_bytes, BytesDisplay(hooked_property.item.variable().name));
 
+                        // A PHP# interface member is public, written bare, and `check_slice` refuses any access
+                        // modifier on it.
+                        let is_sharp = context.program.dialect.is_sharp();
                         let mut found_public = false;
                         let mut non_public_read_visibilities = vec![];
                         let mut write_visibilities = vec![];
@@ -534,7 +549,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                                 found_public = true;
                             }
 
-                            if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)) {
+                            if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)) && !is_sharp {
                                 non_public_read_visibilities.push(modifier);
                             }
 
@@ -586,7 +601,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                             );
                         }
 
-                        if !found_public {
+                        if !found_public && !is_sharp {
                             context.report(
                                 Issue::error(format!(
                                     "Interface virtual property `{property_display}` must be declared public."
@@ -741,8 +756,9 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                     context,
                 );
             }
-            // Only a PHP# file declares an operator or a law, and `check_slice` refuses either in an interface.
-            ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) => {}
+            // Only a PHP# file declares an operator, a law or a named constructor, and `check_slice` refuses each in an
+            // interface.
+            ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) | ClassLikeMember::NamedConstructor(_) => {}
         }
     }
 }
@@ -754,11 +770,7 @@ pub fn check_trait<'ast, 'arena>(r#trait: &'ast Trait<'arena>, context: &mut Con
     let class_like_name = BytesDisplay(class_like_name_bytes);
     let class_like_fqcn = context.display_class_like_name(class_like_fqcn_bytes);
 
-    if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(class_like_name_bytes))
-        || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-            .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case(class_like_name_bytes))
-    {
+    if is_php_keyword_name(class_like_name_bytes, context) {
         context.report(
             Issue::error(format!("Trait `{class_like_name}` name cannot be a reserved keyword."))
                 .with_annotation(
@@ -859,11 +871,7 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
     let enum_fqcn = context.display_class_like_name(enum_fqcn_bytes);
     let enum_is_backed = r#enum.backing_type_hint.is_some();
 
-    if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(enum_name_bytes))
-        || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-            .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case(enum_name_bytes))
-    {
+    if is_php_keyword_name(enum_name_bytes, context) {
         context.report(
             Issue::error(format!("Enum `{enum_name}` name cannot be a reserved keyword."))
                 .with_annotation(
@@ -1058,7 +1066,12 @@ pub fn check_anonymous_class<'ast, 'arena>(
     for modifier in &anonymous_class.modifiers {
         match &modifier {
             // Only PHP# parses these, and `check_slice` decides them.
-            Modifier::Virtual(_) | Modifier::Override(_) | Modifier::Required(_) | Modifier::Extern(_) => {}
+            Modifier::Virtual(_)
+            | Modifier::Override(_)
+            | Modifier::Required(_)
+            | Modifier::Extern(_)
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => {}
             Modifier::Static(_)
             | Modifier::Abstract(_)
             | Modifier::PrivateSet(_)
@@ -1270,32 +1283,79 @@ pub fn check_members<'ast, 'arena>(
     context: &mut Context<'_, 'ast, 'arena>,
 ) {
     let class_like_fqcn = context.display_class_like_name(class_like_fqcn);
-    let mut method_names: HashMap<Vec<u8>, Span> = HashMap::new();
+    let mut method_names: HashMap<Vec<u8>, (Span, &ClassLikeMember<'arena>)> = HashMap::new();
+    let mut main_constructor: Option<Span> = None;
     let mut constant_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
     let mut property_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
 
     for member in members {
-        // A law shares its class's method names, so a law and a method of one name are declared twice.
+        // A law and a named constructor share their class's method names, as the static method a named constructor
+        // lowers to does, so either and a method of one name are declared twice.
         let callable_name = match member {
             ClassLikeMember::Method(method) => Some(&method.name),
             ClassLikeMember::Law(law) => Some(&law.name),
+            ClassLikeMember::NamedConstructor(named_constructor) => Some(&named_constructor.name),
             _ => None,
         };
         if let Some(name) = callable_name {
             let lowercase_name = name.value.to_ascii_lowercase();
-            if let Some(previous) = method_names.get(&lowercase_name) {
-                let method_display = context.display_member(class_like_name, BytesDisplay(name.value));
+            let is_sharp_constructor = matches!(member, ClassLikeMember::Method(method)
+                if context.program.dialect.is_sharp()
+                    && method.return_type_hint.is_none()
+                    && method.name.value == class_like_name);
+            if is_sharp_constructor && let Some(main) = main_constructor {
                 context.report(
-                    Issue::error(format!("{class_like_kind} method `{method_display}` has already been defined"))
-                        .with_annotation(Annotation::primary(name.span()))
-                        .with_annotations([
-                            Annotation::secondary(*previous).with_message("previous definition"),
-                            Annotation::secondary(class_like_span.span())
-                                .with_message(format!("{class_like_kind} `{class_like_fqcn}` defined here.")),
-                        ]),
+                    Issue::error("A class has one main constructor: PHP# has no overloading by argument types.")
+                        .with_annotation(Annotation::primary(name.span()).with_message("A second constructor."))
+                        .with_annotation(Annotation::secondary(main).with_message("The main constructor."))
+                        .with_help(format!(
+                            "Give it a name that passes control to the main constructor, as in `public {}.fromName(…) : this(…) {{ }}`.",
+                            BytesDisplay(class_like_name)
+                        )),
                 );
+            } else if is_sharp_constructor {
+                // The constructor is PHP's `__construct`, so it shares no name with a method, and a method named after
+                // its class has only its own error.
+                main_constructor = Some(name.span());
+            } else if let Some(&(previous, previous_member)) = method_names.get(&lowercase_name) {
+                let method_display = context.display_member(class_like_name, BytesDisplay(name.value));
+                // Spec section 9.1: a named constructor and a method of one name clash, as they do across a class and
+                // its parent, which the analyzer reports in the same words.
+                let clash = match (member, previous_member) {
+                    (ClassLikeMember::NamedConstructor(_), ClassLikeMember::Method(method)) => Some(format!(
+                        "The named constructor `{method_display}` cannot share its name with the method `{}`.",
+                        context.display_member(class_like_name, BytesDisplay(method.name.value))
+                    )),
+                    (ClassLikeMember::Method(_), ClassLikeMember::NamedConstructor(named_constructor)) => {
+                        Some(format!(
+                            "`{method_display}` cannot share its name with `{}`'s named constructor `{}`.",
+                            BytesDisplay(class_like_name),
+                            BytesDisplay(named_constructor.name.value)
+                        ))
+                    }
+                    _ => None,
+                };
+
+                if let Some(message) = clash {
+                    context.report(
+                        Issue::error(message)
+                            .with_code("named-constructor-clash")
+                            .with_annotation(Annotation::primary(name.span()).with_message("Declared here."))
+                            .with_annotation(Annotation::secondary(previous).with_message("Declared first here.")),
+                    );
+                } else {
+                    context.report(
+                        Issue::error(format!("{class_like_kind} method `{method_display}` has already been defined"))
+                            .with_annotation(Annotation::primary(name.span()))
+                            .with_annotations([
+                                Annotation::secondary(previous).with_message("previous definition"),
+                                Annotation::secondary(class_like_span.span())
+                                    .with_message(format!("{class_like_kind} `{class_like_fqcn}` defined here.")),
+                            ]),
+                    );
+                }
             } else {
-                method_names.insert(lowercase_name, name.span());
+                method_names.insert(lowercase_name, (name.span(), member));
             }
         }
 
@@ -1467,31 +1527,32 @@ pub fn check_members<'ast, 'arena>(
                 }
                 constant_names.insert(case_name_bytes, (false, enum_case.item.name().span()));
             }
-            ClassLikeMember::Law(law) => {
-                for parameter in &law.parameter_list.parameters {
-                    let name = BytesDisplay(parameter.variable.name);
-                    let refusal = if let Some(default_value) = &parameter.default_value {
-                        Some((
-                            format!("so `{name}` cannot have a default"),
-                            default_value.span(),
-                            "Default written here.",
-                        ))
-                    } else {
-                        parameter.ellipsis.map(|ellipsis| {
-                            (format!("so `{name}` cannot be variadic"), ellipsis, "Variadic written here.")
-                        })
-                    };
-
-                    if let Some((reason, span, written)) = refusal {
-                        context.report(
-                            Issue::error(format!("A law's parameters range over every value, {reason}."))
-                                .with_annotation(Annotation::primary(span).with_message(written))
-                                .with_note("A law states a fact about every value of its parameters."),
-                        );
-                    }
-                }
-            }
+            ClassLikeMember::Law(law) => check_law_parameters(law, context),
             _ => {}
+        }
+    }
+}
+
+/// Reports a law parameter with a default or written variadic, spec section 28: a law's parameters range over every
+/// value.
+#[inline]
+pub fn check_law_parameters(law: &Law, context: &mut Context<'_, '_, '_>) {
+    for parameter in &law.parameter_list.parameters {
+        let name = BytesDisplay(parameter.variable.name);
+        let refusal = if let Some(default_value) = &parameter.default_value {
+            Some((format!("so `{name}` cannot have a default"), default_value.span(), "Default written here."))
+        } else {
+            parameter
+                .ellipsis
+                .map(|ellipsis| (format!("so `{name}` cannot be variadic"), ellipsis, "Variadic written here."))
+        };
+
+        if let Some((reason, span, written)) = refusal {
+            context.report(
+                Issue::error(format!("A law's parameters range over every value, {reason}."))
+                    .with_annotation(Annotation::primary(span).with_message(written))
+                    .with_note("A law states a fact about every value of its parameters."),
+            );
         }
     }
 }

@@ -80,6 +80,25 @@ pub enum ParseError {
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
+    /// A member other than a binding or a law written in a PHP# module, such as a method or a statement, at the
+    /// member. Spec section 32: a module holds no statements, branches, loops or methods.
+    OtherMemberInSharpModule(Span),
+    /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
+    /// property has no incoming value to receive.
+    ComputedParameterInSharp(Span),
+    /// Anything but `super(…)` or `this(…)` after a PHP# constructor's `:`, as in `: parent(row)`, `: super { }` or
+    /// `: ?Type`, from the `:` up to the body.
+    ConstructorInitializerInSharp(Span),
+    /// A body written after a PHP# event's parameters, as in `public event Paid(int orderId) { }`, at the body. Spec
+    /// section 15: an event's parameters are its whole declaration.
+    EventBodyInSharp(Span),
+    /// A type declared inside a PHP# class-like, as in `class Order { public event Paid(int id); }`, with the
+    /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
+    /// interfaces included, is declared in its own file.
+    NestedTypeInSharp(&'static str, Box<str>, Span),
+    /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
+    /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
+    MiscasedKeywordInSharp(&'static str, Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -113,7 +132,13 @@ impl HasFileId for ParseError {
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
-            | ParseError::UsesAfterFunctionTypeInSharp(span) => span.file_id,
+            | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::OtherMemberInSharpModule(span)
+            | ParseError::ComputedParameterInSharp(span)
+            | ParseError::ConstructorInitializerInSharp(span)
+            | ParseError::EventBodyInSharp(span)
+            | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
         }
     }
 }
@@ -151,7 +176,13 @@ impl HasSpan for ParseError {
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
-            | ParseError::UsesAfterFunctionTypeInSharp(span) => *span,
+            | ParseError::UsesAfterFunctionTypeInSharp(span)
+            | ParseError::OtherMemberInSharpModule(span)
+            | ParseError::ComputedParameterInSharp(span)
+            | ParseError::ConstructorInitializerInSharp(span)
+            | ParseError::EventBodyInSharp(span)
+            | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::MiscasedKeywordInSharp(_, span) => *span,
         }
     }
 }
@@ -262,6 +293,23 @@ impl std::fmt::Display for ParseError {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
+            ParseError::OtherMemberInSharpModule(_) => {
+                "A module holds only service bindings and laws: give each binding one expression.".to_string()
+            }
+            ParseError::ComputedParameterInSharp(_) => {
+                "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
+            }
+            ParseError::ConstructorInitializerInSharp(_) => {
+                "A constructor passes control to its base class with `: super(…)`, and a named constructor to the main one with `: this(…)`.".to_string()
+            }
+            ParseError::EventBodyInSharp(_) => {
+                "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`."
+                    .to_string()
+            }
+            ParseError::NestedTypeInSharp(owner, name, _) => {
+                format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
+            }
+            ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
         };
 
         write!(f, "{message}")
@@ -311,7 +359,13 @@ impl From<&ParseError> for Issue {
             | ParseError::LambdaAfterOperatorInSharp(..)
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
-            | ParseError::UsesAfterFunctionTypeInSharp(..) => Issue::error(error.to_string())
+            | ParseError::UsesAfterFunctionTypeInSharp(..)
+            | ParseError::OtherMemberInSharpModule(..)
+            | ParseError::ComputedParameterInSharp(..)
+            | ParseError::ConstructorInitializerInSharp(..)
+            | ParseError::EventBodyInSharp(..)
+            | ParseError::NestedTypeInSharp(..)
+            | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())

@@ -3,6 +3,8 @@ use mago_analyzer::artifacts::CallTarget;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::add_optional_union_type;
@@ -14,6 +16,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
@@ -112,6 +115,36 @@ impl<'analysis> Types<'analysis> {
         };
 
         Declaration { kind, class: metadata.original_name, name: metadata.original_name, public: true }
+    }
+
+    /// The constructor `parent::__construct` reaches from the fully qualified class name `class`, as
+    /// [`CodebaseMetadata::get_parent_constructor`] finds it.
+    #[must_use]
+    pub fn parent_constructor(&self, class: &[u8]) -> Option<&'analysis FunctionLikeMetadata> {
+        self.codebase.get_parent_constructor(class)
+    }
+
+    /// The parameters of the main constructor the fully qualified class name `class` declares, which the container
+    /// fills, spec section 32.
+    #[must_use]
+    pub fn constructor_parameters(&self, class: &[u8]) -> &'analysis [FunctionLikeParameterMetadata] {
+        self.codebase.get_method(class, b"__construct").map_or(&[], |constructor| constructor.parameters.as_slice())
+    }
+
+    /// The module the scanner recorded at `span`, with its bindings in the order the module declares them.
+    #[must_use]
+    pub fn module(&self, span: Span) -> &'analysis ModuleMetadata {
+        self.codebase
+            .modules
+            .iter()
+            .find(|module| module.span == span)
+            .unwrap_or_else(|| unreachable!("the scanner records every module of a file the checker accepted"))
+    }
+
+    /// The parameters of the lambda a binding's expression runs as, named `lambda` by the scanner.
+    #[must_use]
+    pub fn binding_parameters(&self, lambda: Word) -> &'analysis [FunctionLikeParameterMetadata] {
+        self.codebase.get_closure(&lambda).map_or(&[], |lambda| lambda.parameters.as_slice())
     }
 
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,
@@ -229,6 +262,21 @@ impl<'analysis> Types<'analysis> {
         key_type
     }
 
+    /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
+    /// only about a value the checker typed as a collection.
+    pub(crate) fn element_type(&self, r#type: &TUnion) -> TUnion {
+        let mut element_type = None;
+        for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
+            let TAtomic::Array(array) = atomic else {
+                unreachable!("the checker runs a collection method only on a collection, not on {atomic:?}");
+            };
+            let (_, value) = get_array_parameters(array, self.codebase);
+            element_type = Some(add_optional_union_type(value, element_type.as_ref(), self.codebase));
+        }
+
+        element_type.unwrap_or_else(|| unreachable!("a collection method's receiver is a collection"))
+    }
+
     /// The positions of the arguments of the method call `call`, null-safe or not, that go in as its receiver's key.
     /// The analyzer checks a call on a `Map` against `Sharp\MapMethods<K, V>`, whose `K` the `Map`'s key type fills
     /// (spec section 12), so an argument goes in as a key when the call runs a `MapMethods` method and its parameter
@@ -293,6 +341,16 @@ impl<'analysis> Types<'analysis> {
         Some((collection, method.as_bytes().to_ascii_lowercase()))
     }
 
+    /// Whether the property `property` of an object of `r#type` has hooks in a class the object can be. PHP gives no
+    /// reference to a hooked property, so a write into the `Map` it holds cannot go through one.
+    pub(crate) fn property_has_hooks(&self, r#type: &TUnion, property: &[u8]) -> bool {
+        let variable = [b"$", property].concat();
+
+        receiver_classes(r#type).into_iter().flatten().any(|class| {
+            self.codebase.get_declaring_property(class, &variable).is_some_and(|metadata| !metadata.hooks.is_empty())
+        })
+    }
+
     /// The property `class` declares or inherits by the name `property`, if any.
     fn property_declaration(&self, class: &[u8], property: &[u8]) -> Option<Declaration> {
         let variable = [b"$", property].concat();
@@ -333,12 +391,12 @@ impl<'analysis> Types<'analysis> {
             .unwrap_or_else(|| unreachable!("`{root}` declares the property"))
     }
 
-    /// The class declaring the static method `name` a PHP# operator on `operands` runs as, as the checker chose it: the
-    /// one the left operand's class declares or inherits, else the right one's, as `App\Money` for `op_Addition` on
-    /// two `Order`s that inherit it. Operands with no instance of one class, enums aside, run none.
-    pub(crate) fn operator_class(&self, name: &[u8], operands: &[&Expression]) -> Option<Word> {
+    /// The class declaring the static method `name` a PHP# operator on operands of the types `operands` runs as, as the
+    /// checker chose it: the one the left operand's class declares or inherits, else the right one's, as `App\Money`
+    /// for `op_Addition` on two `Order`s that inherit it. Operands with no instance of one class, enums aside, run none.
+    pub(crate) fn operator_class(&self, name: &[u8], operands: &[&TUnion]) -> Option<Word> {
         operands.iter().find_map(|operand| {
-            let classes = receiver_classes(self.expression_type(operand))?;
+            let classes = receiver_classes(operand)?;
             let [class] = classes.as_slice() else {
                 return None;
             };

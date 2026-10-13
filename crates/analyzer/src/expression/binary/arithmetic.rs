@@ -609,8 +609,9 @@ where
     true
 }
 
-/// Reports the `side` operand of `mixed` type. In a PHP# file, a property read is named with the rule that keeps it
-/// `Any?`: spec section 21 narrows a local or a parameter after `is`, never a property.
+/// Reports the `side` operand of `mixed` type, which a PHP# file names `Any` or `Any?`. In a PHP# file, a property read
+/// is named with the rule that keeps it `Any?`: spec section 21 narrows a local or a parameter after `is`, never a
+/// property.
 fn report_mixed_operand<A>(
     context: &mut Context<'_, '_, A>,
     operand: &Expression<'_>,
@@ -641,15 +642,30 @@ fn report_mixed_operand<A>(
         return;
     }
 
+    let side_name = side.to_ascii_lowercase();
+    let (operand_name, note, help) = if context.dialect.is_sharp() {
+        (
+            display_operand(context, operand_type),
+            "An `Any` may hold any value, so arithmetic on it is unsafe until it is checked.".to_owned(),
+            format!(
+                "Check the {side_name} operand with `is` or `match` first, as in `if (value is int n)`, and use `n`."
+            ),
+        )
+    } else {
+        (
+            "mixed".to_owned(),
+            "Performing operations on `mixed` is unsafe as the actual runtime type is unknown.".to_owned(),
+            format!(
+                "Ensure the {side_name} operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks."
+            ),
+        )
+    };
     context.collector.report_with_code(
         IssueCode::MixedOperand,
-        Issue::error(format!("{side} operand in binary operation has type `mixed`."))
-            .with_annotation(Annotation::primary(operand.span()).with_message("Operand is `mixed`."))
-            .with_note("Performing operations on `mixed` is unsafe as the actual runtime type is unknown.")
-            .with_help(format!(
-                "Ensure the {} operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks.",
-                side.to_ascii_lowercase()
-            )),
+        Issue::error(format!("{side} operand in binary operation has type `{operand_name}`."))
+            .with_annotation(Annotation::primary(operand.span()).with_message(format!("Operand is `{operand_name}`.")))
+            .with_note(note)
+            .with_help(help),
     );
 }
 

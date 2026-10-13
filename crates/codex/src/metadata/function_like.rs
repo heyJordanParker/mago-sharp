@@ -132,6 +132,10 @@ pub struct FunctionLikeMetadata {
     /// This is `Some` if `kind` is `FunctionLikeKind::Method`, `None` otherwise.
     pub method_metadata: Option<MethodMetadata>,
 
+    /// The fully qualified names a PHP# listener's `on` clause lists, spec section 15, in their written order. Empty
+    /// for every method that listens to nothing.
+    pub listens: Vec<Word>,
+
     /// Contains context information needed for resolving types within this function's scope
     /// (e.g., `use` statements, current namespace, class context). Often populated during analysis.
     pub type_resolution_context: Option<TypeResolutionContext>,
@@ -236,6 +240,7 @@ impl FunctionLikeMetadata {
             template_types: TemplateTypes::default(),
             attributes: vec![],
             method_metadata,
+            listens: vec![],
             type_resolution_context: None,
             thrown_types: vec![],
             assertions: BTreeMap::new(),

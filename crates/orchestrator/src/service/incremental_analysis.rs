@@ -36,6 +36,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseEntryKeys;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
 use mago_codex::reference::SymbolReferences;
@@ -918,6 +919,18 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
+        let modules_changed = new_file_scans
+            .iter()
+            .any(|(file_id, metadata)| modules_in(metadata, *file_id) != modules_in(&self.codebase, *file_id))
+            || self
+                .file_states
+                .keys()
+                .any(|file_id| !current_file_ids.contains(file_id) && !modules_in(&self.codebase, *file_id).is_empty());
+
+        if modules_changed {
+            return self.analyze();
+        }
+
         let body_only = diff.get_changed().is_empty() && deleted_count == 0;
 
         if !body_only {
@@ -1101,6 +1114,19 @@ impl IncrementalAnalysisService {
             .flat_map(|state| state.reads.listings.iter().copied())
             .map(|listing| (listing, listing.answer(&self.codebase)))
             .collect();
+        // The analyzer refuses a class-like whose full name is also a namespace (spec section 23), so a file is
+        // analyzed again when a class-like it declares names the namespace of a class-like scanned again.
+        let scanned_namespaces: WordSet = new_file_scans
+            .iter()
+            .flat_map(|(_, metadata)| metadata.class_likes.keys())
+            .flat_map(|name| {
+                let name = name.as_bytes();
+                name.iter()
+                    .enumerate()
+                    .filter(|(_, byte)| **byte == b'\\')
+                    .map(|(end, _)| mago_word::word(&name[..end]))
+            })
+            .collect();
 
         let mut merged_codebase = std::mem::take(&mut self.codebase);
 
@@ -1181,11 +1207,10 @@ impl IncrementalAnalysisService {
             .map(|(listing, _)| listing)
             .collect();
         for file_id in &unchanged_file_ids {
-            if self
-                .file_states
-                .get(file_id)
-                .is_some_and(|state| state.reads.listings.iter().any(|listing| changed_listings.contains(listing)))
-                && let Ok(file) = self.database.get(file_id)
+            if self.file_states.get(file_id).is_some_and(|state| {
+                state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
+                    || state.entry_keys.class_like_names.iter().any(|name| scanned_namespaces.contains(name))
+            }) && let Ok(file) = self.database.get(file_id)
             {
                 invalid_files.insert(mago_word::word(file.name.as_ref()));
             }
@@ -1900,6 +1925,12 @@ fn externs_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ExternMetada
         codebase.externs.values().flatten().filter(|declaration| declaration.span.file_id == file_id).collect();
     externs.sort();
     externs
+}
+
+/// The modules `file_id` declares, spec section 32. Every class takes its services from the modules of its namespace
+/// and the namespaces above it, so a change to them changes files that the signature diff cannot see.
+fn modules_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ModuleMetadata> {
+    codebase.modules.iter().filter(|module| module.span.file_id == file_id).collect()
 }
 
 /// The functions `file_id`'s `[Replaces]` attributes wrap, each with its wrapping methods in the codebase's order. A

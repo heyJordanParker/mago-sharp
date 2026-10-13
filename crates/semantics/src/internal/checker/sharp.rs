@@ -23,6 +23,7 @@ use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::BinaryPattern;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Break;
 use mago_syntax::cst::Call;
@@ -35,9 +36,12 @@ use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Construct;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
+use mago_syntax::cst::DeclareBody;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extern;
 use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOf;
@@ -47,6 +51,7 @@ use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Global;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
@@ -59,11 +64,16 @@ use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
+use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
+use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::PartialArgument;
@@ -98,12 +108,12 @@ use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::token::GetPrecedence;
 use mago_syntax::token::Precedence;
+use mago_syntax::token::is_sharp_keyword;
 use mago_syntax::utils::pattern::has_type_test;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
+use crate::internal::checker::class_like::check_law_parameters;
 use crate::internal::consts::RESERVED_CLASS_NAMES;
-use crate::internal::consts::RESERVED_KEYWORDS;
-use crate::internal::consts::SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED;
 use crate::internal::context::Context;
 
 /// The PHP superglobals, which spec section 29 removes. A PHP# local or parameter of one of these names would read or
@@ -120,17 +130,22 @@ const ANY: &[u8] = b"Any";
 /// - At file level: `namespace`, `import`, `class`, `interface` and `enum`. A file has at most one namespace, named
 ///   and written without braces.
 /// - A class: attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header,
-///   constants, fields, properties, methods, operators and laws, with no other modifiers, `extends` or `implements`.
-///   The engine tells the base class from the interfaces when it links the class.
+///   constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends`
+///   or `implements`. The engine tells the base class from the interfaces when it links the class.
+/// - A named constructor, spec section 9.1: an access modifier, its class's name, a `.` and its own name, parameters
+///   that declare no property, `: this(…)` without `this` in its arguments, and a body. `check_named_constructor`
+///   decides each part, and an interface, an enum and a static class declare none.
 /// - A law, spec section 28, in a class or an enum: `law`, a name, parameters checked as a method's and an expression
 ///   body. `check_members` refuses a default and a variadic parameter, because a law's parameters range over every
 ///   value.
 /// - A static class, `public static class Text`, as spec sections 26 and 29 write it: `static` and an optional
 ///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
 ///   PHP class.
-/// - An interface: an optional `public`, a name, an optional `: Interface` header and methods, with no attributes,
-///   other modifiers or `extends`. An interface method has parameters, a return type and no body, as spec section 29
-///   writes `Money quote(Cart cart);`. A modifier on it is an error, because every interface method is public.
+/// - An interface: an optional `public`, a name, an optional `: Interface` header, methods and get-only properties,
+///   with no attributes, other modifiers or `extends`. An interface method has parameters, a return type and no body,
+///   as spec section 29 writes `Money quote(Cart cart);`, and a property is written `int orderId { get; }`. Every
+///   interface member is public, written bare, so an access modifier on one is an error, and so is any other modifier
+///   on a method.
 /// - An enum: attributes, an optional `public`, a name, an optional `: string, Interface` header, constants, cases,
 ///   methods and laws, with no other modifiers or `implements`. A leading `int` or `string` in the header is the backing type,
 ///   and every class name is an interface. A constant follows a class constant's rules. A case has attributes as a
@@ -191,8 +206,15 @@ const ANY: &[u8] = b"Any";
 ///   member: a field when `private` or `protected` without accessors, and a property with accessors, which follow the
 ///   auto-property rules. A `public` parameter without accessors is an error, as spec section 9 says. The constructor
 ///   alone may be `required`, which keeps it callable as `new Self(…)` on every subclass, spec section 25. The parser
-///   reports `required` on any other member as not supported yet.
-/// - A parameter: always a type, a name and an optional default, and never by reference. A default is a constant
+///   reports `required` on any other member as not supported yet. A class has one constructor, and `check_members`
+///   reports a second one, because PHP# has no overloading by argument types. A parameter cannot be `lazy`, because a
+///   lazy property computes its own value, and `lazy` anywhere else is not supported yet. The constructor passes
+///   control to its base class with `: super(…)`, whose arguments are a method body's expressions without `this`,
+///   because they run before the object exists, as C#'s CS0027 says. `: this(…)` belongs to a named constructor, so on
+///   the main one it is an error. The analyzer checks the arguments against the base class's constructor. A
+///   constructor runs once, when `new` creates the object, so a call of a member named `__construct` is an error.
+/// - A parameter: always a type, a name and an optional default, and never by reference. The parser reports a
+///   parameter written as a computed property, because a parameter receives its value. A default is a constant
 ///   expression: a literal, a constant, `typeof(X)`, a list or map literal of them, or the operators below on them,
 ///   without `++` and `--`. A parameter written `int ...values` is variadic, as spec section 7 writes it, and PHP's
 ///   own checks report a variadic parameter that is not the last or has a default. `check_parameter_list` reports a
@@ -227,7 +249,8 @@ const ANY: &[u8] = b"Any";
 /// - In a method body: blocks, expression statements, `return`, `let` and `const` declarations, `if` with `else if`
 ///   and `else`, `while`, `do … while`, `for` with a `let` or `const` counter or with expressions, `for … of` over a
 ///   value or a key and value, `break` and `continue` without a level, and `try` with `catch` clauses and `finally`.
-///   The body of `if`, `else` and each loop is a block in braces. A catch clause names one or more classes separated
+///   The body of `if`, `else` and each loop is a block in braces, the guard clause
+///   `if (!tenant.active) { throw new InactiveTenant(tenant); }` too. A catch clause names one or more classes separated
 ///   by `|`, and an optional variable written without `$`, which lives until the clause's block ends. A local
 ///   statement can have its type written, as in `Money? total = null;` or `const int base = 2;`, from the types
 ///   above but `void`. An expression statement whose operator is binary, as in `flags | MASK;`, is an error that
@@ -244,8 +267,8 @@ const ANY: &[u8] = b"Any";
 ///   static field or property there is an error when this file declares it, and the analyzer reports it otherwise.
 /// - In expressions: literals, list literals `[a, b]` and `[...a, b]`, map literals `["key": value]` and `[:]`, index reads
 ///   `value[key]`, templates, parentheses, bare names, assignment, the operators below, and method calls and property
-///   reads written with `.` or `?.` and a member name, `new Class(...)` on a class written by its short name,
-///   `new Self(...)` in a class whose constructor is `required`, calls of a function by its bare name,
+///   reads written with `.` or `?.` and a member name, `new Class(...)` and `new Class.name(...)` on a class written by
+///   its short name, `new Self(...)` in a class whose constructor is `required`, calls of a function by its bare name,
 ///   `super.method(...)`, which calls the parent's method, and `Self.method(...)`, which calls a static method of the
 ///   class a static method is called on, each with positional, named and spread arguments, as in
 ///   `Money.sum(...prices)` and `max(...prices)`, `throw`, which is an expression as in PHP, `exit(code)` and
@@ -308,7 +331,8 @@ const ANY: &[u8] = b"Any";
 /// constant, parameter or local. A method name that starts but does not end with `__`, as PHP's magic methods do,
 /// stays not supported yet.
 ///
-/// Nineteen more refusals need inferred types or the codebase, so the analyzer makes them as its part of this contract:
+/// Twenty-two more refusals need inferred types or the codebase, so the analyzer makes them as its part of this
+/// contract:
 /// - `new` on a static class, in `analyze_class_instantiation`, and a class that extends one, in
 ///   `check_class_like_extends`, because the static class may be another file's.
 /// - an `extern` method anywhere but a standard library file whose class is under `Sharp`, in `Method`'s `analyze`,
@@ -344,6 +368,12 @@ const ANY: &[u8] = b"Any";
 /// - an `operator ==` in a class that neither declares nor inherits a `public int hash()`, in `Operator`'s `analyze`,
 ///   because the parent may be another file's.
 /// - an operator a parent already declares, in `check_inherited_operators`, because the parent may be another file's.
+/// - `: super(…)` arguments that do not fit the base class's constructor, or any argument when no constructor exists
+///   above the class, in `analyze_constructor_initializer`, because the base class may be another file's.
+/// - a constructor without `: super(…)` in a class whose base class has a constructor, in `check_super_call`, which
+///   the interim ruling on an implicit `super()` makes an error.
+/// - a class without a constructor whose initial values run in the constructor PHP# gives it, under a base class
+///   whose constructor takes parameters, in `check_super_call`, which is not supported yet.
 #[inline]
 pub fn check_slice(node: Node<'_, '_>, context: &mut Context<'_, '_, '_>) {
     let place = match context.slice_places.last() {
@@ -368,6 +398,10 @@ pub enum Place {
     Signature,
     /// An enum and its members.
     Enum,
+    /// An event, spec section 15: its modifiers, parameters and header.
+    Event,
+    /// A module and its members.
+    Module,
     /// A field or a property, both of which the CST calls a property: its modifiers, type and name.
     FieldOrProperty,
     /// A class constant: its modifiers, type and name.
@@ -437,12 +471,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             && !is_slice_target(target, context)
             && superglobal_span(target, context).is_none()
         {
-            report_not_supported(
-                target.span(),
-                "write target",
-                "PHP# writes to a local, a parameter or a member written `object.name`.",
-                context,
-            );
+            if let Expression::List(list) = target {
+                report_removed_construct(list.list.value, target.span(), context);
+            } else {
+                report_not_supported(
+                    target.span(),
+                    "write target",
+                    "PHP# writes to a local, a parameter or a member written `object.name`.",
+                    context,
+                );
+            }
 
             return Some(Place::RefusedPart(target.span()));
         }
@@ -453,6 +491,17 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
     }
 
     match (node, place) {
+        (Node::Statement(statement), File) if !is_module_file_statement(statement, context) => {
+            let path: &[u8] = &context.source_file.name;
+            let file = BytesDisplay(path.rsplit(|&byte| byte == b'/').next().unwrap_or(path));
+            context.report(
+                Issue::error(format!("{file} holds only its folder's module."))
+                    .with_annotation(Annotation::primary(statement.span()).with_message(format!("Declared in {file}.")))
+                    .with_note(format!("A namespace's `{file}` holds its namespace, its imports and one `module {{ … }}`.")),
+            );
+
+            None
+        }
         (Node::Statement(Statement::Namespace(namespace)), File) if !is_slice_namespace(namespace, context.program) => {
             report_not_supported(
                 namespace.r#namespace.span,
@@ -463,8 +512,39 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(File)
         }
+        (Node::Statement(Statement::Declare(declare)), _) => {
+            let head = BytesDisplay(context.get_code_snippet(declare.declare.span.join(declare.right_parenthesis)));
+            let issue = if declare.items.iter().all(|item| item.name.value.eq_ignore_ascii_case(b"strict_types")) {
+                Issue::error(format!("PHP# is always strict: remove `{head};`."))
+                    .with_note("Every `.sharp` file runs with `strict_types=1`.")
+            } else {
+                let help = match declare.body {
+                    DeclareBody::Statement(Statement::Noop(_)) => "Delete it.",
+                    _ => "Write its body's code without the `declare` around it.",
+                };
+
+                Issue::error(format!("PHP# has no `{head}`: a `.sharp` file runs with PHP's default settings."))
+                    .with_help(help)
+            };
+            context.report(issue.with_annotation(Annotation::primary(declare.span()).with_message("Written here.")));
+
+            None
+        }
+        // Spec section 27: a `.sharp` file declares one type, so code at file level is never valid.
+        (Node::Statement(statement), File) if runs_code(statement) => {
+            let help = if matches!(statement, Statement::Noop(_)) { "Delete it." } else { "Move it into a method." };
+            context.report(
+                Issue::error("A statement cannot sit at file level in PHP#.")
+                    .with_annotation(Annotation::primary(statement.span()).with_message("Written at file level."))
+                    .with_note("A `.sharp` file holds its namespace, its imports and one type, and code runs in that type's methods.")
+                    .with_help(help),
+            );
+
+            None
+        }
         (Node::Keyword(_) | Node::LocalIdentifier(_) | Node::Identifier(Identifier::Local(_)), _) => Some(place),
         (Node::Terminator(Terminator::Semicolon(_)), _) => Some(place),
+        (Node::Extern(r#extern), File) if r#extern.event.is_some() => check_extern_event(r#extern, context),
 
         (
             Node::Program(_)
@@ -472,9 +552,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Statement::Namespace(_)
                 | Statement::Use(_)
                 | Statement::Extern(_)
+                | Statement::Module(_)
                 | Statement::Class(_)
                 | Statement::Interface(_)
-                | Statement::Enum(_),
+                | Statement::Enum(_)
+                | Statement::Event(_),
             )
             | Node::Namespace(_)
             | Node::NamespaceBody(_)
@@ -496,16 +578,62 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             if class.modifiers.contains_static() {
                 check_static_class(class, context);
             }
+            for member in &class.members {
+                if let ClassLikeMember::NamedConstructor(constructor) = member {
+                    check_named_constructor(constructor, class, context);
+                }
+            }
 
             Some(Class)
         }
-        // The walk checks a class's, an interface's and an enum's name in `check_class_name`.
+        // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(_), File) => Some(Enum),
-        (Node::FunctionLikeParameterList(parameters), Method | Signature) => {
+        (Node::Event(_), File) => Some(Place::Event),
+        (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
+        // Spec section 5's `internal` is not supported yet on any declaration.
+        (Node::Modifier(modifier), Place::Event) if !matches!(modifier, Modifier::Internal(_)) => {
+            context.report(
+                Issue::error("An event takes only `public`.")
+                    .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier."))
+                    .with_note("An event runs as a final class, and its parameters are its public get-only properties."),
+            );
+
+            None
+        }
+        (Node::FunctionLikeParameter(parameter), Place::Event) => check_event_parameter(parameter, context),
+        (Node::Module(module), File) => check_module_file_name(module, context),
+        (Node::ModuleMember(_), Place::Module) => Some(Place::Module),
+        // The header names the module it overrides, which `check_module_file_name` checked.
+        (Node::ModuleParent(_), Place::Module) => None,
+        // A binding's parameters are checked as a method's, and its expression as a method's expression body. The
+        // analyzer checks the expression as the lambda it runs as.
+        (Node::Binding(_), Place::Module) => Some(Method),
+        (Node::BindingValue(BindingValue::Expression(_)), Method) => Some(Body),
+        (Node::BindingTarget(_) | Node::BindingValue(_) | Node::BindingClasses(_), Method) => Some(Method),
+        (Node::FunctionLikeParameterList(parameters), Method | Signature | Place::Event) => {
             report_optional_before_required(parameters, context);
 
             Some(place)
+        }
+        (Node::Modifier(Modifier::Lazy(lazy)), Parameter) => {
+            context.report(
+                Issue::error(
+                    "A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
+                )
+                .with_annotation(Annotation::primary(lazy.span).with_message("Written here.")),
+            );
+
+            None
+        }
+        (Node::Modifier(Modifier::Lazy(lazy)), _) => {
+            context.report(
+                Issue::error("`lazy` is not supported yet in PHP#.")
+                    .with_annotation(Annotation::primary(lazy.span).with_message("Not supported yet."))
+                    .with_note("A lazy property computes its value on the first read, which the engine cannot run yet."),
+            );
+
+            None
         }
         // `check_class` reports `protected` and `private` on a class, and PHP's own check `abstract` with `final`.
         // `check_static_class` reports `abstract` and `final` on a static class.
@@ -520,13 +648,34 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Class,
         ) => Some(Class),
-        (Node::Inheritance(inheritance), Class | Interface | Enum) => {
+        (Node::Inheritance(inheritance), Class | Interface | Enum | Place::Event) => {
             check_header(inheritance, place, context);
 
             Some(place)
         }
         (Node::Modifier(Modifier::Public(_)), Interface | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Method(_)), Interface) => Some(Interface),
+        // An interface states a property its classes give, as `OrderEvent` states `orderId`, spec section 15.
+        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
+            if is_interface_property(property) =>
+        {
+            Some(FieldOrProperty)
+        }
+        // An interface member is public, written bare. A method's modifiers are in its signature, and an interface
+        // property, which `is_interface_property` keeps whatever its access modifier, walks as a property.
+        (
+            Node::Modifier(
+                modifier @ (Modifier::Public(_)
+                | Modifier::Protected(_)
+                | Modifier::Private(_)
+                | Modifier::Internal(_)),
+            ),
+            Signature | FieldOrProperty,
+        ) if is_in_interface(context.program, modifier.span()) => {
+            report_interface_member_access(modifier, context);
+
+            None
+        }
         (Node::Modifier(modifier), Signature) => {
             context.report(
                 Issue::error("An interface method takes no modifier: every interface method is public.")
@@ -550,9 +699,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 context,
             ),
         },
-        // A body's block is not in the place, so `MethodBody` admits only `MethodAbstractBody`.
+        // A body's block is not in the place, so `MethodBody` admits only `MethodAbstractBody`. The analyzer's
+        // `check_listener` refuses an interface method that listens.
         (
-            Node::FunctionLikeReturnTypeHint(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
+            Node::FunctionLikeReturnTypeHint(_) | Node::On(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
             Signature,
         ) => Some(Signature),
         (Node::AttributeList(_), Class | Enum | Method | FieldOrProperty | Parameter) => Some(Attribute),
@@ -568,8 +718,26 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
         (Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Law(_)), Class | Enum) => Some(place),
         // A law's parameters and body are checked as a method's. `check_members` refuses a default and a variadic one.
-        (Node::Law(_), Class | Enum) => Some(Method),
-        (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Class) => Some(Class),
+        (Node::Law(_), Class | Enum | Place::Module) => Some(Method),
+        (Node::ClassLikeMember(ClassLikeMember::Operator(_) | ClassLikeMember::NamedConstructor(_)), Class) => {
+            Some(Class)
+        }
+        // A named constructor's parts are a method's, and `check_named_constructor` decides its class, name, modifiers
+        // and `: this(…)` when the walk enters its class.
+        (Node::NamedConstructor(_), Class) => Some(Method),
+        (Node::ClassLikeMember(ClassLikeMember::NamedConstructor(constructor)), Interface | Enum) => {
+            let message = if place == Interface {
+                "An interface has no constructor: a named constructor creates an object of its own class."
+            } else {
+                "An enum has no constructor: its cases are its only values."
+            };
+            context.report(
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(constructor.name.span).with_message("Declared here.")),
+            );
+
+            None
+        }
         // An operator's parts are a method's, and `check_operator` decides its modifiers and its symbol, the one binary
         // operator a method's parts hold.
         (Node::Operator(operator), Class) => {
@@ -620,6 +788,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Ok(()) => {
                 let name = &constant.first_item().name;
                 check_declared_name(name.value, name.span, context);
+                // PHP reserves `X::class` for the class's name, so it loads no constant named `class` in any case.
+                if name.value.eq_ignore_ascii_case(b"class")
+                    && let Some(class) = enclosing_class_like_name(context.program, constant.span())
+                {
+                    context.report(
+                        Issue::error(format!(
+                            "`{}` can't name a constant: `{}.class` already names the class.",
+                            BytesDisplay(name.value),
+                            BytesDisplay(class)
+                        ))
+                        .with_annotation(Annotation::primary(name.span).with_message("Declared here.")),
+                    );
+                }
 
                 Some(ClassConstant)
             }
@@ -683,7 +864,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             context.report(
                 Issue::error("PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.")
                     .with_annotation(Annotation::primary(mixed.span).with_message("Written here."))
-                    .with_note("PHP# removes PHP's `mixed`: `Any` holds a value of any type but null, and `Any?` also allows null."),
+                    .with_note("`Any` holds a value of any type but null, and `Any?` also allows null."),
             );
 
             None
@@ -772,11 +953,34 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Modifier::Extern(_),
             )
             | Node::FunctionLikeReturnTypeHint(_)
+            // The analyzer's `check_listener` decides which methods listen.
+            | Node::On(_)
             | Node::MethodBody(_)
             // PHP's own check reports a method without a body that is not `abstract`, and one with a body that is.
             | Node::MethodAbstractBody(_),
             Method,
         ) => Some(Method),
+        (Node::ConstructorInitializer(initializer), Method)
+            if initializer.is_super() == is_named_constructor_initializer(initializer, context.program) =>
+        {
+            let message = if initializer.is_super() {
+                "A named constructor passes control to the main constructor with `: this(…)`."
+            } else {
+                "The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`."
+            };
+            context.report(
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(initializer.keyword.span).with_message("Written here.")),
+            );
+
+            None
+        }
+        // The arguments of `: super(…)` and `: this(…)` are a method body's expressions, without `this`.
+        (Node::ConstructorInitializer(initializer), Method) => {
+            report_this_in_initializer(initializer, context);
+
+            Some(Body)
+        }
         // Outside a constructor, PHP's own check reports a parameter with an access modifier.
         (Node::FunctionLikeParameter(parameter), Method)
             if parameter.hooks.is_none()
@@ -899,12 +1103,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(_) | Node::DirectVariable(_), TryCatchClause) => None,
         (Node::Block(_), TryCatchClause) => Some(Body),
 
-        (Node::Statement(statement), Body) if !has_braces(statement) => {
-            report_not_supported(
-                statement.span(),
-                "statement without braces",
-                "PHP# writes the body of `if`, `else` and each loop as a block in braces.",
-                context,
+        (Node::Statement(statement), Body) if let Some((body, fix)) = body_without_braces(statement, context) => {
+            context.report(
+                Issue::error("PHP# writes the body of `if`, `else` and each loop in braces.")
+                    .with_annotation(Annotation::primary(body).with_message("Written without braces."))
+                    .with_help(format!("Write `{fix}`.")),
             );
 
             None
@@ -925,6 +1128,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Statement::Block(_)
                 | Statement::Expression(_)
                 | Statement::Return(_)
+                | Statement::Emit(_)
                 | Statement::LocalDeclaration(_)
                 | Statement::If(_)
                 | Statement::While(_)
@@ -941,6 +1145,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::Continue(_)
             | Node::ExpressionStatement(_)
             | Node::Return(_)
+            | Node::Emit(_)
             | Node::LocalDeclaration(_)
             | Node::If(_)
             | Node::IfBody(IfBody::Statement(_))
@@ -961,18 +1166,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // function. The analyzer refuses an `exit` argument that is not an `int`.
         (Node::Statement(Statement::Echo(_)) | Node::Expression(Expression::Construct(Construct::Print(_))), Body) => {
             let form: &[u8] = if matches!(node, Node::Statement(_)) { b"echo" } else { b"print" };
-            report_removed(
-                node.span(),
-                form,
-                "write `printf` or `fwrite`.",
-                "Output is a function call in PHP#.",
-                context,
-            );
-
-            None
-        }
-        (Node::Expression(Expression::Construct(Construct::Die(_))), Body) => {
-            report_die(node.span(), context);
+            report_removed_construct(form, node.span(), context);
 
             None
         }
@@ -997,7 +1191,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 matches!(value, Expression::Literal(Literal::String(_)) | Expression::CompositeString(_))
             }) =>
         {
-            report_die(node.span(), context);
+            report_removed_construct(b"die", node.span(), context);
 
             None
         }
@@ -1280,6 +1474,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // `check_instantiation` reported PHP's `self` and `static`.
         (
             Node::Instantiation(_)
+            | Node::ConstructorName(_)
             | Node::Expression(
                 Expression::Identifier(Identifier::Local(_)) | Expression::Self_(_) | Expression::Static(_),
             ),
@@ -1288,6 +1483,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ArgumentList(_), Instantiation) => Some(Body),
         (Node::AssignmentOperator(operator), Body) if is_slice_assignment_operator(operator) => Some(Body),
         (Node::PositionalArgument(_), Body) => Some(Body),
+        // A constructor runs once, when `new` creates the object, so no code calls one as a method, as in C#.
+        (Node::MethodCall(MethodCall { method, .. }) | Node::NullSafeMethodCall(NullSafeMethodCall { method, .. }), Body)
+            if matches!(method, ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"__construct")) =>
+        {
+            context.report(
+                Issue::error(
+                    "A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+                )
+                .with_annotation(Annotation::primary(method.span()).with_message("Called here.")),
+            );
+
+            None
+        }
         // `super.label()` calls the parent's method, spec section 22. `super` is no value of its own.
         (Node::MethodCall(call), Body) if matches!(call.object, Expression::Parent(_)) => Some(SuperCall),
         // `Self.make()` calls a static method of the class a static method is called on, spec section 25.
@@ -1335,10 +1543,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         // PHP# never has top-level functions, `global`, `compact()` or `extract()`: `check_function`, `check_global` and
-        // `check_function_call` report them. A function is reported at its name, so its parameters and body are checked
-        // as a method's. `global` holds only the names it declares, and `compact()` and `extract()` are reported over
-        // the whole call.
-        (Node::Statement(Statement::Function(_)), File) => Some(File),
+        // `check_function_call` report them. A function, at file level or in a body, is reported at its name, so its
+        // parameters and body are checked as a method's. `global` holds only the names it declares, and `compact()`
+        // and `extract()` are reported over the whole call.
+        (Node::Statement(Statement::Function(_)), File | Body) => Some(File),
         (Node::Function(_), File) => Some(Method),
         (Node::Statement(Statement::Global(_)), Body) => None,
         (Node::Expression(Expression::Call(Call::Function(function_call))), Body)
@@ -1389,11 +1597,9 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), (&'static s
             "This method name is not supported yet in PHP#.",
             "PHP reserves method names that start with `__` for its magic methods.",
         )
-    } else if !method
-        .modifiers
-        .iter()
-        .any(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)))
-    {
+    } else if !method.modifiers.iter().any(|modifier| {
+        matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
+    }) {
         (
             "A method without `public`, `protected` or `private` is not supported yet in PHP#.",
             "A PHP# member without an access modifier is `private`, while PHP makes it `public`.",
@@ -1562,6 +1768,9 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
             {
                 report("A static class has no constructor.".to_owned(), method.name.span, "Declared here.");
             }
+            ClassLikeMember::NamedConstructor(constructor) => {
+                report("A static class has no constructor.".to_owned(), constructor.name.span, "Declared here.");
+            }
             ClassLikeMember::Method(method) if !method.is_static() && !is_extern(method) => {
                 report(non_static(method.name.value), method.name.span, "Declared without `static` here.");
             }
@@ -1602,9 +1811,88 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
     )
 }
 
+/// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
+/// effects its `uses` lists.
+fn check_extern_event(r#extern: &Extern, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let Identifier::Dotted(target) = &r#extern.target else {
+        return Some(Place::File);
+    };
+
+    let issue =
+        Issue::error(format!("An `extern event` names a class, and `{}` names a member.", BytesDisplay(target.value)))
+            .with_annotation(Annotation::primary(target.span).with_message("Named here."))
+            .with_help("Name the event's class, as in `extern event JobFailed;`.");
+
+    report_refusal(issue, r#extern.span(), Place::File, context)
+}
+
+/// Decides an event's parameter, which runs as a public get-only property of the event, spec section 15: a type, a
+/// name and an optional default. PHP refuses a variadic promoted property, and the event decides the property's
+/// access, so a modifier, accessors and `...` are refused. The rest is checked as a method's parameter.
+fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let remove = |span: Span, message: &str| {
+        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
+    };
+    let issue = if let Some(modifier) = parameter.modifiers.first() {
+        // The issue covers the modifier, not the parameter, so the walk stops here: it would refuse `readonly` and
+        // `internal` again as not supported yet.
+        context.report(remove(
+            modifier.span(),
+            "An event's parameter takes no modifier: it is a public get-only property of the event.",
+        ));
+
+        return None;
+    } else if let Some(accessors) = &parameter.hooks {
+        remove(accessors.span(), "An event's parameter takes no accessors: it is a get-only property of the event.")
+    } else if let Some(ellipsis) = parameter.ellipsis {
+        remove(ellipsis, "An event's parameter cannot be variadic: it is one property of the event.")
+    } else if let Some(Hint::Generic(set) | Hint::Nullable(NullableHint { hint: Hint::Generic(set), .. })) =
+        &parameter.hint
+        && set.name.value == b"Set"
+    {
+        Issue::error("A `Set` parameter of an event is not supported yet in PHP#.")
+            .with_annotation(Annotation::primary(set.span()).with_message("Not supported yet."))
+            .with_note("An event's parameter is its property, and an event cannot yet make its argument a `Set`.")
+    } else {
+        return enter(Node::FunctionLikeParameter(parameter), Place::Method, context);
+    };
+
+    report_refusal(issue, parameter.span(), Place::Parameter, context)
+}
+
+/// Whether the slice has an interface property: a type, a name and `{ get; }`, which PHP runs as a public interface
+/// property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15. An access
+/// modifier keeps it in the slice, and `enter` reports the modifier where the walk reaches it.
+fn is_interface_property(property: &HookedProperty) -> bool {
+    property.attribute_lists.is_empty()
+        && property.var.is_none()
+        && property.modifiers.iter().all(|modifier| {
+            matches!(
+                modifier,
+                Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_)
+            )
+        })
+        && property.hint.is_some()
+        && matches!(property.item, PropertyItem::Abstract(_))
+        && property.initial_value.is_none()
+        && matches!(
+            property.hook_list.hooks.as_slice(),
+            [accessor] if accessor.name.value == b"get" && is_slice_accessor(accessor) && matches!(accessor.body, PropertyHookBody::Abstract(_))
+        )
+}
+
+/// Reports an access modifier on an interface member. A member is public, written bare, as TypeScript and Swift
+/// write it.
+fn report_interface_member_access(modifier: &Modifier, context: &mut Context<'_, '_, '_>) {
+    context.report(
+        Issue::error("An interface member is always public, so it takes no access modifier.")
+            .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
+            .with_help(format!("Remove `{}`.", BytesDisplay(modifier.get_keyword().value))),
+    );
+}
+
 /// Reports each name in a `uses` that is no effect, spec section 29. A name is an effect when it resolves to one of the
-/// [`STANDARD_EFFECTS`], written bare or imported, and names compare as PHP's class names do, ignoring case. An
-/// effect's own name that an import shadows, spec section 23, is refused with the imported class it names instead.
+/// [`STANDARD_EFFECTS`], written bare or imported, and names compare as PHP's class names do, ignoring case.
 fn check_uses(uses: &Uses, context: &mut Context<'_, '_, '_>) {
     for effect in &uses.names {
         let resolved = context.get_name(effect.span.start);
@@ -1612,21 +1900,10 @@ fn check_uses(uses: &Uses, context: &mut Context<'_, '_, '_>) {
             continue;
         }
 
-        let written = BytesDisplay(effect.value);
-        let message = if context.names.is_imported(&effect.span.start)
-            && STANDARD_EFFECTS.iter().any(|standard| short_name(standard).as_bytes() == effect.value)
-        {
-            let imported = String::from_utf8_lossy(resolved).replace('\\', ".");
-
-            format!(
-                "`{written}` here is the imported `{imported}`, not the effect `{written}`. Import it under another name, as in `import {imported} as System{written};`."
-            )
-        } else {
-            let [rest @ .., last] = &STANDARD_EFFECTS;
-            let rest = rest.iter().map(short_name).collect::<Vec<_>>().join(", ");
-
-            format!("`{written}` is not an effect: `uses` takes {rest} or {}.", short_name(last))
-        };
+        let [rest @ .., last] = &STANDARD_EFFECTS;
+        let rest = rest.iter().map(short_name).collect::<Vec<_>>().join(", ");
+        let message =
+            format!("`{}` is not an effect: `uses` takes {rest} or {}.", BytesDisplay(effect.value), short_name(last));
 
         context.report(
             Issue::error(message).with_annotation(Annotation::primary(effect.span).with_message("Written here.")),
@@ -1727,6 +2004,16 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
             )));
         }
 
+        if let Property::Hooked(auto_property) = property
+            && let Some(init) = auto_property.hook_list.setter().filter(|setter| setter.name.value == b"init")
+        {
+            return Err(Box::new(
+                Issue::error("A static property has no `init`: `init` sets a property while its object is created.")
+                    .with_annotation(Annotation::primary(init.span()).with_message("Declared here."))
+                    .with_help("Write `set;`, or `private set;` to set it only inside its class."),
+            ));
+        }
+
         if let Some(value) = property.initial_value()
             && !value.is_constant(version, false)
         {
@@ -1790,7 +2077,7 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
             }
         }
         Property::Hooked(auto_property) => {
-            if !auto_property.modifiers.contains_visibility() {
+            if !writes_access(&auto_property.modifiers) {
                 Err(Box::new(not_supported(
                     property.first_variable().span,
                     "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -1804,14 +2091,21 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
                 )))
             } else if let Some(initial_value) = &auto_property.initial_value
                 && !initial_value.value.is_constant(version, false)
-                && auto_property.hook_list.hooks.iter().any(|accessor| {
-                    accessor.name.value == b"set" && matches!(accessor.body, PropertyHookBody::Concrete(_))
-                })
+                && let Some(setter) = auto_property
+                    .hook_list
+                    .setter()
+                    .filter(|setter| matches!(setter.body, PropertyHookBody::Concrete(_)))
             {
+                let setter = BytesDisplay(setter.name.value);
+
                 Err(Box::new(not_supported(
                     initial_value.value.span(),
-                    "An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#.",
-                    "A constant initial value is the property's default, while any other would run the `set` body at the start of the constructor.",
+                    &format!(
+                        "An initial value that is not constant, on a property whose `{setter}` has a body, is not supported yet in PHP#."
+                    ),
+                    &format!(
+                        "A constant initial value is the property's default, while any other would run the `{setter}` body at the start of the constructor."
+                    ),
                 )))
             } else if auto_property.initial_value.is_none()
                 && matches!(auto_property.hint, Some(Hint::Nullable(_)))
@@ -1828,7 +2122,7 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
             }
         }
         Property::Computed(computed) => {
-            if !computed.modifiers.contains_visibility() {
+            if !writes_access(&computed.modifiers) {
                 Err(Box::new(not_supported(
                     computed.variable.span,
                     "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -1889,6 +2183,12 @@ fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_
 }
 
 /// Whether the slice has a class constant, with the refusal when it does not: an access modifier and one name.
+/// Whether a member writes its access, spec section 5's `internal` included, which the walk refuses on its own as not
+/// supported yet.
+fn writes_access(modifiers: &Sequence<Modifier>) -> bool {
+    modifiers.contains_visibility() || modifiers.iter().any(|modifier| matches!(modifier, Modifier::Internal(_)))
+}
+
 fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
     let not_supported = |span: Span, message: &str, note: &str| {
         Box::new(
@@ -1904,7 +2204,7 @@ fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
             "A constant declaring several names is not supported yet in PHP#.",
             supported(Place::ClassConstant),
         ))
-    } else if !constant.modifiers.contains_visibility() {
+    } else if !writes_access(&constant.modifiers) {
         Err(not_supported(
             constant.first_item().name.span,
             "A constant without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -1916,9 +2216,9 @@ fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
 }
 
 /// Checks the accessors of a property, declared in the class body or on a constructor parameter: `get` once, and an
-/// optional `set` once, which may take an access modifier narrower than the property's, as in C#. Each is `;`, an
-/// expression body `=> expr;` or a block. `init`, an access modifier on `get` and a parameter list on `set` are not
-/// supported yet.
+/// optional `set` or `init` once, which may take an access modifier narrower than the property's, as in C#. `init`
+/// sets the property only while its object is created, spec section 6.1. Each is `;`, an expression body `=> expr;`
+/// or a block. An access modifier on `get` and a parameter list on `set` are not supported yet.
 fn check_accessors(
     modifiers: &Sequence<Modifier>,
     accessors: &PropertyHookList,
@@ -1934,7 +2234,7 @@ fn check_accessors(
             report_not_supported(
                 accessor.span(),
                 "accessor",
-                "A PHP# property's accessors are `get` and `set`, each written `;`, `=> expr;` or with a block body, and `set` may take `private` or `protected`.",
+                "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private` or `protected`.",
                 context,
             );
         } else if declared.contains(&name) {
@@ -1942,11 +2242,23 @@ fn check_accessors(
                 Issue::error("A PHP# property declares each accessor once.")
                     .with_annotation(Annotation::primary(accessor.name.span).with_message("Declared again here.")),
             );
-        } else if accessor.modifiers.first().is_some_and(|modifier| visibility_reach(modifier) >= reach) {
+        } else if accessor.is_setter() && declared.iter().any(|declared| *declared == b"set" || *declared == b"init") {
             context.report(
-                Issue::error("The `set` accessor of a PHP# property must be narrower than the property.")
+                Issue::error("A PHP# property is written by `set` or by `init`, not both.")
+                    .with_annotation(Annotation::primary(accessor.name.span).with_message("Declared here."))
+                    .with_help(
+                        "Keep `init` to set it only while the object is created, or `set` to set it at any time.",
+                    ),
+            );
+        } else if accessor.modifiers.first().is_some_and(|modifier| visibility_reach(modifier) >= reach) {
+            let setter = BytesDisplay(name);
+
+            context.report(
+                Issue::error(format!("The `{setter}` accessor of a PHP# property must be narrower than the property."))
                     .with_annotation(Annotation::primary(accessor.span()).with_message("Declared here."))
-                    .with_help("Write `private set;` or `protected set;` narrower than the property, or `set;`."),
+                    .with_help(format!(
+                        "Write `private {setter};` or `protected {setter};` narrower than the property, or `{setter};`."
+                    )),
             );
         }
 
@@ -1962,17 +2274,16 @@ fn check_accessors(
     }
 }
 
-/// Whether the slice has an accessor: `get` or `set` without attributes, `&` or a parameter list, where only `set`
-/// takes an access modifier, `private`, `protected` or `public`, which `check_accessors` compares with the property's.
+/// Whether the slice has an accessor: `get`, `set` or `init` without attributes, `&` or a parameter list, where only
+/// `set` and `init` take an access modifier, `private`, `protected` or `public`, which `check_accessors` compares with
+/// the property's.
 fn is_slice_accessor(accessor: &PropertyHook) -> bool {
-    let name = accessor.name.value;
-
     accessor.attribute_lists.is_empty()
         && accessor.ampersand.is_none()
         && accessor.parameter_list.is_none()
         && match accessor.modifiers.as_slice() {
-            [] => name == b"get" || name == b"set",
-            [Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)] => name == b"set",
+            [] => accessor.name.value == b"get" || accessor.is_setter(),
+            [Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)] => accessor.is_setter(),
             _ => false,
         }
 }
@@ -2002,7 +2313,7 @@ fn check_accessor_bodies(accessors: &PropertyHookList, property: &[u8], context:
 }
 
 /// php-src gives a `get` hook the property's type and a `set` hook `void`, so a `get` block returns a value and a
-/// `set` block returns none. A lambda's returns are its own.
+/// `set` or `init` block, which runs as the `set` hook, returns none. A lambda's returns are its own.
 fn check_accessor_returns(accessor: &[u8], block: &Block, context: &mut Context<'_, '_, '_>) {
     for r#return in mago_syntax::utils::find_returns_in_block(block) {
         match (accessor, &r#return.value) {
@@ -2012,11 +2323,15 @@ fn check_accessor_returns(accessor: &[u8], block: &Block, context: &mut Context<
                     .with_note("PHP gives a `get` hook the property's type.")
                     .with_help("Return the property's value, such as `return field;`."),
             ),
-            (b"set", Some(value)) => context.report(
-                Issue::error("A `set` accessor must not return a value.")
-                    .with_annotation(Annotation::primary(value.span()).with_message("Returned here."))
-                    .with_note("PHP gives a `set` hook the return type `void`.")
-                    .with_help("Write the value with `field = value;`, then `return;` if the body ends early."),
+            (b"set", Some(value)) | (b"init", Some(value)) => context.report(
+                Issue::error(if accessor == b"init" {
+                    "An `init` accessor must not return a value."
+                } else {
+                    "A `set` accessor must not return a value."
+                })
+                .with_annotation(Annotation::primary(value.span()).with_message("Returned here."))
+                .with_note("PHP gives a `set` hook the return type `void`.")
+                .with_help("Write the value with `field = value;`, then `return;` if the body ends early."),
             ),
             _ => {}
         }
@@ -2066,21 +2381,41 @@ fn check_accessor_node(node: Node<'_, '_>, property: &[u8], in_lambda: bool, con
 /// the start of the constructor in declaration order, before the members declared after it are set, so it cannot read
 /// the object, as in C#. Returns whether it reported one.
 fn report_this_in_initial_value(node: Node<'_, '_>, context: &mut Context<'_, '_, '_>) -> bool {
+    report_this(
+        node,
+        "An initial value cannot use `this`: it runs before the constructor body, while the object is built.",
+        Some("Set the member in the constructor body instead."),
+        context,
+    )
+}
+
+/// Reports each `this` in the arguments of `: super(…)` or `: this(…)`. They run before the object exists, as C#'s
+/// CS0027 says: `: this(…)` builds the object, and `: super(…)` runs before the class's own constructor body.
+fn report_this_in_initializer(initializer: &ConstructorInitializer, context: &mut Context<'_, '_, '_>) {
+    report_this(
+        Node::ArgumentList(&initializer.argument_list),
+        "`this` is not available before the constructor runs: pass a parameter instead.",
+        None,
+        context,
+    );
+}
+
+/// Reports each `this` in `node` with `message` and `help`, and returns whether it reported one.
+fn report_this(node: Node<'_, '_>, message: &str, help: Option<&str>, context: &mut Context<'_, '_, '_>) -> bool {
     let mut reported = false;
     if let Node::ConstantAccess(access) = node
         && context.names.binding(&access.name) == Some(Binding::This)
     {
-        context.report(
-            Issue::error(
-                "An initial value cannot use `this`: it runs before the constructor body, while the object is built.",
-            )
-            .with_annotation(Annotation::primary(access.span()).with_message("Used here."))
-            .with_help("Set the member in the constructor body instead."),
-        );
+        let issue =
+            Issue::error(message).with_annotation(Annotation::primary(access.span()).with_message("Used here."));
+        context.report(match help {
+            Some(help) => issue.with_help(help),
+            None => issue,
+        });
         reported = true;
     }
 
-    ensure_sufficient_stack(|| node.visit_children(|child| reported |= report_this_in_initial_value(child, context)));
+    ensure_sufficient_stack(|| node.visit_children(|child| reported |= report_this(child, message, help, context)));
 
     reported
 }
@@ -2317,23 +2652,91 @@ fn write_target<'ast, 'arena>(node: Node<'ast, 'arena>) -> Option<&'ast Expressi
     }
 }
 
-/// Whether every body of an `if`, `else` or loop is a block in braces. An `else` may also hold the next `if`.
-fn has_braces(statement: &Statement) -> bool {
-    let is_block = |statement: &Statement| matches!(statement, Statement::Block(_));
+/// Whether a statement runs code, as a method body's statements do, rather than declaring something. PHP's `foreach`
+/// is a parse error in a `.sharp` file, and `unset(…)` is a call there.
+const fn runs_code(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Block(_)
+            | Statement::Goto(_)
+            | Statement::Label(_)
+            | Statement::Try(_)
+            | Statement::For(_)
+            | Statement::ForOf(_)
+            | Statement::While(_)
+            | Statement::DoWhile(_)
+            | Statement::Continue(_)
+            | Statement::Break(_)
+            | Statement::Switch(_)
+            | Statement::If(_)
+            | Statement::Return(_)
+            | Statement::Expression(_)
+            | Statement::Echo(_)
+            | Statement::Emit(_)
+            | Statement::Global(_)
+            | Statement::Static(_)
+            | Statement::LocalDeclaration(_)
+            | Statement::PatternMatch(_)
+            | Statement::Noop(_)
+    )
+}
+
+/// Whether the walk is inside a statement at file level that runs code, which the file-level rule refuses whole, so
+/// a refusal of a part of it would report the statement twice.
+fn is_in_file_level_code(context: &Context<'_, '_, '_>) -> bool {
+    let mut ancestors =
+        context.ancestors.iter().skip_while(|node| matches!(node, Node::Statement(Statement::Namespace(_))));
+
+    matches!(ancestors.next(), Some(Node::Statement(statement)) if runs_code(statement))
+}
+
+/// The first body of an `if`, `else` or loop that is not a block in braces, with the block to write in its place. An
+/// `else` may also hold the next `if`, whose body is a block too. A colon-delimited body, from its `:` to its `endif;`,
+/// `endwhile;` or `endfor;`, is written as blocks whole, its `elseif` clauses as `else if`. A lone `;` body is the
+/// empty block.
+fn body_without_braces(statement: &Statement, context: &Context<'_, '_, '_>) -> Option<(Span, String)> {
+    let unbraced = |body: &Statement| match body {
+        Statement::Block(_) => None,
+        Statement::Noop(_) => Some((body.span(), "{ }".to_owned())),
+        _ => Some((body.span(), format!("{{ {} }}", BytesDisplay(context.get_code_snippet(body))))),
+    };
+    let block = |statements: &Sequence<Statement>| {
+        let written: Vec<String> =
+            statements.iter().map(|statement| BytesDisplay(context.get_code_snippet(statement)).to_string()).collect();
+
+        format!("{{ {} }}", written.join(" "))
+    };
 
     match statement {
         Statement::If(If { body: IfBody::Statement(body), .. }) => {
-            is_block(body.statement)
-                && body
-                    .else_clause
-                    .as_ref()
-                    .is_none_or(|clause| is_block(clause.statement) || matches!(clause.statement, Statement::If(_)))
+            unbraced(body.statement).or_else(|| match body.else_clause.as_ref()?.statement {
+                Statement::If(If { body: IfBody::Statement(next), .. }) => unbraced(next.statement),
+                Statement::If(_) => None,
+                next => unbraced(next),
+            })
+        }
+        Statement::If(If { body: IfBody::ColonDelimited(body), .. }) => {
+            let mut parts = vec![block(&body.statements)];
+            parts.extend(body.else_if_clauses.iter().map(|clause| {
+                let condition = BytesDisplay(context.get_code_snippet(clause.condition));
+
+                format!("else if ({condition}) {}", block(&clause.statements))
+            }));
+            parts.extend(body.else_clause.iter().map(|clause| format!("else {}", block(&clause.statements))));
+
+            Some((body.colon.join(body.terminator.span()), parts.join(" ")))
+        }
+        Statement::While(While { body: WhileBody::ColonDelimited(body), .. }) => {
+            Some((body.colon.join(body.terminator.span()), block(&body.statements)))
+        }
+        Statement::For(For { body: ForBody::ColonDelimited(body), .. }) => {
+            Some((body.colon.join(body.terminator.span()), block(&body.statements)))
         }
         Statement::While(While { body: WhileBody::Statement(body), .. })
-        | Statement::For(For { body: ForBody::Statement(body), .. }) => is_block(body),
-        Statement::ForOf(for_of) => is_block(for_of.body),
-        Statement::DoWhile(do_while) => is_block(do_while.statement),
-        _ => true,
+        | Statement::For(For { body: ForBody::Statement(body), .. }) => unbraced(body),
+        Statement::ForOf(for_of) => unbraced(for_of.body),
+        Statement::DoWhile(do_while) => unbraced(do_while.statement),
+        _ => None,
     }
 }
 
@@ -2617,6 +3020,34 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
         return None;
     }
 
+    // A named constructor belongs to the class that declares it, spec section 9.1, and `Self` can be any subclass. The
+    // file shows the class only when it declares the named constructor, and the analyzer names any other.
+    if let (Expression::Self_(_), Some(constructor), Some(arguments)) =
+        (instantiation.class, &instantiation.constructor, &instantiation.argument_list)
+    {
+        let Some(class) = enclosing_class(context.program, instantiation.span()).filter(|class| {
+            class.members.iter().any(|member| {
+                matches!(member, ClassLikeMember::NamedConstructor(declared)
+                    if declared.name.value.eq_ignore_ascii_case(constructor.name.value))
+            })
+        }) else {
+            return Some(Place::Instantiation);
+        };
+        let fix = format!(
+            "new {}.{}{}",
+            BytesDisplay(class.name.value),
+            BytesDisplay(constructor.name.value),
+            BytesDisplay(context.get_code_snippet(arguments))
+        );
+        context.report(
+            Issue::error("`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.")
+                .with_annotation(Annotation::primary(instantiation.span()).with_message("Created here."))
+                .with_help(format!("Name its class: write `{fix}`.")),
+        );
+
+        return None;
+    }
+
     if matches!(instantiation.class, Expression::Self_(_))
         && let Some(class) = enclosing_class(context.program, instantiation.span())
         && !has_required_constructor(&class)
@@ -2642,6 +3073,104 @@ fn has_required_constructor(class: &ClassLike) -> bool {
         matches!(member, ClassLikeMember::Method(method)
             if php_method_name(method) == b"__construct"
                 && method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_))))
+    })
+}
+
+/// Checks a named constructor of `class`, spec section 9.1: its class has objects of its own, it is declared on its own
+/// class's name, as in `Artifact.fromJson`, takes only an access modifier, has a name that is neither its class's nor
+/// one PHP reserves, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
+/// another member of the class has, as PHP's duplicate-method check, since the named constructor runs as the static
+/// method of its name.
+fn check_named_constructor(constructor: &NamedConstructor, class: &Class, context: &mut Context<'_, '_, '_>) {
+    let class_name = BytesDisplay(class.name.value);
+    let name = BytesDisplay(constructor.name.value);
+    let mut report = |message: String, span: Span, written: &str| {
+        context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
+    };
+
+    if class.modifiers.contains_abstract() {
+        report(
+            "An abstract class has no objects of its own, so it declares no named constructor.".to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    if constructor.class.value != class.name.value {
+        report(
+            format!("A named constructor is declared on its own class, as in `{class_name}.{name}`."),
+            constructor.class.span,
+            "Written here.",
+        );
+    }
+
+    if constructor.name.value.eq_ignore_ascii_case(class.name.value) {
+        report(
+            format!(
+                "A named constructor cannot have its class's name: `new {class_name}(…)` calls the main constructor."
+            ),
+            constructor.name.span,
+            "Declared here.",
+        );
+    } else if constructor.name.value.starts_with(b"__") {
+        report(
+            "A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods."
+                .to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    // Spec section 5's `internal` is an access, which the walk refuses as not supported yet.
+    let is_access = |modifier: &Modifier| modifier.is_read_visibility() || matches!(modifier, Modifier::Internal(_));
+    for modifier in constructor.modifiers.iter().filter(|modifier| !is_access(modifier)) {
+        report(
+            format!(
+                "A named constructor takes only `public`, `protected` or `private`: remove `{}`.",
+                BytesDisplay(modifier.get_keyword().value)
+            ),
+            modifier.span(),
+            "Written here.",
+        );
+    }
+
+    if !constructor.modifiers.iter().any(is_access) {
+        report(
+            "A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
+            constructor.name.span,
+            "Declared here.",
+        );
+    }
+
+    if constructor.initializer.is_none() {
+        report(
+            "A named constructor passes control to the main constructor with `: this(…)`.".to_owned(),
+            constructor.name.span,
+            "Declared without `: this(…)` here.",
+        );
+    }
+
+    for modifier in constructor.parameter_list.parameters.iter().flat_map(|parameter| parameter.modifiers.iter()) {
+        report(
+            "A named constructor's parameter declares no property: only the main constructor's parameters do."
+                .to_owned(),
+            modifier.span(),
+            "Written here.",
+        );
+    }
+
+    if let MethodBody::Abstract(body) = &constructor.body {
+        report("A named constructor needs a body, even an empty `{ }`.".to_owned(), body.span(), "Written here.");
+    }
+}
+
+/// Whether `: this(…)` or `: super(…)` belongs to a named constructor rather than to the main one.
+fn is_named_constructor_initializer(initializer: &ConstructorInitializer, program: &Program) -> bool {
+    enclosing_class(program, initializer.span()).is_some_and(|class| {
+        class.members.iter().any(|member| {
+            matches!(member, ClassLikeMember::NamedConstructor(constructor)
+                if constructor.initializer.as_ref().is_some_and(|written| written.span() == initializer.span()))
+        })
     })
 }
 
@@ -2823,15 +3352,43 @@ fn report_removed(span: Span, form: &[u8], instead: &str, note: &str, context: &
     );
 }
 
-/// Reports `die`, and `exit` with a string literal or a template, which spec section 8 removes.
-fn report_die(span: Span, context: &mut Context<'_, '_, '_>) {
-    report_removed(
-        span,
+/// The PHP constructs spec sections 2, 8 and 29 remove that start with a word: the word, what PHP# writes instead,
+/// and why. A `.sharp` file reads the word as a plain name, so the construct written as a call, or a bare `die`,
+/// reaches the checker as a call of a function, or a read of a constant, that no code declares.
+const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
+    (b"echo", "write `printf` or `fwrite`.", "Output is a function call in PHP#."),
+    (b"print", "write `printf` or `fwrite`.", "Output is a function call in PHP#."),
+    (
         b"die",
         "write the message to STDERR, then `exit(1)`.",
         "`die(\"…\")` and `exit(\"…\")` print the message and exit with status 0, which reports success.",
-        context,
-    );
+    ),
+    (b"isset", "test it against null, as in `value != null`.", "A PHP# value is never undefined."),
+    (
+        b"empty",
+        "compare the value itself, as in `items.count() == 0`.",
+        "PHP's `empty` is true for `0`, `\"0\"`, `\"\"`, `[]` and null alike.",
+    ),
+    (
+        b"unset",
+        "a local ends at the `}` that closes its block, and `map.remove(key)` removes a Map's entry.",
+        "A PHP# local never becomes undefined.",
+    ),
+    (b"array", "write a list literal, as in `[1, 2]`.", "PHP# writes a list or a map literal in square brackets."),
+    (
+        b"list",
+        "read each element into its own local, as in `const first = pair[0];`.",
+        "PHP# reads a list's elements by index.",
+    ),
+];
+
+/// Reports the PHP construct `word` starts, when spec sections 2, 8 and 29 remove it.
+fn report_removed_construct(word: &[u8], span: Span, context: &mut Context<'_, '_, '_>) {
+    if let Some((_, instead, note)) =
+        REMOVED_CONSTRUCTS.iter().find(|(construct, ..)| construct.eq_ignore_ascii_case(word))
+    {
+        report_removed(span, word, instead, note, context);
+    }
 }
 
 /// The span of the PHP superglobal an expression names, written bare as `_SERVER` or with `$`, through any index of
@@ -2964,12 +3521,12 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// What the slice has at a place, as the note of a refusal there.
 const fn supported(place: Place) -> &'static str {
     match place {
-        Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface` and `enum`.",
+        Place::File => "At file level, PHP# supports `namespace`, `import`, `class`, `interface`, `enum` and `event`.",
         Place::Class => {
-            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, operators and laws, with no other modifiers, `extends` or `implements`."
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header and methods, with no attributes, other modifiers, `extends`, constants or properties."
+            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
             "A PHP# interface method has no modifier, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
@@ -2977,14 +3534,18 @@ const fn supported(place: Place) -> &'static str {
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, methods and laws, with no other modifiers or `implements`."
         }
+        Place::Event => {
+            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
+        }
+        Place::Module => "A PHP# module holds service bindings and laws.",
         Place::FieldOrProperty => {
-            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
+            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
             "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
-            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>`, `Function<R(P)>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`."
+            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>`, `Function<R(P)>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
         }
         Place::Parameter => {
             "A PHP# parameter has a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional default. The last parameter can be variadic, as in `int ...values`."
@@ -2999,7 +3560,7 @@ const fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -3180,22 +3741,15 @@ pub fn check_binding_errors(context: &mut Context<'_, '_, '_>) {
     }
 }
 
-/// Checks the name of a PHP# class, interface or enum against the names the engine reserves, beyond the keywords the
-/// PHP checks reject, against the `__Something__` names spec section 27 removes, and against spec section 24's
-/// capital letter. A name gets the first of these errors only. The standard library's `Sharp.Int`, `Sharp.Float` and
-/// `Sharp.Bool` are the engine's one exception, and the analyzer refuses them in any file that is not the standard
-/// library's.
+/// Checks the name of a PHP# class, interface, enum or event against the type names the engine reserves, against the
+/// `__Something__` names spec section 27 removes, and against spec section 24's capital letter. A name gets the first
+/// of these errors only. Any other word names a type, a PHP keyword PHP# doesn't use included, and so does a
+/// capitalized PHP# keyword, since PHP#'s keywords are lowercase but `Self`, which the engine reserves. The standard
+/// library's `Sharp.Int`, `Sharp.Float` and `Sharp.Bool` are the engine's one exception, and the analyzer refuses
+/// them in any file that is not the standard library's.
 #[inline]
 pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, '_, '_>) {
-    let is_keyword = RESERVED_KEYWORDS
-        .iter()
-        .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
-        .any(|keyword| keyword.eq_ignore_ascii_case(class_name.value));
-
-    if is_reserved_class_name(class_name.value)
-        && !is_keyword
-        && !is_sharp_type_class(context.get_name(class_name.span.start))
-    {
+    if is_reserved_class_name(class_name.value) && !is_sharp_type_class(context.get_name(class_name.span.start)) {
         let name = BytesDisplay(class_name.value);
 
         context.report(
@@ -3203,7 +3757,7 @@ pub fn check_class_name(class_name: &LocalIdentifier, context: &mut Context<'_, 
                 .with_annotation(Annotation::primary(class_name.span).with_message("Class declared here."))
                 .with_note("PHP# reserves this name for a type."),
         );
-    } else if is_keyword || is_magic_name(class_name.value) {
+    } else if is_magic_name(class_name.value) {
         check_declared_name(class_name.value, class_name.span, context);
     } else {
         check_capitalized(class_name.value, class_name.span, context);
@@ -3312,6 +3866,105 @@ pub fn check_declarations(program: &Program, context: &mut Context<'_, '_, '_>) 
     }
 }
 
+/// Checks a module's laws, spec section 28: each law's parameters as a class law's, and no two laws of one name,
+/// compared ignoring case, as a class's methods and laws are. Only a folder's `Module.sharp` states laws, because an
+/// environment or test module only overrides services, spec section 32.
+#[inline]
+pub fn check_module(module: &Module, context: &mut Context<'_, '_, '_>) {
+    let mut stated: Vec<&LocalIdentifier> = Vec::new();
+    for member in &module.members {
+        let ModuleMember::Law(law) = member else {
+            continue;
+        };
+        if module.parent.is_some() {
+            context.report(
+                Issue::error("A module that overrides another states no laws: state it in its folder's Module.sharp.")
+                    .with_annotation(Annotation::primary(law.span()).with_message("Stated here.")),
+            );
+            continue;
+        }
+        check_law_parameters(law, context);
+
+        if let Some(earlier) = stated.iter().find(|earlier| earlier.value.eq_ignore_ascii_case(law.name.value)) {
+            context.report(
+                Issue::error(format!("The module already states a law named `{}`.", BytesDisplay(earlier.value)))
+                    .with_annotation(Annotation::primary(law.name.span).with_message("Stated again here."))
+                    .with_annotation(Annotation::secondary(earlier.span).with_message("First stated here."))
+                    .with_note("Law names are case-insensitive."),
+            );
+        } else {
+            stated.push(&law.name);
+        }
+    }
+}
+
+/// Decides a module by its file and its header, spec section 32:
+/// - a folder's `Module.sharp` holds its base module, which overrides nothing;
+/// - a `Module.<Environment>.sharp` holds an environment module, which overrides its own folder's module;
+/// - any other file holds a test module, which names the module it overrides.
+fn check_module_file_name(module: &Module, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let issue = match (
+        &module.parent,
+        Module::is_declared_in(context.source_file),
+        Module::environment_of(context.source_file),
+    ) {
+        (None, true, _) => return Some(Place::Module),
+        (Some(parent), true, _) => {
+            Issue::error("A folder's Module.sharp overrides no other module: remove its header.")
+                .with_annotation(Annotation::primary(parent.span()).with_message("Written here."))
+        }
+        (None, false, Some(_)) => {
+            let namespace = first_namespace(context.program).and_then(|namespace| namespace.name.as_ref());
+            let header = namespace.map_or_else(String::new, |name| format!(" : {}", BytesDisplay(name.value())));
+            Issue::error(format!("An environment module overrides its folder's module: write `module{header}`."))
+                .with_annotation(Annotation::primary(module.module.span).with_message("Declared here."))
+        }
+        (Some(parent), false, Some(_)) => {
+            let namespace = first_namespace(context.program).and_then(|namespace| namespace.name.as_ref());
+            match namespace {
+                Some(namespace) if context.names.get(namespace) == context.names.get(&parent.name) => {
+                    return Some(Place::Module);
+                }
+                Some(namespace) => Issue::error(format!(
+                    "An environment module overrides its own folder's module: write `module : {}`.",
+                    BytesDisplay(namespace.value())
+                ))
+                .with_annotation(Annotation::primary(parent.name.span()).with_message("Names another module.")),
+                None => Issue::error(
+                    "An environment module overrides its own folder's module, so its file needs a namespace.",
+                )
+                .with_annotation(Annotation::primary(parent.name.span()).with_message("Names a module here.")),
+            }
+        }
+        (Some(_), false, None) => return Some(Place::Module),
+        (None, false, None) => Issue::error("A module is declared in its folder's Module.sharp.")
+            .with_annotation(Annotation::primary(module.module.span).with_message("Declared here."))
+            .with_help("A test module names the module it overrides, as in `module : App.Shop`."),
+    };
+    context.report(issue);
+
+    None
+}
+
+/// Whether `statement` may stand at the top of the checked file: any statement outside a module file, and in
+/// `Module.sharp` or `Module.<Environment>.sharp` its namespace, its imports and its first module, spec section 32.
+fn is_module_file_statement(statement: &Statement, context: &Context<'_, '_, '_>) -> bool {
+    if !Module::is_declared_in(context.source_file) && Module::environment_of(context.source_file).is_none() {
+        return true;
+    }
+
+    match statement {
+        Statement::Namespace(_) | Statement::Use(_) => true,
+        Statement::Module(module) => file_statements(context.program)
+            .find_map(|statement| match statement {
+                Statement::Module(first) => Some(first.span()),
+                _ => None,
+            })
+            .is_some_and(|first| first == module.span()),
+        _ => false,
+    }
+}
+
 /// The name an import gives its class in the file: the name after `as`, or else the last segment of the class name.
 fn imported_name<'arena>(import: &UseItem<'arena>) -> &'arena [u8] {
     import.alias.as_ref().map_or_else(|| import.name.last_segment(), |alias| alias.identifier.value)
@@ -3319,8 +3972,20 @@ fn imported_name<'arena>(import: &UseItem<'arena>) -> &'arena [u8] {
 
 #[inline]
 pub fn check_constant_access(constant_access: &ConstantAccess, context: &mut Context<'_, '_, '_>) {
-    if context.names.binding(&constant_access.name) == Some(Binding::Member) {
-        report_bare_member(constant_access.span(), constant_access.name.value(), context);
+    match context.names.binding(&constant_access.name) {
+        Some(Binding::Member) => report_bare_member(constant_access.span(), constant_access.name.value(), context),
+        // A bare `die`, which no local names, is PHP's construct, and `TRUE` is `true` written in another case.
+        Some(Binding::Constant) if !is_in_file_level_code(context) => {
+            let name = constant_access.name.value();
+            match ["true", "false", "null"].into_iter().find(|literal| literal.as_bytes().eq_ignore_ascii_case(name)) {
+                Some(literal) => context.report(
+                    Issue::error(format!("Write `{literal}` in lowercase."))
+                        .with_annotation(Annotation::primary(constant_access.span()).with_message("Written here.")),
+                ),
+                None => report_removed_construct(name, constant_access.span(), context),
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3331,6 +3996,10 @@ pub fn check_function_call(function_call: &FunctionCall, context: &mut Context<'
     };
 
     let function = identifier.last_segment();
+    if context.names.binding(identifier).is_none() && !is_in_file_level_code(context) {
+        report_removed_construct(function, function_call.span(), context);
+    }
+
     if is_compact_or_extract(function) {
         let function = BytesDisplay(function);
 
@@ -3370,6 +4039,10 @@ pub fn check_function(function: &Function, context: &mut Context<'_, '_, '_>) {
 
 #[inline]
 pub fn check_global(global: &Global, context: &mut Context<'_, '_, '_>) {
+    if is_in_file_level_code(context) {
+        return;
+    }
+
     context.report(
         Issue::error("`global` is not part of PHP#.")
             .with_annotation(Annotation::primary(global.global.span).with_message("Used here."))
@@ -3483,6 +4156,15 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
             Issue::error(format!("`{name}` is the name of a PHP superglobal: rename this {kind}."))
                 .with_annotation(Annotation::primary(span).with_message("Declared here."))
                 .with_note(format!("A PHP# {kind} runs as a PHP variable of the same name, which would be `${name}`.")),
+        );
+    } else if is_sharp_keyword(name) {
+        let renamed = format!("{}Value", name.to_ascii_lowercase().escape_ascii());
+        let name = BytesDisplay(name);
+
+        context.report(
+            Issue::error(format!("`{name}` is a PHP# keyword, so it can't name a {kind}."))
+                .with_annotation(Annotation::primary(span).with_message("Declared here."))
+                .with_help(format!("Rename it, as in `{renamed}`.")),
         );
     } else {
         check_declared_name(name, span, context);
@@ -3718,4 +4400,10 @@ fn enclosing_class_like_name<'arena>(program: &Program<'arena>, span: Span) -> O
         Statement::Enum(r#enum) if r#enum.span().contains(&span.start) => Some(r#enum.name.value),
         _ => None,
     })
+}
+
+/// Whether `span` is in an interface of a PHP# file, in any of the file's namespaces.
+fn is_in_interface(program: &Program, span: Span) -> bool {
+    file_statements(program)
+        .any(|statement| matches!(statement, Statement::Interface(interface) if interface.span().contains(&span.start)))
 }

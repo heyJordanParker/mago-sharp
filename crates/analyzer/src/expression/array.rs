@@ -57,6 +57,8 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::statement::function_like::map_key_error;
+use crate::statement::keys_mix_a_backed_enum;
+use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::display_atomic;
@@ -83,7 +85,23 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Array<'arena> {
     where
         A: Arena,
     {
-        analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())
+        analyze_array_elements(context, block_context, artifacts, self.span(), self.elements.as_slice())?;
+
+        // The engine holds a `Map`'s key as its backing value, so a literal whose keys, written or spread in, mix a
+        // backed enum with other types cannot tell a case from the key of its backing value.
+        if context.dialect.is_sharp()
+            && artifacts.get_expression_type(self).is_some_and(|literal| keys_mix_a_backed_enum(context, literal))
+        {
+            report_keys_sharing_entries(
+                context,
+                IssueCode::InvalidArrayElement,
+                self.span(),
+                "the literal",
+                Annotation::primary(self.span()).with_message("Its keys go in here."),
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -111,8 +129,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LegacyArray<'arena> {
 /// The type a PHP# literal has at a place declared a `Set`: spec section 12 makes a list literal the `Set` of its
 /// elements, which the lowering keys by each element. The literal keeps this type, so its place checks its elements. A
 /// `Map` literal there is refused by [`check_sharp_literal_kind`], and keeps the `Set` of its values, so its place adds
-/// no second issue, unless the place also declares a `Map`, which takes it as it is. `None` for any other value or
-/// place. The literal inside any parentheses gets the type too, since the lowering reads it there.
+/// no second issue, unless the place also declares a `Map`, which takes it as it is. A `List` or `Map` literal at a
+/// place whose elements are declared `Set`s holds `Set` literals, at any depth, as in `List<Set<int>> sets = [[1]]`, so
+/// it gets the type of its elements once they are `Set`s. `None` for any other value or place. The literal inside any
+/// parentheses gets the type too, since the lowering reads it there.
 pub(crate) fn get_set_literal_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -126,19 +146,85 @@ where
     let Expression::Array(array_literal) = literal else {
         return None;
     };
-    let declares_set = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
-    let declares_map = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
-    if !context.dialect.is_sharp() || !declares_set || (declares_map && is_map_literal(array_literal) == Some(true)) {
+    if !context.dialect.is_sharp() {
         return None;
     }
 
-    let array = artifacts.get_expression_type(value)?.get_single_array()?;
-    let (_, element_type) = get_array_parameters(array, context.codebase);
-    let set_type = TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))));
-    artifacts.set_expression_type(literal, set_type.clone());
-    artifacts.set_expression_type(value, set_type.clone());
+    let declares_set = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
+    let declares_map = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
+    let literal_type = if declares_set && !(declares_map && is_map_literal(array_literal) == Some(true)) {
+        let array = artifacts.get_expression_type(value)?.get_single_array()?;
+        let (_, element_type) = get_array_parameters(array, context.codebase);
 
-    Some(set_type)
+        TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
+    } else {
+        get_literal_of_sets_type(context, artifacts, array_literal, declared_type)?
+    };
+    artifacts.set_expression_type(literal, literal_type.clone());
+    artifacts.set_expression_type(value, literal_type.clone());
+
+    Some(literal_type)
+}
+
+/// The type of the `List` or `Map` literal `array_literal`, written where `declared_type` declares its elements, once
+/// each element that is a literal of a declared `Set` has the `Set` type: a `List` of the elements' types, a spread's
+/// included, or a `Map` of its keys to them. A missing element, refused on its own, adds no type. `None` when no
+/// element became a `Set`.
+fn get_literal_of_sets_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    array_literal: &Array<'_>,
+    declared_type: &TUnion,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let declared_element = declared_type
+        .types
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Array(collection @ (TArray::List(_) | TArray::Keyed(_))) => {
+                Some(get_array_parameters(collection, context.codebase).1)
+            }
+            _ => None,
+        })
+        .reduce(|first, other| {
+            combine_union_types(&first, &other, context.codebase, context.settings.combiner_options())
+        })?;
+
+    let mut became_set = false;
+    let mut element_types = Vec::with_capacity(array_literal.elements.len());
+    for element in array_literal.elements.iter() {
+        let element_value = match element {
+            ArrayElement::Value(element) => element.value,
+            ArrayElement::KeyValue(element) => element.value,
+            ArrayElement::Variadic(spread) => {
+                let spread = artifacts.get_expression_type(spread.value)?.get_single_array()?;
+                element_types.push(get_array_parameters(spread, context.codebase).1);
+                continue;
+            }
+            ArrayElement::Missing(_) => continue,
+        };
+        became_set |= get_set_literal_type(context, artifacts, element_value, &declared_element).is_some();
+        element_types.push(artifacts.get_expression_type(element_value)?.clone());
+    }
+    if !became_set {
+        return None;
+    }
+
+    let element_type = element_types.into_iter().reduce(|first, other| {
+        combine_union_types(&first, &other, context.codebase, context.settings.combiner_options())
+    })?;
+    let collection = if is_map_literal(array_literal)? {
+        let array = artifacts.get_expression_type(array_literal)?.get_single_array()?;
+        let (key_type, _) = get_array_parameters(array, context.codebase);
+
+        TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key_type), Arc::new(element_type)))
+    } else {
+        TArray::List(TList::new(Arc::new(element_type)))
+    };
+
+    Some(TUnion::from_atomic(TAtomic::Array(collection)))
 }
 
 /// The type an empty value written to a place declared `declared` has there: PHP types `[]` and `[:]` as one empty
@@ -240,10 +326,13 @@ where
                                 item_key_type.clone()
                             } else {
                                 let item_key_type_id = display_value_type(context, item_key_type, &get_arraykey());
-                                context.collector.report_with_code(
-                                    IssueCode::InvalidArrayElementKey,
-                                    map_key_error(&item_key_type_id, key_value_array_element.key.span()),
+                                let error = map_key_error(
+                                    context,
+                                    item_key_type,
+                                    &item_key_type_id,
+                                    key_value_array_element.key.span(),
                                 );
+                                context.collector.report_with_code(IssueCode::InvalidArrayElementKey, error);
 
                                 get_never()
                             }

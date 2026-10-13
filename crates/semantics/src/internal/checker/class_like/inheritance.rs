@@ -6,8 +6,7 @@ use mago_span::Span;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Implements;
 
-use crate::internal::consts::RESERVED_KEYWORDS;
-use crate::internal::consts::SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED;
+use crate::internal::checker::class_like::is_php_keyword_name;
 use crate::internal::context::Context;
 
 #[inline]
@@ -62,11 +61,7 @@ pub fn check_extends(
     for extended_type in &extends.types {
         let extended_name = extended_type.value();
 
-        if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(extended_name))
-            || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-                .iter()
-                .any(|keyword| keyword.eq_ignore_ascii_case(extended_name))
-        {
+        if is_php_keyword_name(extended_name, context) {
             let extended_name = BytesDisplay(extended_name);
             context.report(
                 Issue::error(format!(
@@ -125,11 +120,7 @@ pub fn check_implements(
     for implemented_type in &implements.types {
         let implemented_name = implemented_type.value();
 
-        if RESERVED_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(implemented_name))
-            || SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED
-                .iter()
-                .any(|keyword| keyword.eq_ignore_ascii_case(implemented_name))
-        {
+        if is_php_keyword_name(implemented_name, context) {
             let implemented_name = BytesDisplay(implemented_name);
             context.report(
                 Issue::error(format!(

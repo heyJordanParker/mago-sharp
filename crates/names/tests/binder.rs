@@ -497,6 +497,23 @@ fn a_law_binds_its_parameters_as_its_own_locals_and_their_types_through_the_impo
     assert_eq!(names.binding_errors(), []);
 }
 
+/// A named constructor binds as a constructor does, spec section 9.1: its parameters are locals of that constructor
+/// alone, in its `: this(…)` as in its body, its body reads `this`, and `new` names its class as any class name.
+#[test]
+fn a_named_constructor_binds_its_parameters_as_its_own_locals_and_this() {
+    const CODE: &str = "namespace App.Shared;\n\nimport App.Billing.Currency;\n\nclass Money\n{\n    public Money(public int cents { get; }) { }\n\n    public Money.of(Currency currency, int amount) : this(amount) { this.add(amount); }\n\n    public Money.zero(int amount) : this(amount) { }\n\n    public static Money make() => new Money.zero(0);\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(resolved(&names, CODE, "Currency currency", 0), b"App\\Billing\\Currency");
+    assert_eq!(binding(&names, CODE, "amount", 1), Some(local(CODE, "amount", 0, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "amount", 2), Some(local(CODE, "amount", 0, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "amount", 4), Some(local(CODE, "amount", 3, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "this.add", 0), Some(Binding::This));
+    assert_eq!(resolved(&names, CODE, "Money.zero(0)", 0), b"App\\Shared\\Money");
+    assert_eq!(names.binding_errors(), []);
+}
+
 /// A bare `extern` target that the file does not import is a global function, since PHP# has no functions of its own.
 #[test]
 fn a_bare_extern_target_that_is_not_imported_is_a_global_function() {
@@ -523,6 +540,27 @@ fn an_effect_name_binds_as_a_class_name() {
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, effect, 0)), format!("Sharp\\{effect}"));
     }
     assert_eq!(resolved(&names, CODE, "Payments;", 1), b"App\\Effects\\Payments");
+}
+
+/// Spec section 29: a standard effect's name in a `uses` is that effect, though the file imports or declares a class
+/// under the name, and outside `uses` the name is that class, spec section 23.
+#[test]
+fn a_standard_effect_name_in_uses_is_the_effect_where_a_class_has_its_name() {
+    const CODE: &str = "namespace App.Stubs;\n\nimport Lib.Http;\n\nextern Http.post uses Http, Clock;\n\nclass Clock\n{\n    private Function<Http(Clock) uses Http, Clock>? send = null;\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    for (needle, nth, class) in [
+        ("Http.post", 0, "Lib\\Http"),
+        ("Http,", 0, "Sharp\\Http"),
+        ("Clock;", 0, "Sharp\\Clock"),
+        ("Http(", 0, "Lib\\Http"),
+        ("Clock)", 0, "App\\Stubs\\Clock"),
+        ("Http,", 1, "Sharp\\Http"),
+        ("Clock>", 0, "Sharp\\Clock"),
+    ] {
+        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, nth)), class, "`{needle}` #{nth}");
+    }
 }
 
 /// An effect a function type lists binds as a class name, as an `extern`'s does.

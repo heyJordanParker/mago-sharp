@@ -4,22 +4,31 @@ use mago_names::ResolvedNames;
 use mago_span::HasSpan;
 use mago_syntax::comments::docblock::PrecedingDocblocks;
 use mago_syntax::cst::AnonymousClass;
+use mago_syntax::cst::Binding;
+use mago_syntax::cst::BindingValue;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::ClassLikeConstantItem;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ComputedProperty;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Implements;
+use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
+use mago_syntax::cst::NamedConstructor;
+use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
@@ -96,6 +105,23 @@ impl Fingerprintable for Implements<'_> {
     }
 }
 
+impl Fingerprintable for Inheritance<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "inheritance".hash(hasher);
+        for type_name in &self.types {
+            type_name.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
 impl Fingerprintable for ClassLikeMember<'_> {
     #[inline]
     fn fingerprint_with_hasher<H>(
@@ -128,7 +154,31 @@ impl Fingerprintable for ClassLikeMember<'_> {
             ClassLikeMember::Law(law) => {
                 law.fingerprint_with_hasher(hasher, resolved_names, options);
             }
+            ClassLikeMember::NamedConstructor(named_constructor) => {
+                named_constructor.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
         }
+    }
+}
+
+impl Fingerprintable for Event<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "event".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }
 
@@ -557,8 +607,74 @@ impl Fingerprintable for Method<'_> {
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.on.fingerprint_with_hasher(hasher, resolved_names, options);
 
         if !options.signature_only {
+            self.initializer.fingerprint_with_hasher(hasher, resolved_names, options);
+            self.body.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for On<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "on".hash(hasher);
+        for event in &self.events {
+            event.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for ConstructorInitializer<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        self.keyword.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for NamedConstructor<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        if let Some(trivia) = options.trivia_context {
+            for t in PrecedingDocblocks::new(trivia, self.span().start.offset)
+                .important_only(options.important_comment_patterns)
+            {
+                t.value.hash(hasher);
+            }
+        }
+        "named_constructor".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        crate::modifier::fingerprint_modifiers(self.modifiers.iter(), hasher, resolved_names, options);
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+
+        if !options.signature_only {
+            self.initializer.fingerprint_with_hasher(hasher, resolved_names, options);
             self.body.fingerprint_with_hasher(hasher, resolved_names, options);
         }
     }
@@ -616,6 +732,78 @@ impl Fingerprintable for Law<'_> {
     }
 }
 
+impl Fingerprintable for Module<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "module".hash(hasher);
+
+        if let Some(parent) = &self.parent {
+            "module_parent".hash(hasher);
+            parent.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+
+        for member in &self.members {
+            match member {
+                ModuleMember::Law(law) => law.fingerprint_with_hasher(hasher, resolved_names, options),
+                ModuleMember::Binding(binding) => binding.fingerprint_with_hasher(hasher, resolved_names, options),
+            }
+        }
+    }
+}
+
+/// A binding's lifetime, service, parameters, target and classes decide which services every class gets, so they
+/// stay in a signature fingerprint. An expression value is the binding's own body.
+impl Fingerprintable for Binding<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "binding".hash(hasher);
+        self.lifetime.value.hash(hasher);
+        self.service.fingerprint_with_hasher(hasher, resolved_names, options);
+
+        if let Some(parameter_list) = &self.parameter_list {
+            parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+
+        if let Some(target) = &self.target {
+            "binding_target".hash(hasher);
+            target.class.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+
+        match &self.value {
+            BindingValue::Class(class) => {
+                "binding_class".hash(hasher);
+                class.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            BindingValue::Classes(classes) => {
+                "binding_classes".hash(hasher);
+                for class in &classes.classes {
+                    class.fingerprint_with_hasher(hasher, resolved_names, options);
+                }
+            }
+            BindingValue::Expression(expression) => {
+                "binding_expression".hash(hasher);
+                if !options.signature_only {
+                    expression.fingerprint_with_hasher(hasher, resolved_names, options);
+                }
+            }
+        }
+    }
+}
+
 impl Fingerprintable for MethodBody<'_> {
     #[inline]
     fn fingerprint_with_hasher<H>(
@@ -667,6 +855,7 @@ impl Fingerprintable for Class<'_> {
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.extends.fingerprint_with_hasher(hasher, resolved_names, options);
         self.implements.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);
         }
@@ -696,6 +885,7 @@ impl Fingerprintable for Interface<'_> {
         }
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.extends.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);
         }
@@ -753,6 +943,7 @@ impl Fingerprintable for Enum<'_> {
         }
         self.name.fingerprint_with_hasher(hasher, resolved_names, options);
         self.backing_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.inheritance.fingerprint_with_hasher(hasher, resolved_names, options);
         self.implements.fingerprint_with_hasher(hasher, resolved_names, options);
         for member in &self.members {
             member.fingerprint_with_hasher(hasher, resolved_names, options);

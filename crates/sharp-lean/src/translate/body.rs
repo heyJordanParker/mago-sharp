@@ -620,11 +620,7 @@ impl<'body, 'program> Body<'body, 'program> {
         match target.kind {
             DeclarationKind::Method { overridable: false } => {}
             DeclarationKind::Method { overridable: true } => {
-                return self.unmodeled(
-                    expression.span(),
-                    format!("a call to the overridable method {}.{}", names::short_name(class), target.name),
-                    issues::OVERRIDABLE,
-                );
+                return self.overridable(expression, class, target.name.as_bytes());
             }
             _ => return self.unmodeled(expression.span(), "a call of a function value".to_owned(), issues::LAMBDA),
         }
@@ -646,11 +642,7 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         let target = self.checked.types().call_target(expression);
         if target.kind != (DeclarationKind::Method { overridable: false }) {
-            return self.unmodeled(
-                expression.span(),
-                format!("a call to the overridable method {}.{}", names::short_name(class), target.name),
-                issues::OVERRIDABLE,
-            );
+            return self.overridable(expression, class, target.name.as_bytes());
         }
 
         let receiver = self.value(call.object);
@@ -722,7 +714,8 @@ impl<'body, 'program> Body<'body, 'program> {
         self.bind(parts.join(" "))
     }
 
-    /// `new Class(…)`, which runs the class's constructor.
+    /// `new Class(…)`, which runs the class's constructor. A named constructor runs a body, which Mago does not
+    /// translate.
     fn instantiation(&mut self, instantiation: &Instantiation) -> String {
         let class = match instantiation.class {
             Expression::Identifier(identifier) => self.checked.names().get(identifier),
@@ -731,6 +724,17 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         if !self.is_translated_class(instantiation.class.span(), class) {
             return "default".to_owned();
+        }
+        if let Some(constructor) = &instantiation.constructor {
+            return self.unmodeled(
+                instantiation.span(),
+                format!(
+                    "the named constructor {}.{}",
+                    names::short_name(class),
+                    String::from_utf8_lossy(constructor.name.value)
+                ),
+                issues::CONSTRUCTOR_BODY,
+            );
         }
 
         let class_name = self.reached_name(class);
@@ -924,8 +928,23 @@ impl<'body, 'program> Body<'body, 'program> {
         true
     }
 
+    /// A call of `class`'s method `method`, which a subclass or, on an interface, each implementation gives its own body,
+    /// so Lean cannot see which body runs, nor whether it has effects.
+    fn overridable(&mut self, expression: &Expression, class: &[u8], method: &[u8]) -> String {
+        let place = format!("{}.{}", names::short_name(class), String::from_utf8_lossy(method));
+        if self.checked.types().class_declaration(class).kind == DeclarationKind::Interface {
+            return self.unmodeled(
+                expression.span(),
+                format!("the interface method {place}"),
+                issues::INTERFACE_METHOD,
+            );
+        }
+
+        self.unmodeled(expression.span(), format!("a call to the overridable method {place}"), issues::OVERRIDABLE)
+    }
+
     /// The Lean type of the class `class` a hint names.
-    fn class_type(&mut self, span: Span, class: &[u8]) -> String {
+    pub(crate) fn class_type(&mut self, span: Span, class: &[u8]) -> String {
         if !self.is_translated_class(span, class) {
             return "default".to_owned();
         }
