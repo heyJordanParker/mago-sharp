@@ -41,6 +41,15 @@ public class Report
         this.name = "report";
     }
 
+    protected Report.fresh(int start) : this(start, new Calc(start), 0)
+    {
+        if (start < 0) {
+            return;
+        }
+        this.name = "fresh";
+        const read = () => this.count;
+    }
+
     public int run([Field] [Entity(false)] int extra, float rate = 1.5, string label = "\u{41}\n", bool strict = !false)
     {
         let total = extra * 2 + 1;
@@ -106,6 +115,7 @@ public class Report
         const made = Calc.make();
         const read = calc.rate;
         const fresh = new Calc(1, rate: 2);
+        const copy = new Report.fresh(1);
         const chained = Calc.make().add(1).rate;
         const sum = Calc.make().add(1, 2);
         const big = 0xFFFFFFFFFFFFFFFF;
@@ -263,8 +273,8 @@ public class Report
         Map<int, string>? labels = null;
         sizes["a"] = (sizes["a"] ?? 0) + numbers[1];
         this.sizes["b"] = array_sum(numbers);
-        const nested = ["x": ["a": items[1].rate]];
-        nested["x"]["a"] = items[0]?.rate ?? items[1].rate;
+        const nested = [["a": items[1].rate]];
+        nested[0]["a"] = items[0]?.rate ?? items[1].rate;
         for (const [string name, size] of sizes) {
             this.sizes[name] = size;
         }
@@ -414,6 +424,52 @@ abstract class Record
     public static (Self|int)? either(int id) => Self.find(id);
 }
 
+public class Page<TItem : Record & Sized, TKey : Comparable<Version>> : Listing<TItem>, Source<TItem>, Sized
+{
+    private Map<string, Class<TItem>> kinds = [:];
+    private Page<TItem, TKey>? previous = null;
+    public List<TItem> items { get; private set; } = [];
+
+    public TItem? first(TKey key, Page<Entry, Version>? fallback = null)
+    {
+        const page = new Page<Entry, Version>();
+        const found = this.convert<Entry>(this.items[0]);
+        const again = this.previous?.convert<Entry>(this.items[0]);
+        Class<TItem>? kind = null;
+        return null;
+    }
+
+    public TResult convert<TResult : Record>(TItem item) => this.convert<TResult>(item);
+
+    public bool accepts(TItem item) => true;
+
+    public TItem next() => this.items[0];
+}
+
+public interface Listing<in TItem : Record & Sized> : Sized
+{
+    bool accepts(TItem item);
+}
+
+public interface Source<out TItem>
+{
+    TItem next();
+}
+
+public interface Comparable<TOther>
+{
+    int compareTo(TOther other);
+}
+
+final class Entry : Record, Sized
+{
+}
+
+final class Version : Comparable<Version>
+{
+    public int compareTo(Any? other) => 0;
+}
+
 public static class Slug
 {
     public const string SEPARATOR = "-";
@@ -421,4 +477,32 @@ public static class Slug
     public static int calls { get; private set; } = 0;
 
     public static string join(string title) => title + Slug.SEPARATOR;
+}
+
+public interface OrderEvent
+{
+    int orderId { get; }
+}
+
+public event OrderPaid(int orderId, int amount = 0) : OrderEvent;
+
+public class Order
+{
+    public OrderPaid pay(int orderId) => new OrderPaid(orderId);
+
+    public int amountOf(OrderPaid paid) => paid.amount;
+
+    public void settle(int orderId)
+    {
+        emit new OrderPaid(orderId);
+    }
+}
+
+public event Shipped(int shipmentId);
+
+public class Receipts
+{
+    private void deliver(OrderEvent e) on OrderPaid { }
+
+    public void count() on OrderPaid, Shipped { }
 }

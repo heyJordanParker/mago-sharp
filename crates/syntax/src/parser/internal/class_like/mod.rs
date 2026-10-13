@@ -35,13 +35,19 @@ where
         self.parse_interface_with_attributes_and_modifiers(attributes, Sequence::empty())
     }
 
-    /// A class, or in PHP# an interface, an enum or a trait, whose declaration starts with modifiers, as in
+    /// A class, or in PHP# an interface, an enum, a trait or an event, whose declaration starts with modifiers, as in
     /// `public interface Foo {}`.
     pub(crate) fn parse_modified_class_like_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
     ) -> Result<Statement<'arena>, ParseError> {
         let modifiers = self.parse_modifier_sequence()?;
+        if self.is_at_event()? {
+            return Ok(Statement::Event(self.parse_event_with_attributes_and_modifiers(attributes, modifiers)?));
+        }
+
+        self.read_php_type_declaration()?;
+
         if self.dialect.is_sharp() {
             match self.stream.peek_kind(0)? {
                 Some(T!["interface"]) => {
@@ -74,6 +80,7 @@ where
             modifiers,
             interface: self.expect_keyword(T!["interface"])?,
             name: self.parse_local_identifier()?,
+            type_parameters: self.parse_optional_type_parameter_list()?,
             extends: self.parse_optional_extends()?,
             inheritance: self.parse_optional_inheritance()?,
             left_brace: self.stream.eat_span(T!["{"])?,
@@ -85,6 +92,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "An interface";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -127,6 +135,7 @@ where
             modifiers,
             class: self.expect_keyword(T!["class"])?,
             name: self.parse_local_identifier()?,
+            type_parameters: self.parse_optional_type_parameter_list()?,
             extends: self.parse_optional_extends()?,
             implements: self.parse_optional_implements()?,
             inheritance: self.parse_optional_inheritance()?,
@@ -139,6 +148,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A class";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -180,6 +190,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A class";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -229,6 +240,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "A trait";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -284,6 +296,7 @@ where
                     }
 
                     let position_before = self.stream.current_position();
+                    self.state.members_of = "An enum";
                     match self.parse_classlike_member() {
                         Ok(member) => members.push(member),
                         Err(err) => self.errors.push(err),
@@ -307,8 +320,8 @@ where
     }
 
     /// The backing type after `:`, as PHP writes `: string`, and in PHP# the interfaces, as in `: string, HasLabel` or
-    /// `: HasLabel`. A leading class name opens the interfaces, and any other type is the backing type, which
-    /// `check_enum` holds to `int` or `string`.
+    /// `: HasLabel`. A leading class name, with or without type arguments, opens the interfaces, and any other type is
+    /// the backing type, which `check_enum` holds to `int` or `string`.
     fn parse_enum_header(
         &mut self,
     ) -> Result<(Option<EnumBackingTypeHint<'arena>>, Option<Inheritance<'arena>>), ParseError> {
@@ -322,8 +335,8 @@ where
             return Ok((Some(EnumBackingTypeHint { colon, hint }), None));
         }
 
-        if let Hint::Identifier(first) = hint {
-            return Ok((None, Some(self.parse_inheritance_from(colon, first)?)));
+        if matches!(hint, Hint::Identifier(_) | Hint::Generic(_)) {
+            return Ok((None, Some(self.parse_inheritance_from(colon, hint)?)));
         }
 
         let backing_type_hint = Some(EnumBackingTypeHint { colon, hint });
@@ -332,7 +345,7 @@ where
         }
 
         let comma = self.stream.consume_span()?;
-        let first = self.parse_identifier()?;
+        let first = self.parse_type_hint()?;
 
         Ok((backing_type_hint, Some(self.parse_inheritance_from(comma, first)?)))
     }

@@ -72,8 +72,8 @@ where
     /// it is the bitwise `|`, as in `flags | MASK;` or `(flags | 1);`.
     ///
     /// A capitalized name followed by `<` starts a type with type arguments, as in `List<Line> lines = [];`, because
-    /// spec section 24 capitalizes every type but the built-in ones. Its arguments can be longer than the parser
-    /// looks ahead.
+    /// spec section 24 capitalizes every type but the built-in ones, unless a `.` follows the `>`, as in
+    /// `Counter<Order>.count++;`, which reads a static member. Its arguments can be longer than the parser looks ahead.
     fn is_at_typed_local(&mut self) -> Result<bool, ParseError> {
         let Some(hint) = self.stream.lookahead(0)? else {
             return Ok(false);
@@ -86,18 +86,14 @@ where
             return Ok(match self.stream.peek_kind(2)? {
                 Some(T!["|"]) => first.kind == T![Identifier] && self.is_at_union_typed_local()?,
                 Some(T!["<"]) => {
-                    (matches!(first.kind, T![Identifier | "list"])
-                        && first.value.first().is_some_and(u8::is_ascii_uppercase))
-                        || (first.kind == T!["function"] && first.value == b"Function")
+                    first.kind == T![Identifier] && first.value.first().is_some_and(u8::is_ascii_uppercase)
                 }
                 _ => false,
             });
         }
         if self.is_at_generic_hint()? {
-            return Ok(hint.value.first().is_some_and(u8::is_ascii_uppercase));
-        }
-        if self.is_at_function_hint()? {
-            return Ok(true);
+            return Ok(hint.value.first().is_some_and(u8::is_ascii_uppercase)
+                && self.stream.peek_kind_after_type_arguments(1)? != Some(T!["."]));
         }
 
         if hint.kind != T![Identifier] {

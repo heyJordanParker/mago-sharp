@@ -11,6 +11,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
@@ -436,23 +437,15 @@ where
 /// `Function<void(int)>` or `Function<Charge(Cart) uses Http>` with each effect named as a class is, `Class<Order>`,
 /// `Object`, `Iterable<int>`, and a literal as `1` or `"text"`. A refinement that
 /// PHP# cannot write is the type that holds it, such as `int` for a `positive-int` and `int|string` for an
-/// `array-key`, and is named once. `numeric`, `scalar` and `never` have no PHP# name and keep Mago's. A PHP docblock's
-/// `non-empty-mixed` has no PHP# name either, and keeps the name its docblock writes, as Mago's `truthy-mixed` speaks
-/// of a truthiness PHP# does not have.
+/// `array-key`, and is named once, as `Any` is for a PHP docblock's `non-empty-mixed`. `numeric`, `scalar` and `never`
+/// have no PHP# name and keep Mago's.
 #[must_use]
 pub(crate) fn display_sharp_type<A>(context: &Context<'_, '_, A>, union: &TUnion) -> String
 where
     A: Arena,
 {
     if let Some(TAtomic::Mixed(mixed)) = union.types.iter().find(|atomic| atomic.is_mixed()) {
-        return if mixed.is_truthy() {
-            "non-empty-mixed"
-        } else if mixed.is_non_null() {
-            "Any"
-        } else {
-            "Any?"
-        }
-        .to_owned();
+        return if mixed.is_truthy() || mixed.is_non_null() { "Any" } else { "Any?" }.to_owned();
     }
 
     let mut parts: Vec<String> = Vec::new();
@@ -507,6 +500,9 @@ where
                 }
                 _ => name,
             }
+        }
+        TAtomic::Reference(TReference::Symbol { name, .. }) => {
+            sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *name)
         }
         TAtomic::GenericParameter(parameter) => parameter.parameter_name.to_string(),
         TAtomic::Callable(TCallable::Signature(signature)) => {
@@ -629,6 +625,18 @@ where
         )
     } else {
         display_member(context, class_name, member_name)
+    }
+}
+
+/// The names `names` as an English list, each in backticks: "`A`", "`A` and `B`", "`A`, `B` and `C`".
+#[must_use]
+pub(crate) fn and_list(names: &[Word]) -> String {
+    let names: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+
+    match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
     }
 }
 

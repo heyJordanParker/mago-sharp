@@ -6,6 +6,7 @@ use mago_span::Span;
 use crate::cst::Terminator;
 use crate::cst::cst::attribute::AttributeList;
 use crate::cst::cst::block::Block;
+use crate::cst::cst::class_like::constructor::ConstructorInitializer;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::function_like::r#return::FunctionLikeReturnTypeHint;
@@ -13,7 +14,10 @@ use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
 use crate::cst::cst::type_hint::Hint;
+use crate::cst::cst::type_hint::TypeParameterList;
 use crate::cst::sequence::Sequence;
+use crate::cst::sequence::TokenSeparatedSequence;
+use crate::cst::sequence::TokenSeparatedSequenceExt;
 
 /// Represents a method statement in PHP.
 ///
@@ -40,9 +44,31 @@ pub struct Method<'arena> {
     pub function: Option<Keyword<'arena>>,
     pub ampersand: Option<Span>,
     pub name: LocalIdentifier<'arena>,
+    /// PHP#'s type parameters, as in `public T first<T>(List<T> items)`. Always `None` in PHP. They live in the arena,
+    /// as a local's hint does, so a method stays near the size of the other class members.
+    pub type_parameters: Option<&'arena TypeParameterList<'arena>>,
     pub parameter_list: FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<FunctionLikeReturnTypeHint<'arena>>,
+    /// A PHP# listener's `on` clause. PHP never sets it.
+    pub on: Option<On<'arena>>,
+    /// A PHP# constructor's `: super(…)` or `: this(…)`. PHP never sets it.
+    pub initializer: Option<ConstructorInitializer<'arena>>,
     pub body: MethodBody<'arena>,
+}
+
+/// Represents a PHP# `on` clause, spec section 15: the comma-separated events a method listens to, written after its
+/// parameters.
+///
+/// Example:
+///
+/// ```csharp
+/// public void send(OrderEvent e) on OrderPaid, OrderRefunded { … }
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct On<'arena> {
+    pub on: Keyword<'arena>,
+    pub events: TokenSeparatedSequence<'arena, LocalIdentifier<'arena>>,
 }
 
 /// Represents the body of a method statement in PHP.
@@ -159,5 +185,13 @@ impl HasSpan for MethodExpressionBody<'_> {
 impl HasSpan for MethodAbstractBody<'_> {
     fn span(&self) -> Span {
         self.terminator.span()
+    }
+}
+
+impl HasSpan for On<'_> {
+    fn span(&self) -> Span {
+        let keyword = self.on.span();
+
+        keyword.join(self.events.span(keyword.file_id, keyword.end))
     }
 }

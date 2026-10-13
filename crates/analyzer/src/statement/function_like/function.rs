@@ -103,6 +103,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Function<'arena> {
             &mut BlockContext::new(scope, context.settings.register_super_globals),
             function_metadata,
             &self.parameter_list,
+            None,
             FunctionLikeBody::Statements(self.body.statements.as_slice(), self.body.span()),
             None,
         )?;
@@ -122,6 +123,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Function<'arena> {
             self.name.span(),
             "function",
             function_name,
+            None,
         );
 
         if context.settings.find_unused_parameters {

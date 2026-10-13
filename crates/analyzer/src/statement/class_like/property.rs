@@ -46,6 +46,7 @@ use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::add_properties_to_context;
 use crate::statement::function_like::get_this_type;
+use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_missing_return;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::r#return::handle_return_value;
@@ -153,7 +154,8 @@ where
         value.analyze(context, block_context, artifacts)?;
     }
 
-    // A PHP# type holds null only when it is written with `?`, so its `Any` and its null defaults are checked too.
+    // A PHP# type holds null only when it is written with `?`, so its `Any`, its type parameters and its null defaults
+    // are checked too.
     let is_sharp = context.dialect.is_sharp();
 
     if let Some(class_metadata) = block_context.scope.get_class_like()
@@ -162,9 +164,9 @@ where
     {
         check_sharp_literal_kind(context, value, &declared_type_metadata.type_union);
 
-        if (is_sharp || !declared_type_metadata.type_union.is_mixed())
-            && !declared_type_metadata.type_union.has_template_types()
-            && !declared_type_metadata.type_union.is_generic_parameter()
+        if (is_sharp
+            || !(declared_type_metadata.type_union.is_mixed()
+                || declared_type_metadata.type_union.has_template_types()))
             && let Some(value_type) = artifacts.get_expression_type(value).cloned()
             && !value_type.is_never()
         {
@@ -178,9 +180,12 @@ where
                     ..Default::default()
                 },
             );
+            if class_metadata.flags.is_sharp() {
+                declared_type = known_type_or_error(declared_type);
+            }
             let value_type = get_set_literal_type(context, artifacts, value, &declared_type).unwrap_or(value_type);
 
-            let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
+            let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
             if union_comparator::is_contained_by(
                 context.codebase,
                 &value_type,
@@ -235,6 +240,7 @@ where
             Body::InitialValue(class_metadata.name, php_variable_name(variable_name)),
             word(variable_name.strip_prefix(b"$").unwrap_or(variable_name)),
             Vec::new(),
+            None,
             FunctionLikeBody::Expression(value),
         );
     }
@@ -309,9 +315,11 @@ where
         return Ok(());
     };
 
+    // A PHP# `init` body runs as the `set` hook it lowers to, under which the codex records it.
+    let hook_name = if context.dialect.is_sharp() && hook.is_setter() { b"set".as_slice() } else { hook.name.value };
     let parameter_name = hook.parameter_list.as_ref().and_then(|p| p.parameters.first()).map(|p| word(p.variable.name));
     let mut hook_block_context =
-        hook_block_context(hook.name.value, parameter_name, property_name, context, parent_block_context)?;
+        hook_block_context(hook_name, parameter_name, property_name, context, parent_block_context)?;
 
     match body {
         PropertyHookConcreteBody::Block(block) => {
@@ -342,14 +350,14 @@ where
             }
         }
         PropertyHookConcreteBody::Expression(expr_body) => {
-            analyze_hook_expression(hook.name.value, expr_body, context, &mut hook_block_context, artifacts)?;
+            analyze_hook_expression(hook_name, expr_body, context, &mut hook_block_context, artifacts)?;
         }
     }
 
     // A `set` accessor's value is its one parameter, written or implicit.
     let parameters = match &hook.parameter_list {
         Some(parameter_list) => parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
-        None if hook.name.value == b"set" => vec![hook.name.span],
+        None if hook_name == b"set" => vec![hook.name.span],
         None => Vec::new(),
     };
     let code = match body {
@@ -358,7 +366,7 @@ where
         }
         PropertyHookConcreteBody::Expression(expr_body) => FunctionLikeBody::Expression(expr_body.expression),
     };
-    record_accessor_summary(hook.name.value, property_name, parameters, code, context, parent_block_context, artifacts);
+    record_accessor_summary(hook_name, property_name, parameters, code, context, parent_block_context, artifacts);
 
     Ok(())
 }
@@ -389,6 +397,7 @@ fn record_accessor_summary<'arena, A>(
         Body::Accessor(class_like.name, property_name, word(accessor)),
         word(property),
         parameters,
+        None,
         code,
     );
 }

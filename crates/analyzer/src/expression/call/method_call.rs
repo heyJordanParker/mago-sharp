@@ -11,7 +11,10 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateResult;
@@ -23,6 +26,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -30,6 +34,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::TypeArgumentList;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::analyzable::Analyzable;
@@ -39,14 +44,18 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::written_static_property;
+use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
+use crate::expression::binary::comparison::check_element_equality;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::constant_access::field_storage;
+use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
@@ -60,6 +69,7 @@ use crate::invocation::return_type_fetcher::fetch_declared_invocation_return_typ
 use crate::invocation::return_type_fetcher::fetch_function_like_provider_return_type;
 use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
 use crate::invocation::template_result::populate_template_result_from_invocation;
+use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::resolver::method::UndocumentedMethod;
@@ -69,7 +79,9 @@ use crate::resolver::method::report_non_documented_method;
 use crate::resolver::method::report_non_existent_method;
 use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
-use crate::resolver::static_property::StaticProperty;
+use crate::statement::keys_mix_a_backed_enum;
+use crate::statement::report_keys_read_back;
+use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
@@ -112,6 +124,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodCall<'arena> {
             artifacts,
             self.object,
             &self.method,
+            self.type_arguments.as_ref(),
             &self.argument_list,
             false, // is_nullsafe
             self.span(),
@@ -164,6 +177,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for NullSafeMethodCall<'arena> {
             artifacts,
             self.object,
             &self.method,
+            self.type_arguments.as_ref(),
             &self.argument_list,
             true, // is_nullsafe
             self.span(),
@@ -305,6 +319,7 @@ fn analyze_method_call<'ctx, 'ast, 'arena, A>(
     artifacts: &mut AnalysisArtifacts,
     object: &'ast Expression<'arena>,
     selector: &'ast ClassLikeMemberSelector<'arena>,
+    type_arguments: Option<&'ast TypeArgumentList<'arena>>,
     argument_list: &'ast ArgumentList<'arena>,
     is_null_safe: bool,
     span: Span,
@@ -321,8 +336,12 @@ where
         block_context.called_methods.insert(method_name);
     }
 
-    let mut method_resolution =
-        resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)?;
+    // The receiver's issues wait until the call is known: spec section 12 refuses a change through a `Map` index once,
+    // as a change to a copy, so the bare read of that index is not reported beside it.
+    let (method_resolution, receiver_issues) = context.record(|context| {
+        resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)
+    });
+    let mut method_resolution = method_resolution?;
 
     let mut collections = method_resolution
         .resolved_methods
@@ -341,6 +360,26 @@ where
             })
         })
         && report_collection_method_on_object(context, artifacts, object, selector, on_several_collections);
+    let searches_list = context.dialect.is_sharp()
+        && !refused_on_object
+        && method_resolution.resolved_methods.iter().any(|method| {
+            let name = method.method_identifier.get_method_name();
+
+            sharp_collection_name(&TObject::new_named(method.classname)) == Some("List")
+                && ["contains", "indexOf", "remove"]
+                    .iter()
+                    .any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        });
+    let takes_map_key = context.dialect.is_sharp()
+        && !refused_on_object
+        && method_resolution.resolved_methods.iter().any(|method| {
+            let name = method.method_identifier.get_method_name();
+
+            sharp_collection_name(&TObject::new_named(method.classname)) == Some("Map")
+                && ["get", "has", "remove", "keys"]
+                    .iter()
+                    .any(|keyed| keyed.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
+        });
 
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
@@ -391,9 +430,21 @@ where
         });
     }
 
-    if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target && !refused_on_object {
-        check_changed_collection(context, block_context, artifacts, object)?;
-    }
+    let copy = if context.dialect.is_sharp()
+        && changes_collection
+        && !method_resolution.has_invalid_target
+        && !refused_on_object
+    {
+        check_changed_collection(context, block_context, artifacts, object)
+    } else {
+        Ok(None)
+    };
+    let copy_span = copy.as_ref().ok().copied().flatten();
+    context.collector.extend(receiver_issues.into_iter().filter(|issue| {
+        issue.code.as_deref() != Some(IssueCode::PossiblyUndefinedArrayIndex.as_str())
+            || copy_span.is_none_or(|copy| issue.primary_span() != Some(copy))
+    }));
+    copy?;
 
     if !method_resolution.unresolved_methods.is_empty() {
         method_resolution.has_invalid_target |= prepare_unresolved_method_targets(
@@ -447,6 +498,17 @@ where
             .push(vec![mago_codex::assertion::Assertion::IsNotType(mago_codex::ttype::atomic::TAtomic::Null)]);
     }
 
+    if let Some(type_arguments) = type_arguments {
+        seed_method_type_arguments(
+            context,
+            block_context,
+            artifacts,
+            type_arguments,
+            &invocation_targets,
+            &mut method_resolution.template_result,
+        );
+    }
+
     if has_resolved_methods || method_resolution.undocumented_methods.is_empty() {
         analyze_invocation_targets(
             context,
@@ -462,6 +524,58 @@ where
             is_null_safe && method_resolution.encountered_null,
             artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null()),
         )?;
+    }
+
+    // A search compares each element with the value as `==` does, so it runs once the value's type is known. A value
+    // that is no element is refused by its argument check.
+    if searches_list
+        && let ClassLikeMemberSelector::Identifier(method) = selector
+        && let Some(value) = argument_list.arguments.first().map(Argument::value)
+        && let Some(value_type) = artifacts.get_expression_type(value)
+        && let Some(element_type) = artifacts.get_expression_type(object).and_then(|list_type| {
+            list_type.types.iter().fold(None, |element_type, atomic| match atomic {
+                TAtomic::Array(list) => Some(add_optional_union_type(
+                    get_array_parameters(list, context.codebase).1,
+                    element_type.as_ref(),
+                    context.codebase,
+                )),
+                _ => element_type,
+            })
+        })
+        && union_comparator::is_contained_by(
+            context.codebase,
+            value_type,
+            &element_type,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        )
+    {
+        let method = String::from_utf8_lossy(method.value);
+        check_element_equality(context, &method, object, value, &element_type, value_type, is_null_safe);
+    }
+
+    // The engine holds a `Map`'s key as its backing value, and reads it back as a case only through one enum. A `Map`
+    // whose keys mix a backed enum with other types cannot read them back in `keys()`, and its `get`, `has` and
+    // `remove` cannot tell a case from the key of its backing value.
+    if takes_map_key
+        && let ClassLikeMemberSelector::Identifier(method) = selector
+        && let Some(map_type) = artifacts.get_expression_type(object)
+        && keys_mix_a_backed_enum(context, map_type)
+    {
+        if method.value.eq_ignore_ascii_case(b"keys") {
+            report_keys_read_back(context, IssueCode::InvalidArrayAccess, object, "`keys()`", selector.span());
+        } else {
+            let finder = format!("`{}`", String::from_utf8_lossy(method.value));
+            report_keys_sharing_entries(
+                context,
+                IssueCode::InvalidArgument,
+                object.span(),
+                &finder,
+                Annotation::primary(method.span()).with_message("Its key is looked up here."),
+            );
+        }
     }
 
     if !method_resolution.undocumented_methods.is_empty() {
@@ -532,15 +646,16 @@ where
 
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the
 /// collection is a place the caller can write: a local or a parameter, `field`, which its accessor writes as the
-/// storage, or a property whose `set` the caller reaches, which the property write check decides as it does for an
-/// index write. The change may fill the collection past any literal the analyzer saw in it, so the place holds the
-/// collections it is declared as from then on, beside whatever else, such as `null`, it held.
+/// storage, a property whose `set` the caller reaches, which the property write check decides as it does for an
+/// index write, or a `List` index of a place, which changes that place too. The change may fill the collection past
+/// any literal the analyzer saw in it, so the place holds the collections it is declared as from then on, beside
+/// whatever else, such as `null`, it held. Gives the span of the `Map` index the change is refused through as a copy.
 fn check_changed_collection<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     collection: &Expression<'arena>,
-) -> Result<(), AnalysisError>
+) -> Result<Option<Span>, AnalysisError>
 where
     A: Arena,
 {
@@ -562,10 +677,13 @@ where
                 block_context.locals.insert(place, Rc::new(changed_type));
             }
 
-            Ok(())
+            Ok(None)
         }
         Expression::Access(Access::Property(access)) => {
-            match StaticProperty::from_property_access(access, context.resolved_names) {
+            let written = match written_static_property(context, block_context, access) {
+                // Reading `Counter.items` reported its missing type arguments, and the write back would again.
+                Some(static_property) if bare_generic_class(context, static_property.class).is_some() => Ok(()),
+                // The read of the collection analyzed its class.
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,
@@ -574,6 +692,7 @@ where
                     &changed_type,
                     None,
                     get_block_expression_id(collection, context, block_context),
+                    true,
                 ),
                 None => property_assignment::analyze(
                     context,
@@ -585,7 +704,9 @@ where
                     None,
                     PropertyWriteKind::Mutation,
                 ),
-            }
+            };
+
+            written.map(|()| None)
         }
         Expression::Access(Access::NullSafeProperty(access)) => property_assignment::analyze(
             context,
@@ -600,7 +721,15 @@ where
             &changed_type,
             None,
             PropertyWriteKind::Mutation,
-        ),
+        )
+        .map(|()| None),
+        Expression::ArrayAccess(access) => {
+            if check_change_through_index(access, context, block_context, artifacts) {
+                check_changed_collection(context, block_context, artifacts, access.array)
+            } else {
+                Ok(Some(access.span()))
+            }
+        }
         _ => {
             context.collector.report_with_code(
                 IssueCode::InvalidPassByReference,
@@ -611,7 +740,7 @@ where
                     .with_help("Store the collection in a local or a property, then call the method on it."),
             );
 
-            Ok(())
+            Ok(None)
         }
     }
 }

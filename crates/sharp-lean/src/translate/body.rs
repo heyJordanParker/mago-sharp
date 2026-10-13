@@ -576,6 +576,13 @@ impl<'body, 'program> Body<'body, 'program> {
     fn method_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let names = self.checked.names();
         if let Some(class) = names.static_call_class(call) {
+            if names.is_type_parameter(&class.name) {
+                return self.unmodeled(
+                    expression.span(),
+                    "a call through a type parameter".to_owned(),
+                    issues::TYPE_TEST,
+                );
+            }
             let class = names.get(&class.name);
             if !self.is_translated_class(call.object.span(), class) {
                 return "default".to_owned();
@@ -722,7 +729,8 @@ impl<'body, 'program> Body<'body, 'program> {
         self.bind(parts.join(" "))
     }
 
-    /// `new Class(…)`, which runs the class's constructor.
+    /// `new Class(…)`, which runs the class's constructor. A named constructor runs a body, which Mago does not
+    /// translate.
     fn instantiation(&mut self, instantiation: &Instantiation) -> String {
         let class = match instantiation.class {
             Expression::Identifier(identifier) => self.checked.names().get(identifier),
@@ -731,6 +739,17 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         if !self.is_translated_class(instantiation.class.span(), class) {
             return "default".to_owned();
+        }
+        if let Some(constructor) = &instantiation.constructor {
+            return self.unmodeled(
+                instantiation.span(),
+                format!(
+                    "the named constructor {}.{}",
+                    names::short_name(class),
+                    String::from_utf8_lossy(constructor.name.value)
+                ),
+                issues::CONSTRUCTOR_BODY,
+            );
         }
 
         let class_name = self.reached_name(class);
@@ -778,6 +797,9 @@ impl<'body, 'program> Body<'body, 'program> {
         };
         let names = self.checked.names();
         if let Some(class) = names.static_property_class(access) {
+            if names.is_type_parameter(&class.name) {
+                return self.unmodeled(expression.span(), "a member of a type parameter".to_owned(), issues::TYPE_TEST);
+            }
             let class = names.get(&class.name);
             if !self.is_translated_class(access.object.span(), class) {
                 return "default".to_owned();

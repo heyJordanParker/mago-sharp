@@ -16,6 +16,7 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumBackingTypeHint;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Implements;
@@ -23,11 +24,14 @@ use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUseAdaptation;
 use mago_syntax::cst::TraitUseMethodReference;
 use mago_syntax::cst::TraitUseSpecification;
+use mago_syntax::cst::TypeParameterList;
 use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
@@ -58,9 +62,12 @@ use crate::scanner::docblock::apply_common_metadata_flag;
 use crate::scanner::docblock::parse_docblock;
 use crate::scanner::docblock::parse_docblock_trivia;
 use crate::scanner::enum_case::scan_enum_case;
+use crate::scanner::function_like::scan_event_constructor;
 use crate::scanner::function_like::scan_law;
 use crate::scanner::property::scan_properties;
+use crate::scanner::ttype::get_type_metadata_from_hint;
 use crate::scanner::ttype::get_type_metadata_from_type;
+use crate::scanner::ttype::scan_type_parameters;
 use crate::scanner::typing_error_issue;
 use crate::scanner::version_claim::evaluate_version_attributes;
 use crate::symbol::SymbolKind;
@@ -115,6 +122,7 @@ where
         class.implements.as_ref(),
         None,
         None,
+        None,
         context,
         scope,
     )?;
@@ -147,6 +155,7 @@ where
         class.extends.as_ref(),
         class.implements.as_ref(),
         class.inheritance.as_ref(),
+        class.type_parameters.as_ref(),
         None,
         context,
         scope,
@@ -180,6 +189,7 @@ where
         interface.extends.as_ref(),
         None,
         interface.inheritance.as_ref(),
+        interface.type_parameters.as_ref(),
         None,
         context,
         scope,
@@ -210,6 +220,7 @@ where
         &r#trait.attribute_lists,
         None,
         &r#trait.members,
+        None,
         None,
         None,
         None,
@@ -246,12 +257,116 @@ where
         None,
         r#enum.implements.as_ref(),
         r#enum.inheritance.as_ref(),
+        None,
         r#enum.backing_type_hint.as_ref(),
         context,
         scope,
     )?;
 
     finish_registration(codebase, class_like_metadata)
+}
+
+/// Registers a PHP# event, spec section 15, as the final class it runs as: its constructor takes the event's
+/// parameters, and each parameter is a public get-only property.
+#[inline]
+pub fn register_event<'arena, A>(
+    codebase: &mut CodebaseMetadata,
+    event: &'arena Event<'arena>,
+    context: &Context<'_, 'arena, A>,
+    scope: &mut NamespaceScope,
+) -> ClassLikeRegistration
+where
+    A: Arena,
+{
+    const NO_MEMBERS: &Sequence<'static, ClassLikeMember<'static>> = &Sequence::empty();
+
+    let span = event.span();
+    let mut class_like_metadata = scan_class_like(
+        codebase,
+        word(context.resolved_names.get(&event.name)),
+        SymbolKind::Class,
+        Some(event.name.span),
+        span,
+        span.start.offset,
+        event.parameter_list.left_parenthesis.start.offset,
+        &event.attribute_lists,
+        Some(&event.modifiers),
+        NO_MEMBERS,
+        None,
+        None,
+        event.inheritance.as_ref(),
+        None,
+        None,
+        context,
+        scope,
+    )?;
+    class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::EVENT;
+
+    let constructor = scan_event_constructor(event, &class_like_metadata, context, scope);
+    for parameter in &constructor.parameters {
+        let mut flags = MetadataFlags::PROMOTED_PROPERTY | MetadataFlags::READONLY;
+        flags |= MetadataFlags::origin_flags(context.file.file_type);
+        if parameter.flags.has_default() {
+            flags |= MetadataFlags::HAS_DEFAULT;
+        }
+
+        let mut property = PropertyMetadata::new(*parameter.get_name(), flags);
+        property.set_name_span(Some(parameter.get_name_span()));
+        property.set_span(Some(parameter.get_span()));
+        property.set_visibility(Visibility::Public, Visibility::Protected);
+        property.set_type_declaration_metadata(parameter.get_type_declaration_metadata().cloned());
+        class_like_metadata.add_property_metadata(property);
+    }
+
+    let method_identifier = MethodIdentifier::new(class_like_metadata.name, constructor.name);
+    class_like_metadata.methods.insert(constructor.name);
+    class_like_metadata.add_declaring_method_id(constructor.name, method_identifier);
+    class_like_metadata.inheritable_method_ids.insert(constructor.name, method_identifier);
+    codebase.function_likes.insert((class_like_metadata.name, constructor.name), constructor);
+
+    finish_registration(codebase, class_like_metadata)
+}
+
+/// Registers a PHP# module, spec sections 28 and 32, as the class-like `<Namespace>\Module` flagged as a module,
+/// holding only its laws, so every class-law path serves a module law. Only its folder's `Module.sharp` declares it:
+/// semantics refuses a module in any other file.
+#[inline]
+pub fn register_module<'arena, A>(
+    codebase: &mut CodebaseMetadata,
+    module: &'arena Module<'arena>,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) -> Option<Word>
+where
+    A: Arena,
+{
+    if !Module::is_declared_in(context.file) {
+        return None;
+    }
+
+    let original_name = word(context.resolved_names.get(&module.module));
+    let name = ascii_lowercase_word(original_name.as_bytes());
+    if codebase.class_likes.contains_key(&name) {
+        return None;
+    }
+
+    let flags = MetadataFlags::origin_flags(context.file.file_type)
+        | MetadataFlags::SHARP
+        | MetadataFlags::MODULE
+        | MetadataFlags::FINAL;
+    let mut metadata = ClassLikeMetadata::new(name, original_name, module.span(), Some(module.module.span), flags);
+    metadata.kind = SymbolKind::Class;
+    codebase.symbols.add_symbol_name(name, SymbolKind::Class);
+
+    let type_context = TypeResolutionContext::new();
+    for ModuleMember::Law(law) in &module.members {
+        let law_metadata = scan_law(law, &metadata, context, scope, &type_context);
+        metadata.laws.entry(law_metadata.name).or_insert(law_metadata);
+    }
+
+    codebase.class_likes.insert(name, metadata);
+
+    Some(name)
 }
 
 fn finish_registration(
@@ -293,6 +408,7 @@ fn scan_class_like<'arena, A>(
     extends: Option<&'arena Extends<'arena>>,
     implements: Option<&'arena Implements<'arena>>,
     inheritance: Option<&'arena Inheritance<'arena>>,
+    type_parameters: Option<&'arena TypeParameterList<'arena>>,
     enum_type: Option<&'arena EnumBackingTypeHint<'arena>>,
     context: &Context<'_, 'arena, A>,
     scope: &mut NamespaceScope,
@@ -412,12 +528,15 @@ where
     }
 
     // A PHP# header, `: Base, IFace`, lists a class's base among its interfaces. PHP links the one class there as
-    // the parent, and so does the populator. An enum has no parent, so every name in its header is an interface.
-    if let Some(inheritance) = inheritance {
-        for type_name in &inheritance.types {
-            class_like_metadata
-                .add_direct_parent_interface(ascii_lowercase_word(context.resolved_names.get(type_name)));
-        }
+    // the parent, and so does the populator. An enum has no parent, so every name in its header is an interface. A
+    // generic type in the header, as in `: PaginatedList<Order>`, names its class before its type arguments, and the
+    // checker refuses any other type there. `List`, `Map` and `Class` have no resolved name, because no class is one.
+    for name in inheritance.iter().flat_map(|inheritance| inheritance.names()) {
+        let Some(name) = context.resolved_names.resolve(&name) else {
+            continue;
+        };
+
+        class_like_metadata.add_direct_parent_interface(ascii_lowercase_word(name));
     }
 
     let mut type_context = TypeResolutionContext::new();
@@ -1160,6 +1279,62 @@ where
         }
     }
 
+    // A PHP# type parameter is the template a `@template` tag declares, its bound the tag's `of`, and `out` and `in`
+    // its `@template-covariant` and `@template-contravariant`, spec sections 11 and 11.1.
+    if let Some(type_parameters) = type_parameters {
+        let templates = scan_type_parameters(
+            type_parameters,
+            GenericParent::ClassLike(name),
+            original_name,
+            &mut type_context,
+            context,
+            scope,
+        );
+        let mut template_variance = std::mem::take(&mut class_like_metadata.template_variance);
+        for ((template_name, definition), parameter) in templates.into_iter().zip(&type_parameters.parameters) {
+            class_like_metadata.add_template_type(template_name, definition);
+
+            let variance = Variance::from(parameter);
+            if variance.is_readonly() {
+                class_like_metadata.template_readonly.insert(template_name);
+            }
+
+            template_variance.push(variance);
+        }
+
+        class_like_metadata.set_template_variance(template_variance);
+    }
+
+    // A header's generic type is the `@extends` or `@implements` tag of a PHP class. The header lists a class's base
+    // among its interfaces until the populator links it, so a class counts its type arguments as implemented and the
+    // populator moves the count with the base.
+    for generic in inheritance.iter().flat_map(|inheritance| &inheritance.types).filter_map(|hint| match hint {
+        Hint::Generic(generic) => Some(generic),
+        _ => None,
+    }) {
+        let Some(parent_name) = context.resolved_names.resolve(&generic.name) else {
+            continue;
+        };
+
+        let parent_name = ascii_lowercase_word(parent_name);
+        let arguments: Vec<TUnion> = generic
+            .type_arguments
+            .arguments
+            .iter()
+            .map(|argument| {
+                get_type_metadata_from_hint(argument, Some(original_name), &type_context, context).type_union
+            })
+            .collect();
+        let counts = if class_like_metadata.kind.is_interface() {
+            &mut class_like_metadata.template_type_extends_count
+        } else {
+            &mut class_like_metadata.template_type_implements_count
+        };
+
+        counts.insert(parent_name, arguments.len());
+        class_like_metadata.add_template_extended_offset(parent_name, arguments);
+    }
+
     for member in members {
         let ClassLikeMember::Constant(constant) = member else {
             continue;
@@ -1587,6 +1762,7 @@ fn create_enum_method(
             visibility: Visibility::Public,
             where_constraints: WordMap::default(),
         }),
+        listens: vec![],
         type_resolution_context: None,
         thrown_types,
         issues: Vec::default(),

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use foldhash::HashMap;
 use foldhash::HashSet;
 use foldhash::fast::RandomState;
@@ -14,6 +16,7 @@ use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
+use mago_codex::symbol::SymbolKind;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
@@ -26,6 +29,7 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::template::GenericTemplate;
@@ -33,12 +37,14 @@ use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::definition_type_replacer;
 use mago_codex::ttype::template::definition_type_replacer::DefinitionReplacementOptions;
 use mago_codex::ttype::template::inferred_type_replacer;
+use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
+use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::Level;
@@ -49,15 +55,20 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Extends;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
 use mago_word::Word;
+use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -70,25 +81,32 @@ use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
+use crate::statement::function_like::FunctionLikeBody;
+use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
+use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
+use crate::utils::template::find_broken_marker;
+use crate::utils::template::find_template_uses;
 
 pub mod constant;
 pub mod enum_case;
 pub mod initialization;
+pub mod listener;
 pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
 pub mod property;
 pub mod unused_members;
 
-/// Reports a duplicate definition issue for class-like types.
+/// Reports a duplicate definition issue for class-like types, naming the class-like as the analyzed file writes it.
 fn report_duplicate_definition<A>(
     context: &mut Context<'_, '_, A>,
     title: &str,
@@ -99,7 +117,11 @@ fn report_duplicate_definition<A>(
 ) where
     A: Arena,
 {
-    let name = BytesDisplay(name);
+    let name = if context.dialect.is_sharp() {
+        display_class_like_name(context, word(name)).to_string()
+    } else {
+        BytesDisplay(name).to_string()
+    };
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
         Issue::error(format!("{title} `{name}` is already defined elsewhere."))
@@ -136,6 +158,60 @@ where
         Issue::error(format!("Cannot use `{class_name}` as a class name: it is reserved."))
             .with_annotation(Annotation::primary(name_span).with_message("Class declared here."))
             .with_note("PHP# reserves this name for a type."),
+    );
+}
+
+/// Refuses a class-like whose full name is also a namespace, as `App\Tenant\Store` is beside a class in
+/// `App\Tenant\Store\`, when either is PHP#: spec section 23. A plain PHP class may still share its name with a
+/// namespace of plain PHP, as PHP allows.
+fn report_class_like_named_as_a_namespace<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    name_span: Span,
+) where
+    A: Arena,
+{
+    let name = class_like_metadata.name.as_bytes();
+    // The codebase keeps a namespace after its last class-like leaves it, so the class-likes decide.
+    if !context.codebase.namespace_exists(name) {
+        return;
+    }
+
+    let sharp = context.dialect.is_sharp();
+    let Some(inside) = context
+        .codebase
+        .class_likes
+        .values()
+        .filter(|other| {
+            (sharp || other.flags.is_sharp())
+                && other.name.as_bytes().strip_prefix(name).is_some_and(|rest| rest.starts_with(b"\\"))
+        })
+        .min_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()))
+    else {
+        return;
+    };
+
+    let (full_name, inside_name) = if sharp {
+        (
+            class_like_metadata.original_name.to_string().replace('\\', "."),
+            inside.original_name.to_string().replace('\\', "."),
+        )
+    } else {
+        (class_like_metadata.original_name.to_string(), inside.original_name.to_string())
+    };
+    let kind = class_like_metadata.kind.as_str();
+    let article = if matches!(class_like_metadata.kind, SymbolKind::Enum | SymbolKind::Interface) { "an" } else { "a" };
+
+    context.collector.report_with_code(
+        IssueCode::NameAlreadyInUse,
+        Issue::error(format!(
+            "`{full_name}` is both {article} {kind} and a namespace: rename the {kind} or the folder."
+        ))
+        .with_annotation(Annotation::primary(name_span).with_message(format!("The {kind} is declared here.")))
+        .with_annotation(
+            Annotation::secondary(inside.name_span.unwrap_or(inside.span))
+                .with_message(format!("`{inside_name}` is in the namespace `{full_name}`.")),
+        ),
     );
 }
 
@@ -334,6 +410,7 @@ fn check_unused_template_parameters<'ctx, A>(
     let class_original_name = display_class_like_name(context, class_like_metadata.original_name);
     let class_kind_str = class_like_metadata.kind.as_str();
     let class_name_span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
+    let sharp_class = context.dialect.is_sharp().then(|| short_name(class_original_name));
 
     'templates: for (template_name, _) in &class_like_metadata.template_types {
         if template_name.as_bytes().starts_with(b"_") {
@@ -387,19 +464,28 @@ fn check_unused_template_parameters<'ctx, A>(
             }
         }
 
-        // Report warning if template parameter is unused
+        let (message, label, help) = match &sharp_class {
+            Some(class) => (
+                format!("Type parameter `{template_name}` is never used in {class_kind_str} `{class}`."),
+                format!("Type parameter `{template_name}` is defined on this {class_kind_str} but never referenced"),
+                format!("Remove `{template_name}` from `{class}<…>`."),
+            ),
+            None => (
+                format!(
+                    "Template parameter `{template_name}` is never used in {class_kind_str} `{class_original_name}`."
+                ),
+                format!("Template `{template_name}` is defined on this {class_kind_str} but never referenced"),
+                format!(
+                    "Remove the unused `@template {template_name}` from the docblock, or use it in a property, method signature, or inherited type."
+                ),
+            ),
+        };
+
         context.collector.report_with_code(
             IssueCode::UnusedTemplateParameter,
-            Issue::warning(format!(
-                "Template parameter `{template_name}` is never used in {class_kind_str} `{class_original_name}`."
-            ))
-            .with_annotation(
-                Annotation::primary(class_name_span)
-                    .with_message(format!("Template `{template_name}` is defined on this {class_kind_str} but never referenced")),
-            )
-            .with_help(format!(
-                "Remove the unused `@template {template_name}` from the docblock, or use it in a property, method signature, or inherited type."
-            )),
+            Issue::warning(message)
+                .with_annotation(Annotation::primary(class_name_span).with_message(label))
+                .with_help(help),
         );
     }
 }
@@ -495,6 +581,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
         }
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         let should_check_unused = 'check_unused: {
             if !context.settings.find_unused_definitions {
@@ -617,6 +704,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
         }
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         // Call plugin on_leave_interface hooks
         if context.plugin_registry.has_interface_hooks() {
@@ -629,6 +717,104 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
 
         Ok(())
     }
+}
+
+/// A PHP# event, spec section 15, analyzes as the final class it runs as, whose constructor's parameters are its
+/// get-only properties. Its header names interfaces only, because no event extends another.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Event<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        _block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        // The scanner registers every event, or the class-like declared first under its name.
+        let name = context.resolved_names.get(&self.name);
+
+        context
+            .codebase
+            .get_class_like(name)
+            .map_or(Ok(()), |class_like_metadata| analyze_event(self, class_like_metadata, context, artifacts))
+    }
+}
+
+fn analyze_event<'ctx, 'arena, A>(
+    event: &Event<'arena>,
+    class_like_metadata: &'ctx ClassLikeMetadata,
+    context: &mut Context<'ctx, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    // An interface or a class declared first in the file under the event's name keeps it, and has no constructor.
+    if class_like_metadata.span != event.span() {
+        let name = class_like_metadata.original_name.as_bytes();
+        report_duplicate_definition(context, "Event", "event", name, event.span(), class_like_metadata.span);
+        return Ok(());
+    }
+
+    let codebase = context.codebase;
+    let named_class_likes: Vec<_> = event
+        .inheritance
+        .iter()
+        .flat_map(|inheritance| inheritance.types.iter())
+        .filter_map(|type_name| Some((type_name, codebase.get_class_like(context.resolved_names.get(type_name))?)))
+        .filter(|(_, named)| !named.kind.is_interface())
+        .collect();
+
+    for (type_name, named) in &named_class_likes {
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!(
+                "An event's header names interfaces only, and `{}` is not one.",
+                display_class_like_name(context, named.original_name)
+            ))
+            .with_annotation(Annotation::primary(type_name.span()).with_message("Named here."))
+            .with_note("No event extends another: a family of events shares an interface."),
+        );
+    }
+
+    // The class the header names is the event's parent, which every other check would read.
+    if !named_class_likes.is_empty() {
+        return Ok(());
+    }
+
+    analyze_class_like(
+        context,
+        artifacts,
+        Some(event.name.span),
+        event.span(),
+        None,
+        None,
+        event.inheritance.as_ref(),
+        class_like_metadata,
+        &[],
+    )?;
+
+    // The constructor has no body: its parameters' types and defaults are checked as a method's.
+    let constructor = context.codebase.get_method(class_like_metadata.name.as_bytes(), b"__construct");
+    constructor.map_or(Ok(()), |constructor| {
+        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, constructor.name)));
+        scope.set_class_like(Some(class_like_metadata));
+        scope.set_function_like(Some(constructor));
+
+        let mut constructor_block_context = BlockContext::new(scope, context.settings.register_super_globals);
+        analyze_function_like(
+            context,
+            artifacts,
+            &mut constructor_block_context,
+            constructor,
+            &event.parameter_list,
+            None,
+            FunctionLikeBody::Statements(&[], event.parameter_list.span()),
+            None,
+        )
+        .map(drop)
+    })
 }
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
@@ -711,6 +897,47 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
     }
 }
 
+/// Spec sections 28 and 32: a module is its namespace's class-like `Module`, and its laws are analyzed as a class's.
+/// Only its folder's `Module.sharp` declares it, and semantics already refused a module in any other file.
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        _block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        if !Module::is_declared_in(context.source_file) {
+            return Ok(());
+        }
+
+        let name = context.resolved_names.get(&self.module);
+        let Some(class_like_metadata) = context.codebase.get_class_like(name) else {
+            tracing::warn!("Module {} not found in codebase", BytesDisplay(name));
+
+            return Ok(());
+        };
+
+        if class_like_metadata.span != self.span() {
+            report_duplicate_definition(context, "Module", "module", name, self.span(), class_like_metadata.span);
+            return Ok(());
+        }
+
+        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));
+        scope.set_class_like(Some(class_like_metadata));
+        scope.set_static(true);
+
+        let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
+        for ModuleMember::Law(law) in &self.members {
+            law.analyze(context, &mut block_context, artifacts)?;
+        }
+
+        Ok(())
+    }
+}
+
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -761,6 +988,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
         check_duplicate_enum_case_values(context, artifacts, name, self);
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         if context.settings.find_unused_definitions
             && !class_like_metadata.flags.is_unchecked()
@@ -895,21 +1123,29 @@ where
     }
 
     context.prepare_class_initializers(class_like_metadata)?;
+    report_class_like_named_as_a_namespace(context, class_like_metadata, name_span.unwrap_or(declaration_span));
 
     let name = display_class_like_name(context, class_like_metadata.original_name);
 
     let mut checked_signatures: HashSet<(Word, Word)> = HashSet::default();
 
-    let mut extended_types: Vec<&Identifier<'arena>> = extends_ast.iter().flat_map(|e| e.types.iter()).collect();
-    let mut implemented_types: Vec<&Identifier<'arena>> = implements_ast.iter().flat_map(|i| i.types.iter()).collect();
+    let mut extended_types: Vec<Identifier<'arena>> =
+        extends_ast.iter().flat_map(|e| e.types.iter()).copied().collect();
+    let mut implemented_types: Vec<Identifier<'arena>> =
+        implements_ast.iter().flat_map(|i| i.types.iter()).copied().collect();
 
     // A PHP# header, `: Base, IFace`, names an interface's parents, or a class's parent among its interfaces: the
-    // one class the populator linked as the parent.
-    for type_name in inheritance_ast.iter().flat_map(|inheritance| inheritance.types.iter()) {
+    // one class the populator linked as the parent. A generic type there, as in `: PaginatedList<Order>`, names its
+    // class before its type arguments, and the checker refuses any other type there. `List`, `Map` and `Class` have no
+    // resolved name, because no class is one.
+    for type_name in inheritance_ast.iter().flat_map(|inheritance| inheritance.names()) {
+        let Some(resolved) = context.resolved_names.resolve(&type_name) else {
+            continue;
+        };
         let is_parent = class_like_metadata.kind.is_interface()
             || class_like_metadata
                 .direct_parent_class
-                .is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(context.resolved_names.get(type_name)));
+                .is_some_and(|parent| parent.as_bytes().eq_ignore_ascii_case(resolved));
 
         if is_parent { extended_types.push(type_name) } else { implemented_types.push(type_name) }
     }
@@ -924,6 +1160,9 @@ where
     }
 
     let has_complete_hierarchy = !class_like_metadata.has_incomplete_hierarchy();
+    if context.dialect.is_sharp() && has_complete_hierarchy && class_like_metadata.kind.is_class() {
+        method::check_super_call(context, class_like_metadata, members, name_span.unwrap_or(declaration_span));
+    }
 
     if has_complete_hierarchy && !class_like_metadata.kind.is_trait() && !class_like_metadata.flags.is_abstract() {
         for (method_name, method_id) in &class_like_metadata.declaring_method_ids {
@@ -1045,18 +1284,24 @@ where
                             })
                         });
 
-                    if !is_implemented {
+                    if !is_implemented && context.dialect.is_sharp() {
+                        // PHP# states a property, not its hooks, so it reports the property once.
+                        report_unstated_property(
+                            context,
+                            class_like_metadata,
+                            name_span.unwrap_or(declaration_span),
+                            parent_metadata,
+                            *property_name,
+                            parent_property,
+                            hook_metadata.span,
+                        );
+
+                        break;
+                    } else if !is_implemented {
                         let fqcn = parent_metadata.original_name;
                         let hook_span = hook_metadata.span;
-                        let (missing_hook, abstract_hook) = if context.dialect.is_sharp() {
-                            let accessor = display_sharp_accessor(context, fqcn, *property_name, *hook_name);
-                            (accessor.clone(), accessor)
-                        } else {
-                            (
-                                format!("{property_name}::{hook_name}()"),
-                                format!("{fqcn}::{property_name}::{hook_name}()"),
-                            )
-                        };
+                        let missing_hook = format!("{property_name}::{hook_name}()");
+                        let abstract_hook = format!("{fqcn}::{property_name}::{hook_name}()");
                         let property = display_property_name(context, *property_name);
 
                         context.collector.report_with_code(
@@ -1091,7 +1336,12 @@ where
 
     check_trait_property_conflicts(context, class_like_metadata, members);
     check_readonly_class_trait_properties(context, class_like_metadata, members);
-    check_template_variance_positions(context, class_like_metadata);
+    if class_like_metadata.flags.is_sharp() {
+        check_sharp_template_variance(context, class_like_metadata, inheritance_ast);
+        check_sharp_serializable(context, class_like_metadata);
+    } else {
+        check_template_variance_positions(context, class_like_metadata);
+    }
     check_uninhabitable_diamonds(context, class_like_metadata);
 
     if !class_like_metadata.template_types.is_empty() {
@@ -1223,6 +1473,9 @@ where
             ClassLikeMember::Law(law) => {
                 law.analyze(context, &mut block_context, artifacts)?;
             }
+            ClassLikeMember::NamedConstructor(named_constructor) => {
+                named_constructor.analyze(context, &mut block_context, artifacts)?;
+            }
             _ => {}
         }
     }
@@ -1245,11 +1498,58 @@ where
     Ok(())
 }
 
+/// Reports a PHP# class or event, declared at `span`, that does not give the property `property_name` that `parent`
+/// states at `stated`. An event gives its properties through its parameters, which are set once, by `new`, spec
+/// section 15, so it cannot give a property stated with `set`.
+fn report_unstated_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    span: Span,
+    parent: &ClassLikeMetadata,
+    property_name: Word,
+    parent_property: &PropertyMetadata,
+    stated: Span,
+) where
+    A: Arena,
+{
+    let name = display_class_like_name(context, class_like_metadata.original_name);
+    let property = display_property_name(context, property_name);
+    let mixed = get_mixed();
+    let written = display_sharp_type(
+        context,
+        parent_property.type_metadata.as_ref().map_or(&mixed, |metadata| &metadata.type_union),
+    );
+    let parent_name = display_class_like_name(context, parent.original_name);
+    let settable = parent_property.hooks.contains_key(&word(b"set"));
+    let issue = if class_like_metadata.flags.is_event() && settable {
+        Issue::error(format!(
+            "`{name}` cannot give `{property}`, which `{parent_name}` states with `set`: an event's properties are set once, by `new`."
+        ))
+    } else {
+        let help = if class_like_metadata.flags.is_event() {
+            format!("Add the parameter `{written} {property}`.")
+        } else if settable {
+            format!("Add the property `public {written} {property} {{ get; set; }}`.")
+        } else {
+            format!("Add the property `public {written} {property} {{ get; }}`.")
+        };
+
+        Issue::error(format!("`{name}` does not give `{property}`, which `{parent_name}` states.")).with_help(help)
+    };
+
+    context.collector.report_with_code(
+        IssueCode::UnimplementedAbstractPropertyHook,
+        issue
+            .with_annotation(Annotation::primary(span).with_message("Declared here."))
+            .with_annotation(Annotation::secondary(stated).with_message("Stated here.")),
+    );
+}
+
 #[allow(clippy::unwrap_used)]
 fn check_class_like_extends<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    extended_types: &[&Identifier<'arena>],
+    extended_types: &[Identifier<'arena>],
 ) where
     A: Arena,
 {
@@ -1377,6 +1677,18 @@ fn check_class_like_extends<'ctx, 'arena, A>(
                                 .with_message(format!("`{extended_name}` is declared `static` here.")),
                         ),
                 );
+            } else if extended_class_metadata.flags.is_module() {
+                context.collector.report_with_code(
+                    IssueCode::ExtendFinalClass,
+                    Issue::error(format!(
+                        "`{extended_name}` is its namespace's module, not a class: no class can extend it."
+                    ))
+                    .with_annotation(Annotation::primary(extended_type.span()).with_message("Extended here."))
+                    .with_annotation(
+                        Annotation::secondary(extended_class_span)
+                            .with_message(format!("`{extended_name}` is declared here.")),
+                    ),
+                );
             } else if extended_class_metadata.flags.is_final() {
                 context.collector.report_with_code(
                     IssueCode::ExtendFinalClass,
@@ -1451,7 +1763,7 @@ fn check_class_like_extends<'ctx, 'arena, A>(
 fn check_class_like_implements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    implemented_types: &[&Identifier<'arena>],
+    implemented_types: &[Identifier<'arena>],
     checked_signatures: &mut HashSet<(Word, Word)>,
 ) where
     A: Arena,
@@ -1757,44 +2069,61 @@ fn check_template_parameters<'ctx, A>(
         InheritanceKind::Use(_) => ("uses", "@use"),
     };
 
-    if min_required_parameters_count > actual_parameters_count {
-        let issue = Issue::error(format!(
-            "Too few template arguments for `{parent_name}`: expected at least {min_required_parameters_count}, but found {actual_parameters_count}."
-        ))
-        .with_annotation(
-            Annotation::primary(primary_annotation_span)
-                .with_message(format!("Too few template arguments provided here when `{class_name}` {inheritance_keyword} `{parent_name}`")),
-        )
-        .with_annotation(
-            Annotation::secondary(class_name_span)
-                .with_message(format!("Declaration of `{class_name}` is here")),
-        )
-        .with_annotation(
-            Annotation::secondary(parent_definition_span)
-                .with_message(format!("`{parent_name}` is defined with {expected_parameters_count} template parameters")),
-        )
-        .with_help(format!("Provide all {expected_parameters_count} required template arguments in the `{inheritance_tag}` docblock tag for `{class_name}`."));
+    // A PHP# class writes its type arguments in its header, `: PaginatedList<…>`, where PHP writes a docblock tag, and
+    // names each class by its short name.
+    let sharp_parent = context.dialect.is_sharp().then(|| short_name(parent_name));
+    let written_class_name =
+        if context.dialect.is_sharp() { short_name(class_name) } else { class_name.as_str_lossy().into_owned() };
+    let type_parameters = and_list(&parent_metadata.template_types.keys().copied().collect::<Vec<_>>());
+    let is_missing = min_required_parameters_count > actual_parameters_count;
+    if is_missing || expected_parameters_count < actual_parameters_count {
+        let (code, amount, expected) = if is_missing {
+            (IssueCode::MissingTemplateParameter, "few", format!("at least {min_required_parameters_count}"))
+        } else {
+            (IssueCode::ExcessTemplateParameter, "many", expected_parameters_count.to_string())
+        };
+        let (message, label, parent_label, help) = match &sharp_parent {
+            Some(parent) => (
+                format!(
+                    "Too {amount} type arguments for `{parent}`: expected {expected}, but found {actual_parameters_count}."
+                ),
+                format!("Too {amount} type arguments here"),
+                format!(
+                    "`{parent}` declares {expected_parameters_count} type parameter{}",
+                    if expected_parameters_count == 1 { "" } else { "s" }
+                ),
+                format!(
+                    "Write {}a type for {type_parameters} in the header, as in `: {parent}<…>`.",
+                    if is_missing { "" } else { "only " }
+                ),
+            ),
+            None => (
+                format!(
+                    "Too {amount} template arguments for `{parent_name}`: expected {expected}, but found {actual_parameters_count}."
+                ),
+                format!(
+                    "Too {amount} template arguments provided here when `{class_name}` {inheritance_keyword} `{parent_name}`"
+                ),
+                format!("`{parent_name}` is defined with {expected_parameters_count} template parameters"),
+                if is_missing {
+                    format!(
+                        "Provide all {expected_parameters_count} required template arguments in the `{inheritance_tag}` docblock tag for `{class_name}`."
+                    )
+                } else {
+                    format!("Remove the extra arguments from the `{inheritance_tag}` tag for `{class_name}`.")
+                },
+            ),
+        };
+        let issue = Issue::error(message)
+            .with_annotation(Annotation::primary(primary_annotation_span).with_message(label))
+            .with_annotation(
+                Annotation::secondary(class_name_span)
+                    .with_message(format!("Declaration of `{written_class_name}` is here")),
+            )
+            .with_annotation(Annotation::secondary(parent_definition_span).with_message(parent_label))
+            .with_help(help);
 
-        context.collector.report_with_code(IssueCode::MissingTemplateParameter, issue);
-    } else if expected_parameters_count < actual_parameters_count {
-        let issue = Issue::error(format!(
-            "Too many template arguments for `{parent_name}`: expected {expected_parameters_count}, but found {actual_parameters_count}."
-        ))
-        .with_annotation(
-            Annotation::primary(primary_annotation_span)
-                .with_message(format!("Too many template arguments provided here when `{class_name}` {inheritance_keyword} `{parent_name}`")),
-        )
-        .with_annotation(
-            Annotation::secondary(class_name_span)
-                .with_message(format!("Declaration of `{class_name}` is here")),
-        )
-        .with_annotation(
-            Annotation::secondary(parent_definition_span)
-                .with_message(format!("`{parent_name}` is defined with {expected_parameters_count} template parameters")),
-        )
-        .with_help(format!("Remove the extra arguments from the `{inheritance_tag}` tag for `{class_name}`."));
-
-        context.collector.report_with_code(IssueCode::ExcessTemplateParameter, issue);
+        context.collector.report_with_code(code, issue);
     }
 
     let own_template_parameters_len = class_like_metadata.template_types.len();
@@ -1847,10 +2176,12 @@ fn check_template_parameters<'ctx, A>(
 
             let extended_type_str = display_type(context, &extended_type);
 
-            if parent_metadata
-                .template_variance
-                .get(i)
-                .is_some_and(mago_codex::ttype::template::variance::Variance::is_invariant)
+            // `check_sharp_template_variance` checks a PHP# header's type arguments against spec section 11.1.
+            if !class_like_metadata.flags.is_sharp()
+                && parent_metadata
+                    .template_variance
+                    .get(i)
+                    .is_some_and(mago_codex::ttype::template::variance::Variance::is_invariant)
             {
                 for extended_type_atomic in extended_type.types.as_ref() {
                     let TAtomic::GenericParameter(generic_parameter) = extended_type_atomic else {
@@ -1943,21 +2274,33 @@ fn check_template_parameters<'ctx, A>(
                         .push(GenericTemplate::new(GenericParent::ClassLike(parent_metadata.name), extended_type));
                 } else {
                     let replaced_type_str = display_type(context, &replaced_template_type);
+                    let (message, provided, bound, help) = match &sharp_parent {
+                        Some(parent) => (
+                            format!("Type argument for `{parent}` is not compatible with its bound."),
+                            format!("The type `{extended_type_str}` provided for type parameter `{template_name}`..."),
+                            format!("...does not satisfy the bound `{replaced_type_str}` from `{parent}`."),
+                            format!("Supply a type contained by `{replaced_type_str}`."),
+                        ),
+                        None => (
+                            format!("Template argument for `{parent_name}` is not compatible with its constraint."),
+                            format!("The type `{extended_type_str}` provided for template `{template_name}`..."),
+                            format!(
+                                "...does not satisfy the required constraint of `{replaced_type_str}` from `{parent_name}`."
+                            ),
+                            "Change the provided type to be compatible with the template constraint.".to_owned(),
+                        ),
+                    };
 
                     context.collector.report_with_code(
                         IssueCode::InvalidTemplateParameter,
-                        Issue::error(format!(
-                            "Template argument for `{parent_name}` is not compatible with its constraint."
-                        ))
-                        .with_annotation(
-                            Annotation::primary(class_name_span)
-                                .with_message(format!("In the definition of `{class_name}`")),
-                        )
-                        .with_note(format!("The type `{extended_type_str}` provided for template `{template_name}`..."))
-                        .with_note(format!(
-                            "...does not satisfy the required constraint of `{replaced_type_str}` from `{parent_name}`."
-                        ))
-                        .with_help("Change the provided type to be compatible with the template constraint."),
+                        Issue::error(message)
+                            .with_annotation(
+                                Annotation::primary(class_name_span)
+                                    .with_message(format!("In the definition of `{written_class_name}`")),
+                            )
+                            .with_note(provided)
+                            .with_note(bound)
+                            .with_help(help),
                     );
                 }
             }
@@ -2025,8 +2368,6 @@ fn check_template_variance_positions<'ctx, A>(
 ) where
     A: Arena,
 {
-    use mago_codex::ttype::template::variance::Variance;
-
     if class_like_metadata.template_variance.is_empty() {
         return;
     }
@@ -2118,6 +2459,78 @@ fn check_template_variance_positions<'ctx, A>(
             }
         }
     }
+}
+
+/// Checks spec section 11.1 on every member of a PHP# class or interface another class reaches, and on the generic
+/// types of its header: an `out` type parameter is only handed out, and an `in` type parameter is only taken in.
+fn check_sharp_template_variance<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    inheritance: Option<&Inheritance<'_>>,
+) where
+    A: Arena,
+{
+    if !class_like_metadata.template_variance.iter().any(|variance| !variance.is_invariant()) {
+        return;
+    }
+
+    let header_spans: WordMap<Span> = inheritance
+        .iter()
+        .flat_map(|inheritance| inheritance.types.iter())
+        .filter_map(|hint| match hint {
+            Hint::Generic(generic) => {
+                Some((ascii_lowercase_word(context.resolved_names.resolve(&generic.name)?), generic.span()))
+            }
+            _ => None,
+        })
+        .collect();
+    for template_use in find_template_uses(context, class_like_metadata, &header_spans) {
+        let Some(marker) = find_broken_marker(class_like_metadata, template_use.template, template_use.position) else {
+            continue;
+        };
+        let refused = if marker == "out" { "take it in" } else { "hand it out" };
+
+        let template_name = template_use.template;
+        context.collector.report_with_code(
+            IssueCode::InvalidTemplateParameter,
+            Issue::error(format!(
+                "`{template_name}` is declared `{marker}`, so {} cannot {refused}.",
+                template_use.member
+            ))
+            .with_annotation(
+                Annotation::primary(template_use.span)
+                    .with_message(format!("{} uses `{template_name}` here", template_use.member)),
+            )
+            .with_note("An `out` type parameter is only handed out, and an `in` type parameter is only taken in."),
+        );
+    }
+}
+
+/// Refuses a generic PHP# class that is a `Serializable`, through its header or a parent's. Its objects carry their
+/// type arguments through serialization, and `Serializable::serialize` writes a string the engine cannot add them to.
+fn check_sharp_serializable<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    if !class_like_metadata.kind.is_class()
+        || class_like_metadata.template_types.is_empty()
+        || !context.codebase.class_implements(class_like_metadata.name.as_bytes(), b"Serializable")
+    {
+        return;
+    }
+
+    let class_name = short_name(class_like_metadata.original_name);
+    context.collector.report_with_code(
+        IssueCode::InvalidImplement,
+        Issue::error(format!(
+            "`{class_name}` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry."
+        ))
+        .with_annotation(
+            Annotation::primary(class_like_metadata.name_span.unwrap_or(class_like_metadata.span))
+                .with_message(format!("`{class_name}` has type parameters")),
+        )
+        .with_help("Leave `Serializable` out: `serialize()` then uses `__serialize` and `__unserialize`, or its default form, which keep them."),
+    );
 }
 
 /// Rejects an uninhabitable diamond at the declaration site: a class-like
@@ -2332,29 +2745,44 @@ fn check_abstract_method_signatures<'ctx, A>(
                 continue;
             }
 
+            let error_span = if appearing_class.kind.is_trait() {
+                class_like_metadata.name_span.unwrap_or(class_like_metadata.span)
+            } else {
+                appearing_method.name_span.unwrap_or(appearing_method.span)
+            };
+
+            if report_named_constructor_clash(
+                context,
+                class_like_metadata,
+                appearing_method,
+                overridden_class,
+                overridden_method,
+                error_span,
+            ) {
+                continue;
+            }
+
             let substituted_overridden_method =
                 get_substituted_method(overridden_method, class_like_metadata, declaring_class_name, context.codebase);
 
             let substituted_appearing_method =
                 get_substituted_method(appearing_method, class_like_metadata, method_fqcn, context.codebase);
 
-            let issues = method_signature::validate_method_signature_compatibility(
+            let mut issues = method_signature::validate_method_signature_compatibility(
                 context.codebase,
                 class_like_metadata.name,
                 &substituted_appearing_method,
                 &substituted_overridden_method,
                 context.dialect,
             );
-
-            if issues.is_empty() {
-                continue;
-            }
-
-            let error_span = if appearing_class.kind.is_trait() {
-                class_like_metadata.name_span.unwrap_or(class_like_metadata.span)
-            } else {
-                appearing_method.name_span.unwrap_or(appearing_method.span)
-            };
+            method_signature::validate_erased_signature_compatibility(
+                context.codebase,
+                class_like_metadata,
+                overridden_class,
+                appearing_method,
+                overridden_method,
+                &mut issues,
+            );
 
             for incompatibility in issues {
                 report_signature_compatibility_issue(
@@ -2860,6 +3288,10 @@ fn apply_template_substitution_to_method(
 ) -> FunctionLikeMetadata {
     let mut substituted_method = method.clone();
 
+    for template in substituted_method.template_types.values_mut() {
+        template.constraint = inferred_type_replacer::replace(&template.constraint, template_result, codebase);
+    }
+
     for param in &mut substituted_method.parameters {
         if let Some(type_metadata) = &mut param.type_metadata {
             type_metadata.type_union =
@@ -2918,6 +3350,19 @@ fn check_interface_method_signatures<'ctx, A>(
             continue;
         }
 
+        let declaring_class = context.codebase.get_class_like(interface_fqcn_str).unwrap_or(interface_metadata);
+        let method_span = class_method.name_span.unwrap_or(class_method.span);
+        if report_named_constructor_clash(
+            context,
+            class_like_metadata,
+            class_method,
+            declaring_class,
+            interface_method,
+            method_span,
+        ) {
+            continue;
+        }
+
         let substituted_interface_method = get_substituted_method(
             interface_method,
             class_like_metadata,
@@ -2932,21 +3377,23 @@ fn check_interface_method_signatures<'ctx, A>(
             context.codebase,
         );
 
-        let issues = method_signature::validate_method_signature_compatibility(
+        let mut issues = method_signature::validate_method_signature_compatibility(
             context.codebase,
             class_like_metadata.name,
             &substituted_class_method,
             &substituted_interface_method,
             context.dialect,
         );
+        method_signature::validate_erased_signature_compatibility(
+            context.codebase,
+            class_like_metadata,
+            declaring_class,
+            class_method,
+            interface_method,
+            &mut issues,
+        );
 
         for incompatibility in issues {
-            // Use the method span as primary location (where the issue actually is)
-            let method_span = class_method.name_span.unwrap_or(class_method.span);
-
-            // Get the actual declaring class for error reporting
-            let declaring_class = context.codebase.get_class_like(interface_fqcn_str).unwrap_or(interface_metadata);
-
             report_signature_compatibility_issue(
                 context,
                 class_like_metadata,
@@ -2958,6 +3405,48 @@ fn check_interface_method_signatures<'ctx, A>(
             );
         }
     }
+}
+
+/// Reports a method that shares its name with a PHP# named constructor of a parent class or interface, or the reverse,
+/// spec section 9.1, and returns whether it did. PHP refuses the pair, a static and an instance method of one name, so
+/// the class is refused once, in the words the user wrote, and the signature checks that would follow are skipped. Two
+/// named constructors of one name are a subclass's own, checked as any static method pair is.
+fn report_named_constructor_clash<A>(
+    context: &mut Context<'_, '_, A>,
+    child_class: &ClassLikeMetadata,
+    child_method: &FunctionLikeMetadata,
+    parent_class: &ClassLikeMetadata,
+    parent_method: &FunctionLikeMetadata,
+    primary_span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    let child_is_constructor = child_method.flags.is_named_constructor();
+    if child_is_constructor == parent_method.flags.is_named_constructor() {
+        return false;
+    }
+
+    let child =
+        display_sharp_member(display_class_like_name(context, child_class.original_name), child_method.original_name);
+    let parent_name = display_class_like_name(context, parent_class.original_name);
+    let message = if child_is_constructor {
+        let parent = display_sharp_member(parent_name, parent_method.original_name);
+
+        format!("The named constructor `{child}` cannot share its name with the method `{parent}`.")
+    } else {
+        format!(
+            "`{child}` cannot share its name with `{parent_name}`'s named constructor `{}`.",
+            parent_method.original_name
+        )
+    };
+
+    context.collector.report_with_code(
+        IssueCode::NamedConstructorClash,
+        Issue::error(message).with_annotation(Annotation::primary(primary_span).with_message("Declared here.")),
+    );
+
+    true
 }
 
 fn report_signature_compatibility_issue<'ctx, A>(
@@ -3125,6 +3614,86 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 )
                 .with_note("Parameter types must be contravariant: child must accept equal or wider types than parent.")
                 .with_help("Change the parameter type to be compatible with the parent method."),
+            );
+        }
+        SignatureCompatibilityIssue::ErasedParameterNarrowed { parameter_index, child_type, parent_type, bound } => {
+            let parameter = parent_method.parameters.get(parameter_index);
+            let param_name = parameter
+                .map_or_else(|| word("unknown"), |p| word(mago_bytes::trim_start_byte(p.name.0.as_bytes(), b'$')));
+            let span = parameter
+                .map(|p| p.name_span)
+                .filter(|span| span.file_id == primary_span.file_id)
+                .unwrap_or(primary_span);
+            let child_type = method_signature::display_erased(&child_type, context);
+            let parent_type = method_signature::display_erased(&parent_type, context);
+            let (child_method, parent_method) = if context.dialect.is_sharp() {
+                let method_name = parent_method.original_name;
+
+                (display_sharp_member(child_name, method_name), display_sharp_member(parent_name, method_name))
+            } else {
+                (format!("{child_name}::{method_name}()"), format!("{parent_name}::{method_name}()"))
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(format!(
+                    "Parameter `{param_name}` of `{child_method}` must take at least {parent_type}, the type `{parent_method}` erases it to."
+                ))
+                .with_annotation(Annotation::primary(span).with_message(format!("Erases to {child_type}.")))
+                .with_annotation(Annotation::secondary(parent_class_span).with_message(format!(
+                    "`{parent_method}` takes {parent_type} once its type parameters are erased."
+                )))
+                .with_note("PHP# erases type parameters when it compiles, and PHP refuses a parameter narrower than the one it overrides when it links the class.")
+                .with_help(method_signature::erased_type_help(param_name, &parent_type, bound)),
+            );
+        }
+        SignatureCompatibilityIssue::ChangedTemplateBound { template, child_method, parent_method, bound } => {
+            let child_method = display_sharp_member(child_name, child_method);
+            let parent_method = display_sharp_member(parent_name, parent_method);
+            let (message, help) = match bound.map(|bound| display_type(context, &bound)) {
+                Some(bound) => (
+                    format!("`{child_method}` must keep the bound `{bound}` of `{parent_method}`."),
+                    format!("Bound `{template}` by `{bound}`, as `{parent_method}` does."),
+                ),
+                None => (
+                    format!("`{child_method}` must keep `{template}` of `{parent_method}` without a bound."),
+                    format!("Remove the bound of `{template}`, as `{parent_method}` has none."),
+                ),
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(message)
+                    .with_annotation(
+                        Annotation::primary(primary_span).with_message(format!("Changes the bound of `{template}`")),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(parent_class_span)
+                            .with_message(format!("`{parent_method}` declares the bound here")),
+                    )
+                    .with_note("An override keeps the bound of each type parameter it overrides, as in C#.")
+                    .with_help(help),
+            );
+        }
+        SignatureCompatibilityIssue::ChangedTemplateCount { child_method, parent_method, parent_count } => {
+            let child_method = display_sharp_member(child_name, child_method);
+            let parent_method = display_sharp_member(parent_name, parent_method);
+            let declared = match parent_count {
+                0 => "no type parameter".to_owned(),
+                1 => "1 type parameter".to_owned(),
+                count => format!("{count} type parameters"),
+            };
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(format!("`{child_method}` must declare {declared}, as `{parent_method}` does."))
+                    .with_annotation(Annotation::primary(primary_span).with_message("Overrides it here"))
+                    .with_annotation(
+                        Annotation::secondary(parent_class_span)
+                            .with_message(format!("`{parent_method}` is declared here")),
+                    )
+                    .with_note("An override declares one type parameter for each of the method it overrides, as in C#.")
+                    .with_help(format!("Declare {declared}, as `{parent_method}` does.")),
             );
         }
         SignatureCompatibilityIssue::IncompatibleReturnType { child_type, parent_type } => {
@@ -3687,17 +4256,30 @@ fn check_class_like_properties<'ctx, A>(
                 parent_property.type_declaration_metadata.as_ref(),
             ) {
                 (Some(declaring_type), Some(parent_type)) => {
+                    // A PHP# declaration may name a type parameter, which the child's header or `@extends` fills.
+                    let is_sharp = parent_metadata.flags.is_sharp() || class_like_metadata.flags.is_sharp();
+                    let parent_type_union = if is_sharp {
+                        Cow::Owned(localize_parent_type(
+                            context.codebase,
+                            class_like_metadata,
+                            parent_metadata.name,
+                            &parent_type.type_union,
+                        ))
+                    } else {
+                        Cow::Borrowed(&parent_type.type_union)
+                    };
+
                     if is_property_type_variance_invalid(
                         context.codebase,
                         &declaring_type.type_union,
-                        &parent_type.type_union,
+                        &parent_type_union,
                         parent_only_get,
                         parent_only_set,
                     ) {
                         has_type_incompatibility = true;
 
                         let declaring_type_id = display_type(context, &declaring_type.type_union);
-                        let parent_type_id = display_type(context, &parent_type.type_union);
+                        let parent_type_id = display_type(context, &parent_type_union);
 
                         context.collector.report_with_code(
                                 IssueCode::IncompatiblePropertyType,
@@ -3715,6 +4297,55 @@ fn check_class_like_properties<'ctx, A>(
                                 .with_note("PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class.")
                                 .with_help(format!("Change the type of `{property}` to `{parent_type_id}` to match the parent property."))
                             );
+                    } else if is_sharp {
+                        let erased_type = method_signature::erase(&declaring_type.type_union, context.codebase);
+                        let erased_parent_type = method_signature::erase(&parent_type.type_union, context.codebase);
+
+                        if is_property_type_variance_invalid(
+                            context.codebase,
+                            &erased_type,
+                            &erased_parent_type,
+                            parent_only_get,
+                            parent_only_set,
+                        ) {
+                            has_type_incompatibility = true;
+
+                            let erased_type_id = method_signature::display_erased(&erased_type, context);
+                            let erased_parent_type_id = method_signature::display_erased(&erased_parent_type, context);
+                            let property_name = mago_bytes::trim_start_byte(property_metadata.name.0.as_bytes(), b'$');
+                            let property_name = String::from_utf8_lossy(property_name);
+                            let class_name = class_like_metadata.original_name;
+                            let help = method_signature::erased_type_help(
+                                &property_name,
+                                &erased_parent_type_id,
+                                method_signature::bound_example(context.codebase, Some(parent_type), &erased_type),
+                            );
+                            let message = if context.dialect.is_sharp() {
+                                format!(
+                                    "Property `{}` must have {erased_parent_type_id}, the type `{}` erases to.",
+                                    display_sharp_member(class_name, &property_name),
+                                    display_sharp_member(parent_class_name, &property_name)
+                                )
+                            } else {
+                                format!(
+                                    "Property `{class_name}::${property_name}` must have the type {erased_parent_type_id}, the type `{parent_class_name}::${property_name}` erases to."
+                                )
+                            };
+
+                            context.collector.report_with_code(
+                                IssueCode::IncompatiblePropertyType,
+                                Issue::error(message)
+                                .with_annotation(
+                                    Annotation::primary(declaring_type.span)
+                                        .with_message(format!("Erases to {erased_type_id}.")),
+                                )
+                                .with_annotation(Annotation::secondary(parent_type.span).with_message(format!(
+                                    "Erases to {erased_parent_type_id}."
+                                )))
+                                .with_note("PHP# erases type parameters when it compiles, and PHP requires a property to keep the type of the property it overrides.")
+                                .with_help(help),
+                            );
+                        }
                     }
                 }
                 (Some(declaring_type), None) => {
@@ -3907,6 +4538,154 @@ fn check_class_like_properties<'ctx, A>(
                 );
             }
         }
+    }
+
+    if context.dialect.is_sharp() {
+        check_interface_properties(context, class_like_metadata);
+    }
+}
+
+/// Checks each property a PHP# class or event ends up with against the property each interface above it states, as
+/// the engine links the class against it. A property the class declares answers to every interface above it. One it
+/// inherits answers to the interfaces the class names itself, because a base class that names an interface answers for
+/// it there. A base class's `private` property counts, as PHP links against it too.
+fn check_interface_properties<A>(context: &mut Context<'_, '_, A>, class_like_metadata: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let names_itself = |interface_name: &Word| {
+        class_like_metadata.direct_parent_interfaces.iter().any(|named| {
+            named == interface_name
+                || codebase.get_class_like(named.as_bytes()).is_some_and(|named| named.has_parent(*interface_name))
+        })
+    };
+
+    for interface_name in &class_like_metadata.all_parent_interfaces {
+        let Some(interface) = codebase.get_class_like(interface_name.as_bytes()) else {
+            continue;
+        };
+
+        for (property_name, stated) in &interface.properties {
+            let owner = std::iter::successors(Some(class_like_metadata), |metadata| {
+                metadata.direct_parent_class.and_then(|parent| codebase.get_class_like(parent.as_bytes()))
+            })
+            .find_map(|metadata| metadata.properties.get(property_name).map(|property| (metadata, property)));
+            let Some((owner, property)) = owner else {
+                continue;
+            };
+
+            if owner.name == class_like_metadata.name || names_itself(interface_name) {
+                report_unfit_interface_property(context, class_like_metadata, owner, interface, property, stated);
+            }
+        }
+    }
+}
+
+/// Reports a PHP# class's or event's property, declared by `owner`, that does not fit the property `interface` states,
+/// as the engine refuses the class: it is public, on each object, and of the stated type or a narrower one for a
+/// get-only property. Every interface property is virtual, so its hooks alone say whether it is get-only. The stated
+/// type reads a generic interface's type parameters as the type arguments the class's header gives it, as `TItem` is
+/// `int` under `: Holder<int>`. A property the class inherits is reported on the class's name, naming the base class to
+/// change.
+fn report_unfit_interface_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    owner: &ClassLikeMetadata,
+    interface: &ClassLikeMetadata,
+    property: &PropertyMetadata,
+    stated: &PropertyMetadata,
+) where
+    A: Arena,
+{
+    let name = display_class_like_name(context, class_like_metadata.original_name);
+    let interface_name = display_class_like_name(context, interface.original_name);
+    let property_name = display_property_name(context, property.name.0);
+    let property_span = property.name_span.unwrap_or(owner.span);
+    let stated_span = stated.name_span.unwrap_or(interface.span);
+    let (from, place) = if owner.name == class_like_metadata.name {
+        (String::new(), String::new())
+    } else {
+        let owner_name = display_class_like_name(context, owner.original_name);
+
+        (format!(", from `{owner_name}`"), format!(" in `{owner_name}`"))
+    };
+    let report = |context: &mut Context<'_, '_, A>, code: IssueCode, given: String, stated: String, help: String| {
+        let issue = Issue::error(format!(
+            "`{name}` gives `{property_name}` {given}{from}, and `{interface_name}` states it {stated}."
+        ));
+        let issue = if from.is_empty() {
+            issue.with_annotation(Annotation::primary(property_span).with_message("Given here."))
+        } else {
+            issue
+                .with_annotation(
+                    Annotation::primary(class_like_metadata.name_span.unwrap_or(class_like_metadata.span))
+                        .with_message("Inherited here."),
+                )
+                .with_annotation(Annotation::secondary(property_span).with_message("Declared here."))
+        };
+
+        context.collector.report_with_code(
+            code,
+            issue.with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")).with_help(help),
+        );
+    };
+
+    if property.read_visibility != stated.read_visibility {
+        let (given, stated) = (property.read_visibility, stated.read_visibility);
+        let help = format!("Declare `{property_name}` `{stated}`{place}.");
+        report(context, IssueCode::IncompatiblePropertyAccess, format!("as `{given}`"), format!("`{stated}`"), help);
+    }
+
+    if property.flags.is_static() != stated.flags.is_static() {
+        let (given, help) = ("as `static`".to_owned(), format!("Remove `static`{place}."));
+        report(context, IssueCode::IncompatibleStaticModifier, given, "on each object".to_owned(), help);
+    }
+
+    // PHP refuses a readonly, a `private(set)` or a get-only virtual property for one stated with `set`.
+    let set = word(b"set");
+    let given_settable = !property.flags.is_readonly()
+        && property.write_visibility == Visibility::Public
+        && (!property.flags.is_virtual_property() || property.hooks.contains_key(&set));
+    if stated.hooks.contains_key(&set) && !given_settable {
+        if owner.flags.is_event() {
+            context.collector.report_with_code(
+                IssueCode::IncompatiblePropertyAccess,
+                Issue::error(format!(
+                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: an event's properties are set once, by `new`."
+                ))
+                .with_annotation(Annotation::primary(property_span).with_message("Given here."))
+                .with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")),
+            );
+        } else {
+            let given = if property.flags.is_init() {
+                "with `init`".to_owned()
+            } else if property.flags.is_readonly() || property.write_visibility == Visibility::Public {
+                "get-only".to_owned()
+            } else {
+                format!("with `{} set`", property.write_visibility)
+            };
+            let help = format!("Declare `{property_name}` with `{{ get; set; }}`{place}.");
+            report(context, IssueCode::IncompatiblePropertyAccess, given, "with `set`".to_owned(), help);
+        }
+    }
+
+    if let Some((given, stated_type)) =
+        property.type_declaration_metadata.as_ref().zip(stated.type_declaration_metadata.as_ref())
+        && let stated_type =
+            localize_parent_type(context.codebase, class_like_metadata, interface.name, &stated_type.type_union)
+        && is_property_type_variance_invalid(
+            context.codebase,
+            &given.type_union,
+            &stated_type,
+            !stated.hooks.contains_key(&word("set")),
+            false,
+        )
+    {
+        let stated_type = display_type(context, &stated_type);
+        let given = format!("as `{}`", display_type(context, &given.type_union));
+        let help = format!("Give `{property_name}` the type `{stated_type}`{place}.");
+        report(context, IssueCode::IncompatiblePropertyType, given, format!("as `{stated_type}`"), help);
     }
 }
 

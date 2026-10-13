@@ -924,6 +924,52 @@ fn compile_accepts_each_form_that_replaces_a_php_function() {
     assert!(refused.is_empty(), "{}", refused.join("\n"));
 }
 
+/// A `.sharp` file's code after a `throw` is analyzed whatever the configuration says about dead code, so `mago
+/// analyze` reports the error `mago compile` refuses the file for.
+#[test]
+fn analyze_and_compile_report_the_same_error_after_a_throw_in_a_sharp_file() {
+    let directory = library_workspace(
+        "namespace App;\n\nimport LogicException;\n\npublic class Box<T>\n{\n    public Box(public T value { get; })\n    {\n    }\n}\n\npublic class Page\n{\n    public Box<int> never()\n    {\n        throw new LogicException(\"never\");\n        return new Box<string>(\"text\");\n    }\n}\n",
+    );
+
+    let analyzed = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let compiled = Command::new(env!("CARGO_BIN_EXE_mago"))
+        .args(["--no-version-check", "--colors", "never", "compile"])
+        .env("MAGO_REPORTING_FORMAT", "emacs")
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    let errors = |output: &Output| -> Vec<String> {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with("src/App/Page.sharp:") && line.contains(":error - "))
+            .map(str::to_owned)
+            .collect()
+    };
+    let expected =
+        ["src/App/Page.sharp:17:16:error - invalid-return-statement: Box<string> cannot be used as Box<int>."];
+
+    assert_eq!(errors(&analyzed), expected, "{}", String::from_utf8_lossy(&analyzed.stdout));
+    assert_eq!(errors(&compiled), expected, "{}", String::from_utf8_lossy(&compiled.stdout));
+}
+
+/// A `.php` file keeps Mago's default: code after a `throw` is reported unreachable and not analyzed, so its error is
+/// not reported.
+#[test]
+fn analyze_skips_the_code_after_a_throw_in_a_php_file() {
+    let directory = library_workspace("namespace App;\n\npublic class Page\n{\n}\n");
+    write(
+        directory.path(),
+        "src/App/Clock.php",
+        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nfinal class Clock\n{\n    public static function never(): int\n    {\n        throw new \\LogicException('never');\n        return 'text';\n    }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(issues_in(&stdout, "src/App/Clock.php"), ["12:9 unevaluated-code"], "{stdout}");
+}
+
 /// A project page that calls every PHP function PHP# replaces with its own syntax.
 const REPLACED_CALLS: &str = "namespace App;\n\npublic class Page\n{\n    public bool text(Any? value) => is_string(value);\n    public bool whole(Any? value) => is_int(value);\n    public bool real(Any? value) => is_float(value);\n    public bool flag(Any? value) => is_bool(value);\n    public string label(int number) => strval(number);\n    public int half(int total, int count) => intdiv(total, count);\n    public List<int> join(List<int> first, List<int> second) => array_merge(first, second);\n    public Map<string, int> merge(Map<string, int> defaults, Map<string, int> overrides) => array_replace(defaults, overrides);\n    public bool walk(List<int> numbers) => array_walk_recursive(numbers, n => n);\n}\n";
 

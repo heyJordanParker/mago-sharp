@@ -14,7 +14,9 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::Class;
 use mago_syntax::cst::Closure;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Function;
@@ -60,6 +62,7 @@ use crate::scanner::parameter::scan_function_like_parameter_with_constants;
 use crate::scanner::ttype::get_type_metadata_from_hint;
 use crate::scanner::ttype::get_type_metadata_from_type;
 use crate::scanner::ttype::merge_type_preserving_nullability;
+use crate::scanner::ttype::scan_type_parameters;
 use crate::scanner::typing_error_issue;
 use crate::scanner::version_claim::evaluate_version_attributes;
 use crate::ttype::atomic::TAtomic;
@@ -103,23 +106,44 @@ where
     metadata.version_constraint = verdict.constraint;
     metadata.attributes =
         scan_attribute_lists(method.attribute_lists, context, scope, Some(class_like_metadata.original_name));
-    metadata.type_resolution_context = type_resolution_context.filter(|c| !c.is_empty());
+
+    // A PHP# method's type parameters are the templates its `@template` tags declare, spec section 11.
+    let mut type_context = type_resolution_context.unwrap_or_default();
+    if let Some(type_parameters) = method.type_parameters {
+        for (template_name, definition) in scan_type_parameters(
+            type_parameters,
+            GenericParent::FunctionLike(functionlike_id),
+            class_like_metadata.original_name,
+            &mut type_context,
+            context,
+            scope,
+        ) {
+            metadata.add_template_type(template_name, definition);
+        }
+    }
 
     metadata.name_span = Some(method.name_span);
     metadata.parameters = method
         .parameter_list
         .parameters
         .iter()
-        .filter_map(|p| scan_function_like_parameter(p, Some(class_like_metadata.original_name), context, scope))
+        .filter_map(|p| {
+            scan_function_like_parameter(p, Some(class_like_metadata.original_name), &type_context, context, scope)
+        })
         .collect();
+    metadata.listens =
+        method.on.iter().flat_map(|on| on.events.iter()).map(|event| word(context.resolved_names.get(event))).collect();
 
     if let Some(return_hint) = method.return_type_hint {
         metadata.set_return_type_declaration_metadata(Some(get_type_metadata_from_hint(
             &return_hint.hint,
             Some(class_like_metadata.original_name),
+            &type_context,
             context,
         )));
     }
+
+    metadata.type_resolution_context = Some(type_context).filter(|c| !c.is_empty());
 
     let mut method_metadata = MethodMetadata {
         is_final: method.modifiers.contains_final(),
@@ -232,7 +256,15 @@ where
         .parameter_list
         .parameters
         .iter()
-        .filter_map(|p| scan_function_like_parameter(p, Some(class_like_metadata.original_name), context, scope))
+        .filter_map(|p| {
+            scan_function_like_parameter(
+                p,
+                Some(class_like_metadata.original_name),
+                type_resolution_context,
+                context,
+                scope,
+            )
+        })
         .collect();
     metadata.set_return_type_declaration_metadata(Some(TypeMetadata::new(get_bool(), law.name.span)));
     metadata.method_metadata = Some(MethodMetadata {
@@ -245,6 +277,67 @@ where
     if utils::expression_has_throws(law.body.expression) {
         metadata.flags |= MetadataFlags::HAS_THROW;
     }
+
+    metadata
+}
+
+/// Scans a PHP# event's constructor, spec section 15: it takes the event's parameters, and each sets the get-only
+/// property of its name.
+#[inline]
+pub(crate) fn scan_event_constructor<'arena, A>(
+    event: &'arena Event<'arena>,
+    class_like_metadata: &ClassLikeMetadata,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) -> FunctionLikeMetadata
+where
+    A: Arena,
+{
+    let name = word(b"__construct");
+    let mut metadata = FunctionLikeMetadata::new(
+        FunctionLikeKind::Method,
+        name,
+        name,
+        event.span(),
+        MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
+    );
+    metadata.name_span = Some(event.name.span);
+    let type_context = TypeResolutionContext::default();
+    metadata.parameters = event
+        .parameter_list
+        .parameters
+        .iter()
+        .filter_map(|p| {
+            scan_function_like_parameter(p, Some(class_like_metadata.original_name), &type_context, context, scope)
+        })
+        .collect();
+    metadata.method_metadata =
+        Some(MethodMetadata { is_constructor: true, visibility: Visibility::Public, ..MethodMetadata::default() });
+
+    metadata
+}
+
+/// Scans the constructor a PHP# class without one gets for its initial values that are not constant, spec section
+/// 9.1: public and without parameters, it sets those values, then calls the base class's constructor.
+#[inline]
+pub(crate) fn scan_initial_values_constructor<'arena, A>(
+    class: &'arena Class<'arena>,
+    context: &Context<'_, 'arena, A>,
+) -> FunctionLikeMetadata
+where
+    A: Arena,
+{
+    let name = word(b"__construct");
+    let mut metadata = FunctionLikeMetadata::new(
+        FunctionLikeKind::Method,
+        name,
+        name,
+        class.span(),
+        MetadataFlags::origin_flags(context.file.file_type) | MetadataFlags::SHARP,
+    );
+    metadata.name_span = Some(class.name.span);
+    metadata.method_metadata =
+        Some(MethodMetadata { is_constructor: true, visibility: Visibility::Public, ..MethodMetadata::default() });
 
     metadata
 }
@@ -293,20 +386,31 @@ where
         .parameter_list
         .parameters
         .iter()
-        .filter_map(|p| scan_function_like_parameter_with_constants(p, classname, context, scope, constants))
+        .filter_map(|p| {
+            scan_function_like_parameter_with_constants(
+                p,
+                classname,
+                &type_resolution_context,
+                context,
+                scope,
+                constants,
+            )
+        })
         .collect();
 
     metadata.attributes = scan_attribute_lists(&function.attribute_lists, context, scope, classname);
-    metadata.type_resolution_context =
-        if type_resolution_context.is_empty() { None } else { Some(type_resolution_context) };
 
     if let Some(return_hint) = function.return_type_hint.as_ref() {
         metadata.set_return_type_declaration_metadata(Some(get_type_metadata_from_hint(
             &return_hint.hint,
             classname,
+            &type_resolution_context,
             context,
         )));
     }
+
+    metadata.type_resolution_context =
+        if type_resolution_context.is_empty() { None } else { Some(type_resolution_context) };
 
     scan_function_like_docblock(function.span(), functionlike_id, &mut metadata, classname, context, scope);
 
@@ -353,25 +457,25 @@ where
     let mut metadata =
         FunctionLikeMetadata::new(FunctionLikeKind::Closure, synthetic_name, synthetic_name, span, flags)
             .with_parameters(
-                closure
-                    .parameter_list
-                    .parameters
-                    .iter()
-                    .filter_map(|p| scan_function_like_parameter(p, classname, context, scope)),
+                closure.parameter_list.parameters.iter().filter_map(|p| {
+                    scan_function_like_parameter(p, classname, &type_resolution_context, context, scope)
+                }),
             );
     collect_globals_into(&closure.body, &mut metadata.globals_accessed);
 
     metadata.attributes = scan_attribute_lists(&closure.attribute_lists, context, scope, classname);
-    metadata.type_resolution_context =
-        if type_resolution_context.is_empty() { None } else { Some(type_resolution_context) };
 
     if let Some(return_hint) = closure.return_type_hint.as_ref() {
         metadata.set_return_type_declaration_metadata(Some(get_type_metadata_from_hint(
             &return_hint.hint,
             classname,
+            &type_resolution_context,
             context,
         )));
     }
+
+    metadata.type_resolution_context =
+        if type_resolution_context.is_empty() { None } else { Some(type_resolution_context) };
 
     scan_function_like_docblock(span, functionlike_id, &mut metadata, classname, context, scope);
 
@@ -414,24 +518,24 @@ where
     let mut metadata =
         FunctionLikeMetadata::new(FunctionLikeKind::ArrowFunction, synthetic_name, synthetic_name, span, flags)
             .with_parameters(
-                arrow_function
-                    .parameter_list
-                    .parameters
-                    .iter()
-                    .filter_map(|p| scan_function_like_parameter(p, classname, context, scope)),
+                arrow_function.parameter_list.parameters.iter().filter_map(|p| {
+                    scan_function_like_parameter(p, classname, &type_resolution_context, context, scope)
+                }),
             );
 
     metadata.attributes = scan_attribute_lists(&arrow_function.attribute_lists, context, scope, classname);
-    metadata.type_resolution_context =
-        if type_resolution_context.is_empty() { None } else { Some(type_resolution_context) };
 
     if let Some(return_hint) = arrow_function.return_type_hint.as_ref() {
         metadata.set_return_type_declaration_metadata(Some(get_type_metadata_from_hint(
             &return_hint.hint,
             classname,
+            &type_resolution_context,
             context,
         )));
     }
+
+    metadata.type_resolution_context =
+        if type_resolution_context.is_empty() { None } else { Some(type_resolution_context) };
 
     scan_function_like_docblock(span, functionlike_id, &mut metadata, classname, context, scope);
 

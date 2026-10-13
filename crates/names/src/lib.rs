@@ -9,6 +9,7 @@ use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::GenericClass;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::PropertyHookBody;
@@ -32,16 +33,26 @@ mod internal;
 /// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
 /// [`ResolvedNames::is_written`] reports. The binder knows no types, so a call of a method of these names on an object
 /// writes its local too, which captures it by reference, as harmless.
-pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "delete", "remove", "clear"];
+pub const CHANGING_COLLECTION_METHODS: [&str; 5] = ["add", "set", "insert", "remove", "clear"];
 
-/// The methods of a PHP# `List`, `Map` or `Set` that run as PHP functions or operators on the array, not as
-/// `Sharp\Collection` methods, as `(collection, method)` pairs.
+/// The methods of a PHP# `List`, `Map` or `Set` the bridge lowers from the checker's types, as `(collection, method)`
+/// pairs.
 ///
-/// The bridge lowers each of them from the checker's types, so the checker refuses one on a value that can also be an
+/// Each lowers to PHP functions or operators on the array, or to the `Sharp\Collection` method that runs it for that
+/// collection, as a `Map`'s `filter` runs as `filterValues`. The checker refuses one on a value that can also be an
 /// object, whose own method would not run.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 9] = [
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 18] = [
     ("List", "count"),
+    ("List", "contains"),
+    ("List", "indexOf"),
+    ("List", "last"),
+    ("List", "remove"),
+    ("List", "clear"),
     ("Map", "count"),
+    ("Map", "has"),
+    ("Map", "keys"),
+    ("Map", "remove"),
+    ("Map", "filter"),
     ("Set", "count"),
     ("Set", "add"),
     ("Set", "remove"),
@@ -100,7 +111,8 @@ pub struct ResolvedNames<'arena> {
     /// for backward compatibility.
     names: HashMap<u32, (u32, (&'arena [u8], bool))>,
 
-    /// Start offset of every bare PHP# name -> what it refers to. Empty for PHP.
+    /// Start offset of every bare PHP# name, and of every PHP# type name that names a type parameter -> what it refers
+    /// to. Empty for PHP.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
     bindings: HashMap<u32, Binding>,
 
@@ -206,7 +218,8 @@ impl<'arena> ResolvedNames<'arena> {
             .collect()
     }
 
-    /// Returns what the bare PHP# name starting at the given position refers to.
+    /// Returns what the bare PHP# name starting at the given position refers to, or the type parameter a PHP# type name
+    /// there names.
     ///
     /// Returns `None` for every name in a PHP file.
     pub fn binding<T>(&self, position: &T) -> Option<Binding>
@@ -216,8 +229,19 @@ impl<'arena> ResolvedNames<'arena> {
         self.bindings.get(&position.offset()).copied()
     }
 
+    /// Returns whether the PHP# type name starting at the given position names a type parameter.
+    ///
+    /// Returns `false` for every name in a PHP file.
+    pub fn is_type_parameter<T>(&self, name: &T) -> bool
+    where
+        T: HasPosition,
+    {
+        matches!(self.binding(name), Some(Binding::TypeParameter { .. }))
+    }
+
     /// Returns the class of a PHP# static call, `Class.method()`: the object of `call` when the binder bound it to a
-    /// class. Returns `None` for an instance call and for every call in a PHP file.
+    /// class, or to a type parameter, which stands for the class of the type argument the code runs with. Returns
+    /// `None` for an instance call and for every call in a PHP file.
     ///
     /// The checker and the engine both read this, so they never disagree on a static call.
     #[must_use]
@@ -226,7 +250,8 @@ impl<'arena> ResolvedNames<'arena> {
     }
 
     /// Returns the class of a PHP# static property access, `Class.name`: the object of `access` when the binder bound
-    /// it to a class. Returns `None` for an instance property and for every access in a PHP file.
+    /// it to a class or to a type parameter, as [`Self::static_call_class`] does. Returns `None` for an instance
+    /// property and for every access in a PHP file.
     ///
     /// The checker, the analyzer and the engine all read this, so they never disagree on a static property.
     #[must_use]
@@ -257,9 +282,16 @@ impl<'arena> ResolvedNames<'arena> {
             || self.uses_field(accessors)
     }
 
+    /// The class name of a member's object: a bare name bound to a class or a type parameter, or the class of
+    /// `Counter<Order>`, whose type arguments a caller that reads them takes from the object.
     fn class_object<'ast>(&self, object: &'ast Expression<'ast>) -> Option<&'ast ConstantAccess<'ast>> {
         match object {
-            Expression::ConstantAccess(access) if self.binding(&access.name) == Some(Binding::Class) => Some(access),
+            Expression::ConstantAccess(access)
+                if matches!(self.binding(&access.name), Some(Binding::Class | Binding::TypeParameter { .. })) =>
+            {
+                Some(access)
+            }
+            Expression::GenericClass(GenericClass { class, .. }) => self.class_object(class),
             _ => None,
         }
     }

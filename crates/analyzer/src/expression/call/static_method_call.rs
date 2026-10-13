@@ -1,12 +1,21 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::StaticMethodCall;
+use mago_syntax::cst::TypeArgumentList;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
@@ -15,16 +24,21 @@ use crate::expression::call::method_call::analyze_undocumented_method_return_typ
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
+use crate::expression::is_refused_type;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
+use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
+use crate::resolver::class_name::generic_class_type;
+use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_member;
+use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodCall<'arena> {
     fn analyze<'ctx, A>(
@@ -43,17 +57,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodCall<'arena> {
             span: self.span(),
         };
 
-        analyze_static_method_call(context, block_context, artifacts, call)
+        analyze_static_method_call(context, block_context, artifacts, call, None)
     }
 }
 
-/// Analyzes a static method call from its parts, whether PHP wrote it as `Class::m()` or PHP# as `Class.m()`.
+/// Analyzes a static method call from its parts, whether PHP wrote it as `Class::m()` or PHP# as `Class.m()`, with
+/// the type arguments PHP# writes as `Class.m<A>()`.
 #[allow(clippy::expect_used)]
-pub(super) fn analyze_static_method_call<'ctx, 'arena, A>(
+pub(crate) fn analyze_static_method_call<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     call: StaticCall<'_, 'arena>,
+    type_arguments: Option<&TypeArgumentList<'arena>>,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -100,11 +116,35 @@ where
 
     let mut method_resolution =
         resolve_static_method_targets(context, block_context, artifacts, call.class, call.method, call.span)?;
+    // A refused class, as `Missing<Order>`, reported itself, so the call reports nothing again.
+    if artifacts.get_expression_type(call.class).is_some_and(is_refused_type) {
+        artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
+
+        return Ok(());
+    }
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
 
+    // `Counter<Order>.track(order)` runs `track` with `Order` for `Counter`'s type parameter, as a call through an object
+    // of `Counter<Order>` does, spec section 11, and so does a call through a `Class<Counter<Order>>`. `Orders.track(order)`
+    // runs it with the type arguments `Orders`'s header gives `Counter`.
+    let generic_class = generic_class_type(artifacts, call.class).cloned();
+
     let mut invocation_targets = vec![];
-    for resolved_method in method_resolution.resolved_methods {
+    let mut class_type_arguments = None;
+    for mut resolved_method in method_resolution.resolved_methods {
+        if let Some(generic_class) = &generic_class {
+            resolved_method.static_class_type = StaticClassType::Object(TObject::Named(generic_class.clone()));
+        }
+        if context.dialect.is_sharp() && resolved_method.is_static {
+            class_type_arguments = static_member_type_arguments(
+                context,
+                resolved_method.classname,
+                resolved_method.method_identifier.get_class_name(),
+                generic_class.as_ref().and_then(TNamedObject::get_type_parameters),
+            );
+        }
+
         let metadata = context
             .codebase
             .get_class_like(resolved_method.classname.as_bytes())
@@ -121,6 +161,20 @@ where
             resolved_method.method_identifier.get_method_name(),
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, call.span);
+
+        // Spec section 9.1: a named constructor creates an object, so PHP# calls it with `new`. PHP calls the static
+        // method it runs as.
+        if context.dialect.is_sharp() && method_metadata.flags.is_named_constructor() {
+            let constructor = quoted_source(context, call.class.span().join(call.method.span()));
+            context.collector.report_with_code(
+                IssueCode::NamedConstructorWithoutNew,
+                Issue::error(format!(
+                    "`{constructor}` is a constructor: write `new {}`.",
+                    quoted_source(context, call.span)
+                ))
+                .with_annotation(Annotation::primary(call.span).with_message("Called without `new` here.")),
+            );
+        }
 
         let method_target_context = MethodTargetContext {
             invocation_kind: MethodInvocationKind::Static,
@@ -169,6 +223,17 @@ where
 
     let class_has_nullsafe_null = artifacts.get_expression_type(call.class).is_some_and(|t| t.has_nullsafe_null());
 
+    if let Some(type_arguments) = type_arguments {
+        seed_method_type_arguments(
+            context,
+            block_context,
+            artifacts,
+            type_arguments,
+            &invocation_targets,
+            &mut method_resolution.template_result,
+        );
+    }
+
     if has_resolved_methods || method_resolution.undocumented_methods.is_empty() {
         analyze_invocation_targets(
             context,
@@ -184,6 +249,13 @@ where
             expression_is_nullsafe(call.class) || method_resolution.encountered_null,
             class_has_nullsafe_null,
         )?;
+    }
+
+    // The method runs with its class's type arguments ahead of its own.
+    if let Some(class_type_arguments) = class_type_arguments {
+        let span = (call.span.start.offset, call.span.end.offset);
+        let own = artifacts.inferred_type_arguments.remove(&span).unwrap_or_default();
+        artifacts.inferred_type_arguments.insert(span, class_type_arguments.into_iter().chain(own).collect());
     }
 
     if !method_resolution.undocumented_methods.is_empty() {

@@ -19,9 +19,13 @@ use crate::cst::cst::ClassLikeMemberSelector;
 use crate::cst::cst::Clone;
 use crate::cst::cst::Conditional;
 use crate::cst::cst::ConstantAccess;
+use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FunctionCall;
 use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::GenericClass;
+use crate::cst::cst::Identifier;
+use crate::cst::cst::Instantiation;
 use crate::cst::cst::MethodCall;
 use crate::cst::cst::MethodPartialApplication;
 use crate::cst::cst::NullSafeMethodCall;
@@ -159,6 +163,20 @@ where
                 left = self.arena.alloc(Expression::ConstantAccess(ConstantAccess { name: *identifier }));
             }
 
+            // `Counter<Order>.count` reads a static member of one type argument's class, spec section 11. A `.` after
+            // the `>` makes the `<` a type argument list, as in C#.
+            if self.dialect.is_sharp()
+                && kind == T!["<"]
+                && let Expression::ConstantAccess(_) = left
+                && self.stream.peek_kind_after_type_arguments(0)? == Some(T!["."])
+            {
+                left = self.arena.alloc(Expression::GenericClass(GenericClass {
+                    class: left,
+                    type_arguments: self.parse_type_argument_list()?,
+                }));
+                continue;
+            }
+
             // Stop parsing if the next token is a terminator.
             if matches!(kind, T![";" | "?>"]) {
                 break;
@@ -204,6 +222,8 @@ where
                     break;
                 }
 
+                self.stream.read_as(0, kind);
+
                 if let Expression::Binary(binary) = left
                     && matches!(binary.rhs, Expression::Assignment(_))
                     && infix_precedence > binary.operator.precedence().in_dialect(self.dialect)
@@ -226,6 +246,7 @@ where
 
     #[inline]
     fn parse_lhs_expression(&mut self, precedence: Precedence) -> Result<&'arena Expression<'arena>, ParseError> {
+        self.read_php_expression()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let next = self.stream.peek_kind(1)?;
 
@@ -261,24 +282,30 @@ where
         }
 
         // `new Report.fromJson(…)` calls a named constructor, spec section 9.1: in PHP# a name after `new` is a class,
-        // so a `.` after it names the constructor. It parses whole as one error, and its value is the error expression.
+        // so a `.` after it names the constructor. `new Self.of(…)` parses too, so the checker can refuse it by name.
         if self.dialect.is_sharp()
             && token.kind == T!["new"]
-            && next == Some(T![Identifier])
+            && matches!(next, Some(T![Identifier] | T!["self"]))
             && self.stream.peek_kind(2)? == Some(T!["."])
             && self.stream.peek_kind(3)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
         {
-            let new = self.stream.consume_span()?;
-            let class = self.parse_local_identifier()?;
-            self.stream.consume()?;
-            let name = self.parse_local_identifier()?;
-            let end = match self.parse_optional_argument_list()? {
-                Some(arguments) => arguments.span(),
-                None => name.span,
+            let new = self.expect_keyword(T!["new"])?;
+            let class = if next == Some(T!["self"]) {
+                Expression::Self_(self.expect_any_keyword()?)
+            } else {
+                Expression::Identifier(Identifier::Local(self.parse_local_identifier()?))
             };
-            self.errors.push(ParseError::NotSupportedYetInSharp("A named constructor", class.span.join(name.span)));
 
-            return Ok(self.arena.alloc(Expression::Error(new.join(end))));
+            return Ok(self.arena.alloc(Expression::Instantiation(Instantiation {
+                new,
+                class: self.arena.alloc(class),
+                type_arguments: None,
+                constructor: Some(ConstructorName {
+                    dot: self.stream.eat_span(T!["."])?,
+                    name: self.parse_local_identifier()?,
+                }),
+                argument_list: self.parse_optional_argument_list()?,
+            })));
         }
 
         if self.is_at_type_of()? {
@@ -401,7 +428,8 @@ where
     /// Returns the operator the next token stands for in the current dialect.
     ///
     /// In PHP#, `.` is member access, which PHP writes `->`, and `?` written right before `.` is null-safe member
-    /// access, which PHP writes `?->`.
+    /// access, which PHP writes `?->`. A name that spells one of PHP's word operators, such as `xor`, stands for that
+    /// operator after an operand, where no name can follow.
     fn operator_kind(&mut self, token: Token<'_>) -> Result<TokenKind, ParseError> {
         Ok(match (self.dialect, token.kind) {
             (Dialect::Sharp, T!["."]) => T!["->"],
@@ -412,6 +440,9 @@ where
                     .is_some_and(|next| next.kind == T!["."] && next.start.offset == token.start.offset + 1) =>
             {
                 T!["?->"]
+            }
+            (Dialect::Sharp, T![Identifier]) => {
+                self.php_keyword(token).filter(TokenKind::is_infix).unwrap_or(token.kind)
             }
             _ => token.kind,
         })
@@ -553,8 +584,21 @@ where
                 let (arrow, operator_refused) = self.consume_operator_span()?;
                 refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
+                let type_arguments = if Precedence::CallDim > precedence {
+                    self.parse_optional_call_type_argument_list()?
+                } else {
+                    None
+                };
 
-                if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
+                if type_arguments.is_some() {
+                    Expression::Call(Call::Method(MethodCall {
+                        object: lhs,
+                        arrow,
+                        method: selector,
+                        type_arguments,
+                        argument_list: self.parse_argument_list()?,
+                    }))
+                } else if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
                     let partial_args = self.parse_partial_argument_list()?;
 
                     if partial_args.has_placeholders() {
@@ -569,6 +613,7 @@ where
                             object: lhs,
                             arrow,
                             method: selector,
+                            type_arguments: None,
                             argument_list: partial_args.into_argument_list(self.arena),
                         }))
                     }
@@ -580,12 +625,20 @@ where
                 let (question_mark_arrow, operator_refused) = self.consume_operator_span()?;
                 refused = operator_refused;
                 let selector = self.parse_classlike_member_selector()?;
+                let type_arguments = if Precedence::CallDim > precedence {
+                    self.parse_optional_call_type_argument_list()?
+                } else {
+                    None
+                };
 
-                if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
+                if type_arguments.is_some()
+                    || (Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])))
+                {
                     Expression::Call(Call::NullSafeMethod(NullSafeMethodCall {
                         object: lhs,
                         question_mark_arrow,
                         method: selector,
+                        type_arguments,
                         argument_list: self.parse_argument_list()?,
                     }))
                 } else {

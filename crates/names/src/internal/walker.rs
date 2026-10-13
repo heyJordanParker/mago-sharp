@@ -22,6 +22,7 @@ use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Extern;
@@ -31,12 +32,12 @@ use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionPartialApplication;
+use mago_syntax::cst::GenericClass;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Implements;
-use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Is;
@@ -46,10 +47,13 @@ use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullSafePropertyAccess;
+use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatchPatternArm;
@@ -67,6 +71,7 @@ use mago_syntax::cst::Trait;
 use mago_syntax::cst::TraitUse;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TypeOf;
+use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
 use mago_syntax::cst::UnaryPrefix;
@@ -76,6 +81,7 @@ use mago_syntax::cst::UseItems;
 use mago_syntax::cst::Uses;
 use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
+use mago_syntax::cst::built_in_generic_arity;
 use mago_syntax::utils::pattern::called_function;
 use mago_syntax::walker::MutWalker;
 use mago_syntax::walker::walk_binary_mut;
@@ -102,7 +108,8 @@ use crate::scope::trim_start_byte;
 /// PHP's scoping and aliasing rules.
 ///
 /// In a PHP# file it is also the binder: it classifies every bare name as a local, `this`,
-/// a class or a constant, from the scopes of the file alone.
+/// a class or a constant, and every type name that names a type parameter as that type parameter, from the scopes of
+/// the file alone.
 #[derive(Debug, Default)]
 pub struct NameWalker<'arena> {
     /// Accumulates the resolved names found during the CST walk.
@@ -120,6 +127,9 @@ pub struct NameWalker<'arena> {
     lambdas: std::vec::Vec<u32>,
     /// The accessor list being walked in PHP#, which declares `field`, its property's storage.
     accessors: Option<Span>,
+    /// The name and declaration of each type parameter of each class, interface and method being walked in PHP#, one
+    /// list each, innermost last.
+    type_parameters: std::vec::Vec<std::vec::Vec<(&'arena [u8], Span)>>,
     /// The names of the class-likes the file declares, compared as PHP compares class names.
     declared_classes: foldhash::HashSet<IgnoringCase<'arena>>,
 }
@@ -229,13 +239,45 @@ impl<'arena> NameWalker<'arena> {
         }
     }
 
-    /// Marks a bare name written before `.` or `?.`, which binds as a class unless it names a local or `this`.
+    /// Marks a bare name written before `.` or `?.`, with or without type arguments, which binds as a class unless it
+    /// names a local, `this` or a type parameter in scope.
     fn mark_member_object(&mut self, object: &Expression<'arena>) {
         if self.sharp
-            && let Expression::ConstantAccess(object) = object
+            && let Expression::ConstantAccess(object)
+            | Expression::GenericClass(GenericClass { class: Expression::ConstantAccess(object), .. }) = object
         {
             self.member_objects.insert(object.name.span().start.offset);
         }
+    }
+
+    /// Brings the type parameters of a class, an interface or a method into scope until `exit_type_parameters`.
+    fn enter_type_parameters(&mut self, list: Option<&TypeParameterList<'arena>>) {
+        if self.sharp {
+            self.type_parameters.push(list.map_or_else(std::vec::Vec::new, |list| {
+                list.parameters.iter().map(|parameter| (parameter.name.value, parameter.name.span)).collect()
+            }));
+        }
+    }
+
+    fn exit_type_parameters(&mut self) {
+        if self.sharp {
+            self.type_parameters.pop();
+        }
+    }
+
+    /// Binds a type name that names a type parameter in scope, the innermost list's first, and resolves it to the name
+    /// as written. Returns whether it named one.
+    fn bind_type_parameter(&mut self, name: &'arena [u8], span: Span) -> bool {
+        let Some(declaration) = self.type_parameters.iter().rev().find_map(|list| {
+            list.iter().find(|(parameter, _)| *parameter == name).map(|(_, declaration)| *declaration)
+        }) else {
+            return false;
+        };
+
+        self.resolved_names.insert_at(span, name, false);
+        self.resolved_names.bind(span, Binding::TypeParameter { declaration });
+
+        true
     }
 
     fn is_member(&self, name: &[u8]) -> bool {
@@ -446,6 +488,7 @@ fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<
             Statement::Interface(interface) => Some(IgnoringCase(interface.name.value)),
             Statement::Trait(r#trait) => Some(IgnoringCase(r#trait.name.value)),
             Statement::Enum(r#enum) => Some(IgnoringCase(r#enum.name.value)),
+            Statement::Event(event) => Some(IgnoringCase(event.name.value)),
             _ => None,
         })
         .collect()
@@ -513,7 +556,12 @@ where
         let written = target.value();
         let class = written.split(|byte| *byte == b'.').next().unwrap_or(written);
         let (fqn, imported) = self.resolve_class(context, class);
-        if !target.is_dotted() && !imported && !self.declared_classes.contains(&IgnoringCase(class)) {
+        // An `extern event` always names a class, spec section 15.
+        if r#extern.event.is_none()
+            && !target.is_dotted()
+            && !imported
+            && !self.declared_classes.contains(&IgnoringCase(class))
+        {
             self.resolved_names.insert_at(target.span(), written, false);
 
             return;
@@ -558,24 +606,40 @@ where
         if self.sharp {
             self.class_members.push(class_member_names(&class.members));
         }
+        self.enter_type_parameters(class.type_parameters.as_ref());
     }
 
     fn walk_out_class(&mut self, _class: &'ast Class<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.class_members.pop();
         }
+        self.exit_type_parameters();
     }
 
-    fn walk_in_method(&mut self, _method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+    /// An event is a class of its namespace, spec section 15, and its parameters are its constructor's.
+    fn walk_in_event(&mut self, event: &'ast Event<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(event.name.value);
+
+        self.resolved_names.insert_at(event.name.span, classlike, false);
+        self.locals.enter_method();
+    }
+
+    fn walk_out_event(&mut self, _event: &'ast Event<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.locals.exit_method();
+    }
+
+    fn walk_in_method(&mut self, method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.locals.enter_method();
         }
+        self.enter_type_parameters(method.type_parameters);
     }
 
     fn walk_out_method(&mut self, _method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.locals.exit_method();
         }
+        self.exit_type_parameters();
     }
 
     /// A PHP# operator runs as the static method it lowers to, so its parameters are its body's locals.
@@ -589,6 +653,31 @@ where
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.locals.exit_method();
+    }
+
+    /// A PHP# named constructor's parameters are its locals, as a constructor's are, spec section 9.1.
+    fn walk_in_named_constructor(
+        &mut self,
+        _named_constructor: &'ast NamedConstructor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_method();
+    }
+
+    fn walk_out_named_constructor(
+        &mut self,
+        _named_constructor: &'ast NamedConstructor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.exit_method();
+    }
+
+    /// A module is the class-like `Module` of its namespace, spec sections 28 and 32, so its keyword holds that full
+    /// name, which names each of its laws.
+    fn walk_in_module(&mut self, module: &'ast Module<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(b"Module");
+
+        self.resolved_names.insert_at(module.module.span, classlike, false);
     }
 
     /// A law binds as a static method does, spec section 28: its parameters are locals of the law alone.
@@ -629,8 +718,8 @@ where
     }
 
     /// A PHP# accessor runs as a function of its own, as PHP runs a hook. Its accessor list declares `field`, the
-    /// storage, apart from any constructor parameter that declares the same property, and `set` declares `value`, the
-    /// incoming value, as PHP's `set` hook declares `$value`.
+    /// storage, apart from any constructor parameter that declares the same property, and `set` or `init` declares
+    /// `value`, the incoming value, as PHP's `set` hook declares `$value`.
     fn walk_in_property_hook(
         &mut self,
         hook: &'ast PropertyHook<'arena>,
@@ -642,7 +731,7 @@ where
 
         self.locals.enter_method();
         self.locals.declare(b"field", Local { declaration: accessors, kind: LocalKind::Parameter });
-        if hook.name.value == b"set" && hook.parameter_list.is_none() {
+        if hook.is_setter() && hook.parameter_list.is_none() {
             self.locals.declare(b"value", Local { declaration: hook.name.span, kind: LocalKind::Parameter });
         }
     }
@@ -997,6 +1086,15 @@ where
         let classlike = context.qualify_name(interface.name.value);
 
         self.resolved_names.insert_at(interface.name.span, classlike, false);
+        self.enter_type_parameters(interface.type_parameters.as_ref());
+    }
+
+    fn walk_out_interface(
+        &mut self,
+        _interface: &'ast Interface<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.exit_type_parameters();
     }
 
     fn walk_in_trait(&mut self, r#trait: &'ast Trait<'arena>, context: &mut NameResolutionContext<'arena, A>) {
@@ -1049,24 +1147,31 @@ where
         }
     }
 
-    fn walk_in_inheritance(
-        &mut self,
-        inheritance: &'ast Inheritance<'arena>,
-        context: &mut NameResolutionContext<'arena, A>,
-    ) {
-        for parent in &inheritance.types {
-            let (parent_classlike, imported) = self.resolve_class(context, parent.value());
+    fn walk_in_on(&mut self, on: &'ast On<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        for event in &on.events {
+            let (event_classlike, imported) = self.resolve_class(context, event.value);
 
-            self.resolved_names.insert_at(parent.span(), parent_classlike, imported);
+            self.resolved_names.insert_at(event.span, event_classlike, imported);
         }
     }
 
+    /// Resolves the name every type is written with, a header's included. A name that names a type parameter in scope
+    /// is that type parameter. A generic type, as in `PaginatedList<Order>`, names its class before its type arguments,
+    /// and the names [`built_in_generic_arity`] knows name no class.
     fn walk_in_hint(&mut self, hint: &'ast Hint<'arena>, context: &mut NameResolutionContext<'arena, A>) {
-        if let Hint::Identifier(identifier) = hint {
-            let (name, imported) = self.resolve_class(context, identifier.value());
-
-            self.resolved_names.insert_at(identifier.span(), name, imported);
+        let (name, span) = match hint {
+            Hint::Identifier(identifier) => (identifier.value(), identifier.span()),
+            Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none() => {
+                (generic.name.value, generic.name.span)
+            }
+            _ => return,
+        };
+        if self.bind_type_parameter(name, span) {
+            return;
         }
+
+        let (name, imported) = self.resolve_class(context, name);
+        self.resolved_names.insert_at(span, name, imported);
     }
 
     fn walk_in_attribute(
@@ -1116,7 +1221,9 @@ where
         instantiation: &'ast Instantiation<'arena>,
         context: &mut NameResolutionContext<'arena, A>,
     ) {
-        if let Expression::Identifier(identifier) = instantiation.class {
+        if let Expression::Identifier(identifier) = instantiation.class
+            && !self.bind_type_parameter(identifier.value(), identifier.span())
+        {
             let (name, imported) = self.resolve_class(context, identifier.value());
 
             self.resolved_names.insert_at(identifier.span(), name, imported);
@@ -1124,6 +1231,10 @@ where
     }
 
     fn walk_in_type_of(&mut self, type_of: &'ast TypeOf<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        if self.bind_type_parameter(type_of.class.value(), type_of.class.span()) {
+            return;
+        }
+
         let (name, imported) = self.resolve_class(context, type_of.class.value());
 
         self.resolved_names.insert_at(type_of.class.span(), name, imported);
@@ -1215,6 +1326,10 @@ where
             }
 
             let is_member_object = self.member_objects.contains(&span.start.offset);
+            if is_member_object && self.bind_type_parameter(name, span) {
+                return;
+            }
+
             let (binding, (fqn, imported)) = if is_member_object {
                 (Binding::Class, self.resolve_class(context, name))
             } else if self.is_member(name) {

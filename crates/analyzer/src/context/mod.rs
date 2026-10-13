@@ -164,6 +164,13 @@ where
         self.settings.check_throws && !self.dialect.is_sharp()
     }
 
+    /// Whether code after a `return`, `throw` or `exit` is analyzed. A PHP# file's always is: `mago compile` lowers every
+    /// statement with the types the analysis gives it, so `mago analyze` reports the errors the compiler refuses.
+    #[inline]
+    pub(crate) fn analyze_dead_code(&self) -> bool {
+        self.settings.analyze_dead_code || self.dialect.is_sharp()
+    }
+
     /// Makes an issue about a null check or a `?` that cannot matter an error in a PHP# file, as spec section 14.4
     /// decides. A PHP file keeps the issue as Mago reports it.
     pub(crate) fn as_null_check_error(&self, mut issue: Issue) -> Issue {

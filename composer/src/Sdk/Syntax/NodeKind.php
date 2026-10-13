@@ -69,8 +69,13 @@ enum NodeKind: string
     case MethodAbstractBody = 'MethodAbstractBody';
     case MethodBody = 'MethodBody';
     case MethodExpressionBody = 'MethodExpressionBody';
+    case On = 'On';
     case Operator = 'Operator';
     case Law = 'Law';
+    case ConstructorInitializer = 'ConstructorInitializer';
+    case NamedConstructor = 'NamedConstructor';
+    case ConstructorName = 'ConstructorName';
+    case Event = 'Event';
     case ComputedProperty = 'ComputedProperty';
     case HookedProperty = 'HookedProperty';
     case PlainProperty = 'PlainProperty';
@@ -171,6 +176,7 @@ enum NodeKind: string
     case Literal = 'Literal';
     case Pipe = 'Pipe';
     case TypeOf = 'TypeOf';
+    case GenericClass = 'GenericClass';
     case LiteralFloat = 'LiteralFloat';
     case LiteralInteger = 'LiteralInteger';
     case LiteralString = 'LiteralString';
@@ -202,6 +208,7 @@ enum NodeKind: string
     case Break = 'Break';
     case Continue = 'Continue';
     case Return = 'Return';
+    case Emit = 'Emit';
     case Static = 'Static';
     case StaticAbstractItem = 'StaticAbstractItem';
     case StaticConcreteItem = 'StaticConcreteItem';
@@ -221,6 +228,8 @@ enum NodeKind: string
     case UseType = 'UseType';
     case Extern = 'Extern';
     case Uses = 'Uses';
+    case Module = 'Module';
+    case ModuleMember = 'ModuleMember';
     case Yield = 'Yield';
     case YieldFrom = 'YieldFrom';
     case YieldPair = 'YieldPair';
@@ -245,6 +254,10 @@ enum NodeKind: string
     case NullableHint = 'NullableHint';
     case GenericHint = 'GenericHint';
     case FunctionHint = 'FunctionHint';
+    case TypeArgumentList = 'TypeArgumentList';
+    case TypeParameterList = 'TypeParameterList';
+    case TypeParameter = 'TypeParameter';
+    case TypeParameterBound = 'TypeParameterBound';
     case ParenthesizedHint = 'ParenthesizedHint';
     case UnionHint = 'UnionHint';
     case Unset = 'Unset';

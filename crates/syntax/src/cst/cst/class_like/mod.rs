@@ -11,9 +11,11 @@ use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
 use crate::cst::cst::type_hint::Hint;
+use crate::cst::cst::type_hint::TypeParameterList;
 use crate::cst::sequence::Sequence;
 
 pub mod constant;
+pub mod constructor;
 pub mod enum_case;
 pub mod inheritance;
 pub mod law;
@@ -40,6 +42,8 @@ pub struct Interface<'arena> {
     pub modifiers: Sequence<'arena, Modifier<'arena>>,
     pub interface: Keyword<'arena>,
     pub name: LocalIdentifier<'arena>,
+    /// PHP#'s type parameters, as in `public interface Validator<in TItem> {}`. Always `None` in PHP.
+    pub type_parameters: Option<TypeParameterList<'arena>>,
     pub extends: Option<Extends<'arena>>,
     /// PHP#'s `: Interface` header. Always `None` in PHP.
     pub inheritance: Option<Inheritance<'arena>>,
@@ -69,6 +73,8 @@ pub struct Class<'arena> {
     pub modifiers: Sequence<'arena, Modifier<'arena>>,
     pub class: Keyword<'arena>,
     pub name: LocalIdentifier<'arena>,
+    /// PHP#'s type parameters, as in `public class PaginatedList<out TItem> {}`. Always `None` in PHP.
+    pub type_parameters: Option<TypeParameterList<'arena>>,
     pub extends: Option<Extends<'arena>>,
     pub implements: Option<Implements<'arena>>,
     /// PHP#'s `: Base, Interface` header. Always `None` in PHP.
