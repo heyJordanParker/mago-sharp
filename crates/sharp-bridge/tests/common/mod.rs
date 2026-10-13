@@ -81,6 +81,13 @@ pub const FLOAT: (&str, &str) = (
     "namespace Sharp;\n\npublic static class Float\n{\n    public static float parse(Any? value) => 0.0;\n\n    public static float? tryParse(Any? value) => null;\n}\n",
 );
 
+/// The standard library's `Sharp\Environment`, the `foreign` class of the effect `Environment`, with the signature of
+/// its `variable`.
+pub const ENVIRONMENT: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
+    "namespace Sharp;\n\npublic foreign class Environment\n{\n    public string? variable(string name) => null;\n}\n",
+);
+
 /// The standard library's package in `vendor/`. A checked file under it is the standard library's, as the loader marks
 /// a file whose nearest `composer.json` names the package.
 const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";

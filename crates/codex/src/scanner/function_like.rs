@@ -116,6 +116,12 @@ where
         .collect();
     metadata.listens =
         method.on.iter().flat_map(|on| on.events.iter()).map(|event| word(context.resolved_names.get(event))).collect();
+    metadata.uses = method
+        .uses
+        .iter()
+        .flat_map(|uses| uses.names.iter())
+        .map(|effect| word(context.resolved_names.get(effect)))
+        .collect();
 
     if let Some(return_hint) = method.return_type_hint {
         metadata.set_return_type_declaration_metadata(Some(get_type_metadata_from_hint(

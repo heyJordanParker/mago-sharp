@@ -14,6 +14,7 @@ use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
 use crate::cst::cst::type_hint::Hint;
+use crate::cst::cst::uses::Uses;
 use crate::cst::sequence::Sequence;
 use crate::cst::sequence::TokenSeparatedSequence;
 use crate::cst::sequence::TokenSeparatedSequenceExt;
@@ -47,6 +48,9 @@ pub struct Method<'arena> {
     pub return_type_hint: Option<FunctionLikeReturnTypeHint<'arena>>,
     /// A PHP# listener's `on` clause. PHP never sets it.
     pub on: Option<On<'arena>>,
+    /// The effects a PHP# method without a body allows its implementations, spec section 29. PHP never sets it, so it
+    /// sits in the arena and keeps every method small.
+    pub uses: Option<&'arena Uses<'arena>>,
     /// A PHP# constructor's `: super(…)` or `: this(…)`. PHP never sets it.
     pub initializer: Option<ConstructorInitializer<'arena>>,
     pub body: MethodBody<'arena>,

@@ -1,6 +1,5 @@
 use mago_bytes::BytesDisplay;
 use mago_names::ResolvedNames;
-use mago_names::STANDARD_EFFECTS;
 use mago_names::binding::Binding;
 use mago_names::binding::BindingError;
 use mago_names::binding::Local;
@@ -8,7 +7,6 @@ use mago_names::binding::LocalKind;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
 use mago_names::scope::php_name;
-use mago_names::short_name;
 use mago_php_version::PHPVersion;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
@@ -101,7 +99,6 @@ use mago_syntax::cst::UnionHint;
 use mago_syntax::cst::Use;
 use mago_syntax::cst::UseItem;
 use mago_syntax::cst::UseItems;
-use mago_syntax::cst::Uses;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
@@ -626,7 +623,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         // `check_class` reports `protected` and `private` on a class, and PHP's own check `abstract` with `final`.
-        // `check_static_class` reports `abstract` and `final` on a static class.
+        // `check_static_class` reports `abstract`, `final` and `foreign` on a static class.
         (
             Node::Modifier(
                 Modifier::Public(_)
@@ -634,7 +631,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Modifier::Private(_)
                 | Modifier::Abstract(_)
                 | Modifier::Final(_)
-                | Modifier::Static(_),
+                | Modifier::Static(_)
+                | Modifier::Foreign(_),
             ),
             Class,
         ) => Some(Class),
@@ -886,12 +884,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // `is_slice_type` refuses for its parameters, and `Self` in it is an error, because `Self` is a method's return
         // type only.
         (Node::FunctionHint(_), FieldOrProperty | Method | Parameter | Body) => Some(Parameter),
-        // The effects an `extern` or a function type lists, spec section 29.
-        (Node::Uses(uses), File | Parameter) => {
-            check_uses(uses, context);
-
-            Some(place)
-        }
+        // The effects an `extern`, a function type or a method without a body lists, spec section 29, which the
+        // analyzer's `check_uses` decides, because an effect is a `foreign` class any file may declare.
+        (Node::Uses(_), File | Parameter | Method | Signature) => Some(place),
         (Node::Method(method), Enum)
             if method.return_type_hint.is_none()
                 && enclosing_class(context.program, method.span())
@@ -916,6 +911,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     check_declared_name(method.name.value, method.name.span, context);
                 }
 
+                check_method_uses(method, context);
                 check_extern(method, context)
             }
             Err((message, help)) => report_refusal(
@@ -1732,7 +1728,7 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
     };
 
     for modifier in &class.modifiers {
-        if let Modifier::Abstract(keyword) | Modifier::Final(keyword) = modifier {
+        if let Modifier::Abstract(keyword) | Modifier::Final(keyword) | Modifier::Foreign(keyword) = modifier {
             report(
                 format!("A static class takes only `public` and `static`: remove `{}`.", BytesDisplay(keyword.value)),
                 keyword.span,
@@ -1778,14 +1774,28 @@ fn is_extern(method: &Method) -> bool {
     method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)))
 }
 
-/// The place of a method's parts, refusing an `extern` method that is not `public static`, in a static class, with no
-/// body. The refusal is at its name, so its other parts, a body written by mistake among them, stay checked. Only the
-/// standard library declares native bodies, but the engine compiles the library's files from `vendor/` as any other,
-/// so the analyzer, which knows a file's package, refuses one anywhere else.
+/// Refuses `uses` on a method with a body, spec section 29: the checker works a body's effects out from its code, so
+/// only a method without a body states the effects its implementations may have.
+fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
+    if let Some(uses) = &method.uses
+        && !method.is_abstract()
+    {
+        context.report(
+            Issue::error("A method with a body takes no `uses`: its effects come from its code.")
+                .with_annotation(Annotation::primary(uses.span()).with_message("Written here."))
+                .with_help("Remove the `uses` clause, or declare the method without a body."),
+        );
+    }
+}
+
+/// The place of a method's parts, refusing an `extern` method that is not `static`, in a static or `foreign` class,
+/// with no body. A `foreign` class's native body is the one part of an effect that plain PHP cannot reach, as
+/// `Environment` reads the command line. The refusal is at its name, so its other parts, a body written by mistake
+/// among them, stay checked. Only the standard library declares native bodies, but the engine compiles the library's
+/// files from `vendor/` as any other, so the analyzer, which knows a file's package, refuses one anywhere else.
 fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     if !is_extern(method)
-        || (enclosing_class(context.program, method.span()).is_some_and(|class| class.is_static)
-            && method.modifiers.contains_public()
+        || (enclosing_class(context.program, method.span()).is_some_and(|class| class.is_static || class.is_foreign)
             && method.is_static()
             && matches!(method.body, MethodBody::Abstract(_)))
     {
@@ -1793,7 +1803,7 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
     }
 
     report_refusal(
-        Issue::error("An `extern` method is `public static`, in a static class, with no body.")
+        Issue::error("An `extern` method is `static`, in a static or `foreign` class, with no body.")
             .with_annotation(Annotation::primary(method.name.span).with_message("Declared `extern` here.")),
         method.span(),
         Place::Method,
@@ -1879,38 +1889,6 @@ fn report_interface_member_access(modifier: &Modifier, context: &mut Context<'_,
             .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
             .with_help(format!("Remove `{}`.", BytesDisplay(modifier.get_keyword().value))),
     );
-}
-
-/// Reports each name in a `uses` that is no effect, spec section 29. A name is an effect when it resolves to one of the
-/// [`STANDARD_EFFECTS`], written bare or imported, and names compare as PHP's class names do, ignoring case. An
-/// effect's own name that an import shadows, spec section 23, is refused with the imported class it names instead.
-fn check_uses(uses: &Uses, context: &mut Context<'_, '_, '_>) {
-    for effect in &uses.names {
-        let resolved = context.get_name(effect.span.start);
-        if STANDARD_EFFECTS.iter().any(|standard| standard.as_bytes().eq_ignore_ascii_case(resolved)) {
-            continue;
-        }
-
-        let written = BytesDisplay(effect.value);
-        let message = if context.names.is_imported(&effect.span.start)
-            && STANDARD_EFFECTS.iter().any(|standard| short_name(standard).as_bytes() == effect.value)
-        {
-            let imported = String::from_utf8_lossy(resolved).replace('\\', ".");
-
-            format!(
-                "`{written}` here is the imported `{imported}`, not the effect `{written}`. Import it under another name, as in `import {imported} as System{written};`."
-            )
-        } else {
-            let [rest @ .., last] = &STANDARD_EFFECTS;
-            let rest = rest.iter().map(short_name).collect::<Vec<_>>().join(", ");
-
-            format!("`{written}` is not an effect: `uses` takes {rest} or {}.", short_name(last))
-        };
-
-        context.report(
-            Issue::error(message).with_annotation(Annotation::primary(effect.span).with_message("Written here.")),
-        );
-    }
 }
 
 /// Reports what the engine refuses in a header when it declares the class: a name the header already holds, and in an
@@ -4053,6 +4031,7 @@ struct ClassLike<'ast, 'arena> {
     span: Span,
     members: &'ast Sequence<'arena, ClassLikeMember<'arena>>,
     is_static: bool,
+    is_foreign: bool,
 }
 
 impl<'ast, 'arena> ClassLike<'ast, 'arena> {
@@ -4062,6 +4041,7 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
             span: class.span(),
             members: &class.members,
             is_static: class.modifiers.contains_static(),
+            is_foreign: class.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Foreign(_))),
         }
     }
 }
@@ -4097,6 +4077,7 @@ fn collect_declarations<'ast, 'arena>(
                 span: r#enum.span(),
                 members: &r#enum.members,
                 is_static: false,
+                is_foreign: false,
             });
         }
         Statement::Use(Use { items: UseItems::Sequence(sequence), .. }) => imports.extend(sequence.items.iter()),

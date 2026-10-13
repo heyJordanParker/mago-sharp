@@ -454,6 +454,12 @@ where
                 class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::STATIC;
             }
 
+            if modifiers
+                .is_some_and(|modifiers| modifiers.iter().any(|modifier| matches!(modifier, Modifier::Foreign(_))))
+            {
+                class_like_metadata.flags |= MetadataFlags::FOREIGN;
+            }
+
             codebase.symbols.add_symbol_name(name, SymbolKind::Class);
 
             if let Some(extended_class) = extends.and_then(|e| e.types.first()) {
@@ -1694,6 +1700,7 @@ fn create_enum_method(
             where_constraints: WordMap::default(),
         }),
         listens: vec![],
+        uses: vec![],
         type_resolution_context: None,
         thrown_types,
         issues: Vec::default(),

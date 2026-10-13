@@ -305,7 +305,8 @@ pub fn check_property(
             | Modifier::Required(_)
             | Modifier::Extern(_)
             | Modifier::Lazy(_)
-            | Modifier::Internal(_) => {}
+            | Modifier::Internal(_)
+            | Modifier::Foreign(_) => {}
         }
     }
 

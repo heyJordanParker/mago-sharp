@@ -669,6 +669,20 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
     assert_eq!(with.tree(), without.tree());
 }
 
+/// `foreign` tells only the checker which effect a class's objects carry, spec section 29, so the engine gets the
+/// plain class, which a test fake may extend.
+#[test]
+fn a_foreign_class_lowers_to_the_nodes_of_the_plain_class() {
+    let foreign = Lowered::new(
+        "namespace App.Billing;\n\npublic foreign class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
+    );
+    let plain = Lowered::new(
+        "namespace App.Billing;\n\npublic class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
+    );
+
+    assert_eq!(foreign.tree(), plain.tree());
+}
+
 /// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it. A module holds only
 /// laws, so its `Module.sharp` lowers to its namespace alone.
 #[test]
@@ -5466,7 +5480,6 @@ fn a_function_type_is_the_closure_class() {
 /// `App\Shop\Cart` and `App\Shop\Charge`, the parameter and return types of the function types below.
 const SHOP: (&str, &str) =
     ("src/App/Shop/Shop.php", "<?php namespace App\\Shop; final class Cart {} final class Charge {}");
-
 /// The type and the declaration of the one property `code` declares, rendered, after the checker accepts `code`.
 fn lowered_field(code: &str) -> (String, String) {
     let lowered = Lowered::with(code, &[SHOP]);
@@ -8750,8 +8763,10 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
 #[test]
 fn environment_and_list_are_the_classes_of_the_sharp_namespace() {
     assert_eq!(
-        body(
-            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        return 1;\n"
+        body_in(
+            RUN,
+            "        const settings = new Environment();\n        const lines = List.wrap(extra);\n        return 1;\n",
+            &[common::ENVIRONMENT]
         ),
         indoc! {r#"
             STMT_LIST

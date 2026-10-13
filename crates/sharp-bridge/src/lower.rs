@@ -3541,20 +3541,21 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::ProtectedSet(_)
             | Modifier::PrivateSet(_)
             | Modifier::Lazy(_)
-            | Modifier::Internal(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
+            | Modifier::Internal(_)
+            | Modifier::Foreign(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
         };
     }
 
     flags
 }
 
-/// The flags of a class's modifiers. `public` adds none, because every PHP class is public. A static class, whose
-/// members are all static, runs as a final PHP class.
+/// The flags of a class's modifiers. `public` adds none, because every PHP class is public, and `foreign` adds none,
+/// because only the checker reads it. A static class, whose members are all static, runs as a final PHP class.
 fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
     for modifier in modifiers {
         flags |= match modifier {
-            Modifier::Public(_) => 0,
+            Modifier::Public(_) | Modifier::Foreign(_) => 0,
             Modifier::Abstract(_) => ZEND_ACC_EXPLICIT_ABSTRACT_CLASS,
             Modifier::Final(_) | Modifier::Static(_) => ZEND_ACC_FINAL,
             Modifier::Protected(_)

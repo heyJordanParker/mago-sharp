@@ -297,6 +297,10 @@ fn analyze_fix_refuses_a_fix_that_would_edit_a_sharp_file() {
 /// its own exception.
 const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string quiet(string title) => @trim(title);\n\n    public static string shout(string title) => strtoupper(title);\n}\n";
 
+/// The standard library's `Environment`, the `foreign` class of the effect `Environment`, spec section 29. Its getters
+/// are pure: its constructor reads the process once, and its methods call plain PHP, as a `foreign` class's code does.
+const ENVIRONMENT: &str = "namespace Sharp;\n\nimport Error;\nimport ValueError;\n\npublic foreign class Environment\n{\n    public List<string> arguments { get; }\n\n    public string currentDirectory { get; }\n\n    public Environment()\n    {\n        this.arguments = Environment.commandLine();\n        this.currentDirectory = getcwd() is string directory ? directory : throw new Error(\"Environment: the current directory cannot be read\");\n    }\n\n    public string? variable(string name) => getenv(name) is string value ? value : null;\n\n    public static string require(string name)\n        => getenv(name) is string value ? value : throw new ValueError(`Environment.require: the environment variable \"${name}\" is not set`);\n\n    private static extern List<string> commandLine();\n}\n";
+
 /// The standard library's `Int`, `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
 /// reserved, and only the standard library declares them.
 const TYPE_CLASSES: [(&str, &str); 3] = [
@@ -358,6 +362,7 @@ fn write(root: &Path, name: &str, contents: &str) {
 fn write_library(root: &Path) {
     write(root, "composer.json", LIBRARY_PACKAGE);
     write(root, "library/Sharp/Text/Text.sharp", TEXT);
+    write(root, "library/Sharp/Environment.sharp", ENVIRONMENT);
     for (class, source) in TYPE_CLASSES.into_iter().chain(WRAPPERS) {
         write(root, &format!("library/Sharp/{class}.sharp"), source);
     }
@@ -462,8 +467,9 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 11 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 12 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Text/Text.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/library/Sharp/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
     assert!(title.windows(b"strtoupper".len()).any(|window| window == b"strtoupper"), "the form is inlined");
     assert!(!root.join(".sharp/example/App/Native.sharpc").exists(), "{printed}");

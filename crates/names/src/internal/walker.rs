@@ -89,7 +89,6 @@ use mago_syntax::walker::walk_while_mut;
 
 use crate::CHANGING_COLLECTION_METHODS;
 use crate::ResolvedNames;
-use crate::STANDARD_EFFECTS;
 use crate::binding::Binding;
 use crate::binding::BindingError;
 use crate::binding::Local;
@@ -293,25 +292,33 @@ impl<'arena> NameWalker<'arena> {
             return (fqn, imported);
         }
 
-        if let Some(effect) = STANDARD_EFFECTS
-            .iter()
-            .find(|effect| effect.strip_prefix("Sharp\\").is_some_and(|short| short.as_bytes() == name))
-        {
-            return (effect.as_bytes(), false);
-        }
-
-        let class: &'static [u8] = match name {
-            b"Int" => b"Sharp\\Int",
-            b"Float" => b"Sharp\\Float",
-            b"Bool" => b"Sharp\\Bool",
-            b"Position" => b"Sharp\\Position",
-            b"List" => b"Sharp\\List",
-            b"Replaces" => b"Sharp\\Replaces",
-            _ => return (fqn, imported),
-        };
-
-        (class, false)
+        standard_class(name).map_or((fqn, imported), |class| (class, false))
     }
+}
+
+/// The class of the `Sharp` namespace a bare `name` writes in a `.sharp` file, which imports `Sharp` by default, spec
+/// section 23: `Sharp\Http` for `Http`. `Events`, the effect of `emit`, is one of them, spec section 29.
+fn standard_class(name: &[u8]) -> Option<&'static [u8]> {
+    Some(match name {
+        b"Int" => b"Sharp\\Int",
+        b"Float" => b"Sharp\\Float",
+        b"Bool" => b"Sharp\\Bool",
+        b"Position" => b"Sharp\\Position",
+        b"List" => b"Sharp\\List",
+        b"Replaces" => b"Sharp\\Replaces",
+        b"Database" => b"Sharp\\Database",
+        b"Http" => b"Sharp\\Http",
+        b"Files" => b"Sharp\\Files",
+        b"Console" => b"Sharp\\Console",
+        b"Process" => b"Sharp\\Process",
+        b"Clock" => b"Sharp\\Clock",
+        b"Random" => b"Sharp\\Random",
+        b"Cache" => b"Sharp\\Cache",
+        b"Mail" => b"Sharp\\Mail",
+        b"Environment" => b"Sharp\\Environment",
+        b"Events" => b"Sharp\\Events",
+        _ => return None,
+    })
 }
 
 /// The variables a pattern declares.
@@ -533,9 +540,14 @@ where
         self.resolved_names.bind(target.span(), Binding::Class);
     }
 
+    /// A name in `uses` names an effect, spec section 29. A class name of the `Sharp` namespace is that class even where
+    /// the file imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
     fn walk_in_uses(&mut self, uses: &'ast Uses<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for name in &uses.names {
-            let (fqn, imported) = self.resolve_class(context, name.value);
+            let (fqn, imported) = match standard_class(name.value) {
+                Some(class) => (class, false),
+                None => self.resolve_class(context, name.value),
+            };
 
             self.resolved_names.insert_at(name.span, fqn, imported);
             self.resolved_names.bind(name.span, Binding::Class);

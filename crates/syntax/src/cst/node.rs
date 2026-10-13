@@ -1461,6 +1461,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 for item in node.on.iter() {
                     f(Node::On(item));
                 }
+                for item in node.uses.iter() {
+                    f(Node::Uses(item));
+                }
                 for item in node.initializer.iter() {
                     f(Node::ConstructorInitializer(item));
                 }
@@ -2377,6 +2380,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Modifier::Extern(node) => Node::Keyword(node),
                 Modifier::Lazy(node) => Node::Keyword(node),
                 Modifier::Internal(node) => Node::Keyword(node),
+                Modifier::Foreign(node) => Node::Keyword(node),
             }),
             Node::Namespace(node) => {
                 f(Node::Keyword(&node.r#namespace));

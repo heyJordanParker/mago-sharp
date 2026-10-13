@@ -606,6 +606,7 @@ impl Fingerprintable for Method<'_> {
         self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
         self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
         self.on.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.uses.fingerprint_with_hasher(hasher, resolved_names, options);
 
         if !options.signature_only {
             self.initializer.fingerprint_with_hasher(hasher, resolved_names, options);

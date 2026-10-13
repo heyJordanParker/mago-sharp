@@ -8,6 +8,7 @@ use mago_syntax::cst::IntersectionHint;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::ParenthesizedHint;
 use mago_syntax::cst::UnionHint;
+use mago_syntax::cst::Uses;
 
 use crate::FingerprintOptions;
 use crate::Fingerprintable;
@@ -69,11 +70,23 @@ impl Fingerprintable for FunctionHint<'_> {
             parameter.fingerprint_with_hasher(hasher, resolved_names, options);
         }
 
-        if let Some(uses) = &self.uses {
-            "uses".hash(hasher);
-            for effect in &uses.names {
-                effect.fingerprint_with_hasher(hasher, resolved_names, options);
-            }
+        self.uses.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for Uses<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "uses".hash(hasher);
+        for effect in &self.names {
+            effect.fingerprint_with_hasher(hasher, resolved_names, options);
         }
     }
 }

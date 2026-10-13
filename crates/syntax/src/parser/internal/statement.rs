@@ -40,7 +40,7 @@ where
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         // It returns here, not from an arm of the match below: an unoptimized build gives each arm's result its own stack
         // slot, and this frame sits between two `ensure_sufficient_stack` calls, so it must stay inside their red zone.
-        if !self.state.within_block && self.is_internal(token) {
+        if !self.state.within_block && (self.is_internal(token) || self.is_foreign(token)) {
             return self.parse_modified_class_like_with_attributes(Sequence::empty());
         }
 
@@ -102,7 +102,7 @@ where
                         expression: self.parse_closure_with_attributes(attributes)?,
                         terminator: self.parse_terminator()?,
                     }),
-                    kind if kind.is_modifier() || self.is_internal(next) => {
+                    kind if kind.is_modifier() || self.is_internal(next) || self.is_foreign(next) => {
                         self.parse_modified_class_like_with_attributes(attributes)?
                     }
                     T![Identifier] if self.is_at_event()? => {

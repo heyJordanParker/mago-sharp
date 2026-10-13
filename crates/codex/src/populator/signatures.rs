@@ -29,8 +29,8 @@ pub fn populate_function_like_metadata(
         add_class_reference(symbol_references, reference_source, attribute_metadata.name, Some(true));
     }
 
-    for event in &metadata.listens {
-        add_class_reference(symbol_references, reference_source, *event, Some(true));
+    for class in metadata.listens.iter().chain(&metadata.uses) {
+        add_class_reference(symbol_references, reference_source, *class, Some(true));
     }
 
     for return_type in

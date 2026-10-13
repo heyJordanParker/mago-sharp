@@ -16,6 +16,11 @@ where
         self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"internal"
     }
 
+    /// Whether `token` is spec section 29's `foreign`, which starts a class's modifiers, as `public` does.
+    pub(crate) fn is_foreign(&self, token: Token<'_>) -> bool {
+        self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"foreign"
+    }
+
     pub(crate) fn parse_modifier_sequence(&mut self) -> Result<Sequence<'arena, Modifier<'arena>>, ParseError> {
         let mut modifiers = self.new_vec();
         while let Some(modifier) = self.parse_optional_modifier()? {
@@ -50,6 +55,7 @@ where
                     Some(b"extern") => Modifier::Extern(self.expect_any_keyword()?),
                     Some(b"lazy") => Modifier::Lazy(self.expect_any_keyword()?),
                     Some(b"internal") => Modifier::Internal(self.expect_any_keyword()?),
+                    Some(b"foreign") => Modifier::Foreign(self.expect_any_keyword()?),
                     _ => return Ok(None),
                 }
             }

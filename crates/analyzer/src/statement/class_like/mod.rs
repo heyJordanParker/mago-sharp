@@ -71,6 +71,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
 use crate::statement::attributes::analyze_class_like_attributes;
@@ -1136,6 +1137,10 @@ where
     let has_complete_hierarchy = !class_like_metadata.has_incomplete_hierarchy();
     if context.dialect.is_sharp() && has_complete_hierarchy && class_like_metadata.kind.is_class() {
         method::check_super_call(context, class_like_metadata, members, name_span.unwrap_or(declaration_span));
+    }
+
+    if context.dialect.is_sharp() {
+        check_foreign_statics(context, class_like_metadata);
     }
 
     if has_complete_hierarchy && !class_like_metadata.kind.is_trait() && !class_like_metadata.flags.is_abstract() {

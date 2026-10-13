@@ -11,6 +11,7 @@ use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Uses;
 use mago_word::Word;
 use mago_word::concat_word;
 use mago_word::word;
@@ -66,6 +67,8 @@ pub struct MethodParts<'ast, 'arena> {
     pub return_type_hint: Option<&'ast FunctionLikeReturnTypeHint<'arena>>,
     /// The events a method listens to. An operator and a named constructor listen to none.
     pub on: Option<&'ast On<'arena>>,
+    /// The effects a method without a body allows, spec section 29. An operator and a named constructor have a body.
+    pub uses: Option<&'ast Uses<'arena>>,
     pub body: &'ast MethodBody<'arena>,
     pub returns_value: bool,
     pub returns_by_reference: bool,
@@ -83,6 +86,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             parameter_list: &method.parameter_list,
             return_type_hint: method.return_type_hint.as_ref(),
             on: method.on.as_ref(),
+            uses: method.uses,
             body: &method.body,
             returns_value: method.returns_value(),
             returns_by_reference: method.ampersand.is_some(),
@@ -102,6 +106,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             parameter_list: &operator.parameter_list,
             return_type_hint: Some(&operator.return_type_hint),
             on: None,
+            uses: None,
             body: &operator.body,
             returns_value: true,
             returns_by_reference: false,
@@ -121,6 +126,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             parameter_list: &named_constructor.parameter_list,
             return_type_hint: None,
             on: None,
+            uses: None,
             body: &named_constructor.body,
             returns_value: false,
             returns_by_reference: false,

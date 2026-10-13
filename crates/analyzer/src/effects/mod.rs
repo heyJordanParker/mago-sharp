@@ -11,6 +11,7 @@ use std::sync::Arc;
 use foldhash::HashMap;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_names::display_sharp_member;
 use mago_names::scope::NamespaceScope;
 use mago_reporting::IssueCollection;
@@ -74,8 +75,9 @@ pub(crate) enum Body {
 pub(crate) enum Runs {
     /// A PHP# lambda or method, whose effects only the solve knows.
     Body(Body),
-    /// A plain PHP method, as its full class name and its member, with the effects its `extern` declares, or `Unknown`
-    /// without one, as a call of it has them.
+    /// A method whose effects need no solve, as its full class name and its member, with the effects a call of it has:
+    /// a plain PHP method's, which its `extern` declares or `Unknown` without one, a `foreign` class's method's, and a
+    /// PHP# method's without a body, which its `uses` lists.
     Foreign { callee: (Word, Word), effects: Vec<Effect> },
 }
 
@@ -240,7 +242,8 @@ impl Effects {
                     .calls
                     .iter()
                     .map(|call| {
-                        // A bodiless callee contributes nothing until PR 2 declares what it uses.
+                        // A callee with no summary contributes nothing. A call of a method without a body has the
+                        // effects its `uses` lists instead of a callee.
                         let Some(&callee) = index.get(&call.callee) else {
                             return Vec::new();
                         };
@@ -345,6 +348,7 @@ impl Effects {
         let mut issues = check::getters_must_be_pure(self, codebase, &short_name_counts);
         issues.extend(check::laws_must_be_pure(self, codebase, &short_name_counts));
         issues.extend(check::function_values_must_fit_their_types(self, codebase, &short_name_counts));
+        issues.extend(check::implementations_must_fit_their_declarations(self, codebase, &short_name_counts));
 
         issues
     }
@@ -416,6 +420,50 @@ impl Effects {
         })
     }
 
+    /// Each PHP# method with the first method without a body it implements whose `uses` does not list one of its
+    /// effects: its class and member as messages name them, the declaration's class and metadata, the imports and the
+    /// scope of its file, and the call that has the effect.
+    fn unfit_implementations<'effects>(
+        &'effects self,
+        codebase: &'effects CodebaseMetadata,
+    ) -> impl Iterator<
+        Item = (
+            (Word, Word),
+            Word,
+            &'effects FunctionLikeMetadata,
+            &'effects WordMap<Word>,
+            &'effects NamespaceScope,
+            Impurity,
+        ),
+    > + 'effects {
+        self.bodies.iter().enumerate().filter(|(position, body)| self.index.get(body) == Some(position)).filter_map(
+            move |(position, body)| {
+                let Body::Method(class, method) = *body else {
+                    return None;
+                };
+                let metadata = codebase.get_class_like(class.as_bytes())?;
+
+                metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).find_map(|ancestor| {
+                    let declaration =
+                        codebase.get_method(ancestor.as_bytes(), method.as_bytes()).filter(|declaration| {
+                            declaration.flags.is_sharp()
+                                && declaration.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
+                        })?;
+                    let impurity = self.effect_outside(*body, &declaration.uses)?;
+
+                    Some((
+                        self.names[position],
+                        *ancestor,
+                        declaration,
+                        &*self.imports[position],
+                        &*self.scopes[position],
+                        impurity,
+                    ))
+                })
+            },
+        )
+    }
+
     /// Each body with its member as messages name it, the imports and the scope of its file, and why it is impure.
     fn impure_bodies(&self) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
         self.bodies.iter().enumerate().filter(|(position, body)| self.index.get(body) == Some(position)).filter_map(
@@ -443,6 +491,28 @@ fn is_outside(effect: Effect, allowed: &[Word]) -> bool {
 /// The effect an `emit` has, `Sharp\Events`.
 fn events() -> Word {
     word(b"Sharp\\Events")
+}
+
+/// The standard effects that are names and no class, spec section 29, in the spec's order. As `Events` is, each is an
+/// effect only an `extern` gives plain PHP.
+const NAMED_EFFECTS: [&str; 9] = [
+    "Sharp\\Database",
+    "Sharp\\Http",
+    "Sharp\\Files",
+    "Sharp\\Console",
+    "Sharp\\Process",
+    "Sharp\\Clock",
+    "Sharp\\Random",
+    "Sharp\\Cache",
+    "Sharp\\Mail",
+];
+
+/// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: a `foreign` class, a named
+/// effect, or `Events`.
+fn is_effect(codebase: &CodebaseMetadata, name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(events().as_bytes())
+        || NAMED_EFFECTS.iter().any(|effect| effect.as_bytes().eq_ignore_ascii_case(name))
+        || codebase.get_class_like(name).is_some_and(|class| class.flags.is_foreign())
 }
 
 /// A body's own effects and changes, in source order, an effect before a change at the same place.

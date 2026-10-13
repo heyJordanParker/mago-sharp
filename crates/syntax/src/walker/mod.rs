@@ -1296,6 +1296,10 @@ generate_ast_walker! {
             walker.walk_on(on, context);
         }
 
+        if let Some(uses) = &method.uses {
+            walker.walk_uses(uses, context);
+        }
+
         if let Some(initializer) = &method.initializer {
             walker.walk_constructor_initializer(initializer, context);
         }
