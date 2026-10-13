@@ -29,6 +29,8 @@ use mago_syntax::cst::Call as CallExpression;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::ConstructorInitializer;
+use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::FunctionLikeParameterList;
@@ -65,14 +67,15 @@ use crate::utils::names::is_prelude_stub;
 
 /// Records the summary of the method, accessor or initial value `body`, which messages name by `member`, and whose
 /// parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with
-/// the function values the analysis gave places since the last body.
-pub(crate) fn record<'arena, A>(
+/// the function values the analysis gave places since the last body. A constructor's `initializer` runs before `code`.
+pub(crate) fn record<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
     body: Body,
     member: Word,
     parameters: Vec<Span>,
-    code: FunctionLikeBody<'_, 'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
+    code: FunctionLikeBody<'ast, 'arena>,
 ) where
     A: Arena,
 {
@@ -82,7 +85,7 @@ pub(crate) fn record<'arena, A>(
     };
 
     let function_values = std::mem::take(&mut artifacts.function_values);
-    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, code);
+    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
     summary.function_values = function_values;
     artifacts.effect_summaries.push(summary);
     artifacts.effect_summaries.append(&mut lambdas);
@@ -179,14 +182,16 @@ pub(crate) fn record_function_values<A>(
 }
 
 /// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
-fn summarize<'arena, A>(
+#[allow(clippy::too_many_arguments)]
+fn summarize<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &AnalysisArtifacts,
     class: Word,
     body: Body,
     member: Word,
     parameters: Vec<Span>,
-    code: FunctionLikeBody<'_, 'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
+    code: FunctionLikeBody<'ast, 'arena>,
 ) -> (EffectSummary, Vec<EffectSummary>)
 where
     A: Arena,
@@ -223,6 +228,9 @@ where
     loop {
         recorder.grew = false;
         recorder.summary = empty_summary();
+        if let Some(initializer) = initializer {
+            SummaryWalker.walk_constructor_initializer(initializer, &mut recorder);
+        }
         match code {
             FunctionLikeBody::Statements(statements, _) => {
                 for statement in statements {
@@ -575,7 +583,7 @@ where
 
         let parameters = parameters.parameters.iter().map(|parameter| parameter.variable.span).collect();
         let (summary, lambdas) =
-            summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, code);
+            summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, None, code);
         self.lambda_summaries.push(summary);
         for lambda in lambdas {
             if !self.lambda_summaries.iter().any(|summary| summary.body == lambda.body) {
@@ -611,6 +619,16 @@ where
             }
         }
 
+        self.call_targets(span, receiver, arguments);
+    }
+
+    /// Records the functions and methods the analysis resolved the call at `span` to, with `receiver` and `arguments`.
+    fn call_targets(
+        &mut self,
+        span: Span,
+        receiver: Option<&'ast Expression<'arena>>,
+        arguments: &'ast ArgumentList<'arena>,
+    ) {
         let artifacts = self.artifacts;
         let Some(targets) = artifacts.call_targets.get(&(span.start.offset, span.end.offset)) else {
             return;
@@ -625,7 +643,7 @@ where
                         .map_or(function_name, |metadata| metadata.original_name);
                     let declaration =
                         extern_of(self.codebase(), empty_word(), ascii_lowercase_word(function_name.as_bytes()));
-                    self.plain_php(declaration, span, (empty_word(), sharp_name(cause)));
+                    self.plain_php(declaration, span, (empty_word(), cause));
                 }
                 CallTarget::FunctionLike {
                     callee: FunctionLikeIdentifier::Method(declaring_class, method_name),
@@ -739,8 +757,15 @@ where
         }
     }
 
-    /// Records a `new`: a PHP# class runs its constructor's body on a fresh object, and plain PHP has the effects
-    /// its `extern` declares.
+    /// Records `: super(…)`: the call of the base class's constructor the analysis resolved at its span.
+    fn constructor_initializer(&mut self, initializer: &'ast ConstructorInitializer<'arena>) {
+        self.call_targets(initializer.span(), None, &initializer.argument_list);
+    }
+
+    /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
+    /// effects its `extern` declares. The class that declares the constructor decides, whatever class `new` names, and
+    /// the class `new` names decides when no class declares one. A named constructor is the class's own, spec section
+    /// 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
         let class_name = match instantiation.class.unparenthesized() {
@@ -754,14 +779,20 @@ where
         };
 
         let span = instantiation.span();
-        let constructor = word(b"__construct");
-        if class.flags.is_sharp() {
-            let Some(declaring_class) =
-                codebase.get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
-            else {
-                return;
-            };
-            let Some(metadata) = codebase.get_method(declaring_class.as_bytes(), constructor.as_bytes()) else {
+        let (declaring, constructor) = match &instantiation.constructor {
+            Some(constructor) => (class, ascii_lowercase_word(constructor.name.value)),
+            None => {
+                let constructor = word(b"__construct");
+                let declaring = codebase
+                    .get_declaring_method_class(class.name.as_bytes(), constructor.as_bytes())
+                    .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
+                    .unwrap_or(class);
+
+                (declaring, constructor)
+            }
+        };
+        if declaring.flags.is_sharp() {
+            let Some(metadata) = codebase.get_method(declaring.name.as_bytes(), constructor.as_bytes()) else {
                 return;
             };
 
@@ -770,11 +801,21 @@ where
                 .as_ref()
                 .map(|arguments| self.argument_roots(arguments, &metadata.parameters))
                 .unwrap_or_default();
-            let callee = Body::Method(ascii_lowercase_word(declaring_class.as_bytes()), constructor);
+            let callee = Body::Method(ascii_lowercase_word(declaring.name.as_bytes()), constructor);
             self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
         } else if !is_prelude_stub(class.name) {
             let declaration = extern_of(codebase, class.name, constructor);
-            self.plain_php(declaration, span, (class.original_name, empty_word()));
+            self.plain_php(declaration, span, (declaring.original_name, empty_word()));
+        }
+    }
+
+    /// Records an `emit`, which has the effect `Sharp\Events` for each class its event may be.
+    fn emit(&mut self, emit: &'ast Emit<'arena>) {
+        let span = emit.span();
+        for class in self.object_classes(emit.value) {
+            let class =
+                self.codebase().get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+            self.summary.effects.push((Effect::Emit, span, (class, empty_word())));
         }
     }
 
@@ -957,6 +998,18 @@ where
         recorder.instantiate(instantiation);
     }
 
+    fn walk_in_emit(&self, emit: &'ast Emit<'arena>, recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>) {
+        recorder.emit(emit);
+    }
+
+    fn walk_in_constructor_initializer(
+        &self,
+        initializer: &'ast ConstructorInitializer<'arena>,
+        recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
+    ) {
+        recorder.constructor_initializer(initializer);
+    }
+
     fn walk_in_property_access(
         &self,
         access: &'ast PropertyAccess<'arena>,
@@ -1004,11 +1057,17 @@ where
 }
 
 /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
-/// falls under: the member's, then the class's, then the same for each parent class, nearest first.
+/// falls under: the member's, then the class's, then the same for each parent class, nearest first. A function in a
+/// namespace is declared as `extern Pdf.render`, which the binder reads as a class and its member, spec section 23.
 fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
     let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
     if class.is_empty() {
-        return declared((empty_word(), member));
+        return declared((empty_word(), member)).or_else(|| {
+            let name = member.as_bytes();
+            let separator = name.iter().rposition(|byte| *byte == b'\\')?;
+
+            declared((word(&name[..separator]), word(&name[separator + 1..])))
+        });
     }
 
     let mut current = Some(ascii_lowercase_word(class.as_bytes()));
@@ -1078,11 +1137,4 @@ fn declared_effects(value_type: &TUnion) -> Vec<Word> {
     }
 
     effects
-}
-
-/// A plain PHP name as PHP# writes it: `App\now` as `App.now`.
-fn sharp_name(name: Word) -> Word {
-    let bytes: Vec<u8> = name.as_bytes().iter().map(|&byte| if byte == b'\\' { b'.' } else { byte }).collect();
-
-    word(&bytes)
 }

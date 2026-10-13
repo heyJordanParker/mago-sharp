@@ -22,6 +22,7 @@ use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Extern;
@@ -46,10 +47,13 @@ use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::MethodPartialApplication;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::NamedConstructor;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullSafePropertyAccess;
+use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatchPatternArm;
@@ -289,11 +293,8 @@ impl<'arena> NameWalker<'arena> {
             return (fqn, imported);
         }
 
-        if let Some(effect) = STANDARD_EFFECTS
-            .iter()
-            .find(|effect| effect.strip_prefix("Sharp\\").is_some_and(|short| short.as_bytes() == name))
-        {
-            return (effect.as_bytes(), false);
+        if let Some(effect) = standard_effect(name) {
+            return (effect, false);
         }
 
         let class: &'static [u8] = match name {
@@ -302,12 +303,19 @@ impl<'arena> NameWalker<'arena> {
             b"Bool" => b"Sharp\\Bool",
             b"Position" => b"Sharp\\Position",
             b"List" => b"Sharp\\List",
-            b"Replaces" => b"Sharp\\Replaces",
             _ => return (fqn, imported),
         };
 
         (class, false)
     }
+}
+
+/// The full name of the standard effect a bare `name` writes, such as `Sharp\Http` for `Http`.
+fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
+    STANDARD_EFFECTS
+        .iter()
+        .find(|effect| effect.strip_prefix("Sharp\\").is_some_and(|short| short.as_bytes() == name))
+        .map(|effect| effect.as_bytes())
 }
 
 /// The variables a pattern declares.
@@ -446,6 +454,7 @@ fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<
             Statement::Interface(interface) => Some(IgnoringCase(interface.name.value)),
             Statement::Trait(r#trait) => Some(IgnoringCase(r#trait.name.value)),
             Statement::Enum(r#enum) => Some(IgnoringCase(r#enum.name.value)),
+            Statement::Event(event) => Some(IgnoringCase(event.name.value)),
             _ => None,
         })
         .collect()
@@ -507,13 +516,27 @@ where
 
     /// An `extern` target is a class when it is `Class.member` or the file imports or declares it, and a global
     /// function otherwise, since PHP# declares no functions. `Class.member` resolves its class and keeps the member as
-    /// written.
+    /// written. `global.now` is the function `now` of PHP's root namespace, spec section 23, and `Pdf.render` binds as
+    /// a class whose member the analysis finds as a function when the import names a namespace.
     fn walk_in_extern(&mut self, r#extern: &'ast Extern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         let target = &r#extern.target;
         let written = target.value();
+        if r#extern.event.is_none()
+            && let Some(function) = written.strip_prefix(b"global.")
+        {
+            self.resolved_names.insert_at(target.span(), function, false);
+
+            return;
+        }
+
         let class = written.split(|byte| *byte == b'.').next().unwrap_or(written);
         let (fqn, imported) = self.resolve_class(context, class);
-        if !target.is_dotted() && !imported && !self.declared_classes.contains(&IgnoringCase(class)) {
+        // An `extern event` always names a class, spec section 15.
+        if r#extern.event.is_none()
+            && !target.is_dotted()
+            && !imported
+            && !self.declared_classes.contains(&IgnoringCase(class))
+        {
             self.resolved_names.insert_at(target.span(), written, false);
 
             return;
@@ -523,9 +546,14 @@ where
         self.resolved_names.bind(target.span(), Binding::Class);
     }
 
+    /// A name in `uses` names an effect, spec section 29. A standard effect's name is that effect even where the file
+    /// imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
     fn walk_in_uses(&mut self, uses: &'ast Uses<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for name in &uses.names {
-            let (fqn, imported) = self.resolve_class(context, name.value);
+            let (fqn, imported) = match standard_effect(name.value) {
+                Some(effect) => (effect, false),
+                None => self.resolve_class(context, name.value),
+            };
 
             self.resolved_names.insert_at(name.span, fqn, imported);
             self.resolved_names.bind(name.span, Binding::Class);
@@ -566,6 +594,18 @@ where
         }
     }
 
+    /// An event is a class of its namespace, spec section 15, and its parameters are its constructor's.
+    fn walk_in_event(&mut self, event: &'ast Event<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(event.name.value);
+
+        self.resolved_names.insert_at(event.name.span, classlike, false);
+        self.locals.enter_method();
+    }
+
+    fn walk_out_event(&mut self, _event: &'ast Event<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.locals.exit_method();
+    }
+
     fn walk_in_method(&mut self, _method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         if self.sharp {
             self.locals.enter_method();
@@ -589,6 +629,31 @@ where
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.locals.exit_method();
+    }
+
+    /// A PHP# named constructor's parameters are its locals, as a constructor's are, spec section 9.1.
+    fn walk_in_named_constructor(
+        &mut self,
+        _named_constructor: &'ast NamedConstructor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.enter_method();
+    }
+
+    fn walk_out_named_constructor(
+        &mut self,
+        _named_constructor: &'ast NamedConstructor<'arena>,
+        _context: &mut NameResolutionContext<'arena, A>,
+    ) {
+        self.locals.exit_method();
+    }
+
+    /// A module is the class-like `Module` of its namespace, spec sections 28 and 32, so its keyword holds that full
+    /// name, which names each of its laws.
+    fn walk_in_module(&mut self, module: &'ast Module<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let classlike = context.qualify_name(b"Module");
+
+        self.resolved_names.insert_at(module.module.span, classlike, false);
     }
 
     /// A law binds as a static method does, spec section 28: its parameters are locals of the law alone.
@@ -629,8 +694,8 @@ where
     }
 
     /// A PHP# accessor runs as a function of its own, as PHP runs a hook. Its accessor list declares `field`, the
-    /// storage, apart from any constructor parameter that declares the same property, and `set` declares `value`, the
-    /// incoming value, as PHP's `set` hook declares `$value`.
+    /// storage, apart from any constructor parameter that declares the same property, and `set` or `init` declares
+    /// `value`, the incoming value, as PHP's `set` hook declares `$value`.
     fn walk_in_property_hook(
         &mut self,
         hook: &'ast PropertyHook<'arena>,
@@ -642,7 +707,7 @@ where
 
         self.locals.enter_method();
         self.locals.declare(b"field", Local { declaration: accessors, kind: LocalKind::Parameter });
-        if hook.name.value == b"set" && hook.parameter_list.is_none() {
+        if hook.is_setter() && hook.parameter_list.is_none() {
             self.locals.declare(b"value", Local { declaration: hook.name.span, kind: LocalKind::Parameter });
         }
     }
@@ -1058,6 +1123,14 @@ where
             let (parent_classlike, imported) = self.resolve_class(context, parent.value());
 
             self.resolved_names.insert_at(parent.span(), parent_classlike, imported);
+        }
+    }
+
+    fn walk_in_on(&mut self, on: &'ast On<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        for event in &on.events {
+            let (event_classlike, imported) = self.resolve_class(context, event.value);
+
+            self.resolved_names.insert_at(event.span, event_classlike, imported);
         }
     }
 

@@ -13,11 +13,21 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    /// Parses a PHP# `extern` declaration: `extern` and its target, a bare name or `Class.member`, then an optional
-    /// `uses` clause.
+    /// Parses a PHP# `extern` declaration: `extern`, `event` when the class is an event, its target, a bare name or
+    /// `Class.member`, then an optional `uses` clause.
     pub(crate) fn parse_extern(&mut self) -> Result<Extern<'arena>, ParseError> {
+        let r#extern = self.expect_any_keyword()?;
+        let event = if self.stream.lookahead(0)?.is_some_and(|token| token.value == b"event")
+            && self.stream.peek_kind(1)? == Some(T![Identifier])
+        {
+            Some(self.expect_any_keyword()?)
+        } else {
+            None
+        };
+
         Ok(Extern {
-            r#extern: self.expect_any_keyword()?,
+            r#extern,
+            event,
             target: self.parse_extern_target()?,
             uses: self.parse_optional_uses()?,
             terminator: self.parse_terminator()?,

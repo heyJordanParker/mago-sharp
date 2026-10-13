@@ -13,6 +13,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Extern;
 use mago_word::Word;
+use mago_word::word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -21,8 +22,10 @@ use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
 use crate::effects::Runs;
+use crate::utils::names::namespace_function;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
+use crate::utils::names::sharp_effect_name;
 use crate::utils::names::sharp_missing_imports;
 
 /// Spec section 29: a getter reads, so it has no effect and changes nothing.
@@ -36,12 +39,13 @@ pub(crate) fn getters_must_be_pure(
         .filter(|(body, ..)| matches!(body, Body::Accessor(_, _, accessor) if accessor.as_bytes() == b"get"))
         .map(|(_, member, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
             impure(
                 IssueCode::ImpureGetter,
-                format!("Getter `{member}` {}. Getters must be pure.", impurity.describe(&class_name)),
+                format!("Getter `{member}` {}. Getters must be pure.", impurity.describe(&class_name, &effect_name)),
                 impurity.span,
                 "getter",
                 &impurity,
@@ -67,12 +71,16 @@ pub(crate) fn laws_must_be_pure(
         })
         .map(|(_, member, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
 
             impure(
                 IssueCode::ImpureLaw,
-                format!("Law `{member}` {}. Laws hold only over pure code.", impurity.describe(&class_name)),
+                format!(
+                    "Law `{member}` {}. Laws hold only over pure code.",
+                    impurity.describe(&class_name, &effect_name)
+                ),
                 impurity.span,
                 "law",
                 &impurity,
@@ -96,14 +104,17 @@ pub(crate) fn function_values_must_fit_their_types(
         .unfit_function_values()
         .map(|(value, name, imports, scope, impurity)| {
             let class_name = |class| sharp_class_like_name(codebase, imports, short_name_counts, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, short_name_counts, effect);
             let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
             let missing_import = |class| sharp_missing_imports(codebase, imports, scope, [class]);
             let method = || format!("`{}`", display_sharp_member(class_name(name.0), name.1));
             let reason = match (&value.runs, impurity.effect) {
-                (Runs::Body(Body::Lambda(_)), _) => format!("This lambda {}", impurity.describe(&class_name)),
-                (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name)),
+                (Runs::Body(Body::Lambda(_)), _) => {
+                    format!("This lambda {}", impurity.describe(&class_name, &effect_name))
+                }
+                (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name, &effect_name)),
                 (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
-                    format!("{} has the effect `{}`", method(), class_name(effect))
+                    format!("{} has the effect `{}`", method(), effect_name(effect))
                 }
                 (Runs::Foreign { .. }, _) => format!("{} has no `extern` declaration", method()),
             };
@@ -147,8 +158,18 @@ fn impure(
 
     match impurity.effect {
         Some(Effect::Unknown(Some((class, member)))) => {
+            // A plain PHP function is declared through its namespace, spec section 23: `global.trim`, or `Pdf.render`
+            // after `import Vendor.Pdf;`.
             let (target, import) = if class.is_empty() {
-                (member.to_string(), None)
+                match member.as_bytes().iter().rposition(|byte| *byte == b'\\') {
+                    Some(separator) => {
+                        let namespace = word(&member.as_bytes()[..separator]);
+                        let function = String::from_utf8_lossy(&member.as_bytes()[separator + 1..]);
+
+                        (format!("{}.{function}", code_class_name(namespace)), missing_import(namespace))
+                    }
+                    None => (format!("global.{member}"), None),
+                }
             } else {
                 let name = code_class_name(class);
                 let target = if member.is_empty() { name } else { display_sharp_member(&name, member) };
@@ -203,7 +224,16 @@ where
     let target = r#extern.target.span();
     let (class, member) = own.target;
     if class.is_empty() {
-        if context.codebase.get_function(member.as_bytes()).is_none() {
+        // Spec section 23 names a function of PHP's root namespace as `global.now`, in an `extern` as in a call.
+        if !written.starts_with("global.") {
+            context.collector.report_with_code(
+                IssueCode::BareFunctionCall,
+                Issue::error(format!(
+                    "An `extern` names a plain PHP function through its namespace: write `extern global.{written}`."
+                ))
+                .with_annotation(Annotation::primary(target)),
+            );
+        } else if context.codebase.get_function(member.as_bytes()).is_none() {
             context.collector.report_with_code(
                 IssueCode::NonExistentFunction,
                 Issue::error(format!("Function `{written}` does not exist."))
@@ -215,6 +245,12 @@ where
     }
 
     let Some(class_metadata) = context.codebase.get_class_like(class.as_bytes()) else {
+        // `extern Pdf.render` after `import Vendor.Pdf;` declares the function `render` of that namespace, spec
+        // section 23.
+        if namespace_function(context.codebase, class, member).is_some() {
+            return;
+        }
+
         context.collector.report_with_code(
             IssueCode::NonExistentClassLike,
             Issue::error(format!("Cannot find class, interface, enum, or type alias `{written}`."))
@@ -228,6 +264,21 @@ where
         context.collector.report_with_code(
             IssueCode::ExternOnSharp,
             Issue::error(format!("`{written}` is PHP# code, so it needs no `extern`: PHP# infers its effects."))
+                .with_annotation(Annotation::primary(target)),
+        );
+    } else if own.event && !class_metadata.kind.is_class() {
+        // Spec section 15: only a class is an event, so `emit` never takes a value plain PHP fills with a non-event.
+        let kind = if class_metadata.kind.is_interface() {
+            "an interface"
+        } else if class_metadata.kind.is_trait() {
+            "a trait"
+        } else {
+            "an enum"
+        };
+
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!("`extern event` marks a class, and `{written}` is {kind}."))
                 .with_annotation(Annotation::primary(target)),
         );
     } else if !member.is_empty() && context.codebase.get_declaring_method(class.as_bytes(), member.as_bytes()).is_none()

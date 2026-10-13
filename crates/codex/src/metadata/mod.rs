@@ -99,11 +99,6 @@ pub struct CodebaseMetadata {
     pub symbols: Symbols,
     /// Map from global constant FQN (`Word`) to its metadata (`ConstantMetadata`).
     pub constants: WordMap<ConstantMetadata>,
-    /// Map from the lowercase name of a PHP function the standard library wraps, decision 040, to the library methods
-    /// whose `[Replaces]` names it. Each entry is the name of the library file that declares the method, the method's
-    /// span and the method, and the entries come in the order the library declares them: by the path of their file,
-    /// then by source order. Only a file `File::is_standard_library` marks adds entries.
-    pub wrapped_functions: WordMap<Vec<(Word, Span, MethodIdentifier)>>,
     /// Map from the target of a PHP# `extern` declaration, keyed as [`ExternMetadata::target`], to every declaration
     /// of it in the order [`ExternMetadata`] sorts them. The first one declares the target, and each later one is a
     /// duplicate.
@@ -509,6 +504,17 @@ impl CodebaseMetadata {
             declaring_method_id.get_class_name().as_bytes(),
             declaring_method_id.get_method_name().as_bytes(),
         )
+    }
+
+    /// Retrieves the constructor `parent::__construct` reaches from `class`: the one its direct parent class declares
+    /// or inherits.
+    #[inline]
+    #[must_use]
+    pub fn get_parent_constructor(&self, class: &[u8]) -> Option<&FunctionLikeMetadata> {
+        let parent = self.get_class_like(class)?.direct_parent_class?;
+        let constructor = self.get_class_like(parent.as_bytes())?.declaring_method_ids.get(&word("__construct"))?;
+
+        self.get_method_by_id(constructor)
     }
 
     /// Retrieves metadata for any function-like construct (function, method, or closure).
@@ -1171,7 +1177,6 @@ impl CodebaseMetadata {
         }
 
         self.symbols.extend(other.symbols);
-        self.merge_wrapped_functions(other.wrapped_functions);
         self.merge_externs(other.externs);
 
         for (k, v) in other.all_class_like_descendants {
@@ -1258,9 +1263,6 @@ impl CodebaseMetadata {
         }
 
         self.symbols.extend_ref(&other.symbols);
-        self.merge_wrapped_functions(
-            other.wrapped_functions.iter().map(|(function, wrappers)| (*function, wrappers.clone())),
-        );
         self.merge_externs(other.externs.iter().map(|(target, declarations)| (*target, declarations.clone())));
 
         for (k, v) in &other.all_class_like_descendants {
@@ -1288,20 +1290,6 @@ impl CodebaseMetadata {
     ) {
         for (alias, (target, span, flags)) in declarations {
             self.add_class_like_alias(alias, target, span, flags);
-        }
-    }
-
-    /// Adds another codebase's wrapping methods, keeping each function's methods in the order the library declares
-    /// them, whatever order the files merge in.
-    fn merge_wrapped_functions(
-        &mut self,
-        incoming: impl IntoIterator<Item = (Word, Vec<(Word, Span, MethodIdentifier)>)>,
-    ) {
-        for (function, wrappers) in incoming {
-            let merged = self.wrapped_functions.entry(function).or_default();
-            merged.extend(wrappers);
-            merged.sort_unstable();
-            merged.dedup();
         }
     }
 
@@ -1583,10 +1571,6 @@ impl CodebaseMetadata {
         self.patch_class_likes.retain(|_, m| !removed_files.contains(&m.span.file_id));
         self.patch_function_likes.retain(|_, m| !removed_files.contains(&m.span.file_id));
         self.patch_constants.retain(|_, m| !removed_files.contains(&m.span.file_id));
-        for wrappers in self.wrapped_functions.values_mut() {
-            wrappers.retain(|(_, span, _)| !removed_files.contains(&span.file_id));
-        }
-        self.wrapped_functions.retain(|_, wrappers| !wrappers.is_empty());
         for declarations in self.externs.values_mut() {
             declarations.retain(|declaration| !removed_files.contains(&declaration.span.file_id));
         }
@@ -1736,11 +1720,13 @@ fn orphan_patch_constant_diagnostic(meta: &ConstantMetadata) -> Issue {
 /// Determines which metadata value to keep when merging duplicates.
 ///
 /// Priority:
-///   1. user-defined > patch > external > built-in > other.
-///   2. non-polyfill > polyfill — tools like rector/phpstan/psalm ship
+///   1. plain PHP > PHP# module — a PHP# module never changes what plain PHP
+///      code means, so a plain PHP class-like of its name keeps the name.
+///   2. user-defined > patch > external > built-in > other.
+///   3. non-polyfill > polyfill — tools like rector/phpstan/psalm ship
 ///      skeleton stubs gated by `if (!class_exists('X'))` that should never
 ///      shadow a concrete definition.
-///   3. smaller span wins as a deterministic tie-breaker.
+///   4. smaller span wins as a deterministic tie-breaker.
 ///
 /// Returns `true` if the new value should replace the existing one.
 fn should_replace_metadata(
@@ -1749,6 +1735,14 @@ fn should_replace_metadata(
     new_flags: MetadataFlags,
     new_span: Span,
 ) -> bool {
+    if new_flags.is_module() && !existing_flags.is_sharp() {
+        return false;
+    }
+
+    if existing_flags.is_module() && !new_flags.is_sharp() {
+        return true;
+    }
+
     let new_is_user_defined = new_flags.is_user_defined();
     let existing_is_user_defined = existing_flags.is_user_defined();
 
@@ -1942,7 +1936,7 @@ mod should_replace_metadata_tests {
         assert!(class.methods.contains(&method_existing));
         assert!(class.flags.is_user_defined());
         // No issues should be emitted.
-        assert!(class.issues.is_empty());
+        assert!(class.issues.is_empty(), "{:?}", class.issues);
     }
 }
 

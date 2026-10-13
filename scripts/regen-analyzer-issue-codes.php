@@ -354,9 +354,10 @@ final class AnalyzerCodeModuleGenerator
         'native-body-outside-library',
         'silence-outside-library',
         'reserved-name-outside-library',
-        'replaces-outside-library',
         'wrapped-function',
         'replaced-by-syntax',
+        'bare-function-call',
+        'function-import',
         'duplicate-extern',
         'extern-on-sharp',
         'impure-getter',
@@ -365,6 +366,11 @@ final class AnalyzerCodeModuleGenerator
         'non-existent-law',
         'missing-lean',
         'unmodeled-construct',
+        'broken-rule',
+        'missing-super-call',
+        'named-constructor-without-new',
+        'named-constructor-clash',
+        'invalid-event',
     ];
 
     /**

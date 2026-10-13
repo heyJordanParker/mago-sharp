@@ -13,6 +13,7 @@ where
         Ok(Instantiation {
             new: self.expect_keyword(T!["new"])?,
             class: self.arena.alloc(self.parse_expression_with_precedence(Precedence::New)?),
+            constructor: None,
             argument_list: self.parse_optional_argument_list()?,
         })
     }

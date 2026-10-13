@@ -1,6 +1,7 @@
 #![allow(clippy::panic, clippy::expect_used)]
 
 use std::borrow::Cow;
+use std::path::Path;
 
 use mago_allocator::LocalArena;
 use mago_database::file::File;
@@ -9,8 +10,13 @@ use mago_php_version::PHPVersion;
 use mago_reporting::Issue;
 use mago_semantics::SemanticsChecker;
 use mago_syntax::parser::parse_file;
+use mago_syntax::token::SHARP_KEYWORDS;
 
-/// Every semantic issue in the source, in the dialect its path names.
+#[path = "../../../tests/support/sharp_words.rs"]
+mod sharp_words;
+
+/// Every semantic issue in the source, in the dialect its path names. Panics when an issue of a `.sharp` file names a
+/// word only PHP has, in its message, help, notes or annotations.
 fn check(path: &'static str, code: &'static str) -> Vec<Issue> {
     let arena = LocalArena::new();
     let file = File::ephemeral(Cow::Borrowed(path.as_bytes()), Cow::Borrowed(code.as_bytes()));
@@ -19,7 +25,20 @@ fn check(path: &'static str, code: &'static str) -> Vec<Issue> {
 
     let names = NameResolver::new(&arena).resolve(program);
 
-    SemanticsChecker::new(PHPVersion::new(8, 4, 0)).check(&file, program, &names).into_iter().collect()
+    let issues: Vec<Issue> =
+        SemanticsChecker::new(PHPVersion::new(8, 4, 0)).check(&file, program, &names).into_iter().collect();
+    if Path::new(path).extension().is_some_and(|extension| extension == "sharp") {
+        let leaks: Vec<String> = issues
+            .iter()
+            .filter_map(|issue| {
+                let (text, word) = sharp_words::banned_word(issue)?;
+                Some(format!("{path}: `{}` says {text:?}, which names {word}", issue.code.as_deref().unwrap_or("none")))
+            })
+            .collect();
+        assert!(leaks.is_empty(), "A `.sharp` message speaks PHP#.\n{}", leaks.join("\n"));
+    }
+
+    issues
 }
 
 /// Every semantic issue in the PHP# source, as `line:column message` at its primary span.
@@ -94,27 +113,68 @@ fn an_extern_uses_only_effects() {
     assert_eq!(issues(class), [format!("6:21 `Order` {NOT_AN_EFFECT}")]);
 }
 
-/// An import of a class named like an effect shadows the effect, spec section 23, so the refusal names the imported
-/// class and the import that frees the name. A class the file declares under that name keeps the plain refusal.
+/// `extern event` marks a plain PHP class as an event, spec section 15, so it names a class, with or without the
+/// effects its `uses` lists.
 #[test]
-fn an_effect_name_an_import_shadows_is_refused_with_the_imported_class() {
-    let extern_ = "namespace App.Stubs;\n\nimport Lib.Clock;\n\nextern Clock.now uses Clock;\n";
-    let function_type = "namespace App.Shop;\n\nimport Lib.Http;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http>? charge = null;\n}\n";
-    let declared = "namespace App.Shop;\n\nclass Clock\n{\n    Function<int() uses Clock>? tick = null;\n}\n";
+fn an_extern_event_names_a_class() {
+    let code = "namespace App.Stubs;\n\nimport Carbon.Carbon;\nimport Illuminate.Queue.Events.JobFailed;\nimport Illuminate.Queue.Events.JobQueued;\n\nextern event JobFailed;\nextern event JobQueued uses Database;\nextern event Carbon.now;\n";
+
+    assert_eq!(issues(code), ["9:14 An `extern event` names a class, and `Carbon.now` names a member."]);
+}
+
+/// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
+/// `public`, and each parameter is a type, a name and an optional default. An event is a class, so any capitalized word
+/// but a reserved type name names one, as `Print` and `Exit` do, and `Self` is refused.
+#[test]
+fn an_event_takes_only_public_and_its_parameters_are_its_properties() {
+    let code = "namespace App.Shop;\n\nprivate event Hidden(int id);\nstatic event Shared(int id);\npublic event Typed(public int id, int ...rest);\npublic event Tagged(Set<string> tags);\n[Logged] public event Noted(int id);\npublic event Tracked(int id { get; });\npublic event Maybe(int id, Set<int>? tags);\npublic event Paid(int orderId, string note = \"\") : Placed;\nevent Moved(int id);\ninterface Placed { }\npublic event Empty();\npublic event Print(int id);\npublic event Exit(int code);\npublic event Frozen(readonly int id);\npublic event Scoped(internal int id);\npublic event Self(int id);\n";
+    let fixed = "namespace App.Shop;\n\npublic event Moved(int id);\n\nevent Emptied();\n";
 
     assert_eq!(
-        issues(extern_),
+        issues(code),
         [
-            "5:23 `Clock` here is the imported `Lib.Clock`, not the effect `Clock`. Import it under another name, as in `import Lib.Clock as SystemClock;`."
+            "3:1 An event takes only `public`.",
+            "4:1 An event takes only `public`.",
+            "5:20 An event's parameter takes no modifier: it is a public get-only property of the event.",
+            "5:39 An event's parameter cannot be variadic: it is one property of the event.",
+            "6:21 A `Set` parameter of an event is not supported yet in PHP#.",
+            "7:1 This construct is not supported yet in PHP#.",
+            "8:29 An event's parameter takes no accessors: it is a get-only property of the event.",
+            "9:28 A `Set` parameter of an event is not supported yet in PHP#.",
+            "16:21 An event's parameter takes no modifier: it is a public get-only property of the event.",
+            "17:21 An event's parameter takes no modifier: it is a public get-only property of the event.",
+            "18:14 Cannot use `Self` as a class name: it is reserved."
         ]
     );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+    let construct_notes: Vec<Vec<String>> = check("src/Report.sharp", code)
+        .into_iter()
+        .filter(|issue| issue.message == "This construct is not supported yet in PHP#.")
+        .map(|issue| issue.notes)
+        .collect();
     assert_eq!(
-        issues(function_type),
-        [
-            "7:32 `Http` here is the imported `Lib.Http`, not the effect `Http`. Import it under another name, as in `import Lib.Http as SystemHttp;`."
-        ]
+        construct_notes,
+        [[
+            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
+        ]]
     );
-    assert_eq!(issues(declared), [format!("5:25 `Clock` {NOT_AN_EFFECT}")]);
+}
+
+/// Spec section 29: a standard effect's name in a `uses` is that effect, even where the file imports or declares a
+/// class under the name, as a file that calls Laravel's `Http` facade still writes `uses Http`.
+#[test]
+fn a_uses_takes_a_standard_effect_where_a_class_has_its_name() {
+    for name in mago_names::STANDARD_EFFECTS.map(mago_names::short_name) {
+        for code in [
+            format!("namespace App.Stubs;\n\nimport Lib.{name};\n\nextern {name}.now uses {name};\n"),
+            format!(
+                "namespace App.Shop;\n\nimport Lib.{name};\n\nclass Checkout\n{{\n    Function<{name}(Cart) uses {name}>? charge = null;\n}}\n"
+            ),
+            format!("namespace App.Shop;\n\nclass {name}\n{{\n    Function<int() uses {name}>? tick = null;\n}}\n"),
+        ] {
+            assert_eq!(issues(leak(code.clone())), Vec::<String>::new(), "{code}");
+        }
+    }
 }
 
 /// Every standard effect passes a `uses`, `Events` too, written bare or through an import of its class.
@@ -137,25 +197,76 @@ fn a_law_is_a_member_of_a_class_or_an_enum_and_of_no_interface() {
     assert_eq!(issues(code), ["17:5 This class member is not supported yet in PHP#."]);
 }
 
-/// A law's parameters range over every value, so none has a default and none collects the rest of the arguments.
+/// A law's parameters range over every value, so none has a default and none collects the rest of the arguments, in a
+/// class and in a module alike.
 #[test]
 fn a_law_parameter_with_a_default_or_a_spread_is_refused() {
-    let code = "namespace App.Shared;\n\npublic class Money\n{\n    law withDefault(int a = 1) => a == a;\n    law withRest(int ...rest) => true;\n}\n";
+    let class = "namespace App.Shared;\n\npublic class Money\n{\n    law withDefault(int a = 1) => a == a;\n    law withRest(int ...rest) => true;\n}\n";
+    let module = "namespace App.Shared;\n\nmodule\n{\n    law withDefault(int a = 1) => a == a;\n    law withRest(int ...rest) => true;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:27 A law's parameters range over every value, so `a` cannot have a default.",
-            "6:22 A law's parameters range over every value, so `rest` cannot be variadic.",
-        ]
-    );
-    assert_eq!(
-        check("src/Report.sharp", code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
-        [
-            ["A law states a fact about every value of its parameters."],
-            ["A law states a fact about every value of its parameters."],
-        ]
-    );
+    for (path, code) in [("src/Report.sharp", class), ("app/Shared/Module.sharp", module)] {
+        assert_eq!(
+            issues_in(path, code),
+            [
+                "5:27 A law's parameters range over every value, so `a` cannot have a default.",
+                "6:22 A law's parameters range over every value, so `rest` cannot be variadic.",
+            ],
+            "{path}"
+        );
+        assert_eq!(
+            check(path, code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
+            [
+                ["A law states a fact about every value of its parameters."],
+                ["A law states a fact about every value of its parameters."],
+            ],
+            "{path}"
+        );
+    }
+}
+
+/// Spec section 32: a namespace's module is declared in its folder's `Module.sharp`. An environment module, in
+/// `Module.<Environment>.sharp`, waits for the container.
+#[test]
+fn a_module_is_declared_only_in_its_folders_module_sharp() {
+    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n}\n";
+
+    for (path, expected) in [
+        ("app/Shop/Module.sharp", None),
+        ("app/Shop/Checkout.sharp", Some("3:1 A module is declared in its folder's Module.sharp.")),
+        ("app/Shop/Module.Production.sharp", Some("3:1 An environment module is not supported yet in PHP#.")),
+    ] {
+        assert_eq!(issues_in(path, code), Vec::from_iter(expected), "{path}");
+    }
+}
+
+/// Spec section 32: `Module.sharp` holds its namespace, its imports and one module, and nothing else.
+#[test]
+fn module_sharp_holds_only_its_folders_module() {
+    let module = "module\n{\n    law same(int a) => a == a;\n}\n";
+
+    for declaration in [
+        "public class Module\n{\n}\n",
+        "public interface Priced\n{\n}\n",
+        "public enum Status\n{\n    case Open;\n}\n",
+        "extern trim;\n",
+        "module\n{\n    law other(int a) => a == a;\n}\n",
+    ] {
+        let code = leak(format!("namespace App.Shop;\n\nimport App.Mail.Mailer;\n\n{module}\n{declaration}"));
+
+        assert_eq!(
+            issues_in("app/Shop/Module.sharp", code),
+            ["10:1 Module.sharp holds only its folder's module."],
+            "{declaration}"
+        );
+    }
+}
+
+/// A module's laws are named by the module and their own names, compared ignoring case, so each name is stated once.
+#[test]
+fn a_module_states_each_law_once() {
+    let code = "namespace App.Shop;\n\nmodule\n{\n    law same(int a) => a == a;\n    law Same(int b) => b == b;\n}\n";
+
+    assert_eq!(issues_in("app/Shop/Module.sharp", code), ["6:9 The module already states a law named `same`."]);
 }
 
 /// A law has no `this`, so a bare member in it is written through the class name, as in a static method.
@@ -179,18 +290,16 @@ fn a_law_and_a_method_named_alike_are_a_duplicate_member() {
 
 #[test]
 fn every_construct_outside_the_slice_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nlet top = 1;\necho 1;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        switch (extra) {\n            default: return 1;\n        }\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Shape\n{\n}\n\ntrait Named\n{\n}\n\nclass Report\n{\n    public int run(int extra)\n    {\n        switch (extra) {\n            default: return 1;\n        }\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:1 This statement is not supported yet in PHP#.",
-            "4:1 This statement is not supported yet in PHP#.",
-            "10:1 This statement is not supported yet in PHP#.",
-            "18:9 This statement is not supported yet in PHP#.",
-            "21:22 This `new` without arguments is not supported yet in PHP#.",
-            "22:25 This expression is not supported yet in PHP#.",
-            "23:22 This expression is not supported yet in PHP#.",
+            "7:1 This statement is not supported yet in PHP#.",
+            "15:9 This statement is not supported yet in PHP#.",
+            "18:22 This `new` without arguments is not supported yet in PHP#.",
+            "19:25 This expression is not supported yet in PHP#.",
+            "20:22 This expression is not supported yet in PHP#.",
         ]
     );
 }
@@ -300,31 +409,67 @@ fn a_catch_variable_is_out_of_scope_after_its_catch_block() {
     assert_eq!(issues(code), ["10:15 `failure` is used after the block that declares it closes."]);
 }
 
+/// The body of `if`, `else` and each loop is a block in braces, a guard clause's `return` or `throw` too, and PHP's
+/// colon-delimited bodies are never valid. The error points at the body, from a colon body's `:` to its `endif;`,
+/// `endwhile;` or `endfor;`, and its help's braced body compiles in its place.
 #[test]
-fn an_if_or_else_without_braces_is_not_supported_yet() {
-    let code = leak(method(
-        "        if (extra > 1) return 1;\n        if (extra > 2) {\n            return 2;\n        } else return 3;\n        return extra;\n",
-    ));
+fn every_body_is_written_in_braces() {
+    let refused = [
+        ("        if (extra > 1) return 1;\n", "7:24", "{ return 1; }"),
+        ("        if (extra > 2) throw new Failure(extra);\n", "7:24", "{ throw new Failure(extra); }"),
+        ("        if (extra > 1) return 1; else {\n            return 2;\n        }\n", "7:24", "{ return 1; }"),
+        ("        if (extra > 1) {\n            return 1;\n        } else return 2;\n", "9:16", "{ return 2; }"),
+        (
+            "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2) return 2;\n",
+            "9:31",
+            "{ return 2; }",
+        ),
+        ("        if (extra > 1) extra = 1;\n", "7:24", "{ extra = 1; }"),
+        ("        if (extra > 1) this.run(extra);\n", "7:24", "{ this.run(extra); }"),
+        ("        if (extra > 10);\n", "7:24", "{ }"),
+        ("        while (extra > 1) return 1;\n", "7:27", "{ return 1; }"),
+        ("        while (extra > 1) {\n            if (extra > 2) break;\n        }\n", "8:28", "{ break; }"),
+        ("        while (extra > 1) {\n            if (extra > 2) continue;\n        }\n", "8:28", "{ continue; }"),
+        ("        do extra += 1; while (extra < 3);\n", "7:12", "{ extra += 1; }"),
+        ("        for (let step = 0; step < 3; step++) extra++;\n", "7:46", "{ extra++; }"),
+        ("        for (const value of Store.values()) extra += value;\n", "7:45", "{ extra += value; }"),
+        ("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n", "7:26", "{ extra -= 1; }"),
+        ("        for (;;):\n            break;\n        endfor;\n", "7:17", "{ break; }"),
+        (
+            "        if (extra > 3):\n            extra = 3;\n        elseif (extra > 2):\n            extra = 2;\n        else:\n            extra = 1;\n        endif;\n",
+            "7:23",
+            "{ extra = 3; } else if (extra > 2) { extra = 2; } else { extra = 1; }",
+        ),
+        (
+            "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2):\n            return 2;\n        endif;\n",
+            "9:30",
+            "{ return 2; }",
+        ),
+    ];
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 This statement without braces is not supported yet in PHP#.",
-            "8:9 This statement without braces is not supported yet in PHP#.",
-        ]
-    );
+    for (body, at, fix) in refused {
+        let code = leak(method(&format!("{body}        return extra;\n")));
+        let issue = check("src/Report.sharp", code).remove(0);
+        let span = issue.primary_span().expect("a primary span");
+        let fixed = leak(format!("{}{fix}{}", &code[..span.start.offset as usize], &code[span.end.offset as usize..]));
+
+        assert_eq!(
+            issues(code),
+            [format!("{at} PHP# writes the body of `if`, `else` and each loop in braces.")],
+            "{body}"
+        );
+        assert_eq!(issue.help, Some(format!("Write `{fix}`.")), "{body}");
+        assert_eq!(issues(fixed), Vec::<String>::new(), "{fixed}");
+    }
 }
 
 #[test]
-fn elseif_and_a_colon_delimited_if_are_not_supported_yet() {
+fn elseif_is_not_supported_yet() {
     let code = leak(method(
-        "        if (extra > 1) {\n            return 1;\n        } elseif (extra > 2) {\n            return 2;\n        }\n        if (extra > 3):\n            return 3;\n        endif;\n        return extra;\n",
+        "        if (extra > 1) {\n            return 1;\n        } elseif (extra > 2) {\n            return 2;\n        }\n        return extra;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        ["9:11 This `elseif` is not supported yet in PHP#.", "12:23 This construct is not supported yet in PHP#."]
-    );
+    assert_eq!(issues(code), ["9:11 This `elseif` is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -343,22 +488,6 @@ fn while_and_do_while_with_braces_are_in_the_slice() {
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
-}
-
-#[test]
-fn a_loop_without_braces_or_with_a_colon_body_is_not_supported_yet() {
-    let code = leak(method(
-        "        while (extra > 0) extra -= 1;\n        do extra += 1; while (extra < 3);\n        while (extra > 1):\n            extra -= 1;\n        endwhile;\n        return extra;\n",
-    ));
-
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 This statement without braces is not supported yet in PHP#.",
-            "8:9 This statement without braces is not supported yet in PHP#.",
-            "9:26 This construct is not supported yet in PHP#.",
-        ]
-    );
 }
 
 #[test]
@@ -414,21 +543,6 @@ fn a_for_counter_is_out_of_scope_after_its_loop_and_const_when_declared_so() {
 }
 
 #[test]
-fn a_for_loop_without_braces_or_with_a_colon_body_is_not_supported_yet() {
-    let code = leak(method(
-        "        for (let step = 0; step < 3; step++) extra++;\n        for (;;):\n            break;\n        endfor;\n        return extra;\n",
-    ));
-
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 This statement without braces is not supported yet in PHP#.",
-            "8:17 This construct is not supported yet in PHP#.",
-        ]
-    );
-}
-
-#[test]
 fn for_of_over_values_or_keys_and_values_is_in_the_slice() {
     let code = leak(method(
         "        for (const value of Store.values()) {\n            extra += value;\n        }\n        for (let [key, value] of Store.values()) {\n            value += key;\n            extra += value;\n        }\n        return extra;\n",
@@ -468,13 +582,6 @@ fn a_loop_variable_named_this_or_a_superglobal_is_an_error() {
 }
 
 #[test]
-fn a_for_of_loop_without_braces_is_not_supported_yet() {
-    let code = leak(method("        for (const value of Store.values()) extra += value;\n        return extra;\n"));
-
-    assert_eq!(issues(code), ["7:9 This statement without braces is not supported yet in PHP#."]);
-}
-
-#[test]
 fn reassigning_a_const_local_is_an_error() {
     let code = leak(method("        const base = 2;\n        base = 3;\n        return base;\n"));
 
@@ -484,13 +591,6 @@ fn reassigning_a_const_local_is_an_error() {
 #[test]
 fn null_coalescing_assignment_to_a_const_local_is_an_error() {
     let code = leak(method("        const base = null;\n        base ??= 3;\n        return base;\n"));
-
-    assert_eq!(issues(code), ["8:9 Cannot assign to `base`: it is declared with `const`."]);
-}
-
-#[test]
-fn reassigning_a_const_local_spelled_in_capitals_is_an_error() {
-    let code = leak(method("        CONST base = 2;\n        base = 3;\n        return base;\n"));
 
     assert_eq!(issues(code), ["8:9 Cannot assign to `base`: it is declared with `const`."]);
 }
@@ -542,11 +642,139 @@ fn writing_a_const_local_after_its_block_closes_reports_only_the_scope_error() {
     assert_eq!(issues(code), ["10:9 `inner` is used after the block that declares it closes."]);
 }
 
+/// A function declared in a method is one PHP declares globally when the method runs, so it is the same error, once.
 #[test]
 fn a_top_level_function_is_an_error() {
-    let code = "namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n";
+    let message = "PHP# has no top-level functions: move `total` into a class as a static method.";
+    for (code, at) in [
+        ("namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n", "3:10"),
+        ("namespace App.Tenant;\n\nFUNCTION total(int extra) { return extra; }\n", "3:10"),
+        (leak(method("        function total() { }\n        return extra;\n")), "7:18"),
+        (leak(method("        FUNCTION total() { }\n        return extra;\n")), "7:18"),
+    ] {
+        assert_eq!(issues(code), [format!("{at} {message}")], "{code}");
+    }
+}
 
-    assert_eq!(issues(code), ["3:10 PHP# has no top-level functions: move `total` into a class as a static method."]);
+/// Spec section 27: a `.sharp` file declares one type, so a statement at file level is never valid, whatever it is.
+#[test]
+fn a_statement_at_file_level_is_an_error() {
+    for statement in [
+        "let total = 1;",
+        "strlen(\"x\");",
+        "die;",
+        "unset(here);",
+        "isset(here);",
+        "if (true) { }",
+        "while (false) { }",
+        "do { } while (false);",
+        "for (const n of [1]) { }",
+        "for (;;) { }",
+        "try { } catch (Exception e) { }",
+        "match (1) { _ => { } }",
+        "break;",
+        "continue;",
+        "switch (1) { }",
+        "global $g;",
+        "static $s = 1;",
+        "return;",
+        "{ }",
+        "echo 1;",
+        "emit new OrderPaid(1);",
+        ";",
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{statement}\n\nclass Report\n{{\n}}\n"));
+
+        assert_eq!(issues(code), ["3:1 A statement cannot sit at file level in PHP#."], "{statement}");
+    }
+
+    let jump = "namespace App.Tenant;\n\ngoto end;\nend:\n\nclass Report\n{\n}\n";
+
+    assert_eq!(
+        issues(jump),
+        ["3:1 A statement cannot sit at file level in PHP#.", "4:1 A statement cannot sit at file level in PHP#."]
+    );
+}
+
+/// Every `.sharp` file runs with `strict_types=1`, so PHP's `declare` line is one error wherever it is written, and the
+/// file compiles without it.
+#[test]
+fn declare_strict_types_is_one_error_wherever_it_is_written() {
+    let message = "PHP# is always strict: remove `declare(strict_types=1);`.";
+    let before = "declare(strict_types=1);\n\nnamespace App.Tenant;\n\nclass Report\n{\n}\n";
+    let after = "namespace App.Tenant;\n\ndeclare(strict_types=1);\n\nclass Report\n{\n}\n";
+    let inside = leak(method("        declare(strict_types=1);\n        return extra;\n"));
+    let after_a_class = "class Report\n{\n}\n\ndeclare(strict_types=1);\n";
+    let removed = leak(method("        return extra;\n"));
+
+    assert_eq!(issues(before), [format!("1:1 {message}")]);
+    assert_eq!(issues(after), [format!("3:1 {message}")]);
+    assert_eq!(issues(inside), [format!("7:9 {message}")]);
+    assert_eq!(issues(after_a_class), [format!("5:1 {message}")]);
+    assert_eq!(issues(removed), Vec::<String>::new());
+    // PHP keeps its own two checks of `declare`.
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\necho 1;\n\ndeclare(strict_types=2);\n"),
+        [
+            "5:1 Strict type declaration must be the first statement in the file.",
+            "5:22 The `strict_types` directive must be set to either `0` or `1`."
+        ]
+    );
+}
+
+/// PHP#'s `true`, `false` and `null` are lowercase, so a value written in another case is one error that names it.
+#[test]
+fn true_false_or_null_written_in_another_case_is_one_error() {
+    for (value, literal) in [("TRUE", "true"), ("False", "false"), ("NULL", "null"), ("Null", "null")] {
+        let code = leak(method(&format!("        let x = {value};\n        return extra;\n")));
+
+        assert_eq!(issues(code), [format!("7:17 Write `{literal}` in lowercase.")], "{code}");
+    }
+}
+
+/// PHP reserves `X::class` for a class's name, so a constant named `class` in any case fails when PHP loads the file.
+#[test]
+fn a_constant_named_class_is_an_error() {
+    for (code, at, name, class) in [
+        ("class Report\n{\n    public const int class = 1;\n}\n", "3:22", "class", "Report"),
+        ("class Report\n{\n    public const int CLASS = 1;\n}\n", "3:22", "CLASS", "Report"),
+        ("enum Suit\n{\n    case Hearts;\n\n    public const int class = 1;\n}\n", "5:22", "class", "Suit"),
+    ] {
+        assert_eq!(
+            issues(code),
+            [format!("{at} `{name}` can't name a constant: `{class}.class` already names the class.")],
+            "{code}"
+        );
+    }
+}
+
+/// PHP's other `declare` settings, `ticks` and `encoding`, set what PHP# leaves at PHP's defaults, so each is one error
+/// that names it, and the help removes it or the `declare` around its body.
+#[test]
+fn declare_of_another_setting_is_one_error_that_names_it() {
+    for (body, head, help) in [
+        ("        declare(ticks=1);\n", "declare(ticks=1)", "Delete it."),
+        ("        declare(encoding=\"UTF-8\");\n", "declare(encoding=\"UTF-8\")", "Delete it."),
+        (
+            "        declare(ticks=1) { extra = 2; }\n",
+            "declare(ticks=1)",
+            "Write its body's code without the `declare` around it.",
+        ),
+        ("        declare(strict_types=1, ticks=1);\n", "declare(strict_types=1, ticks=1)", "Delete it."),
+    ] {
+        let code = leak(method(&format!("{body}        return extra;\n")));
+        let issues: Vec<(String, Option<String>)> =
+            check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.help)).collect();
+
+        assert_eq!(
+            issues,
+            [(
+                format!("PHP# has no `{head}`: a `.sharp` file runs with PHP's default settings."),
+                Some(help.to_owned())
+            )],
+            "{code}"
+        );
+    }
 }
 
 #[test]
@@ -609,23 +837,163 @@ fn compact_extract_and_global_are_errors() {
     );
 }
 
-/// Spec section 8 removes `echo` and `print`: output goes through `printf` or `fwrite`.
+/// Spec section 8 removes `echo` and `print`: output goes through `global.printf` or `global.fwrite`. Spec section 2
+/// makes `echo` a plain name, so `echo` written as a call is a call of a function no code declares, refused the same
+/// way.
 #[test]
 fn echo_is_an_error_that_names_printf_and_fwrite() {
-    let code = leak(method("        echo \"total\", extra;\n        return extra;\n"));
-    let php = leak(php_method("        echo 'total', $extra;\n        return $extra;\n"));
+    let code = leak(method("        echo \"total\", extra;\n        echo(\"total\");\n        return extra;\n"));
+    let message = "PHP# has no `echo`: write `global.printf` or `global.fwrite`.";
 
-    assert_eq!(issues(code), ["7:9 PHP# has no `echo`: write `printf` or `fwrite`."]);
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
+    assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}")]);
 }
 
 #[test]
 fn print_is_an_error_that_names_printf_and_fwrite() {
-    let code = leak(method("        const shown = print \"total\";\n        return extra;\n"));
-    let php = leak(php_method("        $shown = print 'total';\n        return $extra;\n"));
+    let code =
+        leak(method("        const shown = print \"total\";\n        print(\"total\");\n        return extra;\n"));
+    let message = "PHP# has no `print`: write `global.printf` or `global.fwrite`.";
 
-    assert_eq!(issues(code), ["7:23 PHP# has no `print`: write `printf` or `fwrite`."]);
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
+    assert_eq!(issues(code), [format!("7:23 {message}"), format!("8:9 {message}")]);
+}
+
+/// Spec section 2 makes `isset`, `empty`, `unset`, `array` and `list` plain names, so each written as PHP calls it is a
+/// call of a function no code declares, refused with the PHP# form. A local of the name is called as any local that
+/// holds a lambda is.
+#[test]
+fn isset_empty_unset_array_and_list_written_as_calls_name_the_php_sharp_form() {
+    let code = leak(method(
+        "        const set = isset(extra);\n        const blank = empty(extra);\n        unset(extra);\n        const items = array(1, 2);\n        list(first) = items;\n        return extra;\n",
+    ));
+    let local = leak(method("        const isset = (int value) => value > 0;\n        return isset(extra) ? 1 : 0;\n"));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:21 PHP# has no `isset`: test it against null, as in `value != null`.",
+            "8:23 PHP# has no `empty`: compare the value itself, as in `items.count() == 0`.",
+            "9:9 PHP# has no `unset`: a local ends at the `}` that closes its block, and `map.remove(key)` removes a Map's entry.",
+            "10:23 PHP# has no `array`: write a list literal, as in `[1, 2]`.",
+            "11:9 PHP# has no `list`: read each element into its own local, as in `const first = pair[0];`.",
+        ]
+    );
+    assert_eq!(issues(local), Vec::<String>::new());
+}
+
+/// Spec section 2: a PHP keyword PHP# doesn't use is a plain name, and a keyword PHP# uses stays reserved, as the
+/// spec's `keyword-names` example writes them.
+#[test]
+fn the_keyword_names_example_reserves_only_the_keywords_php_sharp_uses() {
+    let code = leak(method(
+        "        const list = [1, 2, 3];\n        let empty = true;\n        const print = \"draft\";\n        const match = 1;\n        return extra;\n",
+    ));
+
+    assert_eq!(issues(code), ["10:15 `match` is a PHP# keyword, so it can't name a local."]);
+}
+
+/// Spec section 2, after C#'s keywords: every word that starts or structures PHP# syntax is reserved, so it can't name
+/// a `const` or `let` local, a parameter, a catch variable or a pattern variable. `this` keeps its own message. The
+/// name the help suggests compiles.
+#[test]
+fn every_keyword_php_sharp_uses_is_refused_as_a_local_or_parameter_name() {
+    const RESERVED: [&str; 52] = [
+        "let",
+        "const",
+        "emit",
+        "match",
+        "new",
+        "return",
+        "throw",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "break",
+        "continue",
+        "try",
+        "catch",
+        "finally",
+        "yield",
+        "exit",
+        "typeof",
+        "is",
+        "as",
+        "import",
+        "namespace",
+        "class",
+        "interface",
+        "enum",
+        "case",
+        "event",
+        "extern",
+        "foreign",
+        "module",
+        "struct",
+        "static",
+        "public",
+        "protected",
+        "private",
+        "internal",
+        "abstract",
+        "final",
+        "sealed",
+        "override",
+        "virtual",
+        "required",
+        "readonly",
+        "lazy",
+        "true",
+        "false",
+        "null",
+        "this",
+        "super",
+        "Self",
+    ];
+
+    for word in RESERVED {
+        let renamed = format!("{}Value", word.to_lowercase());
+        let rows = [
+            (leak(method(&format!("        const {word} = 1;\n        return extra;\n"))), "7:15", "local"),
+            (leak(method(&format!("        let {word} = 1;\n        return extra;\n"))), "7:13", "local"),
+            (
+                leak(format!("namespace App.Tenant;\n\nclass Report\n{{\n    public int run(int {word}) => 1;\n}}\n")),
+                "5:24",
+                "parameter",
+            ),
+            (
+                leak(method(&format!(
+                    "        try {{ return 1; }} catch (Exception {word}) {{ return 2; }}\n        return extra;\n"
+                ))),
+                "7:44",
+                "catch variable",
+            ),
+            (
+                leak(method(&format!("        if (extra is int {word}) {{ return 1; }}\n        return extra;\n"))),
+                "7:26",
+                "pattern variable",
+            ),
+        ];
+
+        for (code, at, kind) in rows {
+            let (message, help) = if word == "this" {
+                (format!("Cannot name a {kind} `this`: `this` is the object the method runs on."), None)
+            } else {
+                (
+                    format!("`{word}` is a PHP# keyword, so it can't name a {kind}."),
+                    Some(format!("Rename it, as in `{renamed}`.")),
+                )
+            };
+            let refused: Vec<(String, Option<String>)> =
+                check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.help)).collect();
+
+            assert_eq!(refused, [(message, help)], "{code}");
+            assert_eq!(issues(code)[0].split_once(' ').map(|(location, _)| location), Some(at), "{code}");
+        }
+
+        let fixed = leak(method(&format!("        const {renamed} = 1;\n        return {renamed};\n")));
+        assert_eq!(issues(fixed), Vec::<String>::new(), "{fixed}");
+    }
 }
 
 /// `die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes `die`.
@@ -634,58 +1002,20 @@ fn die_in_every_form_is_an_error_that_names_stderr_and_exit() {
     let code = leak(method(
         "        die;\n        die();\n        die(\"failed\");\n        die(1);\n        return extra;\n",
     ));
-    let php = leak(php_method(
-        "        die;\n        die();\n        die('failed');\n        die(1);\n        return $extra;\n",
-    ));
-    let message = "PHP# has no `die`: write the message to STDERR, then `exit(1)`.";
+    let message = "PHP# has no `die`: write the message to STDERR, then `global.exit(1)`.";
 
     assert_eq!(
         issues(code),
         [format!("7:9 {message}"), format!("8:9 {message}"), format!("9:9 {message}"), format!("10:9 {message}")]
     );
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
-/// `exit("…")` prints its message and exits with status 0, as `die("…")` does. The engine runs a `.sharp` file
-/// without the analyzer, which refuses an argument that is not an `int`, so `check_slice` refuses a string literal or
-/// a template, in parentheses or not.
+/// `exit` is PHP's function `exit`, which the analyzer refuses bare as it refuses any bare call of a plain PHP
+/// function, spec section 23, so `check_slice` takes it in every form.
 #[test]
-fn exit_with_a_string_literal_is_an_error_as_die_is() {
-    let code = leak(method(
-        "        exit(\"failed\");\n        exit(status: \"failed\");\n        exit(`failed`);\n        exit((\"failed\"));\n        exit(((\"failed\")));\n        return extra;\n",
-    ));
-    let php = leak(php_method(
-        "        exit('failed');\n        exit(status: 'failed');\n        exit(\"failed $extra\");\n        exit(('failed'));\n        exit((('failed')));\n        return $extra;\n",
-    ));
-    let message = "PHP# has no `die`: write the message to STDERR, then `exit(1)`.";
-
-    assert_eq!(
-        issues(code),
-        [
-            format!("7:9 {message}"),
-            format!("8:9 {message}"),
-            format!("9:9 {message}"),
-            format!("10:9 {message}"),
-            format!("11:9 {message}"),
-        ]
-    );
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
-}
-
-#[test]
-fn exit_without_parentheses_is_an_error_that_names_the_call() {
-    let code = leak(method("        exit;\n        return extra;\n"));
-    let php = leak(php_method("        exit;\n        return $extra;\n"));
-
-    assert_eq!(issues(code), ["7:9 PHP# calls `exit` as a function: write `exit(0)`."]);
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
-}
-
-/// Spec section 8 keeps `exit(code)` as PHP 8.4's built-in function.
-#[test]
-fn exit_with_a_code_or_without_arguments_is_in_the_slice() {
+fn exit_in_every_form_is_in_the_slice() {
     let code = leak(
-        method("        exit(1);\n        exit(code);\n        exit(status: code);\n        exit();\n        return code;\n")
+        method("        exit(1);\n        exit(code);\n        exit(status: code);\n        exit();\n        exit;\n        return code;\n")
             .replace("int extra", "int code"),
     );
 
@@ -743,12 +1073,130 @@ fn super_calls_the_parent_method() {
     assert_eq!(issues(code), ["7:20 This expression is not supported yet in PHP#."]);
 }
 
+/// Spec section 9.1: the main constructor passes control to its base class with `: super(…)`, whose arguments are a
+/// method body's expressions without `this`. Only a named constructor calls `: this(…)`.
+#[test]
+fn the_main_constructor_passes_control_with_super_and_its_arguments_cannot_use_this() {
+    let code = "namespace App.Tenant;\n\npublic class Order : Entity\n{\n    public Order(Row row, int count) : super(row, count + 1) { }\n}\n\npublic class Copy : Entity\n{\n    public Copy(Row row) : this(row) { }\n}\n\npublic class Early : Entity\n{\n    public Early(Row row) : super(this, this.row) { }\n}\n\npublic class Late : Entity\n{\n    public Late(Row row) : super(super.row) { }\n}\n\npublic class Lambda : Entity\n{\n    public Lambda(Row row) : super(Rows.call(() => this.row), Rows.call(() => { return this.row; })) { }\n}\n\npublic class Named : Entity\n{\n    public Named(Row row) : super(row: this.row) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "10:28 The main constructor passes control to its base class with `: super(…)`. Only a named constructor calls `: this(…)`.",
+            "15:35 `this` is not available before the constructor runs: pass a parameter instead.",
+            "15:41 `this` is not available before the constructor runs: pass a parameter instead.",
+            "20:34 This expression is not supported yet in PHP#.",
+            "25:52 `this` is not available before the constructor runs: pass a parameter instead.",
+            "25:88 `this` is not available before the constructor runs: pass a parameter instead.",
+            "30:40 `this` is not available before the constructor runs: pass a parameter instead.",
+        ]
+    );
+}
+
+/// Spec section 9.1: a named constructor passes control to the main constructor with `: this(…)`, never `: super(…)`,
+/// and the arguments of `: this(…)` cannot use `this`, which does not exist before the main constructor runs.
+#[test]
+fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_this() {
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Order.single() : this(1) { }\n    public Order.none() { }\n    public Order.base() : super() { }\n    public Order.early() : this(this.count) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "8:18 A named constructor passes control to the main constructor with `: this(…)`.",
+            "9:27 A named constructor passes control to the main constructor with `: this(…)`.",
+            "10:33 `this` is not available before the constructor runs: pass a parameter instead.",
+        ]
+    );
+}
+
+/// Spec section 9.1: a named constructor is declared on its own class's name with an access modifier and nothing else,
+/// a name that is neither its class's nor one PHP reserves, parameters that declare no property, and a body. An
+/// abstract class has no objects of its own, and named constructors are not inherited, so it declares none.
+#[test]
+fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n}\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:12 A named constructor is declared on its own class, as in `Order.copy`.",
+            "8:18 A named constructor cannot have its class's name: `new Order(…)` calls the main constructor.",
+            "9:18 A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods.",
+            "10:12 A named constructor takes only `public`, `protected` or `private`: remove `static`.",
+            "11:11 A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.",
+            "12:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
+            "13:35 A named constructor needs a body, even an empty `{ }`.",
+            "20:18 An abstract class has no objects of its own, so it declares no named constructor.",
+        ]
+    );
+}
+
+/// Spec section 9.1: a named constructor runs as the static method of its name, so it shares no name with a method of
+/// its class, static or not. The clash has the code and the words the analyzer reports it with across a class and its
+/// parent. A law and a named constructor of one name are a duplicate member, as a law and a method are.
+#[test]
+fn a_named_constructor_shares_no_name_with_a_method() {
+    let after = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Order.copy() : this(1) { }\n    public int copy() => 1;\n}\n";
+    let before = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public int Copy() => 1;\n    public Order.copy() : this(1) { }\n}\n";
+    let static_method = "namespace App.Tenant;\n\npublic class Clash\n{\n    public Clash() { }\n\n    public Clash.of() : this() { }\n    public static Clash of() => new Clash();\n}\n";
+    let law = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    law copy(int a) => a == a;\n    public Order.copy() : this(1) { }\n}\n";
+    let coded = |code: &'static str| -> Vec<(String, Option<String>)> {
+        check("src/Report.sharp", code).into_iter().map(|issue| (issue.message, issue.code)).collect()
+    };
+    let clash = |message: &str| vec![(message.to_owned(), Some("named-constructor-clash".to_owned()))];
+
+    assert_eq!(coded(after), clash("`Order.copy` cannot share its name with `Order`'s named constructor `copy`."));
+    assert_eq!(
+        coded(before),
+        clash("The named constructor `Order.copy` cannot share its name with the method `Order.Copy`.")
+    );
+    assert_eq!(coded(static_method), clash("`Clash.of` cannot share its name with `Clash`'s named constructor `of`."));
+    assert_eq!(issues(after), ["8:16 `Order.copy` cannot share its name with `Order`'s named constructor `copy`."]);
+    assert_eq!(
+        issues(before),
+        ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`."]
+    );
+    assert_eq!(issues(law), ["8:18 class method `Order.copy` has already been defined"]);
+}
+
+/// Spec section 9.1: only a class has constructors, so an interface, an enum and a static class declare no named one.
+#[test]
+fn only_a_class_with_instances_declares_a_named_constructor() {
+    let interface = "namespace App.Tenant;\n\npublic interface Priced\n{\n    Priced.free() : this() { }\n}\n";
+    let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit.red() : this() { }\n}\n";
+    let r#static = "namespace App.Tenant;\n\npublic static class Text\n{\n    public Text.empty() : this() { }\n}\n";
+
+    assert_eq!(
+        issues(interface),
+        ["5:12 An interface has no constructor: a named constructor creates an object of its own class."]
+    );
+    assert_eq!(issues(r#enum), ["7:17 An enum has no constructor: its cases are its only values."]);
+    assert_eq!(issues(r#static), ["5:17 A static class has no constructor."]);
+}
+
+/// Spec section 9.1: a constructor runs once, when `new` creates the object, so no code calls a member named
+/// `__construct`. The base class's arguments go in `: super(…)`.
+#[test]
+fn a_constructor_runs_once_so_no_code_calls_it_as_a_member() {
+    let code = "namespace App.Tenant;\n\npublic class Base\n{\n    public Base(public int id { get; }) { }\n}\n\npublic class Once : Base\n{\n    public Once(int id) : super(id) { }\n}\n\npublic class Twice : Base\n{\n    public Twice(int id) : super(id)\n    {\n        super.__construct(id + 1);\n    }\n}\n\npublic class Again : Base\n{\n    public Again(int id) : super(id) { }\n\n    public void reset(Base other, Base? maybe)\n    {\n        super.__construct(2);\n        this.__construct(3);\n        other.__construct(4);\n        maybe?.__CONSTRUCT(5);\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "17:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            "27:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            "28:14 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            "29:15 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+            "30:16 A constructor runs once, when `new` creates the object: pass the base class's arguments with `: super(…)`.",
+        ]
+    );
+}
+
 /// Spec section 25's example: `Self` is the class a static method is called on, and `new Self(…)` needs a `required`
-/// constructor. A subclass calls its parent's constructor with `super.__construct(…)`, because `: super(…)` does not
-/// parse yet.
+/// constructor, which a subclass's constructor calls with `: super(…)`.
 #[test]
 fn self_is_a_return_type_creates_with_a_required_constructor_and_calls_static_methods() {
-    let code = "namespace App.Tenant;\n\nimport Lib.Row;\nimport Lib.Clock;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row)\n    {\n        return new Self(row);\n    }\n\n    public static Self? find(Row row) => Self.fromSchema(row);\n\n    public static Self|int counted(Row row) => Self.fromSchema(row);\n\n    public static (Self|int)? either(Row row) => null;\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null)\n    {\n        super.__construct(row);\n    }\n}\n\npublic interface Copyable\n{\n    Self copy();\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Row;\nimport Lib.Clock;\n\npublic abstract class DatabaseEntity\n{\n    public required DatabaseEntity(Row row)\n    {\n    }\n\n    public static Self fromSchema(Row row)\n    {\n        return new Self(row);\n    }\n\n    public static Self? find(Row row) => Self.fromSchema(row);\n\n    public static Self|int counted(Row row) => Self.fromSchema(row);\n\n    public static (Self|int)? either(Row row) => null;\n}\n\npublic class Order : DatabaseEntity\n{\n    public Order(Row row, Clock? clock = null) : super(row)\n    {\n    }\n}\n\npublic interface Copyable\n{\n    Self copy();\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
@@ -767,6 +1215,32 @@ fn self_is_only_a_return_type() {
             "9:44 `Self` is only a return type in PHP#.",
         ]
     );
+}
+
+/// Spec section 9.1: a named constructor belongs to the class that declares it and is not inherited, so `Self`, which
+/// can be any subclass, cannot name one. The help names the class, and that fix compiles.
+#[test]
+fn new_self_cannot_name_a_named_constructor() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public Report.of(int count) : this(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
+    let fixed = code.replace("new Self.of(1)", "new Report.of(1)");
+
+    let issue = check("src/Report.sharp", code).remove(0);
+    assert_eq!(
+        issue.message,
+        "`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
+    );
+    assert_eq!(issue.help.as_deref(), Some("Name its class: write `new Report.of(1)`."));
+    assert_eq!(
+        issues(code),
+        [
+            "13:36 `Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
+        ]
+    );
+    assert_eq!(issues(leak(fixed)), Vec::<String>::new());
+
+    // A class that inherits `of` shows no declaring class here, so the analyzer reports it with that class's name.
+    let inherited = "namespace App.Tenant;\n\nclass Summary : Report\n{\n    public Summary(int count) : super(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
+    assert_eq!(issues(inherited), Vec::<String>::new());
 }
 
 #[test]
@@ -879,18 +1353,75 @@ fn an_interface_method_takes_union_types_and_a_variadic_parameter() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// An interface member is public, written bare, so an access modifier on a property or a method is one error. A
+/// `.php` interface keeps PHP's own checks.
 #[test]
-fn a_modifier_on_an_interface_member_is_an_error() {
-    let code =
-        "namespace App.Tenant;\n\ninterface Measured\n{\n    public float area();\n\n    static float unit();\n}\n";
+fn an_interface_member_is_public_written_bare() {
+    let bare =
+        "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n\n    string label(int digits);\n}\n";
+    assert_eq!(issues(bare), Vec::<String>::new());
+
+    let message = "An interface member is always public, so it takes no access modifier.";
+    for modifier in ["public", "protected", "private", "internal"] {
+        let code = leak(bare.replace("    string", &format!("    {modifier} string")));
+
+        assert_eq!(issues(code), [format!("5:5 {message}"), format!("7:5 {message}")], "{modifier}");
+    }
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Named\n{\n    protected string $name { get; }\n\n    private function label(int $digits): string;\n}\n";
+    assert_eq!(
+        issues_in("src/Named.php", php),
+        [
+            "7:5 Interface virtual property `Named::$name` cannot have `protected` modifier.",
+            "7:5 Interface virtual property `Named::$name` must be declared public.",
+            "9:5 Interface method `Named::label` cannot have `private` modifier."
+        ]
+    );
+}
+
+/// Spec section 5's `internal` is not supported yet: on a member, a parameter or a declaration it is one error at the
+/// modifier, and the member is not one written without an access modifier.
+#[test]
+fn internal_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    internal const int MAX = 1;\n    internal int count = 0;\n    internal int views { get; set; } = 0;\n    internal int total => 7;\n    public string name { get; internal set; } = \"\";\n\n    internal Report(internal int size { get; })\n    {\n    }\n\n    internal Report.empty() : this(0)\n    {\n    }\n\n    internal void run()\n    {\n    }\n}\n";
+    let message = "This modifier is not supported yet in PHP#.";
 
     assert_eq!(
         issues(code),
         [
-            "5:5 An interface method takes no modifier: every interface method is public.",
-            "7:5 An interface method takes no modifier: every interface method is public."
+            format!("5:5 {message}"),
+            format!("6:5 {message}"),
+            format!("7:5 {message}"),
+            format!("8:5 {message}"),
+            "9:31 This accessor is not supported yet in PHP#.".to_owned(),
+            format!("11:5 {message}"),
+            format!("11:21 {message}"),
+            format!("15:5 {message}"),
+            format!("19:5 {message}"),
         ]
     );
+
+    for declaration in [
+        "internal class Ledger\n{\n}\n",
+        "internal interface Priced\n{\n}\n",
+        "internal enum Suit\n{\n    case Hearts;\n}\n",
+        "internal event Paid(int orderId);\n",
+    ] {
+        let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
+
+        assert_eq!(issues(code), [format!("3:1 {message}")], "{declaration}");
+    }
+
+    // An anonymous class is not supported yet, and `internal` among its modifiers is no other error.
+    let anonymous = leak(method("        const other = new readonly internal class {};\n        return 1;\n"));
+    assert_eq!(issues(anonymous), ["7:23 This expression is not supported yet in PHP#."]);
+}
+
+#[test]
+fn another_modifier_on_an_interface_method_is_an_error() {
+    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    static float unit();\n}\n";
+
+    assert_eq!(issues(code), ["5:5 An interface method takes no modifier: every interface method is public."]);
 }
 
 #[test]
@@ -903,18 +1434,23 @@ fn an_interface_constant_or_another_interface_modifier_is_not_supported_yet() {
     );
 }
 
+/// An interface states a get-only property its classes give, as `OrderEvent` states the `orderId` its events give,
+/// spec section 15. A `set` accessor or an accessor body is not supported yet.
 #[test]
-fn an_interface_property_is_not_supported_yet_with_or_without_accessor_bodies() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    public string name { get; }\n    public string label { get => \"label\"; }\n}\n";
+fn an_interface_property_is_get_only() {
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "6:31 Interface virtual property `Named.label` must be abstract.",
-            "5:5 This class member is not supported yet in PHP#.",
-            "6:5 This class member is not supported yet in PHP#."
+            "6:24 Interface virtual property `Named.label` must be abstract.",
+            "6:5 This class member is not supported yet in PHP#.",
+            "7:5 This class member is not supported yet in PHP#."
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\ninterface Named\n{\n    public string $name { get; }\n    public string $label { get => \"label\"; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["8:32 Interface virtual property `Named::$label` must be abstract."]);
 }
 
 #[test]
@@ -996,6 +1532,116 @@ fn a_reserved_class_name_is_an_error() {
     assert_eq!(issues(code), ["3:7 Cannot use `Mixed` as a class name: it is reserved."]);
 }
 
+/// Spec sections 2 and 24: a type takes any capitalized word but the type names the engine reserves. PHP#'s keywords
+/// are lowercase and case-sensitive, as C#'s are, so `Match` and `Internal` name a class, as every PHP keyword PHP#
+/// doesn't use does, capitalized. `Self` is the one capitalized keyword, and the engine reserves it with `True`,
+/// `False`, `Null`, `Static`, `Parent`, `Array` and `Callable`. A lowercase keyword gets spec section 24's error.
+#[test]
+fn a_type_takes_any_capitalized_word_but_a_reserved_type_name() {
+    const PHP_ONLY: [&str; 42] = [
+        "fn",
+        "or",
+        "and",
+        "die",
+        "use",
+        "var",
+        "xor",
+        "echo",
+        "eval",
+        "from",
+        "goto",
+        "list",
+        "array",
+        "clone",
+        "empty",
+        "endif",
+        "isset",
+        "print",
+        "trait",
+        "unset",
+        "elseif",
+        "endfor",
+        "global",
+        "parent",
+        "switch",
+        "declare",
+        "default",
+        "extends",
+        "foreach",
+        "include",
+        "require",
+        "callable",
+        "endwhile",
+        "function",
+        "endswitch",
+        "insteadof",
+        "enddeclare",
+        "endforeach",
+        "implements",
+        "instanceof",
+        "include_once",
+        "require_once",
+    ];
+    const RESERVED: [&str; 8] = ["Self", "True", "False", "Null", "Static", "Parent", "Array", "Callable"];
+
+    for word in PHP_ONLY.iter().chain(&SHARP_KEYWORDS) {
+        let name = format!("{}{}", word[..1].to_uppercase(), &word[1..]);
+        let declarations = [
+            (format!("class {name}\n{{\n}}\n"), "3:7"),
+            (format!("interface {name}\n{{\n}}\n"), "3:11"),
+            (format!("enum {name}\n{{\n    case One;\n}}\n"), "3:6"),
+            (format!("event {name}(int id);\n"), "3:7"),
+        ];
+
+        for (declaration, at) in declarations {
+            let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
+            let expected = if RESERVED.contains(&name.as_str()) {
+                vec![format!("{at} Cannot use `{name}` as a class name: it is reserved.")]
+            } else {
+                vec![]
+            };
+
+            assert_eq!(issues(code), expected, "{code}");
+        }
+
+        if !RESERVED.contains(&name.as_str()) {
+            for header in [
+                format!("class Shop : {name}"),
+                format!("class Shop : Base, {name}"),
+                format!("interface Shop : {name}"),
+            ] {
+                let code = leak(format!("namespace App.Tenant;\n\n{header}\n{{\n}}\n"));
+
+                assert_eq!(issues(code), Vec::<String>::new(), "{code}");
+            }
+        }
+    }
+
+    // PHP keeps its refusal of a reserved word as a type's name or base type.
+    assert_eq!(
+        issues_in(
+            "src/Report.php",
+            "<?php\n\nclass Report extends parent\n{\n}\n\nclass Total implements readonly\n{\n}\n\ntrait readonly\n{\n}\n\ninterface readonly\n{\n}\n\nenum readonly\n{\n}\n"
+        ),
+        [
+            "3:22 class `Report` cannot extend reserved keyword `parent`.",
+            "7:24 class `Total` cannot implement reserved keyword `readonly`.",
+            "11:7 Trait `readonly` name cannot be a reserved keyword.",
+            "15:11 Interface `readonly` name cannot be a reserved keyword.",
+            "19:6 Enum `readonly` name cannot be a reserved keyword."
+        ]
+    );
+
+    let lowercase = "namespace App.Tenant;\n\nclass internal\n{\n}\n";
+
+    assert_eq!(
+        issues(lowercase),
+        [
+            "3:7 `internal` must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones."
+        ]
+    );
+}
+
 #[test]
 fn any_is_a_reserved_class_name() {
     let code = "namespace App.Tenant;\n\nclass Any\n{\n}\n";
@@ -1054,6 +1700,9 @@ fn methods_whose_names_differ_only_in_case_are_an_error() {
 
     // The PHP checks already reject this, so PHP# adds no second error.
     assert_eq!(issues(code), ["5:16 class method `Report.Run` has already been defined"]);
+
+    let php = "<?php\n\nclass Report\n{\n    public function run(): int { return 1; }\n\n    public function Run(): int { return 2; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:21 class method `Report::Run` has already been defined"]);
 }
 
 #[test]
@@ -1172,19 +1821,22 @@ fn a_clashing_import_is_helped_with_the_import_renamed() {
 }
 
 /// Spec section 24 capitalizes every type but the built-in ones, and the parser reads a capitalized name before `<` as
-/// a type with type arguments. So a class, an interface and an enum start with a capital letter.
+/// a type with type arguments. So a class, an interface, an enum and an event start with a capital letter.
 #[test]
 fn a_class_interface_or_enum_name_starts_with_a_capital_letter() {
-    let lowercase =
-        "namespace App.Tenant;\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n";
-    let capitalized =
-        "namespace App.Tenant;\n\nclass Box\n{\n}\n\ninterface Priced\n{\n}\n\nenum Status\n{\n    case Open;\n}\n";
+    let lowercase = "namespace App.Tenant;\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n\nevent paid(int id);\n";
+    let capitalized = "namespace App.Tenant;\n\nclass Box\n{\n}\n\ninterface Priced\n{\n}\n\nenum Status\n{\n    case Open;\n}\n\nevent Paid(int id);\n";
     let rule =
         "must start with a capital letter: PHP# capitalizes every namespace and every type except the built-in ones.";
 
     assert_eq!(
         issues(lowercase),
-        [format!("3:7 `box` {rule}"), format!("7:11 `priced` {rule}"), format!("11:6 `status` {rule}")]
+        [
+            format!("3:7 `box` {rule}"),
+            format!("7:11 `priced` {rule}"),
+            format!("11:6 `status` {rule}"),
+            format!("16:7 `paid` {rule}")
+        ]
     );
     assert_eq!(issues(capitalized), Vec::<String>::new());
 }
@@ -1280,21 +1932,6 @@ fn an_import_keeps_its_lowercase_namespace_parts() {
     assert_eq!(issues("namespace App.Tenant;\n\nimport vendor.lib.Box;\n\nclass Report\n{\n}\n"), Vec::<String>::new());
 }
 
-/// Plain PHP keeps its own namespaces, so a lowercase namespace part there reports nothing.
-#[test]
-fn a_php_file_keeps_its_lowercase_namespace_parts() {
-    assert_eq!(issues_in("src/Report.php", "<?php\n\nnamespace App\\store;\n"), Vec::<String>::new());
-}
-
-/// Plain PHP keeps its own names, so a lowercase class, interface, enum or `use` alias there reports nothing.
-#[test]
-fn a_php_file_keeps_its_lowercase_type_names_and_use_aliases() {
-    let types = "<?php\n\nclass box\n{\n}\n\ninterface priced\n{\n}\n\nenum status\n{\n    case Open;\n}\n";
-
-    assert_eq!(issues_in("src/Report.php", types), Vec::<String>::new());
-    assert_eq!(issues_in("src/Report.php", "<?php\n\nuse Lib\\Box as box;\n"), Vec::<String>::new());
-}
-
 /// An interface's name is checked as a class's is, so a reserved one is an error, as the engine refuses it.
 #[test]
 fn an_interface_named_like_a_reserved_class_name_is_an_error() {
@@ -1322,9 +1959,6 @@ fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
     let code = leak(method(
         "        Store.keep(GLOBALS[\"a\"], $GLOBALS);\n        Store.keep(_SERVER[\"a\"], $_SERVER);\n        Store.keep(_GET[\"a\"], $_GET);\n        Store.keep(_POST[\"a\"], $_POST);\n        Store.keep(_FILES[\"a\"], $_FILES);\n        Store.keep(_COOKIE[\"a\"], $_COOKIE);\n        Store.keep(_SESSION[\"a\"], $_SESSION);\n        Store.keep(_REQUEST[\"a\"], $_REQUEST);\n        Store.keep(_ENV[\"a\"], $_ENV);\n        return extra;\n",
     ));
-    let php = leak(php_method(
-        "        Store::keep(GLOBALS['a'], $GLOBALS);\n        Store::keep(_SERVER['a'], $_SERVER);\n        Store::keep(_GET['a'], $_GET);\n        Store::keep(_POST['a'], $_POST);\n        Store::keep(_FILES['a'], $_FILES);\n        Store::keep(_COOKIE['a'], $_COOKIE);\n        Store::keep(_SESSION['a'], $_SESSION);\n        Store::keep(_REQUEST['a'], $_REQUEST);\n        Store::keep(_ENV['a'], $_ENV);\n        return $extra;\n",
-    ));
     let message = "PHP# has no superglobals; take a Request";
 
     assert_eq!(
@@ -1350,7 +1984,6 @@ fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
             format!("15:31 {message}"),
         ]
     );
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A write to a superglobal's element names the request as a read does, not the write target.
@@ -1359,13 +1992,9 @@ fn a_write_to_a_superglobal_is_an_error_that_names_a_request() {
     let code = leak(method(
         "        _SESSION[\"user\"] = extra;\n        $_SESSION[\"user\"] = extra;\n        _GET[\"n\"]++;\n        return extra;\n",
     ));
-    let php = leak(php_method(
-        "        _SESSION['user'] = $extra;\n        $_SESSION['user'] = $extra;\n        _GET['n']++;\n        return $extra;\n",
-    ));
     let message = "PHP# has no superglobals; take a Request";
 
     assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}"), format!("9:9 {message}")]);
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A constant expression that reads a superglobal, or a member of one or of a `__Something__` name, names the
@@ -1378,17 +2007,6 @@ fn a_superglobal_in_a_constant_expression_is_an_error_that_names_a_request() {
             .replace(
                 "int extra",
                 "string host = _SERVER[\"HTTP_HOST\"], string other = $_SERVER[\"HTTP_HOST\"], string server = _SERVER.HTTP_HOST, int line = __Foo__.bar",
-            ),
-    );
-    let php = leak(
-        php_method("        return 1;\n")
-            .replace(
-                "{\n    public function run",
-                "{\n    public const int A = __Foo__::bar;\n    #[Field(_SERVER::X)]\n    public function run",
-            )
-            .replace(
-                "int $extra",
-                "string $host = _SERVER['HTTP_HOST'], string $other = $_SERVER['HTTP_HOST'], string $server = _SERVER::HTTP_HOST, int $line = __Foo__::bar",
             ),
     );
     let message = "PHP# has no superglobals; take a Request";
@@ -1405,7 +2023,6 @@ fn a_superglobal_in_a_constant_expression_is_an_error_that_names_a_request() {
             format!("7:140 {magic}"),
         ]
     );
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A superglobal or a `__Something__` name before `.` or `?.` binds as a class, and is refused as its bare form is. A
@@ -1414,9 +2031,6 @@ fn a_superglobal_in_a_constant_expression_is_an_error_that_names_a_request() {
 fn a_superglobal_or_a_double_underscore_name_before_a_member_is_an_error() {
     let code = leak(method(
         "        Store.keep(_SERVER.x);\n        Store.keep(GLOBALS.x);\n        _SERVER.read();\n        _SERVER.x = 1;\n        Store.keep(__Foo__.bar);\n        __Foo__.bar();\n        Store.keep(_SERVER?.x);\n        Store.keep(_Helper.x);\n        return extra;\n",
-    ));
-    let php = leak(php_method(
-        "        Store::keep(_SERVER::$x);\n        Store::keep(GLOBALS::$x);\n        _SERVER::read();\n        _SERVER::$x = 1;\n        Store::keep(__Foo__::$bar);\n        __Foo__::bar();\n        Store::keep(_SERVER?->x);\n        Store::keep(_Helper::$x);\n        return $extra;\n",
     ));
     let superglobal = "PHP# has no superglobals; take a Request";
     let magic = "PHP# has no `__Foo__`: `Position.current()` gives the file, directory, line, column and function.";
@@ -1433,7 +2047,6 @@ fn a_superglobal_or_a_double_underscore_name_before_a_member_is_an_error() {
             format!("13:20 {superglobal}"),
         ]
     );
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// Spec section 27 removes PHP's magic constants and every other `__Something__` name, in a body and in a constant
@@ -1445,12 +2058,6 @@ fn a_magic_constant_or_another_double_underscore_name_is_an_error_that_names_pos
             "        Store.keep(__DIR__);\n        Store.keep(__FILE__);\n        Store.keep(__LINE__);\n        Store.keep(__FUNCTION__);\n        Store.keep(__METHOD__);\n        Store.keep(__CLASS__);\n        Store.keep(__NAMESPACE__);\n        Store.keep(__TRAIT__);\n        Store.keep(__PROPERTY__);\n        Store.keep(__COMPILER_HALT_OFFSET__);\n        Store.keep(__dir__);\n        Store.keep(____, __Version);\n        return extra;\n",
         )
         .replace("int extra", "int extra = __LINE__"),
-    );
-    let php = leak(
-        php_method(
-            "        Store::keep(__DIR__);\n        Store::keep(__FILE__);\n        Store::keep(__LINE__);\n        Store::keep(__FUNCTION__);\n        Store::keep(__METHOD__);\n        Store::keep(__CLASS__);\n        Store::keep(__NAMESPACE__);\n        Store::keep(__TRAIT__);\n        Store::keep(__PROPERTY__);\n        Store::keep(__COMPILER_HALT_OFFSET__);\n        Store::keep(__dir__);\n        Store::keep(____, __Version);\n        return $extra;\n",
-        )
-        .replace("int $extra", "int $extra = __LINE__"),
     );
     let position = "`Position.current()` gives the file, directory, line, column and function.";
 
@@ -1472,7 +2079,6 @@ fn a_magic_constant_or_another_double_underscore_name_is_an_error_that_names_pos
             "17:20 PHP# has no `__dir__`: write `Position.current().directory`.".to_owned(),
         ]
     );
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 /// A declared `__Something__` name is refused as a read of one is, in every kind of declaration. A method named as
@@ -1480,10 +2086,8 @@ fn a_magic_constant_or_another_double_underscore_name_is_an_error_that_names_pos
 #[test]
 fn a_declared_double_underscore_name_is_an_error_that_names_position() {
     let code = "namespace App.Tenant;\n\nclass __Shape__\n{\n}\n\ninterface __Named__\n{\n    int __area__(int __side__);\n}\n\nenum __Suit__\n{\n    case __Hearts__;\n}\n\nclass Report\n{\n    private int __count__ = 0;\n    public int __views__ { get; set; }\n    public string __slug__ => \"a\";\n    public const int __MAX__ = 1;\n\n    public Report(private int __kept__)\n    {\n    }\n\n    public int __run__(int __extra__)\n    {\n        let __a__ = 1;\n        const __b__ = 2;\n        int __c__ = 3;\n        for (let __i__ = 0; __i__ < 1; __i__++) {\n        }\n        for (const __v__ of Store.values()) {\n        }\n        try {\n        } catch (Missing __e__) {\n        }\n        const f = (int __x__) => __x__;\n        return 1;\n    }\n\n    public int __get(string name) => 1;\n}\n";
-    let php = "<?php\n\nclass __Shape__\n{\n}\n\ninterface __Named__\n{\n    public function __area__(int $__side__): int;\n}\n\nenum __Suit__\n{\n    case __Hearts__;\n}\n\nclass Report\n{\n    private int $__count__ = 0;\n    public int $__views__ = 0;\n    public string $__slug__ { get => \"a\"; }\n    public const int __MAX__ = 1;\n\n    public function __construct(private int $__kept__)\n    {\n    }\n\n    public function __run__(int $__extra__): int\n    {\n        $__a__ = 1;\n        for ($__i__ = 0; $__i__ < 1; $__i__++) {\n        }\n        foreach ([] as $__v__) {\n        }\n        try {\n        } catch (Missing $__e__) {\n        }\n        $f = fn (int $__x__) => $__x__;\n        return 1;\n    }\n}\n";
     let position = "`Position.current()` gives the file, directory, line, column and function.";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
@@ -1516,9 +2120,7 @@ fn a_declared_double_underscore_name_is_an_error_that_names_position() {
 #[test]
 fn a_double_underscore_class_with_a_constructor_reports_its_name_once() {
     let code = "namespace App.Tenant;\n\nclass __Shape__\n{\n    public __Shape__()\n    {\n    }\n}\n";
-    let php = "<?php\n\nclass __Shape__\n{\n    public function __construct()\n    {\n    }\n}\n";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         ["3:7 PHP# has no `__Shape__`: `Position.current()` gives the file, directory, line, column and function."
@@ -1531,15 +2133,13 @@ fn a_double_underscore_class_with_a_constructor_reports_its_name_once() {
 #[test]
 fn a_method_refused_at_its_name_has_its_body_checked() {
     let code = "namespace App.Tenant;\n\nclass Forms\n{\n    public void forms()\n    {\n        const host = _SERVER[\"x\"];\n        echo \"a\";\n    }\n}\n";
-    let php = "<?php\n\nclass Forms\n{\n    public function forms(): void\n    {\n        $host = $_SERVER[\"x\"];\n        echo \"a\";\n    }\n}\n";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
             "5:17 A method named after its class is not supported yet in PHP#.",
             "7:22 PHP# has no superglobals; take a Request",
-            "8:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "8:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
 }
@@ -1548,17 +2148,15 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
 #[test]
 fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
     let code = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<float, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
-    let php = "<?php\n\ninterface Named\n{\n    public function __get(string $name = 'x'): void;\n}\n\nclass Report\n{\n    private int $count = __LINE__;\n    public const int MAX = __LINE__;\n\n    public function __construct(public int $id = __LINE__, int &$total = __LINE__)\n    {\n    }\n\n    public function run(): int\n    {\n        echo \"b\";\n        return 1;\n    }\n}\n";
     let line = "write `Position.current().line`.";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
             "5:10 This method name is not supported yet in PHP#.".to_owned(),
             "5:30 PHP# has no superglobals; take a Request".to_owned(),
             "12:12 An enum has no constructor: its cases are its only values.".to_owned(),
-            "14:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
+            "14:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
             format!("20:17 PHP# has no `__LINE__`: {line}"),
             "21:15 A constant without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             format!("21:21 PHP# has no `__LINE__`: {line}"),
@@ -1569,7 +2167,7 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
             "27:9 A method without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             "29:13 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.".to_owned(),
             "29:20 This type is not supported yet in PHP#.".to_owned(),
-            "30:9 PHP# has no `echo`: write `printf` or `fwrite`.".to_owned(),
+            "30:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.".to_owned(),
         ]
     );
 }
@@ -1578,11 +2176,9 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
 #[test]
 fn an_expression_refused_at_part_of_it_has_the_rest_checked() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void run()\n    {\n        const a = (array) _SERVER;\n        const b = _GET ?: __LINE__;\n        const c = self.make(__LINE__);\n        const d = new static(__LINE__);\n        const e = total(__LINE__);\n        const f = _SERVER[__LINE__];\n        PI = __LINE__;\n        _SERVER[\"x\"] = _GET;\n        const g = _GET ? 1 : 2 ? 3 : __LINE__;\n    }\n\n    public int total(int x) => x;\n}\n";
-    let php = "<?php\n\nclass Report\n{\n    public function run(): void\n    {\n        $a = (array) $_SERVER;\n        $b = $_GET ?: __LINE__;\n        $c = self::make(__LINE__);\n        $d = new static(__LINE__);\n        $e = $this->total(__LINE__);\n        $f = $_SERVER[__LINE__];\n        $_SERVER[\"x\"] = $_GET;\n        $g = ($_GET ? 1 : 2) ? 3 : __LINE__;\n    }\n\n    public function total(int $x): int\n    {\n        return $x;\n    }\n}\n";
     let line = "write `Position.current().line`.";
     let request = "PHP# has no superglobals; take a Request";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
@@ -1615,21 +2211,22 @@ fn an_expression_refused_at_part_of_it_has_the_rest_checked() {
 fn a_function_or_namespace_refused_at_its_name_has_its_code_checked() {
     let code = "namespace App.Tenant;\n\nfunction helper()\n{\n    echo \"a\";\n}\n\nnamespace App.Other;\n\nclass Report\n{\n    public void run()\n    {\n        echo \"b\";\n    }\n}\n";
     let braced = "namespace App.Tenant {\n    class Report\n    {\n        public void run()\n        {\n            echo \"a\";\n        }\n    }\n}\n";
-    let php = "<?php\n\nnamespace App\\Tenant;\n\nfunction helper()\n{\n    echo \"a\";\n}\n\nnamespace App\\Other;\n\nclass Report\n{\n    public function run(): void\n    {\n        echo \"b\";\n    }\n}\n";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
             "3:10 PHP# has no top-level functions: move `helper` into a class as a static method.",
-            "5:5 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "5:5 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
             "8:1 This namespace is not supported yet in PHP#.",
-            "14:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "14:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
     assert_eq!(
         issues(braced),
-        ["1:1 This namespace is not supported yet in PHP#.", "6:13 PHP# has no `echo`: write `printf` or `fwrite`."]
+        [
+            "1:1 This namespace is not supported yet in PHP#.",
+            "6:13 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
+        ]
     );
 }
 
@@ -1637,9 +2234,7 @@ fn a_function_or_namespace_refused_at_its_name_has_its_code_checked() {
 #[test]
 fn a_constructor_in_a_refused_namespace_is_a_constructor() {
     let code = "namespace App.Tenant;\n\nnamespace App.Other;\n\nclass Report\n{\n    public Report()\n    {\n    }\n}\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n    }\n}\n";
-    let php = "<?php\n\nnamespace App\\Tenant;\n\nnamespace App\\Other;\n\nclass Report\n{\n    public function __construct()\n    {\n    }\n}\n";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(
         issues(code),
         [
@@ -1674,10 +2269,8 @@ fn a_map_key_is_refused_once() {
 #[test]
 fn a_public_parameter_outside_a_constructor_reports_only_the_php_error() {
     let code = "namespace App.Tenant;\n\nfunction helper(public int id)\n{\n}\n\nclass Report\n{\n    public void run(public int id)\n    {\n    }\n}\n";
-    let php = "<?php\n\nfunction helper(public int $id)\n{\n}\n\nclass Report\n{\n    public function run(public int $id): void\n    {\n    }\n}\n";
     let promoted = "Promoted properties are not allowed outside of constructors.";
 
-    assert_eq!(issues_in("src/Report.php", php), [format!("3:17 {promoted}"), format!("9:25 {promoted}")]);
     assert_eq!(
         issues(code),
         [
@@ -1761,6 +2354,12 @@ fn attribute_arguments_outside_the_slice_are_not_supported_yet() {
             "7:13 This expression is not supported yet in PHP#.",
             "8:19 This expression is not supported yet in PHP#.",
         ]
+    );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    #[Field(Report::class)]\n    #[Field(Mode::Write)]\n    #[Field([$this->run(1)])]\n    #[Field(label: new Report())]\n    public function run(int $extra): int\n    {\n        return $extra;\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["9:13 Attribute `Field` argument contains a non-constant expression."]
     );
 }
 
@@ -1909,6 +2508,73 @@ fn a_promoted_member_outside_the_slice_is_not_supported_yet() {
             "5:27 This modifier is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(private readonly int $a, private static int $b) {}\n\n    public function run(private int $c): void {}\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "9:25 Promoted properties are not allowed outside of constructors.",
+            "7:66 Parameter `$b` cannot have the `static` modifier.",
+        ]
+    );
+}
+
+/// Spec section 9: a parameter receives its value, and a lazy property computes its own, so no parameter is `lazy`,
+/// whether it declares a member or not.
+#[test]
+fn a_parameter_cannot_be_lazy() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(public lazy int id { get; }, lazy int count) {}\n\n    public int run(lazy int extra) => extra;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:26 A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
+            "5:48 A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
+            "7:20 A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
+        ]
+    );
+}
+
+/// `lazy` is a modifier of spec section 6.5, which the engine cannot run yet on a property or anywhere else.
+#[test]
+fn lazy_off_a_parameter_is_not_supported_yet() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public lazy int total => 1;\n\n    public lazy int run() => 1;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["5:12 `lazy` is not supported yet in PHP#.", "7:12 `lazy` is not supported yet in PHP#."]
+    );
+}
+
+/// Spec section 9.1: a class has one unnamed main constructor, and no overloading by argument types. The help's named
+/// constructor compiles. A method named after its class has only its own error, before the constructor or after it.
+#[test]
+fn a_class_has_one_main_constructor() {
+    let second = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report(string name) {}\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public Report.fromName(string name) : this(strlen(name)) { }\n}\n";
+
+    let issue = check("src/Report.sharp", second).remove(0);
+    assert_eq!(issue.message, "A class has one main constructor: PHP# has no overloading by argument types.");
+    assert_eq!(
+        issue.help.as_deref(),
+        Some(
+            "Give it a name that passes control to the main constructor, as in `public Report.fromName(…) : this(…) { }`."
+        )
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
+
+    for (code, expected) in [
+        (
+            "namespace App.Tenant;\n\nclass Report\n{\n    public int Report() => 1;\n    public Report(int id) {}\n}\n",
+            "5:16 A method named after its class is not supported yet in PHP#.",
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int id) {}\n    public int Report() => 1;\n}\n",
+            "6:16 A method named after its class is not supported yet in PHP#.",
+        ),
+    ] {
+        assert_eq!(issues(code), [expected], "{code}");
+    }
 }
 
 #[test]
@@ -1936,6 +2602,9 @@ fn a_method_without_a_body_reports_only_the_php_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int run();\n}\n";
 
     assert_eq!(issues(code), ["5:21 Non-Abstract method `Report.run` must have a concrete body."]);
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function run(): int;\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:31 Non-Abstract method `Report::run` must have a concrete body."]);
 }
 
 #[test]
@@ -1984,10 +2653,6 @@ fn a_static_class_takes_only_public_and_static() {
             "7:1 A static class takes only `public` and `static`: remove `final`.",
         ]
     );
-}
-
-#[test]
-fn a_php_file_keeps_refusing_a_static_class() {
     assert_eq!(
         issues_in("src/Text.php", "<?php\n\nstatic class Text\n{\n}\n"),
         ["3:1 Class `Text` cannot have the `static` modifier."]
@@ -2035,7 +2700,7 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
         issues(code),
         [
             "5:33 An `extern` method is `public static`, in a static class, with no body.",
-            "7:9 PHP# has no `echo`: write `printf` or `fwrite`.",
+            "7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`.",
         ]
     );
 }
@@ -2089,6 +2754,12 @@ fn an_initial_value_may_be_any_expression_a_method_body_has_without_this() {
     assert_eq!(
         issues(code),
         ["10:25 An initial value cannot use `this`: it runs before the constructor body, while the object is built."]
+    );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private int $made = 1;\n    private int $count = $this->made;\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["8:26 Property `Report::$count` value contains a non-constant expression."]
     );
 }
 
@@ -2157,10 +2828,8 @@ fn a_field_without_an_access_modifier_compiles() {
     let section_6 = "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n}\n";
     let section_29 = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Money(Offer)> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n}\n";
     let function_types = "namespace App.Shop;\n\nclass Checkout\n{\n    Function<Charge(Cart) uses Http> charge;\n    Function<Charge(Cart) uses Http>? fallback;\n    Map<string, Function<Charge(Cart) uses Http, Mail>> handlers;\n    Function<int(Function<int(int) uses Http>)> apply;\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Checkout\n{\n    private array $cache = [];\n    private \\Closure $priceOf;\n    private \\Closure $charge;\n    private ?\\Closure $fallback = null;\n    private array $handlers;\n    private \\Closure $apply;\n}\n";
     let public = "namespace App.Shop;\n\nclass Checkout\n{\n    public Map<string, Plan> cache = [:];\n}\n";
 
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
     assert_eq!(issues(section_6), Vec::<String>::new());
     assert_eq!(issues(section_29), Vec::<String>::new());
     assert_eq!(issues(function_types), Vec::<String>::new());
@@ -2212,6 +2881,12 @@ fn a_void_field_reports_only_the_php_error() {
     assert_eq!(
         issues(code),
         ["6:13 Property `Report.plain` cannot have type `void`.", "5:13 Type `void` cannot be nullable."]
+    );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    private ?void $nothing;\n    private void $plain;\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["8:13 Property `Report::$plain` cannot have type `void`.", "7:14 Type `void` cannot be nullable."]
     );
 }
 
@@ -2318,15 +2993,15 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
 }
 
 #[test]
-fn an_auto_property_has_get_an_optional_narrower_set_and_an_optional_constant_initial_value() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; } = \"none\";\n    public float rate { get; protected set; }\n    protected int total { get; private set; }\n    public int id { get; }\n    private int hidden { get; set; }\n}\n";
+fn an_auto_property_has_get_an_optional_narrower_set_or_init_and_an_optional_constant_initial_value() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; } = \"none\";\n    public float rate { get; protected set; }\n    protected int total { get; private set; }\n    public int id { get; }\n    private int hidden { get; set; }\n    public string title { get; init; } = \"\";\n    public string label { get; private init; } = \"\";\n    public string slug { get; init => field = strtolower(value); } = \"\";\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
 fn an_auto_property_breaking_the_accessor_rules_is_an_error() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; public set; }\n    private int b { get; private set; }\n    protected int c { get; public set; }\n    public int d { set; }\n    public int e { get; get; }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; public set; }\n    private int b { get; private set; }\n    protected int c { get; public set; }\n    public int d { set; }\n    public int e { get; get; }\n    protected int f { get; public init; }\n    public int g { get; set; init; }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2336,6 +3011,8 @@ fn an_auto_property_breaking_the_accessor_rules_is_an_error() {
             "7:28 The `set` accessor of a PHP# property must be narrower than the property.",
             "8:16 A PHP# property needs a `get` accessor.",
             "9:25 A PHP# property declares each accessor once.",
+            "10:28 The `init` accessor of a PHP# property must be narrower than the property.",
+            "11:30 A PHP# property is written by `set` or by `init`, not both.",
         ]
     );
 }
@@ -2382,7 +3059,7 @@ fn a_static_computed_property_or_one_without_an_access_modifier_is_not_supported
 
 #[test]
 fn properties_outside_the_slice_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int a { get; set; }\n    public static int b { get; }\n    public int c { private get; set; }\n    public abstract int d { get; }\n    public override int e { get => 1; }\n    public int f { get; init; }\n    public int g = 0 { get; }\n    public int h { get; set(int value); }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    int a { get; set; }\n    public static int b { get; }\n    public int c { private get; set; }\n    public abstract int d { get; }\n    public override int e { get => 1; }\n    public int g = 0 { get; }\n    public int h { get; set(int value); }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2393,11 +3070,13 @@ fn properties_outside_the_slice_are_not_supported_yet() {
             "7:20 This accessor is not supported yet in PHP#.",
             "8:12 This modifier is not supported yet in PHP#.",
             "9:25 Overriding a property is not supported yet in PHP#.",
-            "10:25 This accessor is not supported yet in PHP#.",
-            "11:16 An initial value before the accessors is not supported yet in PHP#.",
-            "12:25 This accessor is not supported yet in PHP#.",
+            "10:16 An initial value before the accessors is not supported yet in PHP#.",
+            "11:25 This accessor is not supported yet in PHP#.",
         ]
     );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    abstract public int $d { get; }\n}\n";
+    assert_eq!(issues_in("src/Report.php", php), ["7:5 Property `Report::$d` cannot be declared abstract"]);
 }
 
 /// Spec section 6.1: `get` and `set` take a body, written `=> expr;` or as a block, which uses `field` for the
@@ -2452,14 +3131,18 @@ fn the_property_read_through_this_inside_its_own_accessor_is_an_error_that_names
 }
 
 /// PHP gives a `get` hook the property's type and a `set` hook `void`, so `get` returns a value and `set` returns
-/// none. A lambda in an accessor returns for itself.
+/// none, as does `init`, which runs as the `set` hook. A lambda in an accessor returns for itself.
 #[test]
 fn a_get_returns_a_value_and_a_set_returns_none_as_php_hooks_do() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { return; } }\n    public int b { get => field; set { return value; } }\n    public int c { get => field; set { const run = () => { return 1; }; return; } }\n    public int d { get { const run = () => { return; }; return 1; } }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { return; } }\n    public int b { get => field; set { return value; } }\n    public int c { get => field; set { const run = () => { return 1; }; return; } }\n    public int d { get { const run = () => { return; }; return 1; } }\n    public int e { get => field; init { return value; } }\n}\n";
 
     assert_eq!(
         issues(code),
-        ["5:26 A `get` accessor must return a value.", "6:47 A `set` accessor must not return a value.",]
+        [
+            "5:26 A `get` accessor must return a value.",
+            "6:47 A `set` accessor must not return a value.",
+            "9:48 An `init` accessor must not return a value.",
+        ]
     );
 }
 
@@ -2501,15 +3184,17 @@ fn an_initial_value_or_a_constructor_parameter_needs_storage() {
     );
 }
 
-/// A constant initial value is the property's default, but any other would run the `set` body in the constructor.
+/// A constant initial value is the property's default, but any other would run the `set` or `init` body in the
+/// constructor.
 #[test]
 fn an_initial_value_that_is_not_constant_on_a_property_whose_set_has_a_body_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get; set => field = value; } = strlen(\"x\");\n    public int b { get => field; set; } = strlen(\"x\");\n    public int c { get; set => field = value; } = 1;\n    public int d { get; init => field = value; } = strlen(\"x\");\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#."
+            "5:51 An initial value that is not constant, on a property whose `set` has a body, is not supported yet in PHP#.",
+            "8:52 An initial value that is not constant, on a property whose `init` has a body, is not supported yet in PHP#.",
         ]
     );
 }
@@ -2520,6 +3205,20 @@ fn a_static_property_with_an_accessor_body_is_not_supported_yet() {
         "namespace App.Tenant;\n\nclass Report\n{\n    public static int a { get; set => field = value; } = 0;\n}\n";
 
     assert_eq!(issues(code), ["5:12 A static property with an accessor body is not supported yet in PHP#."]);
+}
+
+/// Spec section 6.1: `init` sets a property while its object is created, and no object creates a static property.
+/// The help's `set;` and `private set;` compile.
+#[test]
+fn a_static_property_has_no_init() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static int count { get; init; } = 0;\n}\n";
+    let fixed = "namespace App.Tenant;\n\nclass Report\n{\n    public static int count { get; set; } = 0;\n    public static int total { get; private set; } = 0;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["5:36 A static property has no `init`: `init` sets a property while its object is created."]
+    );
+    assert_eq!(issues(fixed), Vec::<String>::new());
 }
 
 #[test]
@@ -2538,6 +3237,15 @@ fn a_variadic_parameter_that_is_not_last_or_has_a_default_is_an_error_as_in_php(
         [
             "5:39 Invalid parameter order: parameter `extra` is defined after variadic parameter `values`.",
             "10:34 Invalid parameter definition: variadic parameter `values` cannot have a default value.",
+        ]
+    );
+
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function run(int ...$values, int $extra): int\n    {\n        return $extra;\n    }\n\n    public function sum(int ...$values = 1): int\n    {\n        return 0;\n    }\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "7:45 Invalid parameter order: parameter `$extra` is defined after variadic parameter `$values`.",
+            "12:40 Invalid parameter definition: variadic parameter `$values` cannot have a default value.",
         ]
     );
 }
@@ -2562,15 +3270,6 @@ fn a_variadic_constructor_parameter_that_declares_a_member_is_an_error_as_in_php
     );
 }
 
-/// Upstream Mago checks neither the member nor the type of a variadic parameter, nor a type written twice, so a `.php`
-/// file keeps its results. The PHP# twins of these lines are errors.
-#[test]
-fn a_php_file_keeps_upstream_results_for_a_variadic_parameter_and_a_type_written_twice() {
-    let code = "<?php\n\nclass Report\n{\n    public function __construct(private int ...$values)\n    {\n    }\n}\n\nfunction f(void ...$x) {}\n\nfunction g(int|int $x) {}\n";
-
-    assert_eq!(issues_in("src/Report.php", code), Vec::<String>::new());
-}
-
 #[test]
 fn a_union_type_is_in_the_slice_wherever_a_type_is() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int|string key = 1;\n    public int|float amount { get; set; } = 0;\n\n    public Report(private bool|Calc flag, int|string start)\n    {\n    }\n\n    public int|string run(int|float|Calc extra)\n    {\n        int|string local = 1;\n        for (int|bool step = 0; ; ) {\n        }\n        return local;\n    }\n}\n";
@@ -2592,6 +3291,15 @@ fn a_union_that_holds_null_is_not_supported_yet() {
             "5:54 This union that holds null is not supported yet in PHP#.",
             "5:62 This union that holds null is not supported yet in PHP#.",
         ]
+    );
+
+    let php = leak(
+        php_method("        return 1;\n")
+            .replace("int $extra", "?int|string $a, int|?string $b, int|null $c, null|Calc $d"),
+    );
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["5:26 Type `int|string` cannot be nullable.", "5:45 Type `?string` cannot be part of a union."]
     );
 }
 
@@ -2650,6 +3358,10 @@ fn a_nullable_union_is_checked_as_its_union_and_never_joins_another_union() {
             "5:98 Type `void` cannot be part of a union.",
         ]
     );
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\nfunction f(?(int|string) $x) {}\n"),
+        ["3:13 Type `(int|string)` cannot be nullable."]
+    );
 }
 
 #[test]
@@ -2657,13 +3369,6 @@ fn a_single_type_in_parentheses_with_a_question_mark_after_it_reports_only_the_p
     let code = leak(method("        return 1;\n").replace("int extra", "(Calc)? extra"));
 
     assert_eq!(issues(code), ["5:20 Type `(Calc)` cannot be nullable.", "5:21 Type `Calc` cannot be parenthesized."]);
-}
-
-#[test]
-fn a_php_file_keeps_refusing_a_nullable_union_in_parentheses() {
-    let code = "<?php\n\nfunction f(?(int|string) $x) {}\n";
-
-    assert_eq!(issues_in("src/Report.php", code), ["3:13 Type `(int|string)` cannot be nullable."]);
 }
 
 #[test]
@@ -2904,7 +3609,7 @@ fn a_null_start_needs_a_type() {
 
 #[test]
 fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() {
-    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d)\n    {\n        return [];\n    }\n}\n";
+    let code = "class Report\n{\n    public List<void> run(Set<string, int> a, List<int, int> b, Map<string> c, Paged<Line> d, Map<string, void> e)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2914,6 +3619,7 @@ fn a_type_with_type_arguments_other_than_list_map_or_set_is_not_supported_yet() 
             "3:47 This type is not supported yet in PHP#.",
             "3:65 This type is not supported yet in PHP#.",
             "3:80 This type is not supported yet in PHP#.",
+            "3:95 This type is not supported yet in PHP#.",
         ]
     );
 }
@@ -3100,9 +3806,6 @@ fn an_array_cast_is_an_error_that_names_parse_and_list_wrap() {
         )
         .replace("int extra", "int row"),
     );
-    let php = leak(php_method(
-        "        $data = (array)$extra;\n        $items = (array)$this->list();\n        $server = (array)$_SERVER;\n        $version = (array)__VERSION__;\n        return 1;\n",
-    ));
     let value = "write a struct's `parse(value)` for an object, or `List.wrap(value)` for a value.";
 
     assert_eq!(
@@ -3118,16 +3821,13 @@ fn an_array_cast_is_an_error_that_names_parse_and_list_wrap() {
                 .to_owned(),
         ]
     );
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
 fn an_object_cast_is_an_error_that_names_a_map_literal_and_a_struct() {
     let code = leak(method("        const row = (object)extra;\n        return 1;\n"));
-    let php = leak(php_method("        $row = (object)$extra;\n        return 1;\n"));
 
     assert_eq!(issues(code), ["7:21 PHP# has no `(object)`: write a `Map` literal, or a struct."]);
-    assert_eq!(issues_in("src/Report.php", php), Vec::<String>::new());
 }
 
 #[test]
@@ -3251,13 +3951,12 @@ fn position_current_as_a_constant_or_an_enum_case_value_keeps_the_constant_expre
             "10:17 This expression is not supported yet in PHP#.",
         ]
     );
-}
 
-#[test]
-fn a_php_file_keeps_its_results_for_a_position_current_default() {
-    let code = "<?php\n\nnamespace App;\n\nclass Reports\n{\n    public static function logSlow(string $message, Position $caller = Position::current()): void\n    {\n    }\n}\n";
-
-    assert_eq!(issues_in("src/Report.php", code), Vec::<String>::new());
+    let php = "<?php\n\nnamespace App;\n\nclass Reports\n{\n    public const Position HERE = Position::current();\n}\n\nenum Spot: string\n{\n    case Here = Position::current();\n}\n";
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        ["7:34 Constant `Reports::HERE` value contains a non-constant expression."]
+    );
 }
 
 #[test]
@@ -3774,6 +4473,31 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
     );
 }
 
+/// A construct outside the slice is refused with a note that lists what PHP# has where it is written, so the note of
+/// a refused class member names a class's members and the note of a refused expression names a body's expressions.
+#[test]
+fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
+    let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
+    let body = leak(method("        const copy = clone this;\n        return extra;\n"));
+
+    for (code, note) in [
+        (
+            class,
+            "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`.",
+        ),
+        (
+            body,
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
+        ),
+    ] {
+        assert_eq!(
+            check("src/Report.sharp", code).into_iter().flat_map(|issue| issue.notes).collect::<Vec<_>>(),
+            [note],
+            "{code}"
+        );
+    }
+}
+
 /// A class-level error names the class by the name the file writes: `Order` in a `.sharp` file, and its full name
 /// `Demo\Order` in the PHP twin.
 #[test]
@@ -3934,22 +4658,18 @@ fn an_operator_body_is_a_method_body() {
         "    public static Money operator +(Money a, Money b)\n    {\n        echo \"adding\";\n        return a;\n    }\n",
     );
 
-    assert_eq!(issues_in("src/Money.sharp", code), ["7:9 PHP# has no `echo`: write `printf` or `fwrite`."]);
+    assert_eq!(
+        issues_in("src/Money.sharp", code),
+        ["7:9 PHP# has no `echo`: write `global.printf` or `global.fwrite`."]
+    );
 }
 
 #[test]
 fn an_interface_or_an_enum_declares_no_operator() {
     let interface =
-        "namespace App;\n\npublic interface Priced\n{\n    public static int operator +(Priced a, Priced b) => 0;\n}\n";
+        "namespace App;\n\npublic interface Priced\n{\n    static int operator +(Priced a, Priced b) => 0;\n}\n";
     let r#enum = "namespace App;\n\npublic enum Suit\n{\n    case Hearts;\n\n    public static int operator +(Suit a, Suit b) => 0;\n}\n";
 
     assert_eq!(issues_in("src/Priced.sharp", interface), ["5:5 This class member is not supported yet in PHP#."]);
     assert_eq!(issues_in("src/Suit.sharp", r#enum), ["7:5 This class member is not supported yet in PHP#."]);
-}
-
-#[test]
-fn a_php_class_keeps_its_static_methods_named_like_operators() {
-    let code = "<?php\n\nclass Money\n{\n    public static function op_Equality(?Money $a, ?Money $b): bool { return true; }\n\n    public static function op_Addition(Money $a, int $b): Money { return $a; }\n}\n";
-
-    assert_eq!(issues_in("src/Money.php", code), Vec::<String>::new());
 }

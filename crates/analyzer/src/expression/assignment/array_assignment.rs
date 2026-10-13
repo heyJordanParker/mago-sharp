@@ -44,11 +44,15 @@ use crate::context::block::BlockContext;
 use crate::context::block::ReferenceConstraintSource;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_set_literal_type;
+use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::method::with_declared_kinds;
+use crate::statement::keys_mix_a_backed_enum;
+use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::get_block_expression_id;
@@ -97,17 +101,23 @@ where
     let mut current_type = root_array_type.clone();
 
     // A value written into a PHP# `Map` takes only a literal of the collection its value type declares, as a value
-    // written to a declared place does, at any depth. A `List` and a `Set` are never written by index, which their own
-    // checks refuse.
+    // written to a declared place does, at any depth, through the `Map`s and the `List` indexes that are places on
+    // the way. A `List` and a `Set` are never written by index, which their own checks refuse. A list literal written
+    // where the value type declares a `Set` is that `Set`, at any depth.
+    let last_step = array_target_expressions.len() - 1;
+    let mut set_literal_type = None;
     if context.dialect.is_sharp()
         && let Some(value) = assign_value
         && let Some(declared) = get_declared_type(context, block_context, artifacts, root_array_expression)
-        && let Some(element) = array_target_expressions.iter().try_fold(declared, |declared, _| {
+        && let Some(element) = (0..=last_step).try_fold(declared, |declared, step| {
             declared
                 .types
                 .iter()
                 .filter_map(|atomic| match atomic {
                     TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase).1),
+                    TAtomic::Array(list @ TArray::List(_)) if step < last_step => {
+                        Some(get_array_parameters(list, context.codebase).1)
+                    }
                     _ => None,
                 })
                 .reduce(|first, other| {
@@ -116,7 +126,9 @@ where
         })
     {
         check_sharp_literal_kind(context, value, &element);
+        set_literal_type = get_set_literal_type(context, artifacts, value, &element);
     }
+    let assign_value_type = set_literal_type.as_ref().unwrap_or(assign_value_type);
 
     let root_var_id = get_block_expression_id(root_array_expression, context, block_context);
     let current_index = analyze_nested_array_assignment(
@@ -165,28 +177,40 @@ where
     // A PHP# local, parameter, `field` or property is the collections it is declared as, so an element written into it
     // must fit the elements of each of them, and the place keeps its type. An `int` written where the elements are
     // `float` is reported at the value, when every refusal is for that `int`, as `are_parts_contained_by` decides for
-    // a union's parts. A property's other mismatches are `property_assignment`'s to report, and its key is the index
-    // checks'.
+    // a union's parts. A property's other mismatches are `property_assignment`'s to report. The index check reports a
+    // key whose PHP# type does not fit, and the place keeps its type there. It keeps it too where PHP stores a fitting
+    // key as another type, as `"5"` as `5`, because the lowering reads every key back as the declared key type.
     if context.dialect.is_sharp()
         && let Some(declared) = get_declared_collection(context, block_context, artifacts, root_array_expression)
     {
-        let declared_elements: Vec<TUnion> = declared
+        let declared_parameters: Vec<(TUnion, TUnion)> = declared
             .types
             .iter()
             .filter_map(|atomic| match atomic {
-                TAtomic::Array(collection) => Some(get_array_parameters(collection, context.codebase).1),
+                TAtomic::Array(collection) => Some(get_array_parameters(collection, context.codebase)),
                 _ => None,
             })
             .collect();
         let mut fits = true;
         let mut refused_otherwise = false;
+        let mut keeps_type = false;
         for atomic in root_array_type.types.iter() {
             let TAtomic::Array(written) = atomic else {
                 continue;
             };
-            let written_element = get_array_parameters(written, context.codebase).1;
+            let (written_key, written_element) = get_array_parameters(written, context.codebase);
 
-            for declared_element in &declared_elements {
+            for (declared_key, declared_element) in &declared_parameters {
+                keeps_type |= !union_comparator::is_contained_by(
+                    context.codebase,
+                    &written_key,
+                    declared_key,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::with_sharp_rules(true),
+                );
+
                 let mut element_result = ComparisonResult::with_sharp_rules(true);
                 if !union_comparator::is_contained_by(
                     context.codebase,
@@ -219,7 +243,7 @@ where
                     };
                     report_int_for_float(context, code, value, &declared);
 
-                    root_array_type = declared;
+                    keeps_type = true;
                 }
                 (None, Some(access)) => {
                     let name = String::from_utf8_lossy(access.name.value());
@@ -237,10 +261,13 @@ where
                             )),
                     );
 
-                    root_array_type = declared;
+                    keeps_type = true;
                 }
                 (None, None) => {}
             }
+        }
+        if keeps_type {
+            root_array_type = declared;
         }
     }
 
@@ -771,6 +798,7 @@ where
     let mut extended_var_id: Option<Word> = None;
     let mut parent_var_id: Option<Word> = None;
     let mut full_var_id = true;
+    let mut through_copy = false;
 
     array_target_expressions.reverse();
     for (i, array_target) in array_target_expressions.iter().copied().enumerate() {
@@ -839,8 +867,18 @@ where
             with_declared_kinds(context, block_context, artifacts, array_target.get_array(), &array_expression_type);
         let written_type = declared_type.as_ref().unwrap_or(&array_expression_type);
 
-        // Spec section 12 keeps a PHP# `List`'s keys without gaps, so it changes by `set` and `add`, never by index.
+        let is_last = i == array_target_expressions.len() - 1;
+
+        // Spec section 12 keeps a PHP# `List`'s keys without gaps, so it changes by `set` and `add`, never by index. A
+        // write into an element changes it through the index, which a `List` takes and a `Map` refuses, and a write
+        // refused there is reported once.
         if context.dialect.is_sharp()
+            && !is_last
+            && let ArrayTarget::Access(access) = array_target
+        {
+            through_copy |= !check_change_through_index(access, context, block_context, artifacts);
+        } else if context.dialect.is_sharp()
+            && !through_copy
             && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
         {
             context.collector.report_with_code(
@@ -853,9 +891,24 @@ where
             );
         }
 
-        let new_index_type = array_target_index_type.unwrap_or(Rc::new(get_non_negative_int()));
+        // A write puts its key into the `Map`, which cannot tell a case from the key of its backing value when its
+        // keys mix a backed enum with other types. A `??=` or `+=` read the key first, and that read reported it.
+        if context.dialect.is_sharp()
+            && is_last
+            && let ArrayTarget::Access(access) = array_target
+            && artifacts.get_expression_type(access).is_none()
+            && keys_mix_a_backed_enum(context, written_type)
+        {
+            report_keys_sharing_entries(
+                context,
+                IssueCode::InvalidArrayAccess,
+                array_target.get_array().span(),
+                "the index",
+                Annotation::primary(access.index.span()).with_message("Its key is written here."),
+            );
+        }
 
-        let is_last = i == array_target_expressions.len() - 1;
+        let new_index_type = array_target_index_type.unwrap_or(Rc::new(get_non_negative_int()));
 
         block_context.flags.set_inside_assignment(true);
 

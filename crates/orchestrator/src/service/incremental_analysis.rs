@@ -32,7 +32,6 @@ use mago_analyzer::settings::Settings;
 #[cfg(not(target_arch = "wasm32"))]
 use mago_analyzer::telemetry as analyzer_telemetry;
 use mago_codex::diff::CodebaseDiff;
-use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseEntryKeys;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
@@ -895,17 +894,6 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
-        let wrapped_functions_changed = new_file_scans
-            .iter()
-            .any(|(file_id, metadata)| wrappers_in(metadata, *file_id) != wrappers_in(&self.codebase, *file_id))
-            || self.file_states.keys().any(|file_id| {
-                !current_file_ids.contains(file_id) && !wrappers_in(&self.codebase, *file_id).is_empty()
-            });
-
-        if wrapped_functions_changed {
-            return self.analyze();
-        }
-
         let externs_changed = new_file_scans
             .iter()
             .any(|(file_id, metadata)| externs_in(metadata, *file_id) != externs_in(&self.codebase, *file_id))
@@ -1101,6 +1089,19 @@ impl IncrementalAnalysisService {
             .flat_map(|state| state.reads.listings.iter().copied())
             .map(|listing| (listing, listing.answer(&self.codebase)))
             .collect();
+        // The analyzer refuses a class-like whose full name is also a namespace (spec section 23), so a file is
+        // analyzed again when a class-like it declares names the namespace of a class-like scanned again.
+        let scanned_namespaces: WordSet = new_file_scans
+            .iter()
+            .flat_map(|(_, metadata)| metadata.class_likes.keys())
+            .flat_map(|name| {
+                let name = name.as_bytes();
+                name.iter()
+                    .enumerate()
+                    .filter(|(_, byte)| **byte == b'\\')
+                    .map(|(end, _)| mago_word::word(&name[..end]))
+            })
+            .collect();
 
         let mut merged_codebase = std::mem::take(&mut self.codebase);
 
@@ -1181,11 +1182,10 @@ impl IncrementalAnalysisService {
             .map(|(listing, _)| listing)
             .collect();
         for file_id in &unchanged_file_ids {
-            if self
-                .file_states
-                .get(file_id)
-                .is_some_and(|state| state.reads.listings.iter().any(|listing| changed_listings.contains(listing)))
-                && let Ok(file) = self.database.get(file_id)
+            if self.file_states.get(file_id).is_some_and(|state| {
+                state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
+                    || state.entry_keys.class_like_names.iter().any(|name| scanned_namespaces.contains(name))
+            }) && let Ok(file) = self.database.get(file_id)
             {
                 invalid_files.insert(mago_word::word(file.name.as_ref()));
             }
@@ -1900,20 +1900,6 @@ fn externs_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ExternMetada
         codebase.externs.values().flatten().filter(|declaration| declaration.span.file_id == file_id).collect();
     externs.sort();
     externs
-}
-
-/// The functions `file_id`'s `[Replaces]` attributes wrap, each with its wrapping methods in the codebase's order. A
-/// change to them changes the issues of every file that calls a wrapped function, which the signature diff cannot see.
-fn wrappers_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<(Word, MethodIdentifier)> {
-    let mut wrappers: Vec<(Word, MethodIdentifier)> = codebase
-        .wrapped_functions
-        .iter()
-        .flat_map(|(function, wrappers)| {
-            wrappers.iter().filter(|(_, span, _)| span.file_id == file_id).map(|(_, _, method)| (*function, *method))
-        })
-        .collect();
-    wrappers.sort_by_key(|(function, _)| *function);
-    wrappers
 }
 
 /// The symbols the extension hooks and providers of each of `files` read, by file name, for the invalidation cascade.
@@ -3312,32 +3298,30 @@ mod tests {
         assert_matches_full(&service, &db, "Order gains discount");
     }
 
-    /// A library edit that adds or drops a `[Replaces]` changes the diagnostics of a project file that calls the
-    /// function, though nothing in the project file changed.
+    /// A library edit that adds or drops the member the checker names in place of a PHP function changes the
+    /// diagnostics of a project file that calls the function, though nothing in the project file changed.
     #[test]
-    fn test_watch_library_replaces_change_reaches_a_project_caller() {
-        let replaces = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\npublic class Replaces\n{\n    public Replaces(string ...functions)\n    {\n    }\n}\n";
-        let date = |attribute: &str| {
+    fn test_watch_library_member_change_reaches_a_project_caller() {
+        let date = |member: &str| {
             format!(
-                "namespace Sharp.Time;\n\npublic static class Date\n{{\n    {attribute}\n    public static string format(string pattern) => stamp(pattern);\n}}\n"
+                "namespace Sharp.Time;\n\npublic static class Date\n{{\n    {member}\n    public static int? parse(string text) => null;\n}}\n"
             )
         };
-        let stamp = "<?php\nfunction stamp(string $pattern): string { return $pattern; }\n";
-        let clock = "namespace App;\n\npublic class Clock\n{\n    public string year() => stamp(\"Y\");\n}\n";
+        let format = "public static string format(int timestamp, string pattern) => global.date(pattern, timestamp);";
+        let clock = "namespace App;\n\npublic class Clock\n{\n    public string year() => date(\"Y\");\n}\n";
+        // The test codebase has no PHP stubs, so it declares the PHP function the project calls.
+        let php_date =
+            "<?php\n\nfunction date(string $format, ?int $timestamp = null): string\n{\n    return $format;\n}\n";
 
-        let mut db = make_database(vec![("src/stamp.php", stamp), ("src/Clock.sharp", clock)]);
-        for (name, contents) in
-            [("library/Sharp/Replaces.sharp", replaces.to_owned()), ("library/Sharp/Time/Date.sharp", date(""))]
-        {
-            let mut file = File::new(
-                Cow::Owned(name.as_bytes().to_vec()),
-                FileType::Host,
-                None,
-                Cow::Owned(contents.into_bytes()),
-            );
-            file.is_standard_library = true;
-            db.add(file);
-        }
+        let mut db = make_database(vec![("src/Clock.sharp", clock), ("src/date.php", php_date)]);
+        let mut file = File::new(
+            Cow::Borrowed(&b"library/Sharp/Time/Date.sharp"[..]),
+            FileType::Host,
+            None,
+            Cow::Owned(date("").into_bytes()),
+        );
+        file.is_standard_library = true;
+        db.add(file);
         let wrapped = |service: &IncrementalAnalysisService| {
             service
                 .collect_all_issues()
@@ -3349,20 +3333,17 @@ mod tests {
         service.analyze().expect("Initial analysis failed.");
         assert_eq!(wrapped(&service), 0);
 
-        db.update(
-            FileId::new(b"library/Sharp/Time/Date.sharp"),
-            Cow::Owned(date("[Replaces(\"stamp\")]").into_bytes()),
-        );
+        db.update(FileId::new(b"library/Sharp/Time/Date.sharp"), Cow::Owned(date(format).into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_eq!(wrapped(&service), 1);
-        assert_matches_full(&service, &db, "added replaces");
+        assert_matches_full(&service, &db, "added member");
 
         db.update(FileId::new(b"library/Sharp/Time/Date.sharp"), Cow::Owned(date("").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_eq!(wrapped(&service), 0);
-        assert_matches_full(&service, &db, "removed replaces");
+        assert_matches_full(&service, &db, "removed member");
     }
 
     /// Parent changes return type making child's override incompatible.

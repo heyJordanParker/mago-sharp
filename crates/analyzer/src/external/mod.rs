@@ -3823,7 +3823,7 @@ mod tests {
         let disabled_transport = Arc::new(TestTransport { requests: Mutex::new(Vec::new()) });
         let disabled = ExternalAnalyzer::initialize_transports([disabled_transport], PHPVersion::PHP85, &[], true)
             .expect("registration should succeed");
-        assert!(disabled.backends[0].registration.function_providers.is_empty());
+        assert!(disabled.backends[0].registration.function_providers.is_empty(), "expected no function providers");
 
         let enabled_transport = Arc::new(TestTransport { requests: Mutex::new(Vec::new()) });
         let enabled = ExternalAnalyzer::initialize_transports(
@@ -3918,7 +3918,7 @@ mod tests {
             .expect("registration should succeed");
 
         assert_eq!(*transport.broadcasts.lock().unwrap(), 1);
-        assert!(analyzer.initialization_files().is_empty());
+        assert!(analyzer.initialization_files().is_empty(), "expected no initialization files");
     }
 
     #[test]

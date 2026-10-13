@@ -54,6 +54,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Statement;
@@ -75,6 +76,7 @@ use crate::resolver::property::resolve_declared_property;
 use crate::statement::analyze_statements;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
+use crate::statement::class_like::method::analyze_constructor_initializer;
 use crate::statement::class_like::property::analyze_property_hook;
 use crate::statement::r#return::handle_return_value;
 use crate::statement::r#static::infer_static_local_types;
@@ -286,6 +288,7 @@ pub fn analyze_function_like<'ctx, 'ast, 'arena, A>(
     block_context: &mut BlockContext<'ctx>,
     function_like_metadata: &'ctx FunctionLikeMetadata,
     parameter_list: &'ast FunctionLikeParameterList<'arena>,
+    initializer: Option<&'ast ConstructorInitializer<'arena>>,
     body: FunctionLikeBody<'ast, 'arena>,
     inferred_parameter_types: Option<HashMap<usize, TUnion>>,
 ) -> Result<AnalysisArtifacts, AnalysisError>
@@ -405,6 +408,10 @@ where
     }
 
     if !function_like_metadata.flags.is_unchecked() {
+        if let Some(initializer) = initializer {
+            analyze_constructor_initializer(context, block_context, &mut artifacts, initializer)?;
+        }
+
         match body {
             FunctionLikeBody::Statements(statements, _) => {
                 artifacts.static_local_types =
@@ -441,7 +448,7 @@ where
 
     if let Some(function_metadata) = block_context.scope.get_function_like()
         && !block_context.flags.has_returned()
-        && let Some(return_type) = &function_metadata.return_type_metadata
+        && let Some(return_type) = body_return_type(function_metadata)
         && !return_type.type_union.is_void()
         && !function_like_metadata.flags.has_yield()
     {
@@ -747,6 +754,12 @@ where
     Ok(())
 }
 
+/// The type a function-like's body returns. A PHP# named constructor runs as a static method that returns the object
+/// its `: this(…)` creates, spec section 9.1, but its body returns nothing, as the main constructor's does.
+pub(crate) fn body_return_type(function_like: &FunctionLikeMetadata) -> Option<&TypeMetadata> {
+    function_like.return_type_metadata.as_ref().filter(|_| !function_like.flags.is_named_constructor())
+}
+
 /// Reports a body that can end without returning a value, though the `kind` named `name`, declared at `declaration`,
 /// returns `expected_type`: a function, or a PHP# `get` accessor, which returns its property's type.
 pub(crate) fn report_missing_return<A>(
@@ -840,7 +853,7 @@ where
         },
     );
 
-    signature_union
+    if function_like_metadata.flags.is_sharp() { known_type_or_error(signature_union) } else { signature_union }
 }
 
 pub(super) fn add_properties_to_context<'ctx, A>(
@@ -1129,7 +1142,7 @@ fn check_return_type_width<'ctx, A>(
         return;
     }
 
-    let Some(return_type_metadata) = function_like_metadata.return_type_metadata.as_ref() else {
+    let Some(return_type_metadata) = body_return_type(function_like_metadata) else {
         return;
     };
 
@@ -1735,27 +1748,60 @@ pub fn report_undefined_type_references<A>(context: &mut Context<'_, '_, A>, typ
 where
     A: Arena,
 {
-    if type_metadata.inferred {
-        return;
+    if !type_metadata.inferred {
+        report_undefined_types(context, &type_metadata.type_union, type_metadata.span);
     }
+}
 
-    for type_ref in type_metadata.type_union.get_all_child_nodes() {
+/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares.
+pub(crate) fn report_undefined_types<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
+where
+    A: Arena,
+{
+    for type_ref in type_union.get_all_child_nodes() {
         let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref else {
             continue;
         };
 
-        context.collector.report_with_code(
-            IssueCode::NonExistentClassLike,
-            Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
-                .with_annotation(
-                    Annotation::primary(type_metadata.span)
-                        .with_message(format!("`{name}` is not defined in the current codebase")),
-                )
-                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-                .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
-                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present."),
-        );
+        report_undefined_type(context, *name, span);
     }
+}
+
+/// Reports the type `name`, written at `span`, as not found in the codebase.
+pub(crate) fn report_undefined_type<A>(context: &mut Context<'_, '_, A>, name: Word, span: Span)
+where
+    A: Arena,
+{
+    let issue = if context.dialect.is_sharp() {
+        let name = display_class_like_name(context, name);
+        Issue::error(format!("Cannot find type `{name}`."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+            )
+            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
+    } else {
+        Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+            )
+            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+            .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
+            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.")
+    };
+    context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
+}
+
+/// `declared`, a type a PHP# declaration writes, or an error when it names a type no analyzed file or stub declares.
+/// `report_undefined_types` reports that type where it is written, so a value of it adds no second issue, as a refused
+/// index read adds none.
+pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
+    let names_unknown_type = declared
+        .get_all_child_nodes()
+        .into_iter()
+        .any(|node| matches!(node, TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { .. }))));
+
+    if names_unknown_type { TUnion::from_atomic(TAtomic::Error) } else { declared }
 }
 
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an
@@ -1868,7 +1914,7 @@ where
 
 /// Reports each PHP# `Map` written in `type_union` whose key type is a class or an enum without a backing value.
 /// Spec section 12 keys a `Map` by an `int`, a `string` or a type with an `int` or `string` backing value, which
-/// runs as its backing value.
+/// runs as its backing value. A key type that names no type is reported as a type that cannot be found.
 pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -1884,12 +1930,15 @@ where
         let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
             continue;
         };
-        if get_backing_key_type(key_type, context.codebase).is_always_array_key(true) {
+        if get_backing_key_type(key_type, context.codebase).is_always_array_key(true)
+            || key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. })))
+        {
             continue;
         }
 
         let key_id = display_sharp_type(context, key_type);
-        context.collector.report_with_code(IssueCode::TemplateConstraintViolation, map_key_error(&key_id, span));
+        let error = map_key_error(context, key_type, &key_id, span);
+        context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
     }
 }
 
@@ -1919,11 +1968,23 @@ where
     }
 }
 
-/// The error for a PHP# `Map` keyed by `key_id`, a type that is not `int`, not `string` and has no `int` or `string`
-/// backing value, written at `span`. A `Map` type and a `Map` literal state the rule in these words.
-pub(crate) fn map_key_error(key_id: &str, span: Span) -> Issue {
+/// The error for a PHP# `Map` keyed by `key_type`, written `key_id`, a type that is not `int`, not `string` and has no
+/// `int` or `string` backing value, at `span`. A `Map` type and a `Map` literal state the rule in these words. A key
+/// type whose other parts key a `Map`, as `Status?`, is refused for its `null` alone.
+pub(crate) fn map_key_error<A>(context: &Context<'_, '_, A>, key_type: &TUnion, key_id: &str, span: Span) -> Issue
+where
+    A: Arena,
+{
+    let reason = if key_type.is_nullable()
+        && get_backing_key_type(&key_type.to_non_nullable(), context.codebase).is_always_array_key(true)
+    {
+        "may be null"
+    } else {
+        "has none"
+    };
+
     Issue::error(format!(
-        "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` has none."
+        "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` {reason}."
     ))
     .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
     .with_help("Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.")
