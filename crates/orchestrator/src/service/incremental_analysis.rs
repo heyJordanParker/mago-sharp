@@ -1936,6 +1936,11 @@ impl IncrementalAnalysisService {
             snapshots.clear();
         }
 
+        // The safe marks tell this pass which code its skipped files' cached results stand for. An analysis of one file
+        // after it, as the compile step runs, analyzes and types the whole file.
+        codebase.safe_symbols.clear();
+        codebase.safe_symbol_members.clear();
+
         Ok(SelectiveAnalysisOutput {
             result: aggregated_result,
             native_symbol_references,
@@ -3684,6 +3689,35 @@ mod tests {
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
         assert_matches_full(&service, &db, "body change in unrelated file");
+    }
+
+    /// After a body-only change in an unrelated file with diff=true, an editor's analysis of the unchanged `Child`
+    /// reports what it reports after a full analysis, though the warm run skipped `Child`'s class.
+    #[test]
+    fn test_watch_one_file_analysis_after_a_body_change_in_an_unrelated_file() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n    private function unused(): void {}\n}\n";
+        let unrelated_v1 = "<?php\nclass Unrelated {\n    public function greet(): string { return 'hello'; }\n}\n";
+        let unrelated_v2 = "<?php\nclass Unrelated {\n    public function greet(): string { return 'hi'; }\n}\n";
+        let child_file = FileId::new(b"src/Child.php");
+
+        let mut db =
+            make_database(vec![("src/Base.php", base), ("src/Child.php", child), ("src/Unrelated.php", unrelated_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        db.update(FileId::new(b"src/Unrelated.php"), Cow::Owned(unrelated_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        let mut fresh = make_watch_service(&db);
+        fresh.analyze().expect("Full analysis failed.");
+
+        let full = fresh.analyze_file(child_file);
+        assert!(!full.is_empty(), "Child's return type and unused method are reported");
+        let (only_warm, only_full) = diff_issues(&service.analyze_file(child_file), &full);
+        assert!(
+            only_warm.is_empty() && only_full.is_empty(),
+            "Only after the warm run: {only_warm:?}\n  Only after the full analysis: {only_full:?}"
+        );
     }
 
     /// Add a method to one class in a multi-class file — other class's issues preserved.
