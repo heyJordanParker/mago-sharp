@@ -46,6 +46,8 @@ use crate::cst::cst::Constant;
 use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::ConstantItem;
 use crate::cst::cst::Construct;
+use crate::cst::cst::ConstructorInitializer;
+use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Continue;
 use crate::cst::cst::Declare;
 use crate::cst::cst::DeclareBody;
@@ -58,6 +60,7 @@ use crate::cst::cst::DocumentString;
 use crate::cst::cst::DottedIdentifier;
 use crate::cst::cst::Echo;
 use crate::cst::cst::EchoTag;
+use crate::cst::cst::Emit;
 use crate::cst::cst::EmptyConstruct;
 use crate::cst::cst::Enum;
 use crate::cst::cst::EnumBackingTypeHint;
@@ -66,10 +69,12 @@ use crate::cst::cst::EnumCaseBackedItem;
 use crate::cst::cst::EnumCaseItem;
 use crate::cst::cst::EnumCaseUnitItem;
 use crate::cst::cst::EvalConstruct;
+use crate::cst::cst::Event;
 use crate::cst::cst::ExitConstruct;
 use crate::cst::cst::Expression;
 use crate::cst::cst::ExpressionStatement;
 use crate::cst::cst::Extends;
+use crate::cst::cst::Extension;
 use crate::cst::cst::Extern;
 use crate::cst::cst::For;
 use crate::cst::cst::ForBody;
@@ -150,7 +155,10 @@ use crate::cst::cst::MethodPartialApplication;
 use crate::cst::cst::MissingArrayElement;
 use crate::cst::cst::MixedUseItemList;
 use crate::cst::cst::Modifier;
+use crate::cst::cst::Module;
+use crate::cst::cst::ModuleMember;
 use crate::cst::cst::NamedArgument;
+use crate::cst::cst::NamedConstructor;
 use crate::cst::cst::NamedPlaceholderArgument;
 use crate::cst::cst::Namespace;
 use crate::cst::cst::NamespaceBody;
@@ -160,6 +168,7 @@ use crate::cst::cst::NotPattern;
 use crate::cst::cst::NullSafeMethodCall;
 use crate::cst::cst::NullSafePropertyAccess;
 use crate::cst::cst::NullableHint;
+use crate::cst::cst::On;
 use crate::cst::cst::OpeningTag;
 use crate::cst::cst::Operator;
 use crate::cst::cst::Parenthesized;
@@ -437,10 +446,12 @@ generate_ast_walker! {
             Statement::Namespace(namespace) => walker.walk_namespace(namespace, context),
             Statement::Use(r#use) => walker.walk_use(r#use, context),
             Statement::Extern(r#extern) => walker.walk_extern(r#extern, context),
+            Statement::Module(module) => walker.walk_module(module, context),
             Statement::Class(class) => walker.walk_class(class, context),
             Statement::Interface(interface) => walker.walk_interface(interface, context),
             Statement::Trait(r#trait) => walker.walk_trait(r#trait, context),
             Statement::Enum(r#enum) => walker.walk_enum(r#enum, context),
+            Statement::Event(event) => walker.walk_event(event, context),
             Statement::Block(block) => walker.walk_block(block, context),
             Statement::Constant(constant) => walker.walk_constant(constant, context),
             Statement::Function(function) => walker.walk_function(function, context),
@@ -458,6 +469,7 @@ generate_ast_walker! {
             Statement::Switch(switch) => walker.walk_switch(switch, context),
             Statement::If(r#if) => walker.walk_if(r#if, context),
             Statement::Return(r#return) => walker.walk_return(r#return, context),
+            Statement::Emit(emit) => walker.walk_emit(emit, context),
             Statement::Expression(expression) => walker.walk_statement_expression(expression, context),
             Statement::EchoTag(echo) => walker.walk_echo_tag(echo, context),
             Statement::Echo(echo) => walker.walk_echo(echo, context),
@@ -624,6 +636,10 @@ generate_ast_walker! {
 
     'arena Extern as r#extern => {
         walker.walk_keyword(&r#extern.r#extern, context);
+        if let Some(event) = &r#extern.event {
+            walker.walk_keyword(event, context);
+        }
+
         walker.walk_identifier(&r#extern.target, context);
 
         if let Some(uses) = &r#extern.uses {
@@ -638,6 +654,20 @@ generate_ast_walker! {
 
         for name in &uses.names {
             walker.walk_local_identifier(name, context);
+        }
+    }
+
+    'arena Module as module => {
+        walker.walk_keyword(&module.module, context);
+
+        for member in &module.members {
+            walker.walk_module_member(member, context);
+        }
+    }
+
+    'arena ModuleMember as module_member => {
+        match module_member {
+            ModuleMember::Law(law) => walker.walk_law(law, context),
         }
     }
 
@@ -844,6 +874,26 @@ generate_ast_walker! {
         }
     }
 
+    'arena Event as event => {
+        for attribute_list in &event.attribute_lists {
+            walker.walk_attribute_list(attribute_list, context);
+        }
+
+        for modifier in &event.modifiers {
+            walker.walk_modifier(modifier, context);
+        }
+
+        walker.walk_keyword(&event.event, context);
+        walker.walk_local_identifier(&event.name, context);
+        walker.walk_function_like_parameter_list(&event.parameter_list, context);
+
+        if let Some(inheritance) = &event.inheritance {
+            walker.walk_inheritance(inheritance, context);
+        }
+
+        walker.walk_terminator(&event.terminator, context);
+    }
+
     'arena EnumBackingTypeHint as enum_backing_type_hint => {
         walker.walk_hint(&enum_backing_type_hint.hint, context);
     }
@@ -871,6 +921,21 @@ generate_ast_walker! {
             ClassLikeMember::Law(law) => {
                 walker.walk_law(law, context);
             }
+            ClassLikeMember::NamedConstructor(named_constructor) => {
+                walker.walk_named_constructor(named_constructor, context);
+            }
+            ClassLikeMember::Extension(extension) => {
+                walker.walk_extension(extension, context);
+            }
+        }
+    }
+
+    'arena Extension as extension => {
+        walker.walk_keyword(&extension.extension, context);
+        walker.walk_function_like_parameter_list(&extension.parameter_list, context);
+
+        for member in &extension.members {
+            walker.walk_class_like_member(member, context);
         }
     }
 
@@ -1240,7 +1305,50 @@ generate_ast_walker! {
             walker.walk_function_like_parameter_list(&method.parameter_list, context);
         }
 
+        if let Some(on) = &method.on {
+            walker.walk_on(on, context);
+        }
+
+        if let Some(initializer) = &method.initializer {
+            walker.walk_constructor_initializer(initializer, context);
+        }
+
         walker.walk_method_body(&method.body, context);
+    }
+
+    'arena On as on => {
+        walker.walk_keyword(&on.on, context);
+        for event in &on.events {
+            walker.walk_local_identifier(event, context);
+        }
+    }
+
+    'arena ConstructorInitializer as constructor_initializer => {
+        walker.walk_keyword(&constructor_initializer.keyword, context);
+        walker.walk_argument_list(&constructor_initializer.argument_list, context);
+    }
+
+    'arena NamedConstructor as named_constructor => {
+        for attribute_list in &named_constructor.attribute_lists {
+            walker.walk_attribute_list(attribute_list, context);
+        }
+
+        for modifier in &named_constructor.modifiers {
+            walker.walk_modifier(modifier, context);
+        }
+
+        walker.walk_local_identifier(&named_constructor.class, context);
+        walker.walk_local_identifier(&named_constructor.name, context);
+        walker.walk_function_like_parameter_list(&named_constructor.parameter_list, context);
+        if let Some(initializer) = &named_constructor.initializer {
+            walker.walk_constructor_initializer(initializer, context);
+        }
+
+        walker.walk_method_body(&named_constructor.body, context);
+    }
+
+    'arena ConstructorName as constructor_name => {
+        walker.walk_local_identifier(&constructor_name.name, context);
     }
 
     'arena MethodBody as method_body => {
@@ -1723,6 +1831,12 @@ generate_ast_walker! {
         }
 
         walker.walk_terminator(&r#return.terminator, context);
+    }
+
+    'arena Emit as emit => {
+        walker.walk_keyword(&emit.emit, context);
+        walker.walk_expression(emit.value, context);
+        walker.walk_terminator(&emit.terminator, context);
     }
 
     'arena ExpressionStatement as statement_expression => {
@@ -2642,6 +2756,9 @@ generate_ast_walker! {
     'arena Instantiation as instantiation => {
         walker.walk_keyword(&instantiation.new, context);
         walker.walk_expression(instantiation.class, context);
+        if let Some(constructor) = &instantiation.constructor {
+            walker.walk_constructor_name(constructor, context);
+        }
         if let Some(argument_list) = &instantiation.argument_list {
             walker.walk_argument_list(argument_list, context);
         }

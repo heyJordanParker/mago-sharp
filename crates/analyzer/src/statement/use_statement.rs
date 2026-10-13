@@ -127,7 +127,11 @@ fn report_non_existent_import<A>(context: &mut Context<'_, '_, A>, span: Span, f
 where
     A: Arena,
 {
-    let fqn = BytesDisplay(fqn);
+    let fqn = if context.dialect.is_sharp() {
+        String::from_utf8_lossy(fqn).replace('\\', ".")
+    } else {
+        BytesDisplay(fqn).to_string()
+    };
     context.collector.report_with_code(
         IssueCode::NonExistentUseImport,
         Issue::error(format!("Imported {symbol_type} `{fqn}` does not exist."))

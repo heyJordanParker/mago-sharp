@@ -12,6 +12,7 @@ use mago_names::binding::Local;
 use mago_names::binding::LocalKind;
 use mago_names::binding::php_variable_name;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
 use mago_span::Position;
 use mago_span::Span;
 use mago_syntax::cst::Node;
@@ -497,6 +498,51 @@ fn a_law_binds_its_parameters_as_its_own_locals_and_their_types_through_the_impo
     assert_eq!(names.binding_errors(), []);
 }
 
+/// An extension's receiver is the first parameter of each of its members, spec section 26: a method and a computed
+/// property bind it as a parameter, a lambda in a member captures it, a member's own parameter of its name redeclares
+/// it, and outside the block, in the static class's other members, it is a constant.
+#[test]
+fn an_extension_member_binds_its_receiver_as_a_parameter() {
+    const CODE: &str = "namespace App.Shared;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug() => Str.slug(value);\n        public bool isBlank => value == \"\";\n        public List<string> words(List<string> all) => all.filter(word => word == value);\n        public string twice(string value) => value;\n    }\n\n    public static string first() => value;\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+    let receiver = local(CODE, "value", 0, LocalKind::Parameter);
+
+    assert_eq!(binding(&names, CODE, "value", 1), Some(receiver));
+    assert_eq!(binding(&names, CODE, "value", 2), Some(receiver));
+    assert_eq!(binding(&names, CODE, "value", 3), Some(receiver));
+    assert_eq!(
+        names.captures(&span(CODE, "word =>", 0)),
+        [(&b"value"[..], declared(CODE, "value", 0, LocalKind::Parameter))]
+    );
+    assert_eq!(binding(&names, CODE, "value", 5), Some(local(CODE, "value", 4, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "value", 6), Some(Binding::Constant));
+    assert_eq!(
+        names.binding_errors(),
+        [BindingError::Redeclared {
+            name: span(CODE, "value", 4),
+            earlier: declared(CODE, "value", 0, LocalKind::Parameter)
+        }]
+    );
+}
+
+/// A named constructor binds as a constructor does, spec section 9.1: its parameters are locals of that constructor
+/// alone, in its `: this(…)` as in its body, its body reads `this`, and `new` names its class as any class name.
+#[test]
+fn a_named_constructor_binds_its_parameters_as_its_own_locals_and_this() {
+    const CODE: &str = "namespace App.Shared;\n\nimport App.Billing.Currency;\n\nclass Money\n{\n    public Money(public int cents { get; }) { }\n\n    public Money.of(Currency currency, int amount) : this(amount) { this.add(amount); }\n\n    public Money.zero(int amount) : this(amount) { }\n\n    public static Money make() => new Money.zero(0);\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    assert_eq!(resolved(&names, CODE, "Currency currency", 0), b"App\\Billing\\Currency");
+    assert_eq!(binding(&names, CODE, "amount", 1), Some(local(CODE, "amount", 0, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "amount", 2), Some(local(CODE, "amount", 0, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "amount", 4), Some(local(CODE, "amount", 3, LocalKind::Parameter)));
+    assert_eq!(binding(&names, CODE, "this.add", 0), Some(Binding::This));
+    assert_eq!(resolved(&names, CODE, "Money.zero(0)", 0), b"App\\Shared\\Money");
+    assert_eq!(names.binding_errors(), []);
+}
+
 /// A bare `extern` target that the file does not import is a global function, since PHP# has no functions of its own.
 #[test]
 fn a_bare_extern_target_that_is_not_imported_is_a_global_function() {
@@ -525,6 +571,27 @@ fn an_effect_name_binds_as_a_class_name() {
     assert_eq!(resolved(&names, CODE, "Payments;", 1), b"App\\Effects\\Payments");
 }
 
+/// Spec section 29: a standard effect's name in a `uses` is that effect, though the file imports or declares a class
+/// under the name, and outside `uses` the name is that class, spec section 23.
+#[test]
+fn a_standard_effect_name_in_uses_is_the_effect_where_a_class_has_its_name() {
+    const CODE: &str = "namespace App.Stubs;\n\nimport Lib.Http;\n\nextern Http.post uses Http, Clock;\n\nclass Clock\n{\n    private Function<Http(Clock) uses Http, Clock>? send = null;\n}\n";
+    let arena = LocalArena::new();
+    let names = bind(&arena, CODE);
+
+    for (needle, nth, class) in [
+        ("Http.post", 0, "Lib\\Http"),
+        ("Http,", 0, "Sharp\\Http"),
+        ("Clock;", 0, "Sharp\\Clock"),
+        ("Http(", 0, "Lib\\Http"),
+        ("Clock)", 0, "App\\Stubs\\Clock"),
+        ("Http,", 1, "Sharp\\Http"),
+        ("Clock>", 0, "Sharp\\Clock"),
+    ] {
+        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, nth)), class, "`{needle}` #{nth}");
+    }
+}
+
 /// An effect a function type lists binds as a class name, as an `extern`'s does.
 #[test]
 fn an_effect_of_a_function_type_binds_as_a_class_name() {
@@ -546,6 +613,65 @@ fn a_collection_type_keeps_its_written_name_unresolved() {
 
     for needle in ["List<", "Map<"] {
         assert!(!names.contains(&Position::new(offset(CODE, needle, 0))), "`{needle}` has a resolved name");
+    }
+}
+
+/// Spec section 23: a class-like of the file's namespace wins over the one `Sharp` imports by default, as a class of
+/// the same package does in Kotlin, C# and Java. A default name its namespace holds no class-like of stays the default
+/// one, and the file records each class-like of its namespace that would win, held or not. PHP reserves `Int` as a
+/// class name, so no `App\Int` is recorded.
+#[test]
+fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
+    const CODE: &str = "namespace App;\n\nclass Shape\n{\n    private Cache? cache = null;\n\n    public bool run(Any value, Environment environment)\n    {\n        const made = new Cache();\n        Cache.clear();\n        Int.parse(\"1\");\n        return value is Cache;\n    }\n}\n";
+    let namespace_classes = NamespaceClasses::new(["App\\Cache", "Shop\\Environment", "App\\Order"]);
+    let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
+    let arena = LocalArena::new();
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
+
+    for (needle, nth, class) in [
+        ("Cache?", 0, "App\\Cache"),
+        ("Cache()", 0, "App\\Cache"),
+        ("Cache.", 0, "App\\Cache"),
+        ("Cache;", 0, "App\\Cache"),
+        ("Environment environment", 0, "Sharp\\Environment"),
+    ] {
+        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, nth)), class, "`{needle}` #{nth}");
+    }
+    let mut recorded: Vec<_> = names.namespace_classes().map(String::from_utf8_lossy).collect();
+    recorded.sort_unstable();
+    assert_eq!(recorded, ["App\\Cache", "App\\Environment"]);
+
+    let alone = NameResolver::new(&arena).resolve(program);
+    assert_eq!(resolved(&alone, CODE, "Cache?", 0), b"Sharp\\Cache");
+}
+
+/// A help that names a standard class reads whether the file's bare short name names another class-like: one of its
+/// namespace, one it imports, or one it declares. `Sharp.Replaces` is the class-like of its own namespace, so a file in
+/// `Sharp` records no class-like of its namespace for it.
+#[test]
+fn a_file_records_each_default_class_its_short_name_no_longer_names() {
+    let namespace_classes = NamespaceClasses::new(["App\\Position", "Sharp\\Replaces"]);
+
+    for (code, shadowed) in [
+        ("namespace App;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Position"]),
+        ("namespace App;\n\nimport Lib.Clock;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Clock", "Sharp\\Position"]),
+        ("namespace Shop;\n\nclass Cache\n{\n}\n", vec!["Sharp\\Cache"]),
+        ("namespace Shop;\n\nclass Paths\n{\n}\n", vec![]),
+        ("namespace Sharp;\n\nclass Paths\n{\n    [Replaces(\"x\")]\n    public void run() { }\n}\n", vec![]),
+    ] {
+        let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
+        let arena = LocalArena::new();
+        let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
+
+        let mut recorded: Vec<&str> = mago_names::STANDARD_EFFECTS
+            .into_iter()
+            .chain(["Sharp\\Position", "Sharp\\Replaces"])
+            .filter(|class| names.shadows_default_class(class.as_bytes()))
+            .collect();
+        recorded.sort_unstable();
+        assert_eq!(recorded, shadowed, "{code}");
+        assert_eq!(names.namespace_classes().count(), 0, "{code}");
     }
 }
 

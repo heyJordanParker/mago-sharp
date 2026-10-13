@@ -59,7 +59,7 @@ where
     /// Parses a pattern: patterns joined by `or`, each of them patterns joined by `and`, as in C#.
     pub(crate) fn parse_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError> {
         let mut left = self.parse_and_pattern()?;
-        while self.stream.is_at(T!["or"])? {
+        while self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"or") {
             let operator = self.expect_any_keyword()?;
             let right = self.parse_and_pattern()?;
             left = self.arena.alloc(Pattern::Binary(BinaryPattern { left, operator, right }));
@@ -70,7 +70,7 @@ where
 
     fn parse_and_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError> {
         let mut left = self.parse_not_pattern()?;
-        while self.stream.is_at(T!["and"])? {
+        while self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"and") {
             let operator = self.expect_any_keyword()?;
             let right = self.parse_not_pattern()?;
             left = self.arena.alloc(Pattern::Binary(BinaryPattern { left, operator, right }));
@@ -160,22 +160,27 @@ where
         Ok(self.arena.alloc(pattern))
     }
 
-    /// The name a type pattern declares, as in `int count`. `when`, which starts an arm's condition, and `is`, which
-    /// starts another test, are no names.
+    /// The name a type pattern declares, as in `int count`. `when`, which starts an arm's condition, and `and` and
+    /// `or`, which join patterns, are no names, and neither is `is` where it starts another test. A keyword parses as
+    /// the name, so the checker names a keyword a local can't take.
     fn parse_pattern_variable(&mut self) -> Result<Option<LocalIdentifier<'arena>>, ParseError> {
-        match self.stream.lookahead(0)? {
-            Some(token) if token.kind == T![Identifier] && !matches!(token.value, b"when" | b"is") => {
-                Ok(Some(self.parse_local_identifier()?))
-            }
-            _ => Ok(None),
-        }
+        let Some(token) = self.stream.lookahead(0)? else {
+            return Ok(None);
+        };
+        let is_name = match token.value {
+            b"when" | b"and" | b"or" => false,
+            b"is" => matches!(self.stream.peek_kind(1)?, Some(T![")" | "=>" | ";" | ","])),
+            _ => token.kind.is_identifier_maybe_reserved(),
+        };
+
+        if is_name { Ok(Some(self.parse_local_identifier()?)) } else { Ok(None) }
     }
 
     /// Whether `Case.Name` is followed by its fields in parentheses or a name, as an enum with data writes it.
     fn is_at_case_with_data(&mut self) -> Result<bool, ParseError> {
         Ok(match self.stream.lookahead(3)? {
             Some(token) if token.kind == T!["("] => true,
-            Some(token) => token.kind == T![Identifier] && !matches!(token.value, b"when" | b"is"),
+            Some(token) => token.kind == T![Identifier] && !matches!(token.value, b"when" | b"is" | b"and" | b"or"),
             None => false,
         })
     }
@@ -235,9 +240,9 @@ where
     }
 
     fn parse_pattern_match_arm(&mut self) -> Result<PatternMatchArm<'arena>, ParseError> {
-        if self.stream.is_at(T!["default"])? {
+        if self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"default") {
             return Ok(PatternMatchArm::Default(PatternMatchDefaultArm {
-                default: self.expect_keyword(T!["default"])?,
+                default: self.expect_any_keyword()?,
                 arrow: self.stream.eat_span(T!["=>"])?,
                 body: self.parse_pattern_match_arm_body()?,
             }));

@@ -54,6 +54,23 @@ impl MetadataFlags {
     pub const EXTERNAL: MetadataFlags = MetadataFlags(1 << 43);
     /// Declared in a PHP# file.
     pub const SHARP: MetadataFlags = MetadataFlags(1 << 44);
+    /// A PHP# module, spec section 32: the class-like `<Namespace>\Module` its `Module.sharp` declares, which holds only
+    /// laws and never runs.
+    pub const MODULE: MetadataFlags = MetadataFlags(1 << 45);
+    /// A PHP# named constructor, spec section 9.1: the public static method it runs as, which creates its class's
+    /// object with the main constructor and is called as `new Class.name(…)`.
+    pub const NAMED_CONSTRUCTOR: MetadataFlags = MetadataFlags(1 << 46);
+    /// A PHP# property declared with `init`, spec section 6.1: it is set only while the object is created, and runs as
+    /// PHP's `set` hook or set visibility.
+    pub const INIT: MetadataFlags = MetadataFlags(1 << 47);
+    /// A PHP# event, spec section 15: the final class an `event` declaration runs as.
+    pub const EVENT: MetadataFlags = MetadataFlags(1 << 48);
+    /// A PHP# extension method, spec section 26: the public static method of a static class it runs as, which takes
+    /// the extension's receiver first and is called as a method of the receiver.
+    pub const EXTENSION_METHOD: MetadataFlags = MetadataFlags(1 << 49);
+    /// A PHP# extension's computed property, spec section 26: the public static method of a static class it runs as,
+    /// which takes only the extension's receiver and is read as a property of the receiver.
+    pub const EXTENSION_PROPERTY: MetadataFlags = MetadataFlags(1 << 50);
 }
 
 impl MetadataFlags {
@@ -118,6 +135,42 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_sharp(self) -> bool {
         self.contains(Self::SHARP)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_module(self) -> bool {
+        self.contains(Self::MODULE)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_named_constructor(self) -> bool {
+        self.contains(Self::NAMED_CONSTRUCTOR)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_init(self) -> bool {
+        self.contains(Self::INIT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_event(self) -> bool {
+        self.contains(Self::EVENT)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_extension_method(self) -> bool {
+        self.contains(Self::EXTENSION_METHOD)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_extension_property(self) -> bool {
+        self.contains(Self::EXTENSION_PROPERTY)
     }
 
     #[inline]

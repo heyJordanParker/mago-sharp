@@ -59,6 +59,29 @@ where
                         terminator: None,
                     });
                 }
+                cst::ClassLikeMember::Extension(extension) => {
+                    for extension_member in &extension.members {
+                        let Some(method) = self.lower_extension_member(extension, extension_member, owner) else {
+                            continue;
+                        };
+                        let node = self.arena.alloc(method);
+                        collected.push(MemberItem {
+                            meta: (),
+                            span: extension_member.span(),
+                            kind: MemberItemKind::Method(node),
+                            terminator: None,
+                        });
+                    }
+                }
+                cst::ClassLikeMember::NamedConstructor(named_constructor) => {
+                    let node = self.arena.alloc(self.lower_named_constructor(named_constructor, owner));
+                    collected.push(MemberItem {
+                        meta: (),
+                        span: member.span(),
+                        kind: MemberItemKind::Method(node),
+                        terminator: None,
+                    });
+                }
                 cst::ClassLikeMember::Property(cst::Property::Plain(property)) => {
                     let lowered = self.lower_plain_property(property);
                     let last = lowered.len().saturating_sub(1);

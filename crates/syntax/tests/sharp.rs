@@ -121,7 +121,7 @@ fn dotted_name_with_a_space_is_a_parse_error() {
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Store.sharp", "namespace App. Tenant;\n");
 
-    assert!(!program.errors.is_empty());
+    assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
 fn class_members<'arena>(program: &'arena Program<'arena>) -> &'arena Sequence<'arena, ClassLikeMember<'arena>> {
@@ -218,6 +218,136 @@ fn a_constructor_is_a_method_named_after_its_class_without_a_return_type() {
     assert_eq!(source(CODE, extra), "int extra");
 }
 
+/// Spec section 9.1: a constructor passes control with `: super(…)` or `: this(…)` between its parameters and its body.
+#[test]
+fn a_constructor_passes_control_with_super_or_this_before_its_body() {
+    for (member, initializer, keyword, body) in [
+        ("public Order(Row row) : super(row) {}", ": super(row)", "super", "{}"),
+        ("public Order(int count) : this(count, 1) {}", ": this(count, 1)", "this", "{}"),
+        ("public Order(int count) : super() => this.count = count;", ": super()", "super", "=> this.count = count;"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(format!("class Order\n{{\n    {member}\n}}\n").into_boxed_str());
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        assert!(program.errors.is_empty(), "{member}: {:#?}", program.errors);
+        let Some(ClassLikeMember::Method(constructor)) = class_members(program).first() else {
+            panic!("expected a constructor for `{member}`, got {:#?}", class_members(program));
+        };
+        let parsed = constructor.initializer.as_ref().expect("an initializer");
+        assert_eq!(source(code, parsed), initializer, "{member}");
+        assert_eq!(source(code, &parsed.keyword), keyword, "{member}");
+        assert_eq!(source(code, &constructor.body), body, "{member}");
+    }
+}
+
+/// Anything but `super(…)` or `this(…)` after a constructor's `:` is one error, and the constructor and the class parse
+/// on.
+#[test]
+fn any_other_word_after_a_constructor_colon_is_one_error() {
+    for (member, start) in [
+        ("public Order(Row row) : base(row) {}", ": base(row)"),
+        ("public Order(Row row) : {}", ":"),
+        ("public Order() : super {}", ": super"),
+        ("public Order() : ?Order {}", ": ?Order"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Order\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            error.to_string(),
+            "A constructor passes control to its base class with `: super(…)`, and a named constructor to the main one with `: this(…)`.",
+            "{member}"
+        );
+        assert_eq!(source(code, error), start, "{member}");
+        let [ClassLikeMember::Method(constructor), ClassLikeMember::Method(run)] = class_members(program).as_slice()
+        else {
+            panic!("expected two methods for `{member}`, got {:#?}", class_members(program));
+        };
+        assert_eq!(source(code, &constructor.body), "{}", "{member}");
+        assert_eq!(source(code, &run.name), "run", "{member}");
+    }
+}
+
+/// Spec section 9.1: a named constructor is its modifiers, its class's name, a `.`, its own name, parameters, an
+/// optional `: this(…)` and a body. Semantics requires `: this(…)`.
+#[test]
+fn a_named_constructor_is_its_class_a_dot_its_name_parameters_this_and_a_body() {
+    for (member, name, initializer, body) in [
+        ("public Report.fromJson(string json) : this(json.length) {}", "fromJson", Some(": this(json.length)"), "{}"),
+        ("[Shown] private Report.empty() : this(0) => this.reset();", "empty", Some(": this(0)"), "=> this.reset();"),
+        ("protected Report.raw(int id) { }", "raw", None, "{ }"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{member}: {:#?}", program.errors);
+        let [ClassLikeMember::NamedConstructor(constructor), ClassLikeMember::Method(run)] =
+            class_members(program).as_slice()
+        else {
+            panic!("expected a named constructor and a method for `{member}`, got {:#?}", class_members(program));
+        };
+        assert_eq!(source(code, constructor), member);
+        assert_eq!(source(code, &constructor.class), "Report", "{member}");
+        assert_eq!(source(code, &constructor.name), name, "{member}");
+        assert_eq!(
+            constructor.initializer.as_ref().map(|initializer| source(code, initializer)),
+            initializer,
+            "{member}"
+        );
+        assert_eq!(source(code, &constructor.body), body, "{member}");
+        assert_eq!(source(code, &run.name), "run", "{member}");
+    }
+}
+
+/// Spec section 9.1: `new Report.fromJson(…)` creates an object with the named constructor `fromJson`. PHP reads
+/// `new Report . fromJson(…)` as the new object joined to a function's result.
+#[test]
+fn new_with_a_dot_names_a_named_constructor_and_php_keeps_its_concatenation() {
+    const SHARP: &str = "class Use\n{\n    public Report make() => new Report.fromJson(\"{}\");\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Use.sharp", SHARP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(ClassLikeMember::Method(method)) = class_members(program).first() else {
+        panic!("expected a method, got {:#?}", class_members(program));
+    };
+    let MethodBody::Expression(body) = &method.body else {
+        panic!("expected an expression body, got {:#?}", method.body);
+    };
+    let Expression::Instantiation(instantiation) = body.expression else {
+        panic!("expected `new`, got {:#?}", body.expression);
+    };
+    assert_eq!(source(SHARP, instantiation), "new Report.fromJson(\"{}\")");
+    assert_eq!(source(SHARP, instantiation.class), "Report");
+    assert_eq!(instantiation.constructor.as_ref().map(|constructor| source(SHARP, constructor)), Some(".fromJson"));
+
+    const PHP: &str = "<?php $made = new Report.fromJson('{}');";
+    let program = parse(&arena, "src/use.php", PHP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Expression(statement)) = program.statements.get(1) else {
+        panic!("expected an expression statement, got {:#?}", program.statements);
+    };
+    let Expression::Assignment(assignment) = statement.expression else {
+        panic!("expected an assignment, got {:#?}", statement.expression);
+    };
+    let Expression::Binary(concatenation) = assignment.rhs else {
+        panic!("expected a concatenation, got {:#?}", assignment.rhs);
+    };
+    assert_eq!(source(PHP, concatenation.lhs), "new Report");
+    assert_eq!(source(PHP, concatenation.rhs), "fromJson('{}')");
+}
+
 #[test]
 fn a_method_with_a_long_return_type_parses() {
     const CODE: &str = "class Report\n{\n    public static int|string|null total() { return 1; }\n}\n";
@@ -236,7 +366,7 @@ fn a_by_reference_parameter_is_a_parse_error() {
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", "class Report\n{\n    public void fill(int &count) {}\n}\n");
 
-    assert!(!program.errors.is_empty());
+    assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
 #[test]
@@ -298,8 +428,8 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required`, `via` and a named constructor are spec syntax outside the slice. Each one is a
-/// single error where it starts, and the class around it still parses.
+/// `required` and `via` are spec syntax outside the slice. Each one is a single error where it starts, and the class
+/// around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
@@ -309,16 +439,6 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
             "public Report(public int id { get; } via Tracked, int other) {}",
             "`via` is not supported yet in PHP#.",
             "via",
-        ),
-        (
-            "public Report.fromJson(string json) : this(json.length) {}",
-            "A named constructor is not supported yet in PHP#.",
-            "Report.fromJson",
-        ),
-        (
-            "public Report make() { return new Report.fromJson(\"{}\"); }",
-            "A named constructor is not supported yet in PHP#.",
-            "Report.fromJson",
         ),
     ] {
         let arena = LocalArena::new();
@@ -343,6 +463,56 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
             "the class keeps parsing after `{member}`"
         );
     }
+}
+
+/// Every type, events and interfaces included, is declared at file level in its own file, spec section 15, so a type
+/// declared inside a class, an interface, an enum, a trait or a module is one error over the whole type that names
+/// its owner, and the owner parses on without it.
+#[test]
+fn a_type_declared_inside_another_is_one_error_and_its_owner_parses_on() {
+    for (owner, named, member, name) in [
+        ("class", "A class", "public event Paid(int orderId) : OrderEvent;", "Paid"),
+        ("class", "A class", "public interface OrderEvent { public int orderId { get; } }", "OrderEvent"),
+        ("class", "A class", "public class Line { }", "Line"),
+        ("class", "A class", "enum Kind { case One; }", "Kind"),
+        ("class", "A class", "trait Logs { }", "Logs"),
+        ("interface", "An interface", "public class Line { public int size() { return 1; } }", "Line"),
+        ("enum", "An enum", "public event Paid(int orderId);", "Paid"),
+        ("trait", "A trait", "public event Paid(int orderId);", "Paid"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("{owner} Order\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Order.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}` in a {owner}, got {:#?}", program.errors);
+        };
+        let message = format!("{named} can't declare a type inside it: declare `{name}` in its own file.");
+        assert_eq!(error.to_string(), message);
+        assert_eq!(source(code, error), member, "{message}");
+        let members = match program.statements.first() {
+            Some(Statement::Class(class)) => &class.members,
+            Some(Statement::Interface(interface)) => &interface.members,
+            Some(Statement::Enum(r#enum)) => &r#enum.members,
+            Some(Statement::Trait(r#trait)) => &r#trait.members,
+            _ => panic!("expected a {owner}, got {:#?}", program.statements),
+        };
+        let [ClassLikeMember::Method(run)] = members.as_slice() else {
+            panic!("expected only the method `run` after `{member}`, got {members:#?}");
+        };
+        assert_eq!(run.name.value, b"run", "{message}");
+    }
+
+    const MODULE: &str = "module\n{\n    public event Paid(int orderId);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Module.sharp", MODULE);
+    let [error] = program.errors else {
+        panic!("expected one error in a module, got {:#?}", program.errors);
+    };
+    assert_eq!(error.to_string(), "A module can't declare a type inside it: declare `Paid` in its own file.");
+    assert_eq!(source(MODULE, error), "public event Paid(int orderId);");
 }
 
 /// A case that carries data, spec section 20, is one error from its name to its closing parenthesis. The case stays
@@ -1082,7 +1252,7 @@ fn a_php_hooked_property_has_no_trailing_initial_value() {
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.php", "<?php class Report { public int $views { get; } = 0; }");
 
-    assert!(!program.errors.is_empty());
+    assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
 #[test]
@@ -1746,7 +1916,7 @@ fn a_question_mark_apart_from_the_dot_is_not_null_safe_access() {
     let program =
         parse(&arena, "src/Report.sharp", "class Report\n{\n    void run()\n    {\n        calc? .add(1);\n    }\n}\n");
 
-    assert!(!program.errors.is_empty());
+    assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
 #[test]
@@ -1794,6 +1964,221 @@ fn the_use_keyword_is_a_parse_error_in_every_form() {
 
         let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
         assert_eq!(messages, ["`use` is PHP syntax: PHP# imports a class with `import`"], "{code}");
+    }
+}
+
+/// The places the program reads `word` as a name, each once. PHP's construct holds the word it starts as a keyword.
+fn name_count(program: &Program<'_>, word: &str) -> usize {
+    let mut spans: Vec<mago_span::Span> = Node::Program(program).filter_map(|node| match node {
+        Node::LocalIdentifier(name) if name.value == word.as_bytes() => Some(name.span),
+        Node::Identifier(Identifier::Local(name)) if name.value == word.as_bytes() => Some(name.span),
+        _ => None,
+    });
+    spans.sort();
+    spans.dedup();
+
+    spans.len()
+}
+
+/// Spec section 2: a `.sharp` file reads a PHP keyword PHP# doesn't use as a plain name, and as PHP's construct only
+/// where the construct can follow it. A PHP# infix word never starts an operand, and `(…)` followed by `:` or a name
+/// is the construct only after `fn` and `function`, or after `foreach`, `switch` and `elseif` at a statement's start.
+#[test]
+fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
+    const PHP_ONLY: [&str; 43] = [
+        "fn",
+        "or",
+        "and",
+        "die",
+        "use",
+        "var",
+        "xor",
+        "echo",
+        "eval",
+        "from",
+        "goto",
+        "list",
+        "array",
+        "clone",
+        "empty",
+        "endif",
+        "isset",
+        "print",
+        "trait",
+        "unset",
+        "elseif",
+        "endfor",
+        "global",
+        "parent",
+        "switch",
+        "declare",
+        "default",
+        "extends",
+        "foreach",
+        "include",
+        "require",
+        "callable",
+        "endwhile",
+        "function",
+        "endswitch",
+        "insteadof",
+        "enddeclare",
+        "endforeach",
+        "implements",
+        "instanceof",
+        "include_once",
+        "require_once",
+        "__halt_compiler",
+    ];
+    let method = |body: &str| -> &'static str {
+        Box::leak(
+            format!("class Report\n{{\n    public Any run(Any value, bool flag)\n    {{\n{body}    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    let mut names = vec![
+        ("empty", method("        const empty = value;\n        return empty is bool;\n")),
+        (
+            "print",
+            method(
+                "        const print = value;\n        if (print is string text) { return text; }\n        return 1;\n",
+            ),
+        ),
+        ("isset", method("        const isset = value;\n        return isset is null;\n")),
+        ("default", method("        const default = value;\n        return default is int;\n")),
+        ("clone", method("        const clone = value;\n        return clone is int;\n")),
+        ("print", method("        const print = (int a) => a;\n        return flag ? print(1) : 0;\n")),
+        ("echo", method("        const echo = (int a) => a;\n        return flag ? echo(1) : 0;\n")),
+        ("empty", method("        const empty = (int a) => a;\n        return empty(1) is int;\n")),
+    ];
+    for word in PHP_ONLY {
+        for row in [
+            format!("        return {word} is int;\n"),
+            format!("        return {word} as int;\n"),
+            format!("        return {word} ? 1 : 0;\n"),
+            format!("        return {word} * 2;\n"),
+            format!("        return {word}.member;\n"),
+            format!("        return {word}(1);\n"),
+            format!("        {word}(1);\n        return 1;\n"),
+            format!("        {word}.member = 1;\n        return 1;\n"),
+        ] {
+            // `declare(` at a statement's start is PHP's construct, which the checker refuses whole.
+            if word != "declare" || !row.starts_with("        declare(") {
+                names.push((word, method(&format!("        const {word} = value;\n{row}"))));
+            }
+        }
+    }
+
+    for (word, code) in names {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        assert_eq!(name_count(program, word), 2, "{code}");
+    }
+
+    for (word, code) in [
+        ("print", method("        print \"y\";\n        return 1;\n")),
+        ("echo", method("        echo value;\n        return 1;\n")),
+        ("foreach", method("        foreach (value as item) { }\n        return 1;\n")),
+        ("foreach", method("        foreach (value as item):\n        endforeach;\n        return 1;\n")),
+        ("switch", method("        switch (value):\n        endswitch;\n        return 1;\n")),
+        ("declare", method("        declare(strict_types=1);\n        return 1;\n")),
+        ("list", method("        list(first) = value;\n        return first;\n")),
+        ("fn", method("        return fn(int x): int => x;\n")),
+        ("function", method("        return function (x) use (flag) { return x; };\n")),
+        ("elseif", method("        if (flag) { return 1; } elseif (value) return 2;\n        return 3;\n")),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert_eq!(name_count(program, word), 0, "{code}");
+    }
+}
+
+/// PHP#'s keywords are lowercase. A PHP# keyword written in another case reads as the keyword, with one error each,
+/// wherever its construct follows and the name could not stand, as rustc's `eat_keyword_case` reads `Fn`: at a
+/// statement's or an expression's head, after a `try` or an `if` statement's body, where only the keyword can stand,
+/// and among a declaration's modifiers. A PHP keyword PHP# doesn't use reads as its construct, whose own error names
+/// the PHP# form, and a word that can be a name stays one.
+#[test]
+fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() {
+    let method = |body: &str| -> &'static str {
+        Box::leak(
+            format!("class Report\n{{\n    public Any run(Any value, bool flag)\n    {{\n{body}    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    for (code, keywords) in [
+        (method("        Return 5;\n"), &["return"][..]),
+        (method("        RETURN value;\n"), &["return"]),
+        (method("        IF (flag) { }\n        return 1;\n"), &["if"]),
+        (method("        const c = New Report();\n        return c;\n"), &["new"]),
+        (method("        const c = New\n            Report();\n        return c;\n"), &["new"]),
+        (method("        New Report();\n        return 1;\n"), &["new"]),
+        (method("        return flag ? New Report() : value;\n"), &["new"]),
+        (method("        IF (flag) { Return 5; }\n        return 1;\n"), &["if", "return"]),
+        (method("        Throw new Exception();\n"), &["throw"]),
+        (method("        Emit new Report();\n        return 1;\n"), &["emit"]),
+        (method("        Try { return 1; } catch (Exception e) { return 2; }\n"), &["try"]),
+        (method("        try { return 1; } Catch (Exception e) { return 2; }\n"), &["catch"]),
+        (method("        try { return 1; } Finally { }\n"), &["finally"]),
+        (method("        try { } catch (Exception e) { } Finally { }\n        return 1;\n"), &["finally"]),
+        (method("        if (flag) { return 1; } Else { return 2; }\n"), &["else"]),
+        (method("        if (flag) { return 1; } Else If (value) { return 2; }\n        return 3;\n"), &["else", "if"]),
+        (method("        Do { } While (flag);\n        return 1;\n"), &["do", "while"]),
+        (method("        for (const item of value) { Break; }\n        return 1;\n"), &["break"]),
+        (method("        for (const item of value) { Continue; }\n        return 1;\n"), &["continue"]),
+        ("class Report\n{\n    Public int run() { return 1; }\n}\n", &["public"]),
+        ("class Report\n{\n    public Static int run() { return 1; }\n}\n", &["static"]),
+        ("class Report\n{\n    Public Static List<int> run() { return []; }\n}\n", &["public", "static"]),
+        ("public Class Report\n{\n}\n", &["class"]),
+        ("public Enum Suit\n{\n    case Hearts;\n}\n", &["enum"]),
+        ("public Interface Drawable\n{\n}\n", &["interface"]),
+        ("Import Lib.Calc;\n\nclass Report\n{\n}\n", &["import"]),
+        ("Namespace App;\n\nclass Report\n{\n}\n", &["namespace"]),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let issues: Vec<(String, Option<String>)> =
+            program.errors.iter().map(Issue::from).map(|issue| (issue.message, issue.help)).collect();
+        let expected: Vec<(String, Option<String>)> =
+            keywords.iter().map(|keyword| (format!("Write the keyword `{keyword}` in lowercase."), None)).collect();
+        assert_eq!(issues, expected, "{code}");
+    }
+
+    let messages = |code: &'static str| -> Vec<String> {
+        let arena = LocalArena::new();
+
+        parse(&arena, "src/Report.sharp", code).errors.iter().map(ToString::to_string).collect()
+    };
+    assert_eq!(
+        messages(method("        Foreach (value as item) { }\n        return 1;\n")),
+        messages(method("        foreach (value as item) { }\n        return 1;\n")),
+    );
+
+    for (code, word, names) in [
+        (method("        Return refund = new Return();\n        return refund;\n"), "Return", 2),
+        (method("        Return? maybe = null;\n        Return.count = 2;\n        return maybe;\n"), "Return", 2),
+        (method("        If branch = If.of();\n        return New.of();\n"), "If", 2),
+        (method("        List<int> items = [];\n        return items;\n"), "List", 1),
+        (method("        const print = Print.make();\n        return print;\n"), "Print", 1),
+        (method("        Static s = new Static();\n        return Static.make();\n"), "Static", 3),
+        (method("        const f = (Static s) => s;\n        return f;\n"), "Static", 1),
+        ("class Report\n{\n    public Static run() { return new Static(); }\n}\n", "Static", 2),
+        ("class Report\n{\n    private Static items;\n\n    public Static(int x) { }\n}\n", "Static", 2),
+        ("class Report\n{\n    public Struct shape { get; set; }\n}\n", "Struct", 1),
+        ("class Report\n{\n    public Class kind { get; set; }\n}\n", "Class", 1),
+        ("class Lazy\n{\n    public static Lazy operator +(Lazy a, Lazy b) { return a; }\n}\n", "Lazy", 4),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        assert_eq!(name_count(program, word), names, "{code}");
     }
 }
 
@@ -2409,6 +2794,134 @@ fn required_on_a_method_with_a_return_type_is_not_supported_yet() {
     }
 }
 
+/// `lazy` is a modifier of a member and of a parameter, spec sections 6.5 and 9, so semantics can name it, and stays a
+/// name elsewhere.
+#[test]
+fn lazy_is_a_modifier_and_stays_a_name_elsewhere() {
+    const CODE: &str = "class Store\n{\n    public Store(public lazy Planner planner { get; }) {}\n\n    public lazy Plan plan => lazy(1);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Store.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(constructor), ClassLikeMember::Property(plan)] = class_members(program).as_slice()
+    else {
+        panic!("expected a constructor and a property, got {:#?}", class_members(program));
+    };
+    let Some(parameter) = constructor.parameter_list.parameters.first() else {
+        panic!("expected a parameter, got {:#?}", constructor.parameter_list);
+    };
+    let parameter_modifiers: Vec<String> = parameter.modifiers.iter().map(ToString::to_string).collect();
+    let plan_modifiers: Vec<String> = plan.modifiers().iter().map(ToString::to_string).collect();
+    assert_eq!(parameter_modifiers, ["Public", "Lazy"]);
+    assert_eq!(plan_modifiers, ["Public", "Lazy"]);
+    let Property::Computed(computed) = plan else {
+        panic!("expected a computed property, got {plan:#?}");
+    };
+    let Expression::Call(Call::Function(call)) = computed.body.expression else {
+        panic!("expected a call, got {:#?}", computed.body.expression);
+    };
+    assert_eq!(source(CODE, call.function), "lazy");
+
+    const LAMBDA: &str = "class Store\n{\n    public bool flag(bool on)\n    {\n        Function<bool(bool, int)> pass = (lazy, int count) => lazy;\n        Function<bool(bool)> same = (lazy) => lazy;\n        return pass(on, 1) && same(on);\n    }\n}\n";
+    let program = parse(&arena, "src/Store.sharp", LAMBDA);
+    assert!(program.errors.is_empty(), "an untyped lambda parameter named `lazy`: {:#?}", program.errors);
+}
+
+/// Spec section 5's `internal` is a modifier of a declaration, a member, an accessor and a parameter, written first or
+/// after another, so semantics can name it, and stays a name elsewhere.
+#[test]
+fn internal_is_a_modifier_and_stays_a_name_elsewhere() {
+    const CODE: &str = "class Report\n{\n    internal const int MAX = 1;\n    internal static int count = 0;\n    public string name { get; internal set; } = \"\";\n    internal Report(internal int size { get; }) {}\n    public internal int run()\n    {\n        int internal = 5;\n        return internal;\n    }\n    public int internal() => 1;\n    [Pure]\n    internal int sum() => 1;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let modifiers = |sequence: &Sequence<Modifier>| sequence.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let [
+        ClassLikeMember::Constant(constant),
+        ClassLikeMember::Property(count),
+        ClassLikeMember::Property(Property::Hooked(name)),
+        ClassLikeMember::Method(constructor),
+        ClassLikeMember::Method(run),
+        ClassLikeMember::Method(named),
+        ClassLikeMember::Method(sum),
+    ] = class_members(program).as_slice()
+    else {
+        panic!("expected seven members, got {:#?}", class_members(program));
+    };
+    assert_eq!(modifiers(&constant.modifiers), ["Internal"]);
+    assert_eq!(modifiers(count.modifiers()), ["Internal", "Static"]);
+    let Some(setter) = name.hook_list.setter() else {
+        panic!("expected a setter, got {:#?}", name.hook_list);
+    };
+    assert_eq!(modifiers(&setter.modifiers), ["Internal"]);
+    assert_eq!(modifiers(&constructor.modifiers), ["Internal"]);
+    let Some(parameter) = constructor.parameter_list.parameters.first() else {
+        panic!("expected a parameter, got {:#?}", constructor.parameter_list);
+    };
+    assert_eq!(modifiers(&parameter.modifiers), ["Internal"]);
+    assert_eq!(modifiers(&run.modifiers), ["Public", "Internal"]);
+    assert_eq!(source(CODE, &named.name), "internal");
+    assert_eq!(modifiers(&sum.modifiers), ["Internal"]);
+    assert_eq!(sum.attribute_lists.len(), 1);
+
+    for (code, kind) in [
+        ("internal class Ledger\n{\n}\n", "class"),
+        ("internal interface Priced\n{\n}\n", "interface"),
+        ("[Flags]\ninternal enum Suit\n{\n    case Hearts;\n}\n", "enum"),
+        ("internal event Paid(int orderId);\n", "event"),
+    ] {
+        let program = parse(&arena, "src/Ledger.sharp", code);
+
+        assert!(program.errors.is_empty(), "{kind}: {:#?}", program.errors);
+        let declared = match program.statements.first() {
+            Some(Statement::Class(class)) => &class.modifiers,
+            Some(Statement::Interface(interface)) => &interface.modifiers,
+            Some(Statement::Enum(r#enum)) => &r#enum.modifiers,
+            Some(Statement::Event(event)) => &event.modifiers,
+            statement => panic!("expected a declaration, got {statement:#?}"),
+        };
+        assert_eq!(modifiers(declared), ["Internal"], "{kind}");
+    }
+
+    let php = parse(&arena, "src/report.php", "<?php\n\ninternal(1);\n");
+    assert!(php.errors.is_empty(), "{:#?}", php.errors);
+    assert!(matches!(php.statements.as_slice(), [_, Statement::Expression(_)]), "{:#?}", php.statements);
+}
+
+/// Spec section 9: a parameter has no computed property, because it receives its value. It is one error at its `=>`,
+/// and the parameter list and the class parse on.
+#[test]
+fn a_computed_parameter_is_one_error_and_the_class_parses_on() {
+    for member in [
+        "public Store(public string slug => trim(\"x\"), int count) {}",
+        "public int run(int slug => 1, int count) => count;",
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str =
+            Box::leak(format!("class Store\n{{\n    {member}\n\n    public int total() => 1;\n}}\n").into_boxed_str());
+        let program = parse(&arena, "src/Store.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            error.to_string(),
+            "A parameter cannot be a computed property: a computed property has no incoming value to receive.",
+            "{member}"
+        );
+        assert_eq!(source(code, error), "=>", "{member}");
+        let [ClassLikeMember::Method(method), ClassLikeMember::Method(total)] = class_members(program).as_slice()
+        else {
+            panic!("expected two methods for `{member}`, got {:#?}", class_members(program));
+        };
+        let parameters: Vec<&str> =
+            method.parameter_list.parameters.iter().map(|parameter| source(code, &parameter.variable)).collect();
+        assert_eq!(parameters, ["slug", "count"], "{member}");
+        assert_eq!(source(code, &total.name), "total", "{member}");
+    }
+}
+
 /// A static class is `static` among a class's modifiers, and a method with a native body is `extern` among a member's
 /// modifiers, with no body, spec section 29. `extern` stays a name elsewhere.
 #[test]
@@ -2461,10 +2974,11 @@ fn extern_in_a_php_file_is_a_name() {
 }
 
 /// A file-level `extern` declares the effects of a plain PHP class, method or function, spec section 29. Its target is
-/// a bare name or `Class.member`, and `uses` lists its effects.
+/// a bare name or `Class.member`, and `uses` lists its effects. `extern event` marks a plain PHP class as an event, spec
+/// section 15, and a class named `event` stays a target.
 #[test]
 fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
-    const CODE: &str = "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Carbon.Carbon;\n\nextern StripeClient uses Http;\nextern Carbon.now uses Clock;\nextern now uses Clock;\nextern BigDecimal;\nextern trim;\nextern Mailer uses Http, Mail;\n";
+    const CODE: &str = "namespace App.Stubs;\n\nimport Stripe.StripeClient;\nimport Carbon.Carbon;\n\nextern StripeClient uses Http;\nextern Carbon.now uses Clock;\nextern now uses Clock;\nextern BigDecimal;\nextern trim;\nextern Mailer uses Http, Mail;\nextern event JobFailed;\nextern event JobFailed uses Database;\nextern event;\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "app/Stubs/Stripe.sharp", CODE);
 
@@ -2472,7 +2986,7 @@ fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
     let Some(Statement::Namespace(namespace)) = program.statements.first() else {
         panic!("expected a namespace, got {:#?}", program.statements);
     };
-    let externs: Vec<(&str, bool, Vec<&str>, &str)> = namespace
+    let externs: Vec<(bool, &str, bool, Vec<&str>, &str)> = namespace
         .statements()
         .iter()
         .filter_map(|statement| match statement {
@@ -2481,6 +2995,7 @@ fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
         })
         .map(|declaration| {
             (
+                declaration.event.is_some(),
                 source(CODE, &declaration.target),
                 declaration.target.is_dotted(),
                 declaration.uses.iter().flat_map(|uses| uses.names.iter()).map(|name| source(CODE, name)).collect(),
@@ -2491,12 +3006,15 @@ fn extern_declares_a_class_a_method_or_a_function_and_its_effects() {
     assert_eq!(
         externs,
         [
-            ("StripeClient", false, vec!["Http"], "extern StripeClient uses Http;"),
-            ("Carbon.now", true, vec!["Clock"], "extern Carbon.now uses Clock;"),
-            ("now", false, vec!["Clock"], "extern now uses Clock;"),
-            ("BigDecimal", false, vec![], "extern BigDecimal;"),
-            ("trim", false, vec![], "extern trim;"),
-            ("Mailer", false, vec!["Http", "Mail"], "extern Mailer uses Http, Mail;"),
+            (false, "StripeClient", false, vec!["Http"], "extern StripeClient uses Http;"),
+            (false, "Carbon.now", true, vec!["Clock"], "extern Carbon.now uses Clock;"),
+            (false, "now", false, vec!["Clock"], "extern now uses Clock;"),
+            (false, "BigDecimal", false, vec![], "extern BigDecimal;"),
+            (false, "trim", false, vec![], "extern trim;"),
+            (false, "Mailer", false, vec!["Http", "Mail"], "extern Mailer uses Http, Mail;"),
+            (true, "JobFailed", false, vec![], "extern event JobFailed;"),
+            (true, "JobFailed", false, vec!["Database"], "extern event JobFailed uses Database;"),
+            (false, "event", false, vec![], "extern event;"),
         ]
     );
     let Some(Statement::Extern(stripe)) =
@@ -2585,6 +3103,118 @@ fn a_law_in_an_enum_follows_its_cases_and_methods() {
     assert_eq!(source(CODE, law), "law refundedIsFinal(Payment e) => Status.Refunded.after(e) == Status.Refunded;");
 }
 
+/// Spec section 28 states a module's laws in `Module.sharp`, in a `module` with no name, because the folder names it.
+#[test]
+fn a_module_is_its_keyword_and_its_laws_in_braces() {
+    const CODE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Tenant/Store/Module.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let [Statement::Module(module)] = namespace.statements().as_slice() else {
+        panic!("expected one module, got {:#?}", namespace.statements());
+    };
+    let [ModuleMember::Law(law)] = module.members.as_slice() else {
+        panic!("expected one law, got {:#?}", module.members);
+    };
+    assert_eq!(module.module.value, b"module");
+    assert_eq!(source(CODE, &law.name), "receiptMatchesRefunds");
+    assert_eq!(
+        source(CODE, law.body.expression),
+        "Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded)"
+    );
+    assert_eq!(
+        source(CODE, module),
+        "module\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}"
+    );
+}
+
+/// Spec section 32's service bindings and parent header wait for the container. Each one is a single error where it
+/// starts, and the module around it still parses its laws.
+#[test]
+fn a_module_service_or_parent_is_one_not_supported_error_and_the_module_parses_on() {
+    for (header, member, message, start) in [
+        ("", "singleton Mailer = SmtpMailer;", "A `singleton` service is not supported yet in PHP#.", "singleton"),
+        (
+            "",
+            "singleton Mailer for SendReceipt = QueueMailer;",
+            "A `singleton` service is not supported yet in PHP#.",
+            "singleton",
+        ),
+        (
+            "",
+            "singleton List<PriceRule> = [TaxRule, DiscountRule];",
+            "A `singleton` service is not supported yet in PHP#.",
+            "singleton",
+        ),
+        (
+            "",
+            "singleton RedisStore = new RedisStore(Environment.require(\"REDIS_URL\"));",
+            "A `singleton` service is not supported yet in PHP#.",
+            "singleton",
+        ),
+        ("", "scoped Mailer = MailerFactory;", "A `scoped` service is not supported yet in PHP#.", "scoped"),
+        ("", "transient Mailer = SmtpMailer;", "A `transient` service is not supported yet in PHP#.", "transient"),
+        (" : App.Shop", "", "A module that overrides another is not supported yet in PHP#.", ": App.Shop"),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("namespace App.Shop;\n\nmodule{header}\n{{\n    {member}\n    law same(int a) => a == a;\n}}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "app/Shop/Module.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{header}{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), message, "{header}{member}");
+        assert_eq!(source(code, error), start, "{header}{member}");
+        let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+            panic!("expected a namespace for `{header}{member}`, got {:#?}", program.statements);
+        };
+        let [Statement::Module(module)] = namespace.statements().as_slice() else {
+            panic!("expected one module for `{header}{member}`, got {:#?}", namespace.statements());
+        };
+        assert!(
+            matches!(module.members.as_slice(), [ModuleMember::Law(law)] if law.name.value == b"same"),
+            "the module keeps parsing after `{header}{member}`"
+        );
+    }
+}
+
+/// Spec section 32: a module holds no statements, branches, loops or methods. Any member but a law is one error at the
+/// member, and the law after it still parses.
+#[test]
+fn a_module_member_other_than_a_law_is_one_error_and_the_module_parses_on() {
+    for member in ["public int total(int a) => a + 1;", "private int count = 0;", "public const int LIMIT = 3;"] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("namespace App.Shop;\n\nmodule\n{{\n    {member}\n    law same(int a) => a == a;\n}}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "app/Shop/Module.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), "A module states only laws.", "{member}");
+        assert_eq!(source(code, error), member, "{member}");
+        let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+            panic!("expected a namespace for `{member}`, got {:#?}", program.statements);
+        };
+        let [Statement::Module(module)] = namespace.statements().as_slice() else {
+            panic!("expected one module for `{member}`, got {:#?}", namespace.statements());
+        };
+        assert!(
+            matches!(module.members.as_slice(), [ModuleMember::Law(law)] if law.name.value == b"same"),
+            "the module keeps parsing after `{member}`"
+        );
+    }
+}
+
 /// PHP has no laws, so a `.php` member that starts with `law` stays a typed property, and `law(…)` a call.
 #[test]
 fn law_in_a_php_file_is_a_name() {
@@ -2629,6 +3259,55 @@ fn law_after_a_modifier_or_before_a_parenthesis_stays_a_name_in_php_sharp() {
         panic!("expected a call, got {:#?}", body.expression);
     };
     assert_eq!(source(CODE, call.function), "law");
+}
+
+/// Spec section 26: an extension block in a static class is `extension`, its receiver in parentheses and the members
+/// it adds in braces, a method and a computed property among them.
+#[test]
+fn an_extension_is_its_receiver_and_its_members_in_braces() {
+    const CODE: &str = "public static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug() => Str.slug(value);\n        public bool isBlank => value.trim() == \"\";\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Shared/Text/TextExtensions.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Extension(extension)] = class_members(program).as_slice() else {
+        panic!("expected an extension, got {:#?}", class_members(program));
+    };
+    let receivers: Vec<&str> =
+        extension.parameter_list.parameters.iter().map(|parameter| source(CODE, parameter)).collect();
+    let [ClassLikeMember::Method(slug), ClassLikeMember::Property(Property::Computed(is_blank))] =
+        extension.members.as_slice()
+    else {
+        panic!("expected a method and a computed property, got {:#?}", extension.members);
+    };
+    assert_eq!(extension.extension.value, b"extension");
+    assert_eq!(receivers, ["string value"]);
+    assert_eq!(source(CODE, slug), "public string slug() => Str.slug(value);");
+    assert_eq!(source(CODE, is_blank), "public bool isBlank => value.trim() == \"\";");
+    assert_eq!(
+        source(CODE, extension),
+        "extension(string value)\n    {\n        public string slug() => Str.slug(value);\n        public bool isBlank => value.trim() == \"\";\n    }"
+    );
+}
+
+/// `extension` starts an extension only at the start of a member, before `(`. After a modifier it is a return type,
+/// before a name a member's type, and in a body a call.
+#[test]
+fn extension_after_a_modifier_or_in_a_body_stays_a_name() {
+    const CODE: &str = "class Files\n{\n    public extension make(int x) => extension(x);\n    extension name;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Files.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(make), ClassLikeMember::Property(name)] = class_members(program).as_slice() else {
+        panic!("expected a method and a field, got {:#?}", class_members(program));
+    };
+    assert_eq!(make.return_type_hint.as_ref().map(|hint| source(CODE, hint)), Some("extension"));
+    let MethodBody::Expression(body) = &make.body else {
+        panic!("expected an expression body, got {:#?}", make.body);
+    };
+    assert!(matches!(body.expression, Expression::Call(Call::Function(_))), "{:#?}", body.expression);
+    assert_eq!(name.hint().map(|hint| source(CODE, hint)), Some("extension"));
 }
 
 /// The lexer reads `Self` and `self` as one keyword. The checker tells them apart by how the keyword is written.
@@ -3465,4 +4144,194 @@ fn php_keeps_reading_operator_as_a_name() {
     assert_eq!(method.name.value, b"operator");
     assert!(matches!(property.hint(), Some(Hint::Identifier(name)) if name.value() == b"operator"), "{property:#?}");
     assert_eq!(constant.first_item().name.value, b"operator");
+}
+
+/// Spec section 15 declares an event at file level as its name and its parameters, with an optional header of the
+/// interfaces it implements. A name PHP reserves, such as `Empty`, still declares an event, which the checks refuse.
+#[test]
+fn an_event_declares_its_parameters_and_its_interfaces() {
+    const CODE: &str = "namespace App;\n\npublic event Shipped(int shipmentId);\n\npublic event Exit(int code);\n\npublic event OrderPaid(int orderId, Money amount) : OrderEvent;\n\nevent Refunded(int orderId) : OrderEvent, Audited;\n\npublic event Cleared();\n\npublic event Empty();\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/App/Events.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let events: Vec<(&str, Vec<&str>, Vec<&str>, &str)> = namespace
+        .statements()
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Event(event) => Some(event),
+            _ => None,
+        })
+        .map(|event| {
+            assert_eq!(event.event.value, b"event");
+
+            (
+                source(CODE, &event.name),
+                event.parameter_list.parameters.iter().map(|parameter| source(CODE, parameter)).collect(),
+                event
+                    .inheritance
+                    .iter()
+                    .flat_map(|inheritance| inheritance.types.iter())
+                    .map(|name| source(CODE, name))
+                    .collect(),
+                source(CODE, event),
+            )
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            ("Shipped", vec!["int shipmentId"], vec![], "public event Shipped(int shipmentId);"),
+            ("Exit", vec!["int code"], vec![], "public event Exit(int code);"),
+            (
+                "OrderPaid",
+                vec!["int orderId", "Money amount"],
+                vec!["OrderEvent"],
+                "public event OrderPaid(int orderId, Money amount) : OrderEvent;"
+            ),
+            (
+                "Refunded",
+                vec!["int orderId"],
+                vec!["OrderEvent", "Audited"],
+                "event Refunded(int orderId) : OrderEvent, Audited;"
+            ),
+            ("Cleared", vec![], vec![], "public event Cleared();"),
+            ("Empty", vec![], vec![], "public event Empty();"),
+        ]
+    );
+}
+
+/// An event's parameters are its whole declaration, so a body after them is one error, and the file parses on.
+#[test]
+fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
+    const CODE: &str =
+        "public event OrderPaid(int orderId) { }\n\npublic class Order\n{\n    public int run() { return 1; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/OrderPaid.sharp", CODE);
+
+    let [error] = program.errors else {
+        panic!("expected one error, got {:#?}", program.errors);
+    };
+    assert_eq!(
+        error.to_string(),
+        "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`."
+    );
+    assert_eq!(source(CODE, error), "{ }");
+    let [.., Statement::Class(order)] = program.statements.as_slice() else {
+        panic!("expected the class `Order` last, got {:#?}", program.statements);
+    };
+    assert_eq!(order.name.value, b"Order");
+}
+
+/// Spec section 15: a trailing `on` clause after a method's parameters lists the events the method listens to, before
+/// its block, its `=>` body or its `;`.
+#[test]
+fn an_on_clause_lists_events_after_the_parameters() {
+    const CODE: &str = "class Notices\n{\n    public void refresh() on OrderPaid { }\n\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded => this.log(e);\n\n    abstract void heard(OrderEvent e) on OrderEvent;\n\n    public void run() { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Notices.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let methods: Vec<_> = class_members(program)
+        .iter()
+        .map(|member| {
+            let ClassLikeMember::Method(method) = member else {
+                panic!("expected a method, got {member:#?}");
+            };
+            let on = method.on.as_ref().map(|on| {
+                assert_eq!(on.on.value, b"on");
+
+                (source(CODE, on), on.events.iter().map(|event| source(CODE, event)).collect::<Vec<_>>())
+            });
+
+            (source(CODE, &method.name), on)
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("refresh", Some(("on OrderPaid", vec!["OrderPaid"]))),
+            ("send", Some(("on OrderPaid, OrderRefunded", vec!["OrderPaid", "OrderRefunded"]))),
+            ("heard", Some(("on OrderEvent", vec!["OrderEvent"]))),
+            ("run", None),
+        ]
+    );
+}
+
+/// `on` starts a clause only after a method's parameters, so a method, a parameter and a local named `on` keep it as a
+/// name.
+#[test]
+fn on_stays_a_name_outside_the_clause() {
+    const CODE: &str =
+        "class Switch\n{\n    public bool on(bool on)\n    {\n        const was = on;\n        return was;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Switch.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(method)] = class_members(program).as_slice() else {
+        panic!("expected one method, got {:#?}", class_members(program));
+    };
+    assert_eq!(source(CODE, &method.name), "on");
+    assert!(method.on.is_none(), "{:#?}", method.on);
+    let [Statement::LocalDeclaration(was), _] = method_body(program) else {
+        panic!("expected a local and a return, got {:#?}", method_body(program));
+    };
+    assert_eq!(source(CODE, was.value), "on");
+}
+
+/// `event` declares an event only before a name and `(`, so a parameter, a field, a local, a call such as Laravel's
+/// `event(…)` and an operand of a word operator keep it as a name.
+#[test]
+fn event_stays_a_name_where_no_declaration_follows() {
+    const CODE: &str = "class Order\n{\n    public void run(int event)\n    {\n        event(new Paid(event));\n        const total = event + 1;\n        event is (Paid);\n    }\n\n    private int event = 0;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [call, Statement::LocalDeclaration(total), both] = method_body(program) else {
+        panic!("expected a call, a local and an expression, got {:#?}", method_body(program));
+    };
+    let Expression::Call(Call::Function(call)) = expression(call) else {
+        panic!("expected a call, got {call:#?}");
+    };
+    assert_eq!(source(CODE, call.function), "event");
+    assert_eq!(source(CODE, total.value), "event + 1");
+    assert!(matches!(expression(both), Expression::Is(_)), "{both:#?}");
+    let [ClassLikeMember::Method(_), ClassLikeMember::Property(field)] = class_members(program).as_slice() else {
+        panic!("expected a method and a field, got {:#?}", class_members(program));
+    };
+    assert_eq!(field.first_variable().name, b"event");
+}
+
+/// Spec section 15 raises an event with `emit` and the expression after it. Spec section 2 reserves `emit`, so at the
+/// start of a `.sharp` statement it always raises, `emit(paid);` included. Plain PHP keeps `emit` a name.
+#[test]
+fn emit_raises_the_expression_after_it() {
+    const CODE: &str = "class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n        emit 5;\n        emit(paid);\n        emit (paid);\n    }\n}\n";
+    const PHP: &str = "<?php\n\nemit new Paid();\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Order.sharp", CODE);
+    let php = parse(&arena, "src/raise.php", PHP);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let statements: Vec<(&str, &str)> = method_body(program)
+        .iter()
+        .map(|statement| match statement {
+            Statement::Emit(emit) => {
+                assert_eq!(emit.emit.value, b"emit");
+
+                ("emit", source(CODE, emit.value))
+            }
+            _ => panic!("expected an emit, got {statement:#?}"),
+        })
+        .collect();
+    assert_eq!(
+        statements,
+        [("emit", "new OrderPaid(1)"), ("emit", "paid"), ("emit", "5"), ("emit", "(paid)"), ("emit", "(paid)")]
+    );
+    assert!(!php.errors.is_empty(), "`emit new` must stay a parse error in plain PHP");
+    assert!(!php.statements.iter().any(|statement| matches!(statement, Statement::Emit(_))), "{:#?}", php.statements);
 }

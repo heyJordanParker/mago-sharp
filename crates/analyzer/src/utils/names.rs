@@ -11,10 +11,12 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
+use mago_names::STANDARD_EFFECTS;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -61,6 +63,24 @@ pub(crate) fn sharp_class_like_name(
         String::from_utf8_lossy(full_name).replace('\\', ".")
     } else {
         short_name(name)
+    }
+}
+
+/// Returns the effect `effect` as a `uses` in a `.sharp` file with the `imported_names` of its imports writes it. A
+/// standard effect is the name the file's import of it gives it, as in `Post` for `import Sharp.Mail as Post;`, or
+/// else its own name, which is that effect in every `uses` whatever class the file imports or declares under it, spec
+/// section 29. Any other effect is named as [`sharp_class_like_name`] names a class.
+pub(crate) fn sharp_effect_name(
+    codebase: &CodebaseMetadata,
+    imported_names: &WordMap<Word>,
+    short_name_counts: &OnceCell<HashMap<String, u32>>,
+    effect: Word,
+) -> String {
+    match STANDARD_EFFECTS.iter().find(|standard| standard.as_bytes().eq_ignore_ascii_case(effect.as_bytes())) {
+        Some(standard) => imported_names
+            .get(&ascii_lowercase_word(standard.as_bytes()))
+            .map_or_else(|| short_name(standard), ToString::to_string),
+        None => sharp_class_like_name(codebase, imported_names, short_name_counts, effect),
     }
 }
 
@@ -204,18 +224,24 @@ fn binds_short_name(
 
 /// Whether a `.sharp` file with the `imported_names` and `scope` of its imports and namespace binds a name to the
 /// class-like `name`, as spec section 23 binds a name: by an import, under its short name or the name after `as`, by
-/// declaring it, or by sharing its namespace. A class-like directly in `Sharp` is imported by default, unless the file
-/// imports or declares another class-like of its short name.
+/// declaring it, by sharing its namespace, or by the [default import](imports_by_default) of `Sharp`.
 fn binds_class_like(imported_names: &WordMap<Word>, scope: &NamespaceScope, name: Word) -> bool {
-    let name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
-    if imported_names.contains_key(&ascii_lowercase_word(name)) {
+    let full_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
+    if imported_names.contains_key(&ascii_lowercase_word(full_name)) {
         return true;
     }
 
-    let (bound, imported) = scope.resolve(NameKind::Default, short_name(name));
-    if bound.eq_ignore_ascii_case(name) {
-        return true;
-    }
+    let (bound, _) = scope.resolve(NameKind::Default, short_name(full_name));
+
+    bound.eq_ignore_ascii_case(full_name) || imports_by_default(scope, name)
+}
+
+/// Whether spec section 23's default import of `Sharp` binds the class-like `name` in a `.sharp` file with the `scope`
+/// of its imports and namespace: `name` is directly in `Sharp`, and the file imports or declares no other class-like
+/// of its short name.
+pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
+    let name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
+    let (_, imported) = scope.resolve(NameKind::Default, short_name(name));
 
     !imported
         && name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))
@@ -436,23 +462,15 @@ where
 /// `Function<void(int)>` or `Function<Charge(Cart) uses Http>` with each effect named as a class is, `Class<Order>`,
 /// `Object`, `Iterable<int>`, and a literal as `1` or `"text"`. A refinement that
 /// PHP# cannot write is the type that holds it, such as `int` for a `positive-int` and `int|string` for an
-/// `array-key`, and is named once. `numeric`, `scalar` and `never` have no PHP# name and keep Mago's. A PHP docblock's
-/// `non-empty-mixed` has no PHP# name either, and keeps the name its docblock writes, as Mago's `truthy-mixed` speaks
-/// of a truthiness PHP# does not have.
+/// `array-key`, and is named once, as `Any` is for a PHP docblock's `non-empty-mixed`. `numeric`, `scalar` and `never`
+/// have no PHP# name and keep Mago's.
 #[must_use]
 pub(crate) fn display_sharp_type<A>(context: &Context<'_, '_, A>, union: &TUnion) -> String
 where
     A: Arena,
 {
     if let Some(TAtomic::Mixed(mixed)) = union.types.iter().find(|atomic| atomic.is_mixed()) {
-        return if mixed.is_truthy() {
-            "non-empty-mixed"
-        } else if mixed.is_non_null() {
-            "Any"
-        } else {
-            "Any?"
-        }
-        .to_owned();
+        return if mixed.is_truthy() || mixed.is_non_null() { "Any" } else { "Any?" }.to_owned();
     }
 
     let mut parts: Vec<String> = Vec::new();
@@ -508,6 +526,9 @@ where
                 _ => name,
             }
         }
+        TAtomic::Reference(TReference::Symbol { name, .. }) => {
+            sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *name)
+        }
         TAtomic::GenericParameter(parameter) => parameter.parameter_name.to_string(),
         TAtomic::Callable(TCallable::Signature(signature)) => {
             let written = |union: Option<&TUnion>| {
@@ -520,12 +541,7 @@ where
                 .iter()
                 .flatten()
                 .map(|effect| {
-                    sharp_class_like_name(
-                        context.codebase,
-                        &context.imported_names,
-                        &context.short_name_counts,
-                        *effect,
-                    )
+                    sharp_effect_name(context.codebase, &context.imported_names, &context.short_name_counts, *effect)
                 })
                 .collect();
             let uses = if effects.is_empty() { String::new() } else { format!(" uses {}", effects.join(", ")) };

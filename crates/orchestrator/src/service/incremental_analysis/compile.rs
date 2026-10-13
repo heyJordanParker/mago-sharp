@@ -21,6 +21,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::resolver::NameResolver;
+use mago_names::short_name;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_reporting::Level;
@@ -65,10 +66,65 @@ pub enum Compilation {
     Refused(IssueCollection),
 }
 
-/// A `.sharp` file lowered and translated to Lean, or the errors that refused it.
-type Lowered = Result<(Unit, Vec<(Vec<u8>, InlineForm)>, Translation), IssueCollection>;
+/// A `.sharp` file lowered and translated to Lean, with each class-like of its namespace that would win over a default
+/// class-like it names, or the errors that refused it.
+type Lowered = Result<(Unit, Vec<(Vec<u8>, InlineForm)>, Translation, Vec<Word>), IssueCollection>;
+
+/// A PHP# listener, spec section 15: a method with an `on` clause, which the engine runs when an event it lists is
+/// raised.
+#[derive(Debug)]
+pub struct Listener {
+    /// The file that declares it.
+    pub file_id: FileId,
+    /// The fully qualified name of its class.
+    pub class: Word,
+    pub method: Word,
+    /// The fully qualified names its `on` clause lists, in their written order.
+    pub events: Vec<Word>,
+    /// Whether it takes the event as its parameter.
+    pub takes_event: bool,
+}
 
 impl IncrementalAnalysisService {
+    /// Every PHP# listener of the last analysis, in the order the engine runs them: by its class's full name, then by
+    /// its place in its class.
+    #[must_use]
+    pub fn listeners(&self) -> Vec<Listener> {
+        let mut listeners: Vec<(Word, u32, Listener)> = self
+            .codebase
+            .function_likes
+            .iter()
+            .filter(|(_, method)| !method.listens.is_empty())
+            .filter_map(|((class, _), method)| {
+                let class = self.codebase.class_likes.get(class)?;
+                let events = method
+                    .listens
+                    .iter()
+                    .map(|event| {
+                        self.codebase.get_class_like(event.as_bytes()).map_or(*event, |event| event.original_name)
+                    })
+                    .collect();
+
+                Some((
+                    class.name,
+                    method.span.start.offset,
+                    Listener {
+                        file_id: method.span.file_id,
+                        class: class.original_name,
+                        method: method.original_name,
+                        events,
+                        takes_event: !method.parameters.is_empty(),
+                    },
+                ))
+            })
+            .collect();
+        listeners.sort_unstable_by(|(a, a_offset, _), (b, b_offset, _)| {
+            a.as_bytes().cmp(b.as_bytes()).then(a_offset.cmp(b_offset))
+        });
+
+        listeners.into_iter().map(|(_, _, listener)| listener).collect()
+    }
+
     /// Compiles each `.sharp` file of the last analysis, in file name order.
     ///
     /// A file is accepted when the analysis reported no error-level issue in it. The standard library's files, those
@@ -81,10 +137,12 @@ impl IncrementalAnalysisService {
     /// declares a method whose return it reads from that method's body, along every chain of such returns, with that
     /// file's own inputs.
     ///
-    /// A file that states a law also lists its proof file and every source its laws reach. `prove` gets the Lean
-    /// translation of every accepted file and returns the issues of each file whose law is not proved, which refuse
-    /// that file whatever pragma, ignore entry or baseline the analysis honors. It runs before any input is stamped,
-    /// so a proof file it creates is stamped present.
+    /// A file that states a law also lists its proof file and every source its laws reach. A file outside `vendor/`
+    /// lists the workspace-relative Lean files `rules` gives for its name, whose structure rules may judge it. `check`
+    /// gets the Lean translation of every accepted file and the namespace of every class-like PHP or PHP# code
+    /// declares, in the project or `vendor/`, refused or not, and returns the issues of each file whose law is not proved or that breaks a structure rule, which refuse that
+    /// file whatever pragma, ignore entry or baseline the analysis honors. It runs before any input is stamped, so a
+    /// proof file it creates is stamped present.
     ///
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there. It is called once per input. An input no file is at is stored absent: its size, modification
@@ -92,12 +150,13 @@ impl IncrementalAnalysisService {
     ///
     /// # Errors
     ///
-    /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `stamp` or
-    /// `prove` fails.
+    /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `stamp`, `rules`
+    /// or `check` fails.
     pub fn compile(
         &mut self,
         mut stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
-        prove: impl FnOnce(Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        mut rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
+        check: impl FnOnce(Vec<Translation>, &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>>,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
         if !self.initialized {
             return Err(OrchestratorError::General("analyze() must be called before compile()".to_string()));
@@ -127,11 +186,11 @@ impl IncrementalAnalysisService {
         let forms: InlineForms = lowered_library
             .iter()
             .filter_map(|lowered| lowered.as_ref().ok())
-            .flat_map(|(_, forms, _)| forms.iter().cloned())
+            .flat_map(|(_, forms, _, _)| forms.iter().cloned())
             .collect();
         let lowered_rest = self.lower_all(&rest, &forms, &errors, &reach, session.as_ref())?;
         let mut translations = Vec::new();
-        let mut lowered: HashMap<FileId, Result<Unit, IssueCollection>> = library
+        let mut lowered: HashMap<FileId, Result<(Unit, Vec<Word>), IssueCollection>> = library
             .iter()
             .chain(&rest)
             .map(|file| file.id)
@@ -139,14 +198,28 @@ impl IncrementalAnalysisService {
             .map(|(file_id, lowered)| {
                 (
                     file_id,
-                    lowered.map(|(unit, _, translation)| {
+                    lowered.map(|(unit, _, translation, namespace_classes)| {
                         translations.push(translation);
-                        unit
+                        (unit, namespace_classes)
                     }),
                 )
             })
             .collect();
-        let mut unproven = prove(translations)
+        let mut namespaces: Vec<String> = self
+            .codebase
+            .class_likes
+            .values()
+            .filter(|class_like| !class_like.flags.is_built_in())
+            .filter_map(|class_like| {
+                let name = class_like.original_name.as_str_lossy();
+                let (namespace, _) = name.rsplit_once('\\')?;
+
+                Some(namespace.replace('\\', "."))
+            })
+            .collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        let mut refused = check(translations, &namespaces)
             .map_err(|error| OrchestratorError::General(format!("The Lean step failed: {error}.")))?;
 
         let mut reads = self.reads();
@@ -165,7 +238,9 @@ impl IncrementalAnalysisService {
         let inputs_start = std::time::Instant::now();
         let dependencies = Dependencies::new(self);
         let mut input_paths: HashMap<FileId, Vec<Vec<u8>>> = HashMap::default();
-        for file in files.iter().filter(|file| lowered.get(&file.id).is_some_and(Result::is_ok)) {
+        for (file, namespace_classes) in
+            files.iter().filter_map(|file| Some((file, &lowered.get(&file.id)?.as_ref().ok()?.1)))
+        {
             // A method whose return comes from its body can return another such method's return, so the body files
             // close over the body files of each file they hold.
             let mut body_files: HashSet<FileId> = HashSet::default();
@@ -186,12 +261,27 @@ impl IncrementalAnalysisService {
             sources.insert(file.id);
 
             let proof = (!reach.files(file.id).is_empty() && is_source(file)).then(|| proof_file(&file.name));
+            let lean = if is_source(file) {
+                rules(&file.name).map_err(mago_database::error::DatabaseError::from)?
+            } else {
+                Vec::new()
+            };
+            // Spec section 27 puts a class-like of the file's namespace in the file's folder, under its own name, so the
+            // files that would declare one are inputs, stamped absent while the namespace lacks it.
+            let folder = &file.name[..file.name.iter().rposition(|byte| *byte == b'/').map_or(0, |slash| slash + 1)];
+            let namespace_class_files = namespace_classes.iter().filter(|_| is_source(file)).flat_map(|class| {
+                let class = short_name(class);
+
+                [".sharp", ".php"].map(|extension| [folder, class.as_bytes(), extension.as_bytes()].concat())
+            });
             let mut paths: Vec<Vec<u8>> = sources
                 .into_iter()
                 .filter_map(|source| self.database.get(&source).ok())
                 .filter(|source| source.id == file.id || is_source(source))
                 .map(|source| source.name.to_vec())
                 .chain(proof)
+                .chain(lean)
+                .chain(namespace_class_files)
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .collect();
             paths.sort_unstable();
@@ -214,9 +304,9 @@ impl IncrementalAnalysisService {
             let Some(lowered) = lowered.remove(&file.id) else {
                 continue;
             };
-            let compilation = match (lowered, unproven.remove(&file.id)) {
+            let compilation = match (lowered, refused.remove(&file.id)) {
                 (Ok(_), Some(issues)) | (Err(issues), _) => Compilation::Refused(issues),
-                (Ok(unit), None) => {
+                (Ok((unit, _)), None) => {
                     let (mut reads, _) = reads.remove(&file.id).unwrap_or_default();
                     reads.inlined = unit.inlined().to_vec();
                     let key = key(source_hash(&file.contents), &reads);
@@ -293,7 +383,10 @@ impl IncrementalAnalysisService {
                 }
                 ReferenceOrigin::File(name) => Some(FileId::new(name.as_bytes())),
             };
-            let (Some(origin), Some((target, target_file, hash))) = (origin, declared(target)) else {
+            let Some(origin) = origin else {
+                return;
+            };
+            let Some((target, target_file, hash)) = declared(target) else {
                 return;
             };
             if origin == target_file {
@@ -370,13 +463,16 @@ impl IncrementalAnalysisService {
                     errors.get(&file.id).map(|issues| issues.iter().cloned().collect()).unwrap_or_default();
                 let arena = LocalArena::new();
                 let program = parse_file_with_settings(&arena, file, self.parser_settings);
-                let names = NameResolver::new(&arena).resolve(program);
+                let names = NameResolver::new(&arena).resolve_in(program, &self.namespace_classes);
+                let namespace_classes = names.namespace_classes().map(mago_word::word).collect();
                 let artifacts = self
                     .file_analyzer(&arena, file, &names, session)
                     .analyze_with_artifacts(program, &mut AnalysisResult::new(SymbolReferences::new()))?;
 
                 Ok(match check(file, program, names, &artifacts, &self.codebase, forms, &issues) {
-                    Ok(checked) => Ok((lower(&checked), inline_forms(&checked), translate(&checked, reach))),
+                    Ok(checked) => {
+                        Ok((lower(&checked), inline_forms(&checked), translate(&checked, reach), namespace_classes))
+                    }
                     Err(Refusal::Parse(errors)) => Err(errors.iter().map(Issue::from).collect()),
                     Err(Refusal::Compile(errors)) => Err(IssueCollection::from(errors)),
                 })
@@ -637,10 +733,15 @@ mod tests {
 
     /// The service after a full analysis of `database`.
     fn analyzed(database: &Database<'static>) -> IncrementalAnalysisService {
+        analyzed_with(database, Settings::default())
+    }
+
+    /// The service after a full analysis of `database` under `settings`.
+    fn analyzed_with(database: &Database<'static>, settings: Settings) -> IncrementalAnalysisService {
         let mut service = IncrementalAnalysisService::new(
             database.read_only(),
             prelude,
-            Settings::default(),
+            settings,
             ParserSettings::default(),
             Arc::clone(&PLUGIN_REGISTRY),
         );
@@ -672,8 +773,14 @@ mod tests {
         }
     }
 
+    /// The Lean files whose structure rules may judge the file `name`, as `mago compile` lists them, in a workspace whose
+    /// folders hold no Lean file.
+    fn module_leans(name: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
+        mago_sharp_lean::rules_files(Path::new("/project"), name)
+    }
+
     /// Proves every law, as a Lean step that refuses nothing.
-    fn proved(_: Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>> {
+    fn proved(_: Vec<Translation>, _: &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>> {
         Ok(HashMap::default())
     }
 
@@ -682,7 +789,7 @@ mod tests {
         service: &mut IncrementalAnalysisService,
         stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
     ) -> std::collections::BTreeMap<String, Compilation> {
-        let compiled = service.compile(stamp, proved).expect("the compile runs");
+        let compiled = service.compile(stamp, module_leans, proved).expect("the compile runs");
         let database = service.database();
 
         compiled
@@ -749,7 +856,7 @@ mod tests {
         let database = project(&[("app/Order.sharp", ORDER)]);
         let mut service = analyzed(&database);
 
-        let compiled = service.compile(empty_stamp, proved).expect("the compile runs");
+        let compiled = service.compile(empty_stamp, module_leans, proved).expect("the compile runs");
 
         assert_eq!(compiled.len(), 1, "{compiled:?}");
         let (file_id, Compilation::Accepted(bytes)) = &compiled[0] else {
@@ -809,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_names_its_source_each_file_whose_edit_reanalyzes_it_and_composer_lock_in_path_order() {
+    fn a_file_names_its_source_its_folders_module_lean_files_each_file_whose_edit_reanalyzes_it_and_composer_lock() {
         let database = shop_project(&shop(MONEY, RATE));
         let mut service = analyzed(&database);
 
@@ -817,10 +924,13 @@ mod tests {
 
         assert_eq!(
             input_paths(accepted(&compiled, "app/Order.sharp")),
-            ["app/Money.sharp", "app/Order.sharp", "composer.lock", "lib/Rate.php"],
+            ["Module.lean", "app/Module.lean", "app/Money.sharp", "app/Order.sharp", "composer.lock", "lib/Rate.php"],
             "a vendor file is left to composer.lock"
         );
-        assert_eq!(input_paths(accepted(&compiled, "app/Unrelated.sharp")), ["app/Unrelated.sharp", "composer.lock"]);
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/Unrelated.sharp")),
+            ["Module.lean", "app/Module.lean", "app/Unrelated.sharp", "composer.lock"]
+        );
     }
 
     #[test]
@@ -830,7 +940,10 @@ mod tests {
         let compiled = compile(&mut analyzed(&database), empty_stamp);
 
         assert_eq!(input_paths(accepted(&compiled, TEXT_PATH)), ["composer.lock", TEXT_PATH]);
-        assert_eq!(input_paths(accepted(&compiled, "app/Title.sharp")), ["app/Title.sharp", "composer.lock"]);
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/Title.sharp")),
+            ["Module.lean", "app/Module.lean", "app/Title.sharp", "composer.lock"]
+        );
     }
 
     #[test]
@@ -844,6 +957,8 @@ mod tests {
         assert_eq!(
             inputs(accepted(&compiled, "app/Order.sharp")),
             [
+                Input { path: b"Module.lean".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
+                Input { path: b"app/Module.lean".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
                 Input {
                     path: b"app/Order.sharp".to_vec(),
                     size: ORDER.len() as u64,
@@ -896,7 +1011,7 @@ mod tests {
 
         assert_eq!(
             input_paths(accepted(&compiled, "app/Unrelated.sharp")),
-            ["app/Unrelated.sharp", "composer.lock", "lib/aliases.php"]
+            ["Module.lean", "app/Module.lean", "app/Unrelated.sharp", "composer.lock", "lib/aliases.php"]
         );
     }
 
@@ -1443,7 +1558,8 @@ mod tests {
                     let present = path != b"app/Shared/Money.lean" || created.get();
                     Ok(present.then(|| Input { path: path.to_vec(), size: 1, mtime_ns: 0, hash: [1; 16] }))
                 },
-                |translations| {
+                module_leans,
+                |translations, _| {
                     assert_eq!(translations.len(), 4);
                     created.set(true);
                     Ok(HashMap::default())
@@ -1467,7 +1583,7 @@ mod tests {
         let money = FileId::new(b"app/Shared/Money.sharp");
 
         let compiled = service
-            .compile(empty_stamp, |_| {
+            .compile(empty_stamp, module_leans, |_, _| {
                 let mut issues = IssueCollection::default();
                 issues.push(Issue::error("Law addKeepsCurrency is not proven."));
                 Ok(HashMap::from_iter([(money, issues)]))
@@ -1491,9 +1607,457 @@ mod tests {
         let mut service = analyzed(&database);
 
         let error = service
-            .compile(empty_stamp, |_| Err(std::io::Error::other("lake crashed")))
+            .compile(empty_stamp, module_leans, |_, _| Err(std::io::Error::other("lake crashed")))
             .expect_err("the Lean step failed");
 
         assert_eq!(error.to_string(), "The Lean step failed: lake crashed.");
+    }
+
+    /// A structure rule judges every import of PHP# code, of plain PHP too, so the Lean step gets the namespace of
+    /// every class-like the project and `vendor/` declare, a refused file's too: a type error in the only file of
+    /// `App.Shared.Schema` keeps the namespace a rule names. A built-in class-like names none.
+    #[test]
+    fn the_lean_step_gets_the_namespace_of_every_class_like_the_codebase_declares_a_refused_one_too() {
+        let refused = ORDER.replace("namespace App;", "namespace App.Shared.Schema;").replace("extra + 1", "\"one\"");
+        let database = project(&[
+            ("app/Order.sharp", ORDER),
+            ("app/Shared/Schema/Order.sharp", &refused),
+            ("app/Legacy/Rate.php", "<?php\n\nnamespace App\\Legacy;\n\nfinal class Rate {}\n"),
+            (
+                "vendor/illuminate/support/Facades/DB.php",
+                "<?php\n\nnamespace Illuminate\\Support\\Facades;\n\nclass DB {}\n",
+            ),
+        ]);
+        let mut service = analyzed(&database);
+        let mut given = Vec::new();
+
+        service
+            .compile(empty_stamp, module_leans, |translations, namespaces| {
+                assert_eq!(translations.len(), 1);
+                given = namespaces.to_vec();
+                Ok(HashMap::default())
+            })
+            .expect("the compile runs");
+
+        assert_eq!(given, ["App", "App.Legacy", "App.Shared.Schema", "Illuminate.Support.Facades"]);
+    }
+
+    /// A project whose `Report` reads what the headers of `Invoice`, `Taxable` and `Status` say they inherit, and whose
+    /// `Notice` reads the effects the `extern` declaration of `Mailer` gives it.
+    fn headers() -> Vec<(&'static str, String)> {
+        vec![
+            ("app/Shop/Document.sharp", "namespace App.Shop;\n\npublic class Document\n{\n    public int pages()\n    {\n        return 1;\n    }\n}\n".to_string()),
+            ("app/Shop/Record.sharp", "namespace App.Shop;\n\npublic class Record\n{\n    public int rows()\n    {\n        return 2;\n    }\n}\n".to_string()),
+            ("app/Shop/Payable.sharp", "namespace App.Shop;\n\npublic interface Payable\n{\n    int amount();\n}\n".to_string()),
+            ("app/Shop/Taxable.sharp", "namespace App.Shop;\n\npublic interface Taxable : Payable\n{\n}\n".to_string()),
+            ("app/Shop/Invoice.sharp", "namespace App.Shop;\n\npublic class Invoice : Document, Payable\n{\n    public int amount()\n    {\n        return 5;\n    }\n}\n".to_string()),
+            ("app/Shop/Status.sharp", "namespace App.Shop;\n\npublic enum Status : Payable\n{\n    case Open;\n\n    public int amount() => 1;\n}\n".to_string()),
+            ("app/Shop/Report.sharp", "namespace App.Shop;\n\npublic class Report\n{\n    public int pages(Invoice invoice)\n    {\n        return invoice.pages();\n    }\n\n    public int settle(Invoice invoice)\n    {\n        return this.pay(invoice);\n    }\n\n    public int tax(Taxable taxable)\n    {\n        return taxable.amount();\n    }\n\n    public int due()\n    {\n        return this.pay(Status.Open);\n    }\n\n    private int pay(Payable payable)\n    {\n        return payable.amount();\n    }\n}\n".to_string()),
+            ("app/Lib/Mailer.php", "<?php\n\nnamespace Mail;\n\nfinal class Mailer\n{\n    public static function subject(string $text): string\n    {\n        return $text;\n    }\n}\n".to_string()),
+            ("app/Stubs/Mail.sharp", "namespace App.Stubs;\n\nimport Mail.Mailer;\n\nextern Mailer;\n".to_string()),
+            ("app/Shop/Notice.sharp", "namespace App.Shop;\n\nimport Mail.Mailer;\n\npublic class Notice\n{\n    public Notice(private string name) { }\n\n    public string text => Mailer.subject(this.name);\n}\n".to_string()),
+        ]
+    }
+
+    /// The key of each accepted file's compiled file, and the messages of each refused file.
+    fn outcomes(compiled: &BTreeMap<String, Compilation>) -> BTreeMap<&str, Result<[u8; 16], Vec<String>>> {
+        compiled
+            .iter()
+            .map(|(name, compilation)| {
+                let outcome = match compilation {
+                    Compilation::Accepted(bytes) => Ok(compiled_key(bytes)),
+                    Compilation::Refused(issues) => Err(messages(issues)),
+                };
+                (name.as_str(), outcome)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_compile_after_an_edit_to_a_header_or_an_extern_matches_a_clean_compile() {
+        let base = shop_project(&headers());
+
+        for (edited_file, from, to) in [
+            ("app/Shop/Invoice.sharp", "Invoice : Document,", "Invoice : Record,"),
+            ("app/Shop/Invoice.sharp", "Document, Payable", "Document"),
+            ("app/Shop/Taxable.sharp", "Taxable : Payable", "Taxable"),
+            ("app/Shop/Status.sharp", "Status : Payable", "Status"),
+            ("app/Stubs/Mail.sharp", "extern Mailer;", "extern Mailer uses Http;"),
+        ] {
+            let mut files = headers();
+            let (_, contents) =
+                files.iter_mut().find(|(name, _)| *name == edited_file).expect("the edited file exists");
+            assert!(contents.contains(from), "{edited_file} holds `{from}`");
+            *contents = contents.replace(from, to);
+            let edited = shop_project(&files);
+
+            let mut warm = analyzed(&base);
+            compile(&mut warm, empty_stamp);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm = compile(&mut warm, empty_stamp);
+            let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+            assert!(
+                outcomes(&clean).iter().any(|(name, outcome)| *name != edited_file && outcome.is_err()),
+                "`{to}` refuses a file that reads {edited_file}: {:#?}",
+                outcomes(&clean)
+            );
+            assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
+
+    /// Each spec section 23 refusal of `service`, as `file: message`.
+    fn named_like_a_namespace(service: &IncrementalAnalysisService) -> Vec<String> {
+        let mut refusals: Vec<String> = service
+            .collect_all_issues()
+            .iter()
+            .filter(|issue| issue.code.as_deref() == Some("name-already-in-use"))
+            .map(|issue| {
+                let file = service.database().get(&issue.primary_span().expect("a primary span").file_id);
+                format!("{}: {}", String::from_utf8_lossy(&file.expect("the file exists").name), issue.message)
+            })
+            .collect();
+        refusals.sort_unstable();
+        refusals
+    }
+
+    /// Spec section 23 refuses `Store` while a PHP# class sits in the namespace `App.Tenant.Store`, so a file added to
+    /// or removed from `app/Tenant/Store/` changes whether the unchanged file of `Store` is refused, in a one-off compile
+    /// and under `mago analyze --watch`, which analyzes with `diff`. In the last row the namespace already holds a plain
+    /// PHP class, and only the PHP# file added to it refuses the plain PHP `Store`.
+    #[test]
+    fn a_compile_after_the_folder_named_like_a_class_gains_or_loses_a_class_matches_a_clean_compile() {
+        let store = ("app/Tenant/Store.sharp", "namespace App.Tenant;\n\npublic class Store\n{\n}\n".to_string());
+        let receipts = (
+            "app/Tenant/Store/Receipts.sharp",
+            "namespace App.Tenant.Store;\n\npublic class Receipts\n{\n}\n".to_string(),
+        );
+        let php_store = ("app/Tenant/Store.php", "<?php\n\nnamespace App\\Tenant;\n\nclass Store\n{\n}\n".to_string());
+        let php_order =
+            ("app/Tenant/Store/Order.php", "<?php\n\nnamespace App\\Tenant\\Store;\n\nclass Order\n{\n}\n".to_string());
+        let alone = vec![store.clone()];
+        let beside = vec![store, receipts.clone()];
+        let php = vec![php_store.clone(), php_order.clone()];
+        let php_beside = vec![php_store, php_order, receipts];
+        let refused = "app/Tenant/Store.sharp: `App.Tenant.Store` is both a class and a namespace: rename the class or the folder.";
+        let php_refused = "app/Tenant/Store.php: `App\\Tenant\\Store` is both a class and a namespace: rename the class or the folder.";
+
+        for diff in [false, true] {
+            for (before, after, expected) in
+                [(&alone, &beside, vec![refused]), (&beside, &alone, vec![]), (&php, &php_beside, vec![php_refused])]
+            {
+                let (base, edited) = (shop_project(before), shop_project(after));
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let mut clean = analyzed(&edited);
+                let clean_compiled = compile(&mut clean, empty_stamp);
+
+                let names =
+                    |files: &[(&str, String)]| files.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
+                let row = format!("diff {diff}: {} to {}", names(before), names(after));
+                assert_eq!(named_like_a_namespace(&clean), expected, "{row}");
+                assert_eq!(named_like_a_namespace(&warm), expected, "{row}");
+                assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
+            }
+        }
+    }
+
+    /// Each spec section 26 refusal of `service`, as `file: message`.
+    fn hidden_members(service: &IncrementalAnalysisService) -> Vec<String> {
+        let mut refusals: Vec<String> = service
+            .collect_all_issues()
+            .iter()
+            .filter(|issue| issue.message.starts_with("An extension cannot hide"))
+            .map(|issue| {
+                let file = service.database().get(&issue.primary_span().expect("a primary span").file_id);
+                format!("{}: {}", String::from_utf8_lossy(&file.expect("the file exists").name), issue.message)
+            })
+            .collect();
+        refusals.sort_unstable();
+        refusals
+    }
+
+    const WALLET: &str = "<?php\n\nnamespace Lib;\n\nclass Wallet\n{\n    public int $balance = 0;\n}\n";
+    const WALLET_EXTENSIONS: &str = "namespace App.Wallets;\n\nimport Lib.Wallet;\n\npublic static class WalletExtensions\n{\n    extension(Wallet wallet)\n    {\n        public int total() => wallet.balance + 1;\n    }\n}\n";
+    const WALLET_REPORT: &str = "namespace App;\n\nimport App.Wallets.WalletExtensions;\nimport Lib.Purse;\n\npublic class Report\n{\n    public int of(Purse purse)\n    {\n        return purse.wallet().total();\n    }\n}\n";
+
+    /// Spec section 26: an imported class's extensions apply to the whole file, so a file reads each class it imports
+    /// though it names none of its members, and compiles again when the class gains an extension member.
+    #[test]
+    fn a_file_reads_each_class_it_imports() {
+        let reader = "namespace App;\n\nimport App.Wallets.WalletExtensions;\n\npublic class Reader\n{\n    public int one() => 1;\n}\n";
+        let files = |extensions: &str| {
+            vec![
+                ("lib/Wallet.php", WALLET.to_string()),
+                ("app/Wallets/WalletExtensions.sharp", extensions.to_string()),
+                ("app/Reader.sharp", reader.to_string()),
+            ]
+        };
+        let gained =
+            WALLET_EXTENSIONS.replace("public int total()", "public int count() => 0;\n\n        public int total()");
+
+        let before = compile(&mut analyzed(&shop_project(&files(WALLET_EXTENSIONS))), empty_stamp);
+        let after = compile(&mut analyzed(&shop_project(&files(&gained))), empty_stamp);
+
+        let reader = accepted(&before, "app/Reader.sharp");
+        assert!(
+            input_paths(reader).contains(&"app/Wallets/WalletExtensions.sharp".to_string()),
+            "{:?}",
+            input_paths(reader)
+        );
+        assert_ne!(compiled_key(reader), compiled_key(accepted(&after, "app/Reader.sharp")));
+    }
+
+    /// Spec section 26 refuses an extension member named like a real member its receiver's class declares or
+    /// inherits, so a member of that name joining or leaving that class, or a class above it, changes whether the
+    /// unchanged file of the extension is refused, and gives the unchanged file that calls the member a new key, though
+    /// it reaches the wallet through `Purse.wallet()` and never names `Wallet`. A class below the receiver's competes
+    /// with no extension, so its member changes neither. Each row edits only a PHP file. The refusals match a clean
+    /// analysis in a one-off compile and under `mago analyze --watch`, which analyzes with `diff` and never compiles,
+    /// and each compiled file matches a clean compile after its header.
+    #[test]
+    fn a_compile_after_a_class_an_extension_receiver_is_gains_or_loses_its_member_matches_a_clean_compile() {
+        let wallets = |wallet: &str, family: &str| {
+            vec![
+                ("lib/Wallet.php", wallet.to_string()),
+                ("lib/Family.php", format!("<?php\n\nnamespace Lib;\n\n{family}")),
+                (
+                    "lib/Purse.php",
+                    "<?php\n\nnamespace Lib;\n\nclass Purse\n{\n    public function wallet(): Wallet\n    {\n        return new Wallet();\n    }\n}\n".to_string(),
+                ),
+                ("app/Wallets/WalletExtensions.sharp", WALLET_EXTENSIONS.to_string()),
+                ("app/Report.sharp", WALLET_REPORT.to_string()),
+            ]
+        };
+        let total = "\n{\n    public function total(): int\n    {\n        return 9;\n    }\n}\n";
+        let plain = "class Base\n{\n}\n\nclass Audited extends Wallet\n{\n}\n";
+        let below = format!("class Base\n{{\n}}\n\nclass Audited extends Wallet{total}");
+        let above = format!("class Base{total}\nclass Audited extends Wallet\n{{\n}}\n");
+        let wallet = WALLET.replace("class Wallet", "class Wallet extends Base");
+        let method = wallet.replace(
+            "public int $balance = 0;",
+            "public int $balance = 0;\n\n    public function total(): int\n    {\n        return 9;\n    }",
+        );
+        let docblock = wallet.replace("class Wallet", "/** @method int total() */\nclass Wallet");
+
+        // Each row: the files without the member, the files with it, and the refusal the member brings, if any.
+        let rows = [
+            (wallets(&wallet, plain), wallets(&method, plain), Some("`Wallet.total`")),
+            (wallets(&wallet, plain), wallets(&docblock, plain), Some("`Wallet.total`")),
+            (wallets(&wallet, plain), wallets(&wallet, &above), Some("`Base.total`")),
+            (wallets(&wallet, plain), wallets(&wallet, &below), None),
+        ];
+
+        for (without, with, member) in &rows {
+            for (before, after) in [(without, with), (with, without)] {
+                let (base, edited) = (shop_project(before), shop_project(after));
+                let row = format!("{member:?} {}", if after == with { "added" } else { "removed" });
+                let expected: Vec<String> = member
+                    .filter(|_| after == with)
+                    .map(|member| {
+                        format!(
+                            "app/Wallets/WalletExtensions.sharp: An extension cannot hide the real member {member}."
+                        )
+                    })
+                    .into_iter()
+                    .collect();
+
+                for diff in [false, true] {
+                    let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                    warm.update_database(edited.read_only());
+                    warm.analyze_incremental(None).expect("the warm path runs");
+                    assert_eq!(hidden_members(&warm), expected, "diff {diff}: {row}");
+                }
+
+                let mut warm = analyzed(&base);
+                let base_compiled = compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let mut clean = analyzed(&edited);
+                let clean_compiled = compile(&mut clean, empty_stamp);
+
+                assert_eq!(hidden_members(&clean), expected, "{row}");
+                assert_eq!(
+                    compiled_key(accepted(&base_compiled, "app/Report.sharp"))
+                        != compiled_key(accepted(&clean_compiled, "app/Report.sharp")),
+                    member.is_some(),
+                    "{row}: the caller compiles again only when the member competes"
+                );
+                assert_eq!(bodies(&warm_compiled), bodies(&clean_compiled), "{row}");
+            }
+        }
+    }
+
+    /// The bytes after the header of each accepted file's compiled file, and the messages of each refused file. A warm
+    /// key can differ from a clean one while these match: incremental analysis keeps the references a method it
+    /// analyzes again made before, so a warm compile reads members a clean one does not, and compiles its file again
+    /// once more than it needs to.
+    fn bodies(compiled: &BTreeMap<String, Compilation>) -> BTreeMap<&str, Result<&[u8], Vec<String>>> {
+        compiled
+            .iter()
+            .map(|(name, compilation)| {
+                let outcome = match compilation {
+                    Compilation::Accepted(bytes) => Ok(&bytes[104..]),
+                    Compilation::Refused(issues) => Err(messages(issues)),
+                };
+                (name.as_str(), outcome)
+            })
+            .collect()
+    }
+
+    const SHAPE: &str =
+        "namespace App;\n\npublic class Shape\n{\n    public int size(Cache cache) => Cache.size();\n}\n";
+    const CACHE: &str = "namespace App;\n\npublic class Cache\n{\n    public static int size() => 1;\n}\n";
+
+    /// Spec section 23: a class of the file's namespace wins over the class `Sharp` imports by default, so the unchanged
+    /// `Shape`, whose bare `Cache` meant the missing `Sharp.Cache`, compiles once `app/App/Cache.sharp` declares
+    /// `App.Cache`, and is refused again once it is removed, in a one-off compile and under `mago analyze --watch`. An
+    /// edit to `Shape` itself keeps its bare `Cache` naming `App.Cache`.
+    #[test]
+    fn a_compile_after_the_namespace_gains_or_loses_a_class_named_like_a_default_class_matches_a_clean_compile() {
+        let alone = vec![("app/App/Shape.sharp", SHAPE.to_string())];
+        let beside = vec![("app/App/Shape.sharp", SHAPE.to_string()), ("app/App/Cache.sharp", CACHE.to_string())];
+        let edited_shape = SHAPE.replace(
+            "Cache.size();\n",
+            "Cache.size();\n\n    public int twice(Cache cache) => this.size(cache) * 2;\n",
+        );
+        let shape_edited = vec![("app/App/Shape.sharp", edited_shape), ("app/App/Cache.sharp", CACHE.to_string())];
+
+        for diff in [false, true] {
+            for (name, before, after, accepted) in [
+                ("Cache added", &alone, &beside, true),
+                ("Cache removed", &beside, &alone, false),
+                ("Shape edited", &beside, &shape_edited, true),
+            ] {
+                let (base, edited) = (shop_project(before), shop_project(after));
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let clean_compiled = compile(&mut analyzed(&edited), empty_stamp);
+
+                let row = format!("diff {diff}: {name}");
+                assert_eq!(outcomes(&clean_compiled)["app/App/Shape.sharp"].is_ok(), accepted, "{row}");
+                assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
+            }
+        }
+    }
+
+    /// An editor analyzes one file against the classes of its namespace too, so `Shape`'s bare `Cache` is `App.Cache`.
+    #[test]
+    fn one_file_analyzed_alone_names_the_class_of_its_namespace() {
+        let database = project(&[("app/App/Shape.sharp", SHAPE), ("app/App/Cache.sharp", CACHE)]);
+        let service = analyzed(&database);
+        let shape = FileId::new(b"app/App/Shape.sharp");
+
+        assert_eq!(messages(&service.analyze_file(shape)), Vec::<String>::new());
+        assert_eq!(
+            messages(&service.analyze_file_with_artifacts(shape).expect("the file exists").0),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Spec section 23: once `App.Position` and `App.Environment` take the short names, the help of each refused magic
+    /// constant and superglobal names the standard class through an aliased import, and the help's fix compiles.
+    #[test]
+    fn a_help_names_a_standard_class_its_namespace_shadows_through_an_aliased_import() {
+        let position =
+            "namespace App;\n\npublic class Position\n{\n    public Position(public string title { get; }) { }\n}\n";
+        let environment = "namespace App;\n\npublic class Environment\n{\n    public int level() => 1;\n}\n";
+        let paths = "namespace App;\n\npublic class Paths\n{\n    public string here() => __DIR__;\n\n    public string file() => __FILE__;\n\n    public int line() => __LINE__;\n\n    public string caller() => __FUNCTION__;\n\n    public string space() => __NAMESPACE__;\n\n    public string held() => __TRAIT__;\n\n    public string home() => $_SERVER[\"HOME\"];\n}\n";
+        let fixed = "namespace App;\n\nimport Sharp.Environment as SharpEnvironment;\nimport Sharp.Position as SharpPosition;\n\npublic class Fixed\n{\n    public string here() => SharpPosition.current().directory;\n\n    public string file() => SharpPosition.current().file;\n\n    public int line() => SharpPosition.current().line;\n\n    public string caller() => SharpPosition.current().function;\n\n    public string folder(SharpEnvironment environment) => environment.currentDirectory;\n\n    public string title(Position position) => position.title;\n\n    public int level(Environment environment) => environment.level();\n}\n";
+        let database = project(&[
+            ("app/App/Position.sharp", position),
+            ("app/App/Environment.sharp", environment),
+            ("app/App/Paths.sharp", paths),
+            ("app/App/Fixed.sharp", fixed),
+        ]);
+        let mut service = analyzed(&database);
+        let import = "after `import Sharp.Position as SharpPosition;`";
+
+        let issues = service.analyze_file(FileId::new(b"app/App/Paths.sharp"));
+        let removed: Vec<String> =
+            messages(&issues).into_iter().filter(|message| message.starts_with("PHP# has no")).collect();
+        assert_eq!(
+            removed,
+            [
+                format!("PHP# has no `__DIR__`: write `SharpPosition.current().directory` {import}."),
+                format!("PHP# has no `__FILE__`: write `SharpPosition.current().file` {import}."),
+                format!("PHP# has no `__FUNCTION__`: write `SharpPosition.current().function` {import}."),
+                format!("PHP# has no `__LINE__`: write `SharpPosition.current().line` {import}."),
+                format!(
+                    "PHP# has no `__NAMESPACE__`: write `SharpPosition.current().function` {import}, which starts with the namespace."
+                ),
+                format!(
+                    "PHP# has no `__TRAIT__`: `SharpPosition.current()` {import} gives the file, directory, line, column and function."
+                ),
+                "PHP# has no superglobals; take a Request".to_owned(),
+            ]
+        );
+        let superglobal = issues.iter().find(|issue| issue.message.starts_with("PHP# has no superglobals"));
+        assert_eq!(
+            superglobal.expect("the superglobal is refused").notes,
+            [
+                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `SharpEnvironment` after `import Sharp.Environment as SharpEnvironment;`."
+            ]
+        );
+
+        let compiled = compile(&mut service, empty_stamp);
+        let fixed = &outcomes(&compiled)["app/App/Fixed.sharp"];
+        assert!(fixed.is_ok(), "the help's fix compiles: {fixed:?}");
+    }
+
+    /// Only a class named like a default class changes what a bare name means, so adding another class to `App`
+    /// analyzes only its own file under `mago analyze --watch`.
+    #[test]
+    fn a_class_named_like_no_default_class_leaves_the_other_files_of_its_namespace_unanalyzed() {
+        let base = project(&[("app/App/Shape.sharp", SHAPE)]);
+        let edited = project(&[("app/App/Shape.sharp", SHAPE), ("app/App/Order.sharp", ORDER)]);
+
+        let mut warm = analyzed(&base);
+        warm.update_database(edited.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+
+        assert_eq!(warm.analyzed_files, HashSet::from_iter([FileId::new(b"app/App/Order.sharp")]));
+    }
+
+    /// A file whose bare `Environment` means `Sharp.Environment` lists the files that would declare `App.Environment`
+    /// in its folder as inputs, stamped absent, so adding one makes its compiled file stale. A package file leaves them
+    /// to `composer.lock`, as the rest of its package.
+    #[test]
+    fn a_default_class_name_lists_the_files_its_namespace_would_declare_it_in_as_absent_inputs() {
+        let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory;\n}\n";
+        let packaged = "vendor/acme/shapes/src/Here.sharp";
+        let database =
+            project(&[("app/App/Here.sharp", here), (packaged, &here.replace("namespace App;", "namespace Acme;"))]);
+
+        let compiled = compile(&mut analyzed(&database), database_stamp(&database));
+
+        assert_eq!(input_paths(accepted(&compiled, packaged)), ["composer.lock", packaged]);
+
+        let inputs = inputs(accepted(&compiled, "app/App/Here.sharp"));
+        assert_eq!(
+            inputs.iter().map(|input| String::from_utf8_lossy(&input.path)).collect::<Vec<_>>(),
+            [
+                "Module.lean",
+                "app/App/Environment.php",
+                "app/App/Environment.sharp",
+                "app/App/Here.sharp",
+                "app/App/Module.lean",
+                "app/Module.lean",
+                "composer.lock"
+            ]
+        );
+        for input in &inputs[1..3] {
+            assert_eq!((input.size, input.mtime_ns, input.hash), (0, 0, [0; 16]), "{input:?} is stamped absent");
+        }
     }
 }

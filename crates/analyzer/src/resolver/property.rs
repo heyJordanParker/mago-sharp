@@ -6,6 +6,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -50,14 +51,19 @@ use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::external::PropertyAccessKind;
 use crate::resolver::class_name::report_non_existent_class_like;
+use crate::resolver::extension::Extension;
+use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
+use crate::statement::function_like::known_type_or_error;
 use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
+use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
+use crate::utils::quoted_source;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -99,6 +105,9 @@ pub struct PropertyResolutionResult {
     /// When combined with `encountered_null` and nullsafe access, indicates
     /// the null in the result type came ONLY from nullsafe short-circuit.
     pub all_properties_non_nullable: bool,
+    /// The static method of the extension's computed property a PHP# read runs, spec section 26, which leaves the
+    /// other properties empty.
+    pub extension: Option<MethodIdentifier>,
 }
 
 /// Resolves all possible instance properties from an object expression and a member selector.
@@ -129,6 +138,32 @@ where
 
     if is_null_safe && !for_assignment {
         check_redundant_nullsafe(context, operator_span, object_expression, &object_type);
+    }
+
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(name) = property_selector
+        && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_PROPERTY)
+    {
+        match extension {
+            Extension::Member(_) if for_assignment => {
+                result.has_error_path = true;
+                context.collector.report_with_code(
+                    IssueCode::InvalidPropertyWrite,
+                    Issue::error(format!(
+                        "`{}` is a computed property an extension adds: it is read, never written.",
+                        String::from_utf8_lossy(name.value)
+                    ))
+                    .with_annotation(Annotation::primary(name.span()).with_message("Written here.")),
+                );
+            }
+            Extension::Member(method) => result.extension = Some(method),
+            Extension::Refused => result.has_error_path = true,
+        }
+        if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {
+            report_access_on_null(context, block_context, object_expression.span(), operator_span, false, false);
+        }
+
+        return Ok(result);
     }
 
     let mut property_names = Vec::new();
@@ -663,10 +698,12 @@ impl DeclaredProperty<'_> {
             }
         }
 
-        annotation_type_metadata(self.property, for_write)
+        let declared = annotation_type_metadata(self.property, for_write)
             .or(self.property.type_declaration_metadata.as_ref())
             .map(|tm| tm.type_union.clone())
-            .unwrap_or_else(get_mixed)
+            .unwrap_or_else(get_mixed);
+
+        if self.declaring_class.flags.is_sharp() { known_type_or_error(declared) } else { declared }
     }
 }
 
@@ -1079,6 +1116,32 @@ where
         && (!property_metadata.flags.is_virtual_property() || declaring_class_metadata.kind.is_interface())
     {
         property_type.set_possibly_undefined(true, None);
+    }
+
+    // A PHP# `init` property is set only while its object is created, spec section 6.1: on `this`, in a constructor of
+    // its class or a subclass, or in a named constructor, where C# allows an `init` accessor. A lambda may run after
+    // the object is created, so it cannot set one, as C# refuses with CS8852. The property's own accessor body writes
+    // its storage through `field`, on `this` only.
+    if for_assignment && context.dialect.is_sharp() && property_metadata.flags.is_init() {
+        let writes_its_storage = is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names);
+        let creates_this = is_this(object_expr, context.resolved_names)
+            && block_context.scope.get_function_like().is_some_and(|function_like| {
+                function_like.flags.is_named_constructor()
+                    || function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
+            });
+
+        if !writes_its_storage && !creates_this {
+            let property = display_property_name(context, prop_name);
+            context.collector.report_with_code(
+                IssueCode::InvalidPropertyWrite,
+                Issue::error(format!("`{property}` is set only while the object is created."))
+                    .with_annotation(Annotation::primary(selector.span()).with_message("Written here."))
+                    .with_help("Set it on `this` in a constructor or a named constructor."),
+            );
+            result.has_error_path = true;
+
+            return None;
+        }
     }
 
     let is_visible = if for_assignment {
@@ -1545,6 +1608,19 @@ where
         None,
     ) {
         return Some(get_never());
+    }
+
+    // Spec section 9.1: a named constructor creates an object, so it is called with `new` and is no function value.
+    // The read keeps the closure's type, so the one error is this one.
+    if context.codebase.get_method_by_id(&method).is_some_and(|metadata| metadata.flags.is_named_constructor()) {
+        let constructor = quoted_source(context, access_span);
+        context.collector.report_with_code(
+            IssueCode::NamedConstructorWithoutNew,
+            Issue::error(format!(
+                "`{constructor}` is a constructor, so it is no function value: create the object with `new {constructor}(…)`."
+            ))
+            .with_annotation(Annotation::primary(access_span).with_message("Read as a value here.")),
+        );
     }
 
     artifacts.symbol_references.add_reference_to_class_member(

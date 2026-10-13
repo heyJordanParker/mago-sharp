@@ -8,6 +8,7 @@ use mago_bytes::BytesDisplay;
 use mago_bytes::trim_start_byte;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_union_type;
@@ -60,11 +61,13 @@ use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
 use crate::invocation::resolver::resolve_invocation_type;
+use crate::invocation::return_type_fetcher::keys_a_map_by_its_function;
 use crate::invocation::template_inference::infer_parameter_templates_from_argument;
 use crate::invocation::template_inference::infer_parameter_templates_from_default;
 use crate::invocation::template_result::get_class_template_parameters_from_result;
 use crate::invocation::template_result::populate_template_result_from_invocation;
 use crate::invocation::template_result::refine_template_result_for_function_like;
+use crate::statement::function_like::known_type_or_error;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
@@ -185,9 +188,24 @@ where
     }
 
     populate_template_result_from_invocation(context, invocation, template_result);
+    if context.dialect.is_sharp() && keys_a_map_by_its_function(&invocation.target) {
+        for template in template_result.template_types.values_mut().flatten() {
+            if matches!(template.defining_entity, GenericParent::FunctionLike(_)) {
+                template.constraint = get_mixed();
+            }
+        }
+    }
 
     let arg_count = invocation.arguments_source.argument_count();
     let mut analyzed_argument_types = HashMap::default();
+
+    // A PHP# extension's receiver was analyzed as the object of its access, so it is the first argument as it is, less
+    // the `null` that `?.` skips.
+    if let InvocationArgumentsSource::ExtensionReceiver(receiver, _) = invocation.arguments_source
+        && let Some(receiver_type) = artifacts.get_expression_type(receiver)
+    {
+        analyzed_argument_types.insert(0, (receiver_type.to_non_nullable(), receiver.span()));
+    }
 
     let mut non_closure_arguments = Vec::with_capacity(arg_count);
     let mut closure_arguments = Vec::with_capacity(arg_count);
@@ -251,6 +269,7 @@ where
         {
             let parameter_type = get_parameter_type(
                 context,
+                &invocation.target,
                 Some(parameter_ref),
                 base_class_metadata,
                 calling_class_like_metadata,
@@ -317,6 +336,7 @@ where
         let parameter_type = if let Some((_, parameter_ref)) = parameter {
             let base_parameter_type = get_parameter_type(
                 context,
+                &invocation.target,
                 Some(parameter_ref),
                 base_class_metadata,
                 calling_class_like_metadata,
@@ -631,6 +651,7 @@ where
 
             let base_parameter_type = get_parameter_type(
                 context,
+                &invocation.target,
                 Some(parameter_ref),
                 base_class_metadata,
                 calling_class_like_metadata,
@@ -788,6 +809,7 @@ where
 
             let parameter_type = get_parameter_type(
                 context,
+                &invocation.target,
                 Some(unused_parameter),
                 base_class_metadata,
                 calling_class_like_metadata,
@@ -819,6 +841,7 @@ where
     {
         let base_variadic_parameter_type = get_parameter_type(
             context,
+            &invocation.target,
             Some(last_parameter_ref),
             base_class_metadata,
             calling_class_like_metadata,
@@ -939,6 +962,7 @@ where
             if last_parameter_ref.is_variadic() {
                 let base_variadic_parameter_type = get_parameter_type(
                     context,
+                    &invocation.target,
                     Some(last_parameter_ref),
                     base_class_metadata,
                     calling_class_like_metadata,
@@ -1205,6 +1229,7 @@ where
 
         issue = match invocation.arguments_source {
             InvocationArgumentsSource::ArgumentList(_)
+            | InvocationArgumentsSource::ExtensionReceiver(..)
             | InvocationArgumentsSource::PartialArgumentList(_)
             | InvocationArgumentsSource::AttributeArgumentList(_) => issue.with_annotation(
                 Annotation::secondary(invocation.target.span())
@@ -1333,6 +1358,7 @@ fn infer_generic_callable_arguments<'ctx, 'arena, A>(
 
         let base_parameter_type = get_parameter_type(
             context,
+            &invocation.target,
             Some(parameter),
             base_class_metadata,
             calling_class_like_metadata,
@@ -1444,6 +1470,7 @@ fn remove_template_bounds_from_argument(template_result: &mut TemplateResult, ar
 /// Gets the effective parameter type, expanding class-relative types based on call context.
 fn get_parameter_type<'ctx, A>(
     context: &Context<'ctx, '_, A>,
+    invocation_target: &InvocationTarget<'_>,
     invocation_target_parameter: Option<InvocationTargetParameter<'_>>,
     base_class_metadata: Option<&'ctx ClassLikeMetadata>,
     calling_class_like_metadata: Option<&'ctx ClassLikeMetadata>,
@@ -1458,16 +1485,24 @@ where
     };
 
     // A PHP caller calls the PHP method a PHP# method runs as, whose declaration may differ from what PHP# code sees:
-    // `op_Equality` takes `null`, which it lifts itself.
+    // `op_Equality` takes `null`, which it lifts itself. The method decides, whatever class the call goes through.
     let parameter_type = match invocation_target_parameter {
         InvocationTargetParameter::FunctionLike(parameter)
-            if !context.dialect.is_sharp() && base_class_metadata.is_some_and(|class| class.flags.is_sharp()) =>
+            if !context.dialect.is_sharp()
+                && invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) =>
         {
             parameter.get_type_declaration_metadata().map(|declaration| &declaration.type_union)
         }
         _ => invocation_target_parameter.get_type(),
     };
     let parameter_type = parameter_type.cloned().unwrap_or_else(get_mixed);
+    let parameter_type = if context.dialect.is_sharp() && keys_a_map_by_its_function(invocation_target) {
+        without_method_template_bounds(&parameter_type)
+    } else if invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) {
+        known_type_or_error(parameter_type)
+    } else {
+        parameter_type
+    };
 
     resolve_type_in_class_context(
         context,
@@ -1477,6 +1512,28 @@ where
         calling_instance_type,
         method_class_type,
     )
+}
+
+/// The type of the key function of a `groupBy` or `associateBy`, `\Closure(T): G`, with its method's `G` unbounded.
+fn without_method_template_bounds(key_function: &TUnion) -> TUnion {
+    let types = key_function.types.iter().map(|atomic| {
+        let TAtomic::Callable(TCallable::Signature(signature)) = atomic else {
+            unreachable!("the stub declares the key function as `\\Closure(T): G`");
+        };
+        let mut signature = signature.clone();
+        let Some(return_type) = signature.get_return_type_mut() else {
+            unreachable!("the stub declares the key function's return type as `G`");
+        };
+        let keys = return_type.types.iter().map(|key| match key {
+            TAtomic::GenericParameter(key) => TAtomic::GenericParameter(key.with_constraint(get_mixed())),
+            _ => unreachable!("the stub declares the key function's return type as `G`"),
+        });
+        *return_type = return_type.clone_with_types(keys.collect());
+
+        TAtomic::Callable(TCallable::Signature(signature))
+    });
+
+    key_function.clone_with_types(types.collect())
 }
 
 /// Expands `self`/`static`/`parent` and class-level context in a type declared on a function-like,
@@ -1752,6 +1809,7 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
                         if let Some(parameter_ref) = invocation_target.get_parameter(parameter_position) {
                             let base_parameter_type = get_parameter_type(
                                 context,
+                                invocation_target,
                                 Some(parameter_ref),
                                 base_class_metadata,
                                 calling_class_like_metadata,
@@ -1792,6 +1850,7 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
                         if let Some(parameter_ref) = invocation_target.get_parameter(parameter_position) {
                             let base_parameter_type = get_parameter_type(
                                 context,
+                                invocation_target,
                                 Some(parameter_ref),
                                 base_class_metadata,
                                 calling_class_like_metadata,
@@ -1898,6 +1957,7 @@ fn validate_keyed_array_elements<'ctx, 'arena, A>(
         {
             let base_parameter_type = get_parameter_type(
                 context,
+                invocation_target,
                 Some(parameter_ref),
                 base_class_metadata,
                 calling_class_like_metadata,

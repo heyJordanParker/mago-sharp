@@ -68,7 +68,9 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
         let constant_metadata = context.codebase.get_constant_or_global(name_bytes, unqualified_name);
 
         let Some(constant_metadata) = constant_metadata else {
-            if let Some(literal_type) = get_literal_constant_type(name_bytes) {
+            // The name as written, since a `.sharp` file resolves `TRUE` into its namespace, and the semantic checks
+            // refuse it as `true` written in another case.
+            if let Some(literal_type) = get_literal_constant_type(unqualified_name) {
                 artifacts.set_expression_type(self, literal_type);
                 return Ok(());
             }
@@ -77,6 +79,20 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
 
             if is_known {
                 artifacts.set_expression_type(self, get_mixed());
+            } else if context.dialect.is_sharp() {
+                // A `.sharp` file writes a constant by its bare name, and PHP's fallback to the global constant applies.
+                let name = BytesDisplay(unqualified_name);
+                context.collector.report_with_code(
+                    IssueCode::NonExistentConstant,
+                    Issue::error(format!("Undefined constant: `{name}`."))
+                        .with_annotation(
+                            Annotation::primary(self.span()).with_message(format!("Constant `{name}` is not defined.")),
+                        )
+                        .with_note("The constant might be misspelled or not defined.")
+                        .with_help(format!(
+                            "Check `{name}` for typos. PHP# declares no global constant, so a bare name reads a constant declared in a `.php` file, and a class constant is read through its class, as in `Limits.MAX`."
+                        )),
+                );
             } else {
                 context.collector.report_with_code(
                     IssueCode::NonExistentConstant,

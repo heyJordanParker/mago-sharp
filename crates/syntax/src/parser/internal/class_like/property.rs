@@ -171,7 +171,7 @@ where
             return self.parse_direct_variable();
         }
 
-        if self.stream.is_at(T![Identifier])? {
+        if self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) {
             return self.parse_bare_variable();
         }
 

@@ -1,4 +1,5 @@
-//! A checked PHP# file as the Lean declarations of the code laws reach, and of its own laws.
+//! A checked PHP# file as the Lean declarations of the code laws reach, of its own laws, and as the facts structure
+//! rules judge.
 //!
 //! The translation reads the same `CheckedProgram` the bridge lowers to the `.sharpc` file: one checked tree, two back
 //! ends. It translates only what a law reaches, and records each construct Lean does not model where it stands, so a
@@ -17,25 +18,34 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::Extension;
+use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::Inheritance;
+use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
+use mago_syntax::cst::Module;
+use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 
+use crate::facts;
+use crate::facts::Facts;
 use crate::issues;
 use crate::reach::Reach;
 use crate::translate::body::Body;
 use crate::translate::body::indented;
 
-/// The Lean translation of one accepted `.sharp` file: its laws, and the declarations laws reach in it.
+/// The Lean translation of one accepted `.sharp` file: its laws, the declarations laws reach in it, and its facts.
 #[derive(Debug)]
 pub struct Translation {
     pub(crate) file: FileId,
@@ -46,6 +56,8 @@ pub struct Translation {
     pub(crate) class: Option<(String, Span)>,
     pub(crate) laws: Vec<Law>,
     pub(crate) declarations: Vec<Declaration>,
+    /// What structure rules judge in the file.
+    pub(crate) facts: Facts,
 }
 
 /// A law the file states.
@@ -107,6 +119,7 @@ pub fn translate(checked: &CheckedProgram<'_>, reach: &Reach) -> Translation {
             class: None,
             laws: Vec::new(),
             declarations: Vec::new(),
+            facts: facts::collect(checked),
         },
     };
 
@@ -137,11 +150,21 @@ impl Translator<'_, '_> {
             }
             Statement::Class(class) => self.class(class),
             Statement::Enum(r#enum) => self.r#enum(r#enum),
-            Statement::Interface(interface) => {
-                let full = self.checked.names().get(&interface.name);
-                self.name_module(full, interface.name.span);
-            }
+            Statement::Interface(interface) => self.interface(interface),
+            Statement::Module(module) => self.module(module),
             _ => {}
+        }
+    }
+
+    /// A module's laws, named by its class-like `<Namespace>.Module`, as a class's laws are named by the class.
+    fn module(&mut self, module: &Module) {
+        let full = self.checked.names().get(&module.module);
+        self.name_module(full, module.module.span);
+
+        let lean = names::full_name(full);
+        let short = names::short_name(full);
+        for ModuleMember::Law(law) in &module.members {
+            self.law(full, &lean, &short, law);
         }
     }
 
@@ -221,6 +244,7 @@ impl Translator<'_, '_> {
             types.push(r#type);
         }
         lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
+        lines.extend(self.coercions(&mut body, &lean, class.inheritance.as_ref()));
         self.declare(body, lean.clone(), class.name.span, lines.join("\n"), false);
 
         self.constructor(full, &lean, &short, class.name.span, constructor, &fields, &types);
@@ -311,6 +335,7 @@ impl Translator<'_, '_> {
             }
         }
         lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
+        lines.extend(self.coercions(&mut body, &lean, r#enum.inheritance.as_ref()));
         self.declare(body, lean.clone(), r#enum.name.span, lines.join("\n"), false);
 
         if let Some(backing) = &r#enum.backing_type_hint {
@@ -326,15 +351,57 @@ impl Translator<'_, '_> {
         self.members(full, &lean, &short, &r#enum.members);
     }
 
-    /// The reached methods and constants, and every law, of a class-like.
+    /// An interface as a type Lean knows nothing about, `Interface "App.Shop.Payment"`, so a proof holds for every class
+    /// that implements it. A call of its methods is not translated, since an implementation can have effects.
+    fn interface(&mut self, interface: &Interface) {
+        let full = self.checked.names().get(&interface.name);
+        self.name_module(full, interface.name.span);
+        if !self.reach.reaches(full, b"") {
+            return;
+        }
+
+        let lean = names::full_name(full);
+        let short = names::short_name(full);
+        let mut body = Body::new(self.checked, self.reach, full, short.clone());
+        let mut lines = vec![format!("abbrev {lean} : Type := Interface \"{lean}\"")];
+        lines.extend(self.coercions(&mut body, &lean, interface.inheritance.as_ref()));
+        self.declare(body, lean.clone(), interface.name.span, lines.join("\n"), false);
+        self.members(full, &lean, &short, &interface.members);
+    }
+
+    /// A `Coe` from the class-like `lean` to each interface its header names that a law reaches, so a value of it
+    /// passes where the interface is expected. The interface's value is `upcast`'s, of which Lean knows nothing, as of
+    /// every interface value. They follow the class-like's own declaration, so every declaration that uses it can use
+    /// them.
+    fn coercions(&self, body: &mut Body<'_, '_>, lean: &str, inheritance: Option<&Inheritance>) -> Vec<String> {
+        let mut coercions = Vec::new();
+        for (index, name) in inheritance.iter().flat_map(|inheritance| inheritance.types.iter()).enumerate() {
+            let parent = self.checked.names().get(name);
+            let translated = self.reach.class(parent).is_some_and(|reached| reached.sharp);
+            if self.checked.types().class_declaration(parent).kind != DeclarationKind::Interface
+                || !translated
+                || !self.reach.reaches(parent, b"")
+            {
+                continue;
+            }
+
+            let interface = body.class_type(name.span(), parent);
+            coercions.push(format!("instance {lean}.«$coe{index}» : Coe {lean} {interface} := ⟨upcast⟩"));
+        }
+
+        coercions
+    }
+
+    /// The reached methods, extension members and constants, and every law, of a class-like.
     fn members(&mut self, full: &[u8], lean: &str, short: &str, members: &Sequence<'_, ClassLikeMember<'_>>) {
         for member in members {
             match member {
                 ClassLikeMember::Method(method)
                     if php_method_name(method) != b"__construct" && self.reach.reaches(full, method.name.value) =>
                 {
-                    self.method(full, lean, short, method);
+                    self.method(full, lean, short, method, None);
                 }
+                ClassLikeMember::Extension(extension) => self.extension(full, lean, short, extension),
                 ClassLikeMember::Constant(constant) => {
                     for item in constant.items.iter().filter(|item| self.reach.reaches(full, item.name.value)) {
                         let key = names::member(lean, item.name.value);
@@ -359,8 +426,15 @@ impl Translator<'_, '_> {
         }
     }
 
-    fn method(&mut self, full: &[u8], lean: &str, short: &str, method: &Method) {
-        let key = names::member(lean, method.name.value);
+    /// A method, or an extension's method, spec section 26, which runs as a static method that takes `receiver` first.
+    fn method(
+        &mut self,
+        full: &[u8],
+        lean: &str,
+        short: &str,
+        method: &Method,
+        receiver: Option<&FunctionLikeParameter>,
+    ) {
         let place = format!("{short}.{}", String::from_utf8_lossy(method.name.value));
         let mut body = Body::new(self.checked, self.reach, full, place.clone());
         if names::RESERVED.contains(&String::from_utf8_lossy(method.name.value).as_ref()) {
@@ -371,22 +445,17 @@ impl Translator<'_, '_> {
         }
 
         let mut parameters = Vec::new();
-        if !method.is_static() {
+        if receiver.is_none() && !method.is_static() {
             parameters.push(format!("(this : {lean})"));
         }
-        for parameter in method.parameter_list.parameters.iter() {
-            let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
-            if matches!(parameter.hint, Some(Hint::Nullable(_))) {
-                body.nullable_parameter(parameter.variable.span.start.offset);
-            }
-            let name = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
-            parameters.push(format!("({} : {type})", names::identifier(name)));
+        for parameter in receiver.into_iter().chain(method.parameter_list.parameters.iter()) {
+            parameters.push(binder(&mut body, parameter));
         }
         let void = method.return_type_hint.as_ref().is_none_or(|hint| matches!(hint.hint, Hint::Void(_)));
         let returns =
             method.return_type_hint.as_ref().map_or_else(|| "Unit".to_owned(), |hint| body.r#type(&hint.hint));
 
-        let (lines, uses, unmodeled) = match &method.body {
+        let translated = match &method.body {
             MethodBody::Concrete(block) => body.block_body(block, void),
             MethodBody::Expression(expression) => body.expression_body(expression.expression),
             MethodBody::Abstract(abstract_body) => {
@@ -394,19 +463,68 @@ impl Translator<'_, '_> {
                 body.finish()
             }
         };
+        self.define(names::member(lean, method.name.value), method.name.span, &parameters, &returns, translated);
+    }
+
+    /// The reached members of an extension, spec section 26, each the static method it runs as.
+    fn extension(&mut self, full: &[u8], lean: &str, short: &str, extension: &Extension) {
+        let [receiver] = extension.parameter_list.parameters.as_slice() else {
+            unreachable!("semantics refuses an extension without exactly one receiver");
+        };
+
+        for member in &extension.members {
+            match member {
+                ClassLikeMember::Method(method) if self.reach.reaches(full, method.name.value) => {
+                    self.method(full, lean, short, method, Some(receiver));
+                }
+                ClassLikeMember::Property(Property::Computed(property))
+                    if self.reach.reaches(full, property.variable.name) =>
+                {
+                    self.extension_property(full, lean, short, receiver, property);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// An extension's computed property, spec section 26, which runs as a static method that takes only `receiver`
+    /// and returns the property's expression.
+    fn extension_property(
+        &mut self,
+        full: &[u8],
+        lean: &str,
+        short: &str,
+        receiver: &FunctionLikeParameter,
+        property: &ComputedProperty,
+    ) {
+        let name = property.variable.name;
+        let place = format!("{short}.{}", String::from_utf8_lossy(name));
+        let mut body = Body::new(self.checked, self.reach, full, place.clone());
+        if names::RESERVED.contains(&String::from_utf8_lossy(name).as_ref()) {
+            body.unmodeled(property.variable.span, format!("the property {place}"), issues::RESERVED_NAME);
+        }
+
+        let parameter = binder(&mut body, receiver);
+        let returns = body.declared_type(property.hint.as_ref(), property.variable.span);
+        let translated = body.expression_body(property.body.expression);
+        self.define(names::member(lean, name), property.variable.span, &[parameter], &returns, translated);
+    }
+
+    /// `def Class.m (parameters) : M returns := do …`, a definition a law unfolds, from its translated body.
+    fn define(
+        &mut self,
+        key: String,
+        span: Span,
+        parameters: &[String],
+        returns: &str,
+        (lines, uses, unmodeled): (Vec<String>, Vec<Use>, Vec<Unmodeled>),
+    ) {
         let text = format!(
             "def {key} {} : M {returns} := do\n{}",
             parameters.join(" "),
             indented(&lines, 2).collect::<Vec<_>>().join("\n")
         );
-        self.translation.declarations.push(Declaration {
-            key,
-            span: method.name.span,
-            text,
-            uses,
-            unmodeled,
-            unfolds: true,
-        });
+        self.translation.declarations.push(Declaration { key, span, text, uses, unmodeled, unfolds: true });
     }
 
     /// `@[law] def Class.law : Prop := ∀ (a : A), holds do …`: the law holds unless its body finishes with `false`.
@@ -414,15 +532,8 @@ impl Translator<'_, '_> {
         let name = String::from_utf8_lossy(law.name.value).into_owned();
         let key = names::member(lean, law.name.value);
         let mut body = Body::new(self.checked, self.reach, full, format!("{short}.{name}"));
-        let mut binders = Vec::new();
-        for parameter in law.parameter_list.parameters.iter() {
-            let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
-            if matches!(parameter.hint, Some(Hint::Nullable(_))) {
-                body.nullable_parameter(parameter.variable.span.start.offset);
-            }
-            let parameter = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
-            binders.push(format!("({} : {type})", names::identifier(parameter)));
-        }
+        let binders: Vec<String> =
+            law.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)).collect();
 
         let (lines, uses, unmodeled) = body.expression_body(law.body.expression);
         let statement =
@@ -472,4 +583,15 @@ fn is_stored(property: &Property) -> bool {
         }
         Property::Computed(_) => false,
     }
+}
+
+/// `parameter` as the binder `(name : Type)`, which `body` reads as a local.
+fn binder(body: &mut Body<'_, '_>, parameter: &FunctionLikeParameter) -> String {
+    let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
+    if matches!(parameter.hint, Some(Hint::Nullable(_))) {
+        body.nullable_parameter(parameter.variable.span.start.offset);
+    }
+    let name = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
+
+    format!("({} : {type})", names::identifier(name))
 }

@@ -1300,7 +1300,10 @@ where
                 ClassLikeMember::Property(m) => m.format(f),
                 ClassLikeMember::EnumCase(m) => m.format(f),
                 ClassLikeMember::Method(m) => m.format(f),
-                ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) => {
+                ClassLikeMember::Operator(_)
+                | ClassLikeMember::Law(_)
+                | ClassLikeMember::NamedConstructor(_)
+                | ClassLikeMember::Extension(_) => {
                     unreachable!("`mago format` skips PHP# files, the only ones with it")
                 }
             }
@@ -1745,6 +1748,8 @@ where
                 Modifier::Override(keyword) => keyword.format(f),
                 Modifier::Required(keyword) => keyword.format(f),
                 Modifier::Extern(keyword) => keyword.format(f),
+                Modifier::Lazy(keyword) => keyword.format(f),
+                Modifier::Internal(keyword) => keyword.format(f),
             }
         })
     }
