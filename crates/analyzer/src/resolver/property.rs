@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use foldhash::HashMap;
 use indexmap::IndexMap;
 use mago_allocator::Arena;
@@ -31,6 +33,7 @@ use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
 use mago_names::ResolvedNames;
 use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
@@ -69,6 +72,8 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_type;
 use crate::utils::quoted_source;
+use crate::utils::template::check_private_method_reach;
+use crate::utils::template::check_private_property_reach;
 use crate::utils::template::get_template_types_for_class_member;
 use crate::visibility::check_method_visibility;
 use crate::visibility::check_resolved_property_read_visibility;
@@ -854,6 +859,13 @@ where
                 read_span,
             )
         {
+            check_private_method_reach(
+                context,
+                object_expr,
+                &MethodIdentifier::new(class_id, method_name),
+                selector.span(),
+            );
+
             return Some(ResolvedProperty {
                 property_span: None,
                 property_name: prop_name,
@@ -1138,6 +1150,15 @@ where
         return None;
     }
 
+    check_private_property_reach(
+        context,
+        object_expr,
+        declaring_class_metadata,
+        property_metadata,
+        for_assignment,
+        selector.span(),
+    );
+
     Some(ResolvedProperty {
         property_span: property_metadata.name_span.or(property_metadata.span),
         property_name: prop_name,
@@ -1305,6 +1326,42 @@ where
         class_property_type,
         &TemplateResult::new(IndexMap::default(), template_types),
         context.codebase,
+    )
+}
+
+/// The type arguments of `declaring_class`, a generic PHP# class, for its static member reached through `class`,
+/// spec section 11: its type parameters as the access gives them, written on the class, as in `Counter<Order>.count`,
+/// or by `class`'s header, as in `Orders.count` for `Orders : Counter<Order>`. Each type argument keeps its own
+/// statics, and a static method runs with them ahead of its own. None for a member of any other class.
+pub(crate) fn static_member_type_arguments<A>(
+    context: &Context<'_, '_, A>,
+    class: Word,
+    declaring_class: Word,
+    type_arguments: Option<&[TUnion]>,
+) -> Option<Vec<TUnion>>
+where
+    A: Arena,
+{
+    let class = context.codebase.get_class_like(class.as_bytes())?;
+    let declaring_class = context.codebase.get_class_like(declaring_class.as_bytes())?;
+    if !declaring_class.flags.is_sharp() || declaring_class.template_types.is_empty() {
+        return None;
+    }
+
+    Some(
+        declaring_class
+            .template_types
+            .iter()
+            .map(|(name, template)| {
+                let parameter = wrap_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                    *name,
+                    Arc::new(template.constraint.clone()),
+                    template.defining_entity,
+                )));
+
+                localize_property_type(context, &parameter, type_arguments.unwrap_or_default(), class, declaring_class)
+            })
+            .collect(),
     )
 }
 

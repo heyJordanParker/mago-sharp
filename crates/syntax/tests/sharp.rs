@@ -472,9 +472,8 @@ fn php_keeps_refusing_an_arrow_after_a_method_or_a_property() {
     }
 }
 
-/// `required`, `via`, a static member of a class with type arguments and `typeof` of one are spec syntax outside the
-/// slice. Each one is a single error where it starts, and the class around it still parses. A `.` after the `>` makes
-/// `Counter<Order>` a class with type arguments, as in C#.
+/// `required` and `via` are spec syntax outside the slice. Each one is a single error where it starts, and the class
+/// around it still parses.
 #[test]
 fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     for (member, message, start) in [
@@ -484,21 +483,6 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
             "public Report(public int id { get; } via Tracked, int other) {}",
             "`via` is not supported yet in PHP#.",
             "via",
-        ),
-        (
-            "public int counted() => Counter<Order>.count;",
-            "A static member of a class with type arguments is not supported yet in PHP#.",
-            "Counter<Order>",
-        ),
-        (
-            "public int made(bool fresh) => fresh ? Counter<Map<string, Order>>.make() : 0;",
-            "A static member of a class with type arguments is not supported yet in PHP#.",
-            "Counter<Map<string, Order>>",
-        ),
-        (
-            "public string pages() => typeof(PaginatedList<Order>).name;",
-            "A class value with type arguments is not supported yet in PHP#.",
-            "PaginatedList<Order>",
         ),
     ] {
         let arena = LocalArena::new();
@@ -1152,6 +1136,63 @@ fn new_and_a_method_call_take_type_arguments_after_their_name() {
 
     assert!(matches!(expression(report), Expression::Instantiation(Instantiation { type_arguments: None, .. })));
     assert!(matches!(expression(add), Expression::Call(Call::Method(MethodCall { type_arguments: None, .. }))));
+}
+
+/// The class of a static member names its type arguments before the `.`, as in `Counter<Order>.count`, spec section
+/// 11: one `GenericClass` node holds the class and its list, whether a property, a call or a chain follows. A `<` after
+/// a bare name starts type arguments only when `.` follows its `>`, as C# decides, so a comparison stays one.
+#[test]
+fn a_class_with_type_arguments_before_a_dot_is_one_generic_class() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        Counter<Order>.count;\n        Counter<List<Order>>.items.add(x);\n        Pair<int, string?>.reset();\n        const less = low < high;\n        const both = low < high && high > other.size;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    // The class and the type arguments of a `GenericClass`, as written.
+    let generic = |object: &Expression| {
+        let Expression::GenericClass(generic) = object else {
+            panic!("expected a class with type arguments, got {object:#?}");
+        };
+
+        assert!(matches!(generic.class, Expression::ConstantAccess(_)), "{:#?}", generic.class);
+
+        (source(CODE, generic), source(CODE, generic.class), type_arguments(CODE, Some(&generic.type_arguments)))
+    };
+
+    let Expression::Access(Access::Property(count)) = statement_expression(program, 0) else {
+        panic!("expected `Counter<Order>.count`, got {:#?}", statement_expression(program, 0));
+    };
+    assert_eq!(generic(count.object), ("Counter<Order>", "Counter", vec!["Order"]));
+    assert_eq!(source(CODE, &count.property), "count");
+
+    let Expression::Call(Call::Method(add)) = statement_expression(program, 1) else {
+        panic!("expected `Counter<List<Order>>.items.add(x)`, got {:#?}", statement_expression(program, 1));
+    };
+    let Expression::Access(Access::Property(items)) = add.object else {
+        panic!("expected `Counter<List<Order>>.items`, got {:#?}", add.object);
+    };
+    assert_eq!(generic(items.object), ("Counter<List<Order>>", "Counter", vec!["List<Order>"]));
+
+    let Expression::Call(Call::Method(reset)) = statement_expression(program, 2) else {
+        panic!("expected `Pair<int, string?>.reset()`, got {:#?}", statement_expression(program, 2));
+    };
+    assert_eq!(generic(reset.object), ("Pair<int, string?>", "Pair", vec!["int", "string?"]));
+    assert!(reset.type_arguments.is_none());
+
+    assert!(
+        matches!(
+            statement_expression(program, 3),
+            Expression::Binary(Binary { operator: BinaryOperator::LessThan(_), .. })
+        ),
+        "{:#?}",
+        statement_expression(program, 3)
+    );
+    let Expression::Binary(Binary { lhs: Expression::Binary(less), operator: BinaryOperator::And(_), .. }) =
+        statement_expression(program, 4)
+    else {
+        panic!("expected `low < high && high > other.size`, got {:#?}", statement_expression(program, 4));
+    };
+    assert!(matches!(less.operator, BinaryOperator::LessThan(_)), "{:#?}", less.operator);
 }
 
 /// A `<` after a member starts type arguments only when the tokens up to its `>` can all be types and `(` follows the
@@ -2794,24 +2835,36 @@ fn an_attribute_target_is_not_supported_yet() {
     assert_eq!(names, [&b"NotNull"[..]]);
 }
 
+/// `typeof` names a class by its short name, and a class value of a generic class may carry its type arguments, spec
+/// section 25.
 #[test]
-fn typeof_names_a_class_by_its_short_name() {
-    const CODE: &str = "class Report\n{\n    void run()\n    {\n        Store.keep(typeof(Order));\n    }\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Report.sharp", CODE);
+fn typeof_names_a_class_by_its_short_name_with_any_type_arguments() {
+    for (written, class, type_arguments) in [
+        ("typeof(Order)", "Order", None),
+        ("typeof(PaginatedList<Order>)", "PaginatedList", Some("<Order>")),
+        ("typeof(Pair<int, List<Order>>)", "Pair", Some("<int, List<Order>>")),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    void run()\n    {{\n        Store.keep({written});\n    }}\n}}\n")
+                .into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Report.sharp", code);
 
-    assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let [statement] = method_body(program) else {
-        panic!("expected one statement, got {:#?}", method_body(program));
-    };
-    let Expression::Call(Call::Method(keep)) = expression(statement) else {
-        panic!("expected a method call, got {statement:#?}");
-    };
-    let Some(Expression::TypeOf(type_of)) = keep.argument_list.arguments.first().map(Argument::value) else {
-        panic!("expected `typeof(Order)`, got {:#?}", keep.argument_list.arguments);
-    };
-    assert_eq!(type_of.class.value(), b"Order");
-    assert_eq!(source(CODE, type_of), "typeof(Order)");
+        assert!(program.errors.is_empty(), "{written}: {:#?}", program.errors);
+        let [statement] = method_body(program) else {
+            panic!("expected one statement, got {:#?}", method_body(program));
+        };
+        let Expression::Call(Call::Method(keep)) = expression(statement) else {
+            panic!("expected a method call, got {statement:#?}");
+        };
+        let Some(Expression::TypeOf(type_of)) = keep.argument_list.arguments.first().map(Argument::value) else {
+            panic!("expected `{written}`, got {:#?}", keep.argument_list.arguments);
+        };
+        assert_eq!(source(code, &type_of.class), class);
+        assert_eq!(type_of.type_arguments.as_ref().map(|list| source(code, list)), type_arguments);
+        assert_eq!(source(code, type_of), written);
+    }
 }
 
 /// The names a header's entries are written with.

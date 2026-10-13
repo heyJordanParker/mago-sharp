@@ -23,6 +23,7 @@ use crate::cst::cst::ConstructorName;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FunctionCall;
 use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::GenericClass;
 use crate::cst::cst::Identifier;
 use crate::cst::cst::Instantiation;
 use crate::cst::cst::MethodCall;
@@ -162,18 +163,17 @@ where
                 left = self.arena.alloc(Expression::ConstantAccess(ConstantAccess { name: *identifier }));
             }
 
-            // `Counter<Order>.count` reads a static member of one type argument's class, spec section 11, which the
-            // engine does not keep yet. A `.` after the `>` makes the `<` a type argument list, as in C#. The class
-            // with its type arguments parses whole as one error, so the member read after it adds nothing.
+            // `Counter<Order>.count` reads a static member of one type argument's class, spec section 11. A `.` after
+            // the `>` makes the `<` a type argument list, as in C#.
             if self.dialect.is_sharp()
                 && kind == T!["<"]
-                && let Expression::ConstantAccess(class) = left
-                && self.stream.peek_kind_after_type_arguments()? == Some(T!["."])
+                && let Expression::ConstantAccess(_) = left
+                && self.stream.peek_kind_after_type_arguments(0)? == Some(T!["."])
             {
-                let span = class.name.span().join(self.parse_type_argument_list()?.span());
-                self.errors
-                    .push(ParseError::NotSupportedYetInSharp("A static member of a class with type arguments", span));
-                left = self.arena.alloc(Expression::Error(span));
+                left = self.arena.alloc(Expression::GenericClass(GenericClass {
+                    class: left,
+                    type_arguments: self.parse_type_argument_list()?,
+                }));
                 continue;
             }
 
@@ -302,7 +302,7 @@ where
         }
 
         if self.is_at_type_of()? {
-            return Ok(self.arena.alloc(self.parse_type_of()?));
+            return Ok(self.arena.alloc(Expression::TypeOf(self.parse_type_of()?)));
         }
 
         // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`.

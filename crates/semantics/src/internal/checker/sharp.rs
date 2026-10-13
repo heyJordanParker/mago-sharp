@@ -46,6 +46,7 @@ use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::FunctionHint;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::GenericHint;
@@ -155,10 +156,10 @@ const ANY: &[u8] = b"Any";
 ///   `out` on a method's type parameter are errors, because only a class or an interface declares variance, spec
 ///   section 11.1. A bound is a class or an interface, a generic class type, as in `Comparable<TItem>`, or several of
 ///   them joined with `&`, and any other bound is an error. A type parameter is in scope in its class's or interface's
-///   whole declaration, its header included, and in its method's signature and body, as the binder decides. A static
-///   member uses none of its class's type parameters, because every `Box<…>` shares the member until R4: not
-///   a static field's or property's type, nor a static method's signature or body. A static method's own type
-///   parameters are its own. The analyzer checks variance, bounds and inference.
+///   whole declaration, its header included, and in its method's signature and body, as the binder decides. A
+///   constant uses none of its class's type parameters, because every `Box<…>` shares it. A static field, property or
+///   method uses them, because each type argument has its own, as `Box<int>.count` reaches it. The analyzer checks
+///   variance, bounds and inference.
 /// - An enum: attributes, an optional `public`, a name, an optional `: string, Interface` header, constants, cases,
 ///   methods and laws, with no other modifiers or `implements`. A leading `int` or `string` in the header is the backing type,
 ///   and every class name is an interface. A constant follows a class constant's rules. A case has attributes as a
@@ -783,13 +784,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::EnumCaseBackedItem(_), Enum) => Some(Constant),
         (Node::ClassLikeMember(ClassLikeMember::Property(property)), Class) => {
             match is_slice_property(property, &context.version, context.names) {
-                // Each type argument has its own statics, spec section 11, which the engine does not keep yet. The
-                // property is skipped, so the refusal of its type parameters in a static member does not repeat it.
-                Ok(()) if let Some(refusal) = generic_static_property(property, context) => {
-                    context.report(refusal);
-
-                    None
-                }
                 Ok(()) => {
                     let variable = property.first_variable();
                     check_declared_name(variable.name, variable.span, context);
@@ -1102,12 +1096,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Block(_), Method | Body) => Some(Body),
         (Node::MethodExpressionBody(_), Method) => Some(Body),
         (Node::TryCatchClause(_), Body) => Some(TryCatchClause),
-        (Node::Hint(hint), TryCatchClause) if let Some(untested) = untested_catch_name(hint, context) => {
-            let refused = format!("`catch ({})`", BytesDisplay(context.get_code_snippet(hint)));
-            report_type_argument_read(untested.span(), &refused, context);
-
-            None
-        }
+        // A generic class's type arguments in a catch clause are a parameter's types, alone or in a union.
+        (Node::Hint(Hint::Generic(_)), TryCatchClause) => Some(Parameter),
+        (Node::Hint(Hint::Union(_)) | Node::UnionHint(_), TryCatchClause) => Some(TryCatchClause),
         // `check_try` reports a catch type that is not a class, and `check_try_catch_clause` the variable's name.
         (Node::Hint(_) | Node::DirectVariable(_), TryCatchClause) => None,
         (Node::Block(_), TryCatchClause) => Some(Body),
@@ -1276,12 +1267,17 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
                 None
             }
+            hint if let Some(function) = tested_function_type(hint) => {
+                report_function_type_test(function, context);
+
+                None
+            }
             // A type outside the slice, and `Self`, are refused by the walk, as anywhere in a body.
-            hint if !is_tested(hint, context) && (is_slice_type(hint) || matches!(hint, Hint::Union(_))) => {
+            hint if !has_type_test(hint) && (is_slice_type(hint) || matches!(hint, Hint::Union(_))) => {
                 report_not_supported(
                     hint.span(),
                     "type",
-                    "`as` converts to `int`, `float`, `string`, `bool` or a class.",
+                    "`as` converts to `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`.",
                     context,
                 );
 
@@ -1308,7 +1304,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::Hint(hint), Place::Pattern) if is_slice_type(hint) && is_tested(hint, context) => Some(Place::Pattern),
+        (Node::Hint(hint), Place::Pattern) if let Some(function) = tested_function_type(hint) => {
+            report_function_type_test(function, context);
+
+            None
+        }
+        // A generic class's type arguments are types, as in a body.
+        (Node::Hint(hint), Place::Pattern) if is_slice_type(hint) && has_type_test(hint) => Some(Body),
+        // A union's members are types, which `check_union` checks as in a body.
+        (Node::Hint(hint @ Hint::Union(union)), Place::Pattern) if has_type_test(hint) => {
+            check_union(union, Body, context);
+
+            None
+        }
         (Node::BinaryPattern(binary), Place::Pattern)
             if !binary.is_and() && [binary.left, binary.right].iter().any(|side| matches!(side, Pattern::Not(_))) =>
         {
@@ -1395,21 +1403,28 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Body | Constant,
         ) => Some(place),
         (Node::Expression(Expression::ArrayAccess(_)) | Node::ArrayAccess(_), Body) => Some(Body),
-        (Node::ConstantAccess(access), Body) if context.names.is_type_parameter(&access.name) => {
-            let refused = format!("A static member of `{}`", BytesDisplay(context.get_code_snippet(access)));
-            report_type_argument_read(access.span(), &refused, context);
+        (Node::ConstantAccess(_), Body) => Some(Body),
+        (Node::TypeOf(type_of), Body | Constant)
+            if context.names.is_type_parameter(&type_of.class)
+                && let Some(type_arguments) = &type_of.type_arguments =>
+        {
+            let name = BytesDisplay(type_of.class.value());
+            context.report(
+                Issue::error(format!("A type parameter takes no type arguments: write `typeof({name})`."))
+                    .with_annotation(Annotation::primary(type_arguments.span()).with_message("Written here.")),
+            );
 
             None
         }
-        (Node::ConstantAccess(_), Body) => Some(Body),
-        (Node::TypeOf(type_of), Body | Constant) if context.names.is_type_parameter(&type_of.class) => {
-            let refused = format!("`{}`", BytesDisplay(context.get_code_snippet(type_of)));
-            report_type_argument_read(type_of.span(), &refused, context);
+        (Node::TypeOf(type_of), Constant) if context.names.is_type_parameter(&type_of.class) => {
+            report_type_argument_in_constant(type_of.span(), context);
 
             None
         }
         // `typeof(X)` is `X::class`, which PHP takes as a constant expression too.
         (Node::Expression(Expression::TypeOf(_)) | Node::TypeOf(_), Body | Constant) => Some(place),
+        // The parser builds a class with type arguments only before `.`, as `Counter<Order>.count`.
+        (Node::Expression(Expression::GenericClass(_)) | Node::GenericClass(_), Body) => Some(Body),
         (Node::ConstantAccess(constant), Constant)
             if context.names.binding(&constant.name) == Some(Binding::Constant) =>
         {
@@ -1427,6 +1442,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // The engine reads `Class.name` in a constant expression as the class constant or enum case, since PHP
         // cannot read a static property there. The analyzer reports a static property of a class this file does
         // not declare.
+        (Node::Expression(Expression::Access(Access::Property(access))), Constant)
+            if let Some(class) = context.names.static_property_class(access)
+                && context.names.is_type_parameter(&class.name) =>
+        {
+            report_type_argument_in_constant(access.span(), context);
+
+            None
+        }
         (Node::Expression(Expression::Access(Access::Property(access))), Constant)
             if let Some(class) = context.names.static_property_class(access)
                 && let ClassLikeMemberSelector::Identifier(member) = &access.property =>
@@ -1497,7 +1520,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Expression(Expression::Instantiation(instantiation)), Body)
             if matches!(
                 instantiation.class,
-                Expression::Identifier(Identifier::Local(_)) | Expression::Self_(_) | Expression::Static(_)
+                Expression::Identifier(Identifier::Local(_))
+                    | Expression::Self_(_)
+                    | Expression::Static(_)
+                    | Expression::Parenthesized(_)
             ) =>
         {
             check_instantiation(instantiation, context)
@@ -1511,6 +1537,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             ),
             Instantiation,
         ) => Some(Instantiation),
+        // `new (type)(…)` creates an object from the class value in the parentheses, spec section 25.
+        (Node::Expression(Expression::Parenthesized(_)), Instantiation) => Some(Body),
         (Node::ArgumentList(_), Instantiation) => Some(Body),
         (Node::AssignmentOperator(operator), Body) if is_slice_assignment_operator(operator) => Some(Body),
         (Node::PositionalArgument(_), Body) => Some(Body),
@@ -2853,6 +2881,39 @@ fn is_slice_type(hint: &Hint) -> bool {
     }
 }
 
+/// The function type `hint` tests, alone or as a member of a union, or `None` when it tests none.
+fn tested_function_type<'hint, 'arena>(hint: &'hint Hint<'arena>) -> Option<&'hint FunctionHint<'arena>> {
+    match hint {
+        Hint::Function(function) => Some(function),
+        Hint::Union(union) => tested_function_type(union.left).or_else(|| tested_function_type(union.right)),
+        _ => None,
+    }
+}
+
+/// Refuses a test of `function`: a function value keeps only the types PHP declares on it, so no test while the code
+/// runs tells one function type from another.
+fn report_function_type_test(function: &FunctionHint, context: &mut Context<'_, '_, '_>) {
+    context.report(
+        Issue::error("A function type can't be tested: a function value doesn't keep its type while the code runs.")
+            .with_annotation(Annotation::primary(function.span()).with_message("Tested here."))
+            .with_note(
+                "A function keeps neither its result type nor a parameter type the checker inferred, so no test can tell `Function<int(int)>` from `Function<string(int)>`.",
+            )
+            .with_help("Give the value its function type where it is made, as in `Function<int(int)> double = x => x * 2;`."),
+    );
+}
+
+/// Refuses the expression at `span` in a constant value: it reads a type argument, which only the running code has.
+fn report_type_argument_in_constant(span: Span, context: &mut Context<'_, '_, '_>) {
+    context.report(
+        Issue::error(format!(
+            "`{}` is not a constant: it reads the type argument the code runs with.",
+            BytesDisplay(context.get_code_snippet(span))
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Written here.")),
+    );
+}
+
 /// Refuses `refused`, a type test or an expression that reads a type argument while the code runs, which R3 compiles,
 /// named as the code writes it.
 fn report_type_argument_read(span: Span, refused: &str, context: &mut Context<'_, '_, '_>) {
@@ -2862,27 +2923,8 @@ fn report_type_argument_read(span: Span, refused: &str, context: &mut Context<'_
     );
 }
 
-/// Whether PHP tests a value against `hint`, as [`has_type_test`] decides for `is`, `as`, a `match` arm and the
-/// bridge alike. A type parameter has no test until the engine reads type arguments while the code runs.
-fn is_tested(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> bool {
-    has_type_test(hint, &|span| context.names.is_type_parameter(&span))
-}
-
-/// The name in a catch clause's type, alone or in a union, that PHP's `catch` can't test yet, as [`is_tested`]
-/// decides: a type parameter. `check_try` reports any type that is not a name.
-fn untested_catch_name<'ast>(hint: &'ast Hint<'ast>, context: &Context<'_, '_, '_>) -> Option<&'ast Hint<'ast>> {
-    match hint {
-        Hint::Identifier(_) => (!is_tested(hint, context)).then_some(hint),
-        Hint::Union(union) => {
-            untested_catch_name(union.left, context).or_else(|| untested_catch_name(union.right, context))
-        }
-        _ => None,
-    }
-}
-
-/// The refusal of `hint` in a constant or static method of its class, when `hint` names one of the class's type
-/// parameters or is `Self`, which carries them all. `None` for any other type, a static method's own type parameter
-/// included, because the method declares it. A static field or property of a generic class is refused whole.
+/// The refusal of `hint` in a constant of its class, when `hint` names one of the class's type parameters or is `Self`,
+/// which carries them all. `None` for any other type.
 fn static_member_use(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> Option<String> {
     match hint {
         Hint::Identifier(name) => {
@@ -2893,7 +2935,7 @@ fn static_member_use(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> Option<S
 
             class.type_parameters?.span().contains(&declaration.start).then(|| {
                 format!(
-                    "A static member can't use `{}`, because every `{}<…>` shares it.",
+                    "A constant can't use `{}`, because every `{}<…>` shares it.",
                     BytesDisplay(name.value()),
                     BytesDisplay(class.name.value)
                 )
@@ -2904,8 +2946,8 @@ fn static_member_use(hint: &Hint<'_>, context: &Context<'_, '_, '_>) -> Option<S
     }
 }
 
-/// The refusal of PHP#'s `Self` at `span` in a constant or static method of a generic class, as a type or in
-/// `new Self(…)`: `Self` carries the class's type parameters, which no static member names.
+/// The refusal of PHP#'s `Self` at `span` in a constant of a generic class, as a type or in `new Self(…)`: `Self`
+/// carries the class's type parameters, which no constant names.
 fn static_self_use(span: Span, context: &Context<'_, '_, '_>) -> Option<String> {
     let class = static_member_class(span, context)?;
     let names: Vec<String> = class
@@ -2920,45 +2962,24 @@ fn static_self_use(span: Span, context: &Context<'_, '_, '_>) -> Option<String> 
     };
 
     Some(format!(
-        "A static member can't use `Self`, because every `{}<…>` shares it and `Self` carries {carried}.",
+        "A constant can't use `Self`, because every `{}<…>` shares it and `Self` carries {carried}.",
         BytesDisplay(class.name.value)
     ))
 }
 
-/// The class of the constant or static method that holds `span`.
+/// The class of the constant that holds `span`. A static method or property of a generic class has the type arguments
+/// it is reached through, spec section 11, and a constant has none.
 fn static_member_class<'ast, 'arena>(
     span: Span,
     context: &Context<'_, 'ast, 'arena>,
 ) -> Option<ClassLike<'ast, 'arena>> {
     let class = enclosing_class(context.program, span)?;
-    let in_static_member = class.members.iter().any(|member| {
-        let (member_span, is_static) = match member {
-            ClassLikeMember::Method(method) => (method.span(), method.modifiers.contains_static()),
-            ClassLikeMember::Constant(constant) => (constant.span(), true),
-            _ => return false,
-        };
-
-        is_static && member_span.contains(&span.start)
+    let in_constant = class.members.iter().any(|member| match member {
+        ClassLikeMember::Constant(constant) => constant.span().contains(&span.start),
+        _ => false,
     });
 
-    in_static_member.then_some(class)
-}
-
-/// The refusal of `property` when it is static and its class has type parameters: each type argument has its own
-/// statics, as in C#, and the engine keeps one for every type argument, so it is not supported yet.
-fn generic_static_property(property: &Property, context: &Context<'_, '_, '_>) -> Option<Issue> {
-    let modifier = property.modifiers().get_static()?;
-    let class = enclosing_class(context.program, property.span())?;
-    class.type_parameters?;
-
-    Some(
-        Issue::error(format!(
-            "A static property is not supported yet in a generic class, because every `{}<…>` shares it.",
-            BytesDisplay(class.name.value)
-        ))
-        .with_annotation(Annotation::primary(modifier.span()).with_message("Not supported yet."))
-        .with_note("A static method and a constant are supported."),
-    )
+    in_constant.then_some(class)
 }
 
 /// Reports `refusal`, which `static_member_use` or `static_self_use` words, at `span`.
@@ -2970,8 +2991,7 @@ fn report_static_member_use(span: Span, refusal: String, context: &mut Context<'
 
 /// Reports each type parameter of a list whose name is not `T`, or `T` and an uppercase letter, as C# names them, a
 /// name the list declares twice, and `in` or `out` on a method's, because only a class or an interface declares
-/// variance, spec section 11.1. `in` and `out` on a class's or an interface's are not supported yet: the engine checks
-/// a generic object's type arguments exactly where the code runs, so the checker does too.
+/// variance, spec section 11.1.
 fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut Context<'_, '_, '_>) {
     for (index, parameter) in list.parameters.iter().enumerate() {
         let name = parameter.name.value;
@@ -2990,22 +3010,15 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
             );
         }
 
-        let Some(variance) = parameter.variance else {
-            continue;
-        };
-        let marker = BytesDisplay(variance.value);
-        if matches!(place, Place::Method | Place::Signature) {
+        if matches!(place, Place::Method | Place::Signature)
+            && let Some(variance) = parameter.variance
+        {
             context.report(
                 Issue::error(format!(
-                    "A method's type parameter takes no `{marker}`: only a class or an interface declares variance, so remove it."
+                    "A method's type parameter takes no `{}`: only a class or an interface declares variance, so remove it.",
+                    BytesDisplay(variance.value)
                 ))
                 .with_annotation(Annotation::primary(variance.span).with_message("Written here.")),
-            );
-        } else {
-            context.report(
-                Issue::error(format!("An `{marker}` type parameter is not supported yet in PHP#."))
-                    .with_annotation(Annotation::primary(variance.span).with_message("Not supported yet."))
-                    .with_note("Without `in` or `out`, a generic class takes only its own type arguments, so a `Box<Order>` is not a `Box<DatabaseEntity>`."),
             );
         }
     }
@@ -3062,10 +3075,12 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
     }
 
     match (generic.name.value, generic.type_arguments.arguments.as_slice()) {
-        // The analyzer refuses a named key type without an `int` or `string` backing value. A key type outside the
-        // slice, nullable or not, is refused once, by the walk, as that type.
+        // The analyzer refuses a named key type without an `int` or `string` backing value, and a class value, with the
+        // check a `Map` literal's key and an inferred key keep. A key type outside the slice, nullable or not, is
+        // refused once, by the walk, as that type.
         (b"Map", [key, _])
             if !matches!(key, Hint::Integer(_) | Hint::String(_) | Hint::Identifier(_))
+                && !matches!(key, Hint::Generic(class) if class.name.value == b"Class")
                 && is_slice_type(match key {
                     Hint::Nullable(nullable) => nullable.hint,
                     key => key,
@@ -3079,16 +3094,11 @@ fn check_generic(generic: &GenericHint, place: Place, context: &mut Context<'_, 
                 context,
             )
         }
-        // A class value carries no type arguments until R5, spec section 25.
-        (b"Class", [class @ Hint::Generic(_)]) => {
-            context.report(
-                Issue::error("A class value with type arguments is not supported yet in PHP#.")
-                    .with_annotation(Annotation::primary(class.span()).with_message("Not supported yet.")),
-            );
-
-            None
-        }
-        (b"Class", [class]) if !matches!(class, Hint::Identifier(Identifier::Local(_))) => {
+        // A class value of a generic class may carry its type arguments, as `Class<PaginatedList<Order>>`.
+        (b"Class", [class])
+            if !matches!(class, Hint::Identifier(Identifier::Local(_)))
+                && !matches!(class, Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none()) =>
+        {
             context.report(
                 Issue::error(
                     "`Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
@@ -3283,8 +3293,8 @@ fn report_php_static(keyword: &Keyword, context: &mut Context<'_, '_, '_>) {
 /// the class's constructor marked `required`, spec section 25, because `Self` can be any subclass, and names no type
 /// arguments, spec section 11, because `Self` is the class with its own type parameters, which a static member of a
 /// generic class can't name. PHP's `self` and `static`, and `Self` in such a static member, are reported at the
-/// keyword, so the arguments are still checked. `new` of a type parameter reads its type argument while the code runs,
-/// which R3 compiles.
+/// keyword, so the arguments are still checked. `new` of a type parameter creates its type argument while the code
+/// runs, which carries its own type arguments, so it names none.
 fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     match instantiation.class {
         Expression::Self_(keyword) if !is_sharp_self(keyword) => {
@@ -3297,11 +3307,24 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
 
             return Some(Place::Instantiation);
         }
-        Expression::Identifier(class) if context.names.is_type_parameter(class) => {
+        Expression::Identifier(class)
+            if context.names.is_type_parameter(class) && instantiation.constructor.is_some() =>
+        {
             let refused = format!("`new {}`", BytesDisplay(context.get_code_snippet(class)));
             report_type_argument_read(instantiation.span(), &refused, context);
 
             return None;
+        }
+        Expression::Identifier(class)
+            if context.names.is_type_parameter(class)
+                && let Some(type_arguments) = &instantiation.type_arguments =>
+        {
+            let name = BytesDisplay(context.get_code_snippet(class));
+            context.report(
+                Issue::error(format!("`{name}` already carries the type arguments of the type it stands for."))
+                    .with_annotation(Annotation::primary(type_arguments.span()).with_message("Written here."))
+                    .with_help(format!("Write `new {name}(…)`.")),
+            );
         }
         Expression::Self_(keyword) if let Some(refusal) = static_self_use(keyword.span, context) => {
             report_static_member_use(keyword.span, refusal, context);
@@ -3314,6 +3337,15 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
                     .with_annotation(Annotation::primary(type_arguments.span()).with_message("Written here."))
                     .with_help("Write `new Self(…)`."),
             );
+        }
+        Expression::Parenthesized(_) if let Some(constructor) = &instantiation.constructor => {
+            context.report(
+                Issue::error("`new` through a class value calls the class's constructor, so it names no other one.")
+                    .with_annotation(Annotation::primary(constructor.span()).with_message("Named here."))
+                    .with_help("Call a named constructor on its class by name, as in `new Report.fromJson(…)`."),
+            );
+
+            return None;
         }
         _ => {}
     }
@@ -3370,23 +3402,10 @@ fn has_required_constructor(class: &ClassLike) -> bool {
 /// class's name, as in `Artifact.fromJson`, takes only an access modifier, has a name that is neither its class's nor
 /// one PHP reserves, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
 /// another member of the class has, as PHP's duplicate-method check, since the named constructor runs as the static
-/// method of its name. A generic class declares none yet: the static method would need its class's type arguments,
-/// which reach a static member of a generic class in R4.
+/// method of its name.
 fn check_named_constructor(constructor: &NamedConstructor, class: &Class, context: &mut Context<'_, '_, '_>) {
     let class_name = BytesDisplay(class.name.value);
     let name = BytesDisplay(constructor.name.value);
-    if class.type_parameters.is_some() {
-        context.report(
-            Issue::error(format!(
-                "A named constructor is not supported yet in a generic class, because it runs as a static method every `{class_name}<…>` shares."
-            ))
-            .with_annotation(Annotation::primary(constructor.name.span).with_message("Not supported yet."))
-            .with_note(format!("The main constructor is supported, as in `new {class_name}<Order>(…)`.")),
-        );
-
-        return;
-    }
-
     let mut report = |message: String, span: Span, written: &str| {
         context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
     };
@@ -3830,7 +3849,7 @@ const fn supported(place: Place) -> &'static str {
             "A PHP# header names each base class and interface by its short name, as in `: DatabaseEntity, Linkable`, and a generic one with its type arguments, as in `: PaginatedList<Order>`."
         }
         Place::TypeParameter => {
-            "A PHP# type parameter is a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<TItem : DatabaseEntity & Shareable>`."
+            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
         }
         Place::Event => {
             "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
@@ -3858,7 +3877,7 @@ const fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -3867,7 +3886,7 @@ const fn supported(place: Place) -> &'static str {
             "A parameter default, an attribute argument, a constant's value or an enum case's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool` or a class with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a value, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }

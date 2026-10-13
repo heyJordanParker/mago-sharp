@@ -1,5 +1,8 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::expander::StaticClassType;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -27,6 +30,8 @@ use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
+use crate::resolver::class_name::generic_class_type;
+use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_member;
@@ -111,8 +116,26 @@ where
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
 
+    // `Counter<Order>.track(order)` runs `track` with `Order` for `Counter`'s type parameter, as a call through an object
+    // of `Counter<Order>` does, spec section 11, and so does a call through a `Class<Counter<Order>>`. `Orders.track(order)`
+    // runs it with the type arguments `Orders`'s header gives `Counter`.
+    let generic_class = generic_class_type(artifacts, call.class).cloned();
+
     let mut invocation_targets = vec![];
-    for resolved_method in method_resolution.resolved_methods {
+    let mut class_type_arguments = None;
+    for mut resolved_method in method_resolution.resolved_methods {
+        if let Some(generic_class) = &generic_class {
+            resolved_method.static_class_type = StaticClassType::Object(TObject::Named(generic_class.clone()));
+        }
+        if context.dialect.is_sharp() && resolved_method.is_static {
+            class_type_arguments = static_member_type_arguments(
+                context,
+                resolved_method.classname,
+                resolved_method.method_identifier.get_class_name(),
+                generic_class.as_ref().and_then(TNamedObject::get_type_parameters),
+            );
+        }
+
         let metadata = context
             .codebase
             .get_class_like(resolved_method.classname.as_bytes())
@@ -217,6 +240,13 @@ where
             expression_is_nullsafe(call.class) || method_resolution.encountered_null,
             class_has_nullsafe_null,
         )?;
+    }
+
+    // The method runs with its class's type arguments ahead of its own.
+    if let Some(class_type_arguments) = class_type_arguments {
+        let span = (call.span.start.offset, call.span.end.offset);
+        let own = artifacts.inferred_type_arguments.remove(&span).unwrap_or_default();
+        artifacts.inferred_type_arguments.insert(span, class_type_arguments.into_iter().chain(own).collect());
     }
 
     if !method_resolution.undocumented_methods.is_empty() {

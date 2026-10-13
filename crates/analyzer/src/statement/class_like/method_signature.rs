@@ -27,6 +27,7 @@ use mago_codex::ttype::get_mixed_keyed_array;
 use mago_codex::ttype::get_string;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
+use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_codex::visibility::Visibility;
@@ -524,8 +525,8 @@ pub fn validate_erased_signature_compatibility(
 }
 
 /// How a bound reads that makes the class's type parameter `declared`, the parent's written type, erase to `erased`,
-/// the child's erased type, such as `Validator<TItem : Order>`. None when `declared` is no type parameter of a class,
-/// or `erased` is not one class.
+/// the child's erased type, such as `Validator<in TItem : Order>`. None when `declared` is no type parameter of a
+/// class, or `erased` is not one class.
 pub(super) fn bound_example(
     codebase: &CodebaseMetadata,
     declared: Option<&TypeMetadata>,
@@ -547,8 +548,14 @@ pub(super) fn bound_example(
     };
     let bound = short_name(codebase.get_class_like(bound.as_bytes()).map_or(bound, |class| class.original_name));
     let class = codebase.get_class_like(class.as_bytes())?;
+    let name = parameter.parameter_name;
+    let marker = match class.get_template_index_for_name(name).and_then(|index| class.template_variance.get(index)) {
+        Some(Variance::Covariant) => "out ",
+        Some(Variance::Contravariant) => "in ",
+        _ => "",
+    };
 
-    Some(word(format!("{}<{} : {bound}>", short_name(class.original_name), parameter.parameter_name)))
+    Some(word(format!("{}<{marker}{name} : {bound}>", short_name(class.original_name))))
 }
 
 /// The help of an issue whose `name` erases to another type than `erased_parent_type`, the type its parent's

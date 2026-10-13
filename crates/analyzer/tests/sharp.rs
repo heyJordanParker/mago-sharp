@@ -7793,9 +7793,9 @@ fn a_spread_of_a_value_that_is_neither_a_list_nor_a_map_is_an_error() {
     );
 }
 
-/// The generic declarations of spec section 11: classes and interfaces with type parameters and their bounds, a
-/// generic method, and headers that pass type arguments to a generic base.
-const PAGING: &str = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Shareable\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class SharedOrder : DatabaseEntity, Shareable\n{\n}\n\npublic class Line\n{\n}\n\npublic interface Query<TItem>\n{\n    List<TItem> rows();\n}\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    private List<TItem> rows;\n\n    public PaginatedList(List<TItem> rows)\n    {\n        this.rows = rows;\n    }\n\n    public TItem first() => this.rows[0];\n\n    public TItem head()\n    {\n        TItem item = this.first();\n        return item;\n    }\n}\n\npublic interface Shelf<TItem : DatabaseEntity & Shareable>\n{\n    TItem top();\n}\n\npublic interface Feed<TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Repository\n{\n    PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query);\n}\n\npublic class Lists\n{\n    public static T first<T>(List<T> items) => items[0];\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class OrderList<TItem : DatabaseEntity> : PaginatedList<TItem>\n{\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(Any? item) => true;\n}\n";
+/// The generic declarations of spec section 11: classes and interfaces with type parameters, their bounds and
+/// variance, a generic method, and headers that pass type arguments to a generic base.
+const PAGING: &str = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Shareable\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class SharedOrder : DatabaseEntity, Shareable\n{\n}\n\npublic class Line\n{\n}\n\npublic interface Query<TItem>\n{\n    List<TItem> rows();\n}\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    private List<TItem> rows;\n\n    public PaginatedList(List<TItem> rows)\n    {\n        this.rows = rows;\n    }\n\n    public TItem first() => this.rows[0];\n\n    public TItem head()\n    {\n        TItem item = this.first();\n        return item;\n    }\n}\n\npublic interface Shelf<TItem : DatabaseEntity & Shareable>\n{\n    TItem top();\n}\n\npublic interface Feed<out TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Repository\n{\n    PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query);\n}\n\npublic class Lists\n{\n    public static T first<T>(List<T> items) => items[0];\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class OrderList<TItem : DatabaseEntity> : PaginatedList<TItem>\n{\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(Any? item) => true;\n}\n";
 
 /// The generic declarations read as Mago's templates, so a type parameter, a type argument, a bound and a typed local
 /// inside a generic class add no issue.
@@ -7906,6 +7906,18 @@ fn a_type_argument_report_names_type_arguments_and_short_class_names() {
     );
 }
 
+/// `out TItem` lets a `Feed<Order>` pass as a `Feed<DatabaseEntity>`, `in TItem` lets a `Validator<DatabaseEntity>`
+/// pass as a `Validator<Order>`, and an invariant `PaginatedList<Order>` passes as neither, spec section 11.1.
+#[test]
+fn variance_decides_which_type_arguments_substitute() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any feed(Feed<DatabaseEntity> feed) => feed;\n\n    public static Any page(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any check(Validator<Order> validator) => validator;\n\n    public static Any covariant(Feed<Order> feed) => Report.feed(feed);\n\n    public static Any invariant(PaginatedList<Order> page) => Report.page(page);\n\n    public static Any contravariant(Validator<DatabaseEntity> validator) => Report.check(validator);\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        ["13:75 invalid-argument"]
+    );
+}
+
 /// A header's type arguments are the `@extends` and `@implements` of its PHP twin: `OrderPage : PaginatedList<Order>`
 /// returns an `Order` from `first()`, `OrderList<TItem> : PaginatedList<TItem>` forwards its own type parameter, and
 /// `OrderValidator : Validator<Order>` is a `Validator<Order>` and not a `Validator<Line>`.
@@ -8000,30 +8012,55 @@ fn a_plain_php_docblock_parent_is_the_parent_of_its_class() {
 /// constant named `TItem`, and their refused values add no issue.
 #[test]
 fn a_type_parameter_before_a_dot_is_not_read_as_a_constant() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n\n    public static int size = 1;\n}\n\npublic abstract class Builder<TItem : Maker>\n{\n    public int build() => TItem.make();\n\n    public int size() => TItem.size;\n\n    public int length() => TItem.size.length;\n\n    public int typed() => typeof(TItem).make();\n\n    public abstract TItem made();\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n\n    public static int size = 1;\n}\n\npublic abstract class Builder<TItem : Maker>\n{\n    public int build() => TItem.make();\n\n    public int size() => TItem.size;\n\n    public int typed() => typeof(TItem).make();\n\n    public abstract TItem made();\n}\n";
 
     assert_eq!(issues(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// `typeof(TItem)` and `new TItem()`, which `check_slice` refuses, add no analyzer issue on the refused line.
+/// `TItem.member` reads the member of the type argument's class, which its bound declares, so a missing member is
+/// reported on the bound. A type parameter that can stand for a type that is not a class has no members to read.
 #[test]
-fn typeof_and_new_of_a_type_parameter_add_no_issue() {
-    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n}\n\npublic abstract class Builder<TItem : Maker>\n{\n    public string name() => typeof(TItem);\n\n    public Any create() => new TItem();\n\n    public abstract TItem made();\n}\n";
+fn a_static_member_of_a_type_parameter_is_its_bounds() {
+    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public abstract TItem made(TAny value);\n}\n";
 
-    assert_eq!(issues(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/Builder.sharp", sharp), &[]),
+        [
+            "Method `Maker.unknown` does not exist.",
+            "Could not infer a precise return type for method `Builder.missing`. Saw type `Any?`.",
+            "`TAny` can stand for a type that is not a class.",
+            "Could not infer a precise return type for method `Builder.open`. Saw type `Any?`.",
+        ]
+    );
 }
 
-/// `value is TItem`, `value as TItem` and a `match` arm of the type `TItem`, which `check_slice` refuses, add no
-/// analyzer issue on the refused line, in an expression or in a statement. The other arms' types of a refused `match`
-/// statement add none either, as `Box<int>` outside its bound.
+/// `new TItem(…)` creates the type argument the code runs with, so it has the type `TItem`, and its arguments are
+/// checked against the constructor of `TItem`'s bound, which must be `required`, as `new Self(…)` needs, since the type
+/// argument can be any subclass of the bound.
 #[test]
-fn a_pattern_or_as_of_a_type_parameter_adds_no_issue() {
+fn new_of_a_type_parameter_is_the_type_parameter_and_takes_its_bounds_required_constructor() {
+    let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n    public required Maker(public int size { get; }) { }\n}\n\npublic abstract class Plain\n{\n    public Plain(public int size { get; }) { }\n}\n\npublic abstract class Builder<TItem : Maker, TPlain : Plain>\n{\n    public TItem create() => new TItem(1);\n\n    public TItem wrong() => new TItem(\"one\");\n\n    public int sized() => new TItem(1);\n\n    public TPlain plain() => new TPlain(1);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Builder.sharp", sharp), &[]),
+        [
+            "Invalid argument type for argument #1 of `Maker.__construct`: expected `int`, but found `string`.",
+            "Invalid return type for method `Builder.sized`: expected `int`, but found `TItem`.",
+            "`new TPlain(…)` needs a `required` constructor: `TPlain` can be any subclass of `Plain`, so every subclass must keep a constructor that `new TPlain(…)` can call.",
+        ]
+    );
+}
+
+/// `value is TItem`, `value as TItem` and a `match` arm of the type `TItem`, in an expression or in a statement, add no
+/// issue, and the other arms' types are checked as types anywhere: `Box<int>` is outside its bound.
+#[test]
+fn a_pattern_or_as_of_a_type_parameter_is_checked_with_the_other_arms() {
     let sharp = "namespace Demo;\n\npublic abstract class Maker\n{\n}\n\npublic class Box<T : Maker>\n{\n    public T? item() => null;\n}\n\npublic abstract class Builder<TItem : Maker>\n{\n    public bool holds(Any? value) => value is TItem;\n\n    public bool lacks(Any? value) => value is not TItem;\n\n    public Any? kept(Any? value) => value as TItem;\n\n    public int ranked(Any? value) => match (value) { TItem item => 1, default => 0 };\n\n    public void sort(Any? value)\n    {\n        match (value) {\n            TItem item => this.made(),\n            Box<int> box => this.made(),\n            default => this.made(),\n        }\n    }\n\n    public abstract TItem made();\n}\n";
 
-    assert_eq!(issues(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Builder.sharp", sharp), &[]), ["26:13 template-constraint-violation"]);
 }
 
-/// Generics are erased when PHP# compiles, so `Validator<TItem>` takes `mixed`, and PHP refuses a parameter
+/// Generics are erased when PHP# compiles, so `Validator<in TItem>` takes `mixed`, and PHP refuses a parameter
 /// narrower than the one it overrides when it links the class. The parameter is refused where it is written, with the
 /// type it must take and the bound that lets it keep its type.
 #[test]
@@ -8033,7 +8070,7 @@ fn a_parameter_narrower_than_the_erased_parent_parameter_is_an_error() {
     assert_eq!(
         explained(("src/Demo/StrictValidator.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
         [
-            "5:32 incompatible-parameter-type Parameter `item` of `StrictValidator.validate` must take at least `Any?`, the type `Validator.validate` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Validator<TItem : Order>`, so both sides erase to the bound."
+            "5:32 incompatible-parameter-type Parameter `item` of `StrictValidator.validate` must take at least `Any?`, the type `Validator.validate` erases it to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Validator<in TItem : Order>`, so both sides erase to the bound."
         ]
     );
 }
@@ -8045,7 +8082,7 @@ fn a_parameter_narrower_than_the_erased_parent_parameter_is_an_error() {
 #[test]
 fn a_return_type_that_would_erase_wider_than_the_parent_return_type_is_an_error() {
     let picker = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Picker\n{\n    T pick<T : DatabaseEntity>(T item);\n}\n\npublic class AnyPicker : Picker\n{\n    public T pick<T>(T item) => item;\n}\n";
-    let feed = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Feed<TItem : DatabaseEntity>\n{\n    TItem next();\n}\n\npublic abstract class Wrapper<TItem> : Feed<TItem>\n{\n    public abstract TItem next();\n}\n";
+    let feed = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Feed<out TItem : DatabaseEntity>\n{\n    TItem next();\n}\n\npublic abstract class Wrapper<TItem> : Feed<TItem>\n{\n    public abstract TItem next();\n}\n";
     let errors = |analyzed: (&'static str, &'static str)| {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[])
             .iter()
@@ -8103,7 +8140,7 @@ fn an_erased_parameter_help_names_a_bound_only_where_one_fits() {
 /// link a constructor against a parent's constructor that is not abstract, `required` or not.
 #[test]
 fn a_signature_that_links_once_erased_has_no_issue() {
-    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic interface Validator<TItem : DatabaseEntity>\n{\n    bool validate(TItem item);\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(DatabaseEntity item) => true;\n}\n\npublic interface Feed<TItem>\n{\n    TItem next();\n}\n\npublic class OrderFeed : Feed<Order>\n{\n    public Order next() => new Order();\n}\n\npublic class Box<TItem>\n{\n    public required Box(TItem item)\n    {\n    }\n}\n\npublic class OrderBox : Box<Order>\n{\n    public required OrderBox(Order item) : super(item)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic interface Validator<in TItem : DatabaseEntity>\n{\n    bool validate(TItem item);\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(DatabaseEntity item) => true;\n}\n\npublic interface Feed<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderFeed : Feed<Order>\n{\n    public Order next() => new Order();\n}\n\npublic class Box<TItem>\n{\n    public required Box(TItem item)\n    {\n    }\n}\n\npublic class OrderBox : Box<Order>\n{\n    public required OrderBox(Order item) : super(item)\n    {\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Entities.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -8413,14 +8450,176 @@ fn the_type_arguments_written_from_sharp_fix_a_php_template() {
     );
 }
 
-/// `is`, `as` and a `match` arm of a type with type arguments or of a type parameter, and `typeof` of a type parameter,
-/// which `check_slice` refuses as not supported yet until R3, add no analyzer issue: not
-/// the `is` test, the variable it declares nor its use.
+/// Spec section 11.1 checks `out` and `in` on every member another class reaches: a parameter takes its type in, a
+/// return hands it out, a property hands it out and takes it in when its `set` is reachable, and a type argument keeps,
+/// flips or doubles the position by the variance of its type parameter. A private member and the constructor are exempt.
 #[test]
-fn a_type_test_with_type_arguments_adds_no_issue() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int counted(Any? item) => item is List<int> numbers ? count(numbers) : 0;\n\n    public static Any? kept(Any? item) => item as List<int>;\n\n    public static int matched(Any? item) => match (item) { List<int> numbers => count(numbers), default => 0 };\n\n    public static Any? paged(Any? item) => item is PaginatedList<Order> page ? page.first() : null;\n\n    public static Any? cast(Any? item) => item as PaginatedList<Order>;\n\n    public static Any? pageMatched(Any? item) => match (item) { PaginatedList<Order> page => page.first(), default => null };\n\n    public static int held<TItem>(List<TItem> items, Any item) => item is TItem found ? 1 : 0;\n\n    public static TItem? taken<TItem>(List<TItem> items, Any item) => item as TItem;\n\n    public static int named<TItem : DatabaseEntity>(List<TItem> items) => typeof(TItem);\n}\n";
+fn out_and_in_are_checked_on_every_member() {
+    let sharp = "namespace Demo;\n\npublic abstract class Feed<out TItem>\n{\n    private List<TItem> items;\n\n    public Feed(List<TItem> items)\n    {\n        this.items = this.kept(items);\n    }\n\n    public abstract void add(TItem item);\n\n    public abstract void each(Function<void(TItem)> visit);\n\n    public List<TItem> all() => this.items;\n\n    public abstract void addAll(List<TItem> items);\n\n    public TItem? current { get; set; }\n\n    private List<TItem> kept(List<TItem> items) => items;\n}\n\npublic interface Validator<in TItem>\n{\n    TItem last();\n}\n";
 
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]), Vec::<String>::new());
+    assert_eq!(
+        explained(("src/Demo/Feed.sharp", sharp), &[]),
+        [
+            "12:26 invalid-template-parameter `TItem` is declared `out`, so `add` cannot take it in.",
+            "18:26 invalid-template-parameter `TItem` is declared `out`, so `addAll` cannot take it in.",
+            "20:19 invalid-template-parameter `TItem` is declared `out`, so the property `current` cannot take it in.",
+            "27:11 invalid-template-parameter `TItem` is declared `in`, so `last` cannot hand it out.",
+        ]
+    );
+    assert!(analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Feed.sharp", sharp), &[]).iter().all(|issue| issue.notes
+        == ["An `out` type parameter is only handed out, and an `in` type parameter is only taken in."]),);
+}
+
+/// A header hands its type arguments out, as C# (CS1961) and Kotlin check a base type's: `Sink<in TItem> :
+/// Source<TItem>` hands `TItem` out through `Source<out TItem>`, and `Reader<out TItem> : Slot<TItem>` passes it to an
+/// invariant type parameter, which takes it in too, so each is reported once on its header. `Feed<out TItem> :
+/// Source<TItem>` and `Check<in TItem> : Validator<TItem>` keep their markers.
+#[test]
+fn out_and_in_are_checked_on_the_type_arguments_of_the_header() {
+    let sharp = "namespace Demo;\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Slot<TItem>\n{\n    TItem get();\n}\n\npublic interface Sink<in TItem> : Source<TItem>\n{\n}\n\npublic interface Reader<out TItem> : Slot<TItem>\n{\n}\n\npublic interface Feed<out TItem> : Source<TItem>\n{\n}\n\npublic interface Check<in TItem> : Validator<TItem>\n{\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Streams.sharp", sharp), &[]),
+        [
+            "18:35 invalid-template-parameter `TItem` is declared `in`, so the header `Source<TItem>` cannot hand it out.",
+            "22:38 invalid-template-parameter `TItem` is declared `out`, so the header `Slot<TItem>` cannot take it in.",
+        ]
+    );
+}
+
+/// `Class<TItem>` hands `TItem` out, as `typeof` of a subclass passes where the class is expected, so `out TItem`
+/// refuses it as a parameter type and `in TItem` as a return type.
+#[test]
+fn out_and_in_are_checked_on_a_class_type() {
+    let sharp = "namespace Demo;\n\npublic abstract class Maker<out TItem>\n{\n    public abstract TItem make(Class<TItem> type);\n}\n\npublic abstract class Kind<in TItem>\n{\n    public abstract Class<TItem> kind();\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Makers.sharp", sharp), &[]),
+        [
+            "5:27 invalid-template-parameter `TItem` is declared `out`, so `make` cannot take it in.",
+            "10:34 invalid-template-parameter `TItem` is declared `in`, so `kind` cannot hand it out.",
+        ]
+    );
+}
+
+/// Spec section 11.1 lets a private member break the marker, as Scala's object-private members do, and reaches it only
+/// through `this`: another instance's field, written or read, another instance's method, called or read as a value, and
+/// the private `set` of another instance's property are refused where they are reached, for `out` and `in` alike, and a
+/// property whose `get` is public is written only through `this`, as its `get` stays reachable.
+#[test]
+fn a_variance_breaking_private_member_is_reachable_only_through_this() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Cell<out TItem>\n{\n    private TItem? value = null;\n\n    public TItem? get() => this.value;\n\n    public void poison(Cell<Any?> target)\n    {\n        target.value = 1;\n    }\n\n    public Any? peek(Cell<Any?> other) => other.value;\n}\n\npublic class Stack<out TItem>\n{\n    private void push(TItem item)\n    {\n    }\n\n    public void fill(Stack<Any?> other)\n    {\n        other.push(1);\n    }\n\n    public Any? grab(Stack<Any?> other) => other.push;\n}\n\npublic class Sink<in TItem>\n{\n    private TItem? last = null;\n\n    public void take(TItem item)\n    {\n        this.last = item;\n    }\n\n    public Any? leak(Sink<Order> other) => other.last;\n}\n\npublic class Slot<out TItem>\n{\n    public TItem? held { get; private set; } = null;\n\n    public void swap(Slot<Any?> other)\n    {\n        other.held = 1;\n    }\n\n    public Any? read(Slot<Any?> other) => other.held;\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Cell.sharp", sharp), &[]),
+        [
+            "15:16 invalid-template-parameter `value` breaks `out TItem`, so it is reachable only through `this`.",
+            "18:49 invalid-template-parameter `value` breaks `out TItem`, so it is reachable only through `this`.",
+            "29:15 invalid-template-parameter `push` breaks `out TItem`, so it is reachable only through `this`.",
+            "32:50 invalid-template-parameter `push` breaks `out TItem`, so it is reachable only through `this`.",
+            "44:50 invalid-template-parameter `last` breaks `in TItem`, so it is reachable only through `this`.",
+            "53:15 invalid-template-parameter `held` breaks `out TItem`, so it is written only through `this`.",
+        ]
+    );
+    assert!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Cell.sharp", sharp), &[]).iter().all(|issue| issue.notes
+            == ["A private member may break the marker, and is then reachable only through `this`."]),
+    );
+}
+
+/// `is`, `as` and a `match` arm of a `List`, a `Map` or a `Set` test every element while the code runs, so the value
+/// they narrow is the collection with its element types: a `List<int>`'s element is an `int`, and returning it as a
+/// `string` is refused.
+#[test]
+fn a_type_test_of_a_collection_narrows_to_its_element_types() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int first(Any? item) => item is List<int> numbers ? numbers[0] : 0;\n\n    public static List<int>? kept(Any? item) => item as List<int>;\n\n    public static int counted(Any? item) => match (item) { Map<string, int> counts => counts.count(), Set<string> tags => tags.count(), default => 0 };\n\n    public static string wrong(Any? item) => item is List<int> numbers ? numbers[0] : \"\";\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["11:46 invalid-return-statement"]);
+}
+
+/// `is`, `as` and a `match` arm of `Any` or of a union test the type written while the code runs, so the value they
+/// narrow has that type: a value tested `is int|string` is no `int`.
+#[test]
+fn a_type_test_of_any_or_a_union_narrows_to_the_type_written() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int scalar(Any? item) => item is int|string value ? 1 : 0;\n\n    public static (int|string)? kept(Any? item) => item as int|string;\n\n    public static Any present(Any? item) => item as Any ?? 0;\n\n    public static int sorted(Any? item) => match (item) { int|string value => 1, Any other => 2, default => 0 };\n\n    public static int wrong(Any? item) => item is int|string value ? value : 0;\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["13:43 invalid-return-statement"]);
+}
+
+/// An `as` or an `is` of a type the value always has tests nothing, and PHP# says so in the words the code writes, for
+/// a class and a collection alike.
+#[test]
+fn a_type_test_the_value_always_passes_says_the_value_already_has_the_type() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Report\n{\n    public static Order same(Order order) => order as Order;\n\n    public static List<int> listed(List<int> numbers) => numbers as List<int>;\n\n    public static bool always(Order order) => order is Order;\n\n    public static bool alwaysListed(List<int> numbers) => numbers is List<int>;\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "9:52 redundant-type-comparison `order` is already an `Order`, so `as Order` changes nothing. Write `order` alone.",
+            "11:66 redundant-type-comparison `numbers` is already a `List<int>`, so `as List<int>` changes nothing. Write `numbers` alone.",
+            "13:53 redundant-type-comparison `order` is already an `Order`, so `is Order` is always true. Remove the test.",
+            "15:67 redundant-type-comparison `numbers` is already a `List<int>`, so `is List<int>` is always true. Remove the test.",
+        ]
+    );
+}
+
+/// `is` and `as` of a generic class test its type arguments while the code runs, so the value they narrow has the
+/// class's type with its type arguments.
+#[test]
+fn is_and_as_of_a_generic_class_narrow_to_its_type_arguments() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int tested(Any? item)\n    {\n        if (item is PaginatedList<Order>) {\n            return item;\n        }\n        return 0;\n    }\n\n    public static int named(Any? item)\n    {\n        if (item is PaginatedList<Order> page) {\n            return page;\n        }\n        return 0;\n    }\n\n    public static int cast(Any? item) => item as PaginatedList<Order>;\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        [
+            "Invalid return type for method `Report.tested`: expected `int`, but found `PaginatedList<Order>`.",
+            "Invalid return type for method `Report.named`: expected `int`, but found `PaginatedList<Order>`.",
+            "Method `Report.cast` is declared to return `int` but possibly returns a nullable value (inferred as `PaginatedList<Order>?`).",
+            "Invalid return type for method `Report.cast`: expected `int`, but found `PaginatedList<Order>?`.",
+        ]
+    );
+}
+
+/// Each `match` arm of a generic class tests its own type arguments, so an arm of `PaginatedList<SharedOrder>` after
+/// one of `PaginatedList<Order>` still matches, and each narrows its variable to its own type.
+#[test]
+fn each_match_arm_of_a_generic_class_narrows_to_its_own_type_arguments() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int take(int count) => count;\n\n    public static int arms(Any? item) => match (item) {\n        PaginatedList<Order> orders => Report.take(orders),\n        PaginatedList<SharedOrder> shared => Report.take(shared),\n        default => 0,\n    };\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        [
+            "Invalid argument type for argument #1 of `Report.take`: expected `int`, but found `PaginatedList<Order>`.",
+            "Invalid argument type for argument #1 of `Report.take`: expected `int`, but found `PaginatedList<SharedOrder>`.",
+        ]
+    );
+}
+
+/// `value is TItem` tests the type argument `TItem` runs with, so it narrows the value to `TItem`, and `as TItem` gives
+/// a `TItem?`.
+#[test]
+fn is_and_as_of_a_type_parameter_narrow_to_the_type_parameter() {
+    let sharp = "namespace Demo;\n\npublic class Inbox\n{\n    public static int held<TItem>(List<TItem> items, Any value)\n    {\n        if (value is TItem item) {\n            return item;\n        }\n        return 0;\n    }\n\n    public static int taken<TItem>(List<TItem> items, Any value) => value as TItem;\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Inbox.sharp", sharp), &[]),
+        [
+            "Invalid return type for method `Inbox.held`: expected `int`, but found `TItem`.",
+            "Method `Inbox.taken` is declared to return `int` but possibly returns a nullable value (inferred as `TItem?`).",
+            "Invalid return type for method `Inbox.taken`: expected `int`, but found `TItem?`.",
+        ]
+    );
+}
+
+/// `typeof(TItem)` is the class of the type argument `TItem` runs with, a `Class<TItem>`.
+#[test]
+fn typeof_of_a_type_parameter_is_the_class_of_the_type_parameter() {
+    let sharp = "namespace Demo;\n\npublic class Kinds\n{\n    public static int named<TItem : DatabaseEntity>(List<TItem> items) => typeof(TItem);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Kinds.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        ["Invalid return type for method `Kinds.named`: expected `int`, but found `Class<TItem>`."]
+    );
 }
 
 /// An override keeps the bounds of the type parameters it overrides, as C# keeps them, so one that changes a bound
@@ -8446,20 +8645,26 @@ fn an_override_that_changes_a_bound_names_the_bound() {
     );
 }
 
-/// A type, `new` and a type test name the type arguments of a generic PHP# class, spec section 11, as C# refuses a
-/// generic type without them (CS0305): a property's, a parameter's, a return type and a typed local's, `new` of a class
-/// with one or two type parameters, and `is`, `as`, a `match` arm and `catch` of a class declared in another file. `Self`
-/// names its class's own type parameters, and a class without type parameters takes none. A refused `as Box` or
-/// `new Box()` reports nothing again where a `Box<int>` goes, whether returned or passed to `this(…)`. The plain PHP
-/// twins keep Mago's issues.
+/// A type, `new`, a type test and a static member name the type arguments of a generic PHP# class, spec section 11, as
+/// C# refuses a generic type without them (CS0305): a property's, a parameter's, a return type and a typed local's,
+/// `new` of a class with one or two type parameters, `is`, `as`, a `match` arm and `catch` of a class declared in
+/// another file, and a static property read, write, compound write, increment and collection call and a static call,
+/// each reported once and read as the bounds, so nothing reports again on what they read. Each type argument has its
+/// own statics, so a bare `Counter.count` names none. A constant, `Counter<Order>.count` and a subclass whose header
+/// gives the type argument need none. `Self` names its class's own type parameters, and a class without type parameters
+/// takes none. A refused `as Box` or `new Box()` reports nothing again where a `Box<int>` goes, whether returned or
+/// passed to `this(…)`. The plain PHP twins keep Mago's issues.
 #[test]
-fn a_type_new_and_a_type_test_name_the_type_arguments_of_a_generic_class() {
+fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_generic_class() {
     let types = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Self same(TFirst first, TSecond second) => this;\n}\n\npublic class Report\n{\n    public PaginatedList? shelf { get; set; }\n\n    public static void f(PaginatedList page)\n    {\n    }\n\n    public static Pair paired(Order order) => new Pair<Order, Order>();\n\n    public static Any local(PaginatedList<Order> given)\n    {\n        PaginatedList page = given;\n        return page;\n    }\n\n    public static Any listed(List<Order> orders) => new PaginatedList(orders);\n\n    public static Any pair() => new Pair();\n}\n";
     let php_types = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass PaginatedList\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    public ?PaginatedList $shelf = null;\n\n    public static function f(PaginatedList $page): void\n    {\n    }\n}\n";
     let classes = "namespace Demo;\n\nimport RuntimeException;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n}\n\npublic class Failure<TItem> : RuntimeException\n{\n    public TItem? first() => null;\n}\n";
     let tests = "namespace Demo;\n\npublic class Report\n{\n    public static bool held(Any? value) => value is Box;\n\n    public static Any? kept(Any? value) => value as Box;\n\n    public static int matched(Any? value) => match (value) { Box => 1, default => 0 };\n\n    public static bool plain(Any? value) => value is Plain;\n\n    public static int run()\n    {\n        try {\n            return 1;\n        } catch (Failure failure) {\n            return 0;\n        }\n    }\n\n    public Report(public Box<int> box { get; }) { }\n\n    public Report.empty() : this(new Box()) { }\n\n    public static Box<int>? narrowed(Any? value) => value as Box;\n\n    public static Box<int> made() => new Box();\n}\n";
     let php_tests = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function held(mixed $value): bool\n    {\n        return $value instanceof Box;\n    }\n\n    public static function run(): int\n    {\n        try {\n            return 1;\n        } catch (Failure $failure) {\n            return 0;\n        }\n    }\n}\n";
-    let note = "A type and `new` name the type arguments of a generic class.";
+    let counter = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Counter<TItem>\n{\n    public const int LIMIT = 3;\n\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n\n    public static void reset()\n    {\n        Counter<TItem>.count = 0;\n    }\n}\n\npublic class Orders : Counter<Order>\n{\n}\n";
+    let statics = "namespace Demo;\n\npublic class Report\n{\n    public static int read() => Counter.count;\n\n    public static void write()\n    {\n        Counter.count = 4;\n        Counter.count += 2;\n        Counter.count++;\n        Counter.items.add(new Order());\n        Counter.reset();\n    }\n\n    public static int named() => Counter<Order>.count + Counter.LIMIT + Orders.count;\n}\n";
+    let php_statics = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function write(): void\n    {\n        Counter::reset();\n    }\n}\n";
+    let note = "A type, `new` and a static member name the type arguments of a generic class.";
     let one = |class: &str| format!("`{class}` needs its type argument. | `{class}` has type parameters | {note}");
     let two = |class: &str| format!("`{class}` needs its 2 type arguments. | `{class}` has type parameters | {note}");
 
@@ -8491,17 +8696,52 @@ fn a_type_new_and_a_type_test_name_the_type_arguments_of_a_generic_class() {
             format!("28:42 missing-template-parameter {}", one("Box")),
         ]
     );
+    assert_eq!(
+        explained(("src/Demo/Report.php", php_statics), &[("src/Demo/Counter.sharp", counter)]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", statics), &[("src/Demo/Counter.sharp", counter)]),
+        [
+            format!("5:33 missing-template-parameter {}", one("Counter")),
+            format!("9:9 missing-template-parameter {}", one("Counter")),
+            format!("10:9 missing-template-parameter {}", one("Counter")),
+            format!("11:9 missing-template-parameter {}", one("Counter")),
+            format!("12:9 missing-template-parameter {}", one("Counter")),
+            format!("13:9 missing-template-parameter {}", one("Counter")),
+        ]
+    );
+}
+
+/// A static member of `Counter<Order>` has `Order` for `TItem`, spec section 11: a static property read, a collection
+/// call on it, a write and a static call's argument and result are checked against `Order`, through the class's own
+/// `Counter<TItem>` too, and against `List<Order>` for a nested type argument.
+#[test]
+fn a_static_member_of_a_class_with_type_arguments_has_its_type_arguments_for_its_type_parameters() {
+    let counter = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Customer\n{\n}\n\npublic class Counter<TItem>\n{\n    public static List<TItem> items { get; set; } = [];\n\n    public static TItem? latest { get; set; }\n\n    public static void track(TItem item)\n    {\n        Counter<TItem>.items.add(item);\n        Counter<TItem>.latest = item;\n    }\n\n    public static TItem? last() => Counter<TItem>.items.last();\n}\n";
+    let usage = "namespace Demo;\n\npublic class Report\n{\n    public static void run()\n    {\n        Counter<Order>.items.add(new Order());\n        Counter<Order>.items.add(new Customer());\n        Counter<Order>.latest = new Customer();\n        Counter<Order>.track(new Customer());\n        Counter<List<Order>>.items.add([new Order()]);\n        Counter<List<Order>>.items.add(new Order());\n    }\n\n    public static Order? latest() => Counter<Order>.latest;\n\n    public static Customer? wrong() => Counter<Order>.last();\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", usage), &[("src/Demo/Counter.sharp", counter)]),
+        [
+            "Invalid argument type for argument #1 of `List<Order>.add`: expected `Order`, but found `Customer`.",
+            "Invalid property assignment value",
+            "Invalid argument type for argument #1 of `Counter.track`: expected `Order`, but found `Customer`.",
+            "Invalid argument type for argument #1 of `List<List<Order>>.add`: expected `List<Order>`, but found `Order`.",
+            "Invalid return type for method `Report.wrong`: expected `Customer?`, but found `Order?`.",
+        ]
+    );
 }
 
 /// Invariant type parameters of `Checks`: `Validator` only takes `TItem` in, and `Slot` takes it in and returns it.
 const CHECKS: &str = "namespace Checks;\n\npublic interface Validator<TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Slot<TItem>\n{\n    TItem get();\n\n    void put(TItem item);\n}\n";
 
-/// A generic class without a marker takes only its own type arguments, as the engine checks them, so a `Feed<Order>`
-/// is refused where a `Feed<Entity>` is expected, worded as spec section 11.1 words it: as an argument, a returned
-/// value, a typed local and a property. It is a value of another type, not a wider one, so each issue is its place's
-/// invalid one, with spec section 11.1's note and no help, which would name a marker, not supported yet.
+/// A substitution that only a missing `out` or `in` blocks is worded as spec section 11.1 words it, and its help names
+/// the marker to add by where the class uses the type parameter: as an argument, a returned value, a typed local and a
+/// property. It is a value of another type, not a wider one, so each issue is its place's invalid one, with spec section
+/// 11.1's note.
 #[test]
-fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
+fn a_substitution_a_missing_marker_blocks_names_the_marker() {
     let sharp = "namespace App;\n\nimport Checks.Slot;\nimport Checks.Validator;\nimport Demo.DatabaseEntity;\nimport Demo.Order;\nimport Demo.PaginatedList;\n\npublic class Report\n{\n    public PaginatedList<DatabaseEntity>? shelf { get; set; }\n\n    public static Any wide(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any narrow(Validator<Order> validator) => validator;\n\n    public static Any slot(Slot<DatabaseEntity> slot) => slot;\n\n    public static Any passed(PaginatedList<Order> page) => Report.wide(page);\n\n    public static Any checked(Validator<DatabaseEntity> validator) => Report.narrow(validator);\n\n    public static Any slotted(Slot<Order> slot) => Report.slot(slot);\n\n    public static PaginatedList<DatabaseEntity> returned(PaginatedList<Order> page) => page;\n\n    public static PaginatedList<DatabaseEntity> assigned(PaginatedList<Order> page)\n    {\n        PaginatedList<DatabaseEntity> wide = page;\n        return wide;\n    }\n\n    public void kept(PaginatedList<Order> page)\n    {\n        this.shelf = page;\n    }\n}\n";
     let others = [("src/Demo/Paging.sharp", PAGING), ("src/Checks/Checks.sharp", CHECKS)];
     let wide = "PaginatedList<Order> cannot be used as PaginatedList<DatabaseEntity>.";
@@ -8528,12 +8768,26 @@ fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
             wide,
         ]
     );
+    let out = "TItem is only returned by PaginatedList, so declare it `out TItem`.";
+    assert_eq!(
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Report.sharp", sharp), &others)
+            .into_iter()
+            .map(|issue| issue.help.unwrap_or_default())
+            .collect::<Vec<_>>(),
+        [
+            out,
+            "TItem is only taken in by Validator, so declare it `in TItem`.",
+            "TItem is both taken in and returned by Slot, so neither marker fits.",
+            out,
+            out,
+            out,
+        ]
+    );
     for issue in analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Report.sharp", sharp), &others) {
         assert_eq!(
             issue.notes,
             ["A type parameter without `out` or `in` is invariant, so neither substitution is allowed."]
         );
-        assert_eq!(issue.help, None);
         let given = issue.message.split(" cannot be used as ").next().unwrap();
         let primary = issue.annotations.iter().find(|annotation| matches!(annotation.kind, AnnotationKind::Primary));
         assert_eq!(
@@ -8541,6 +8795,22 @@ fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
             Some(format!("This has type `{given}`."))
         );
     }
+}
+
+/// A substitution that the missing marker would not let through names no marker: `Shelf<TItem>` only returns `TItem`,
+/// so `out TItem` lets a `Shelf<Order>` pass as a `Shelf<DatabaseEntity>` and never the other way, and `Sink<TItem>`
+/// only takes `TItem` in, so `in TItem` never lets a `Sink<Order>` pass as a `Sink<DatabaseEntity>`.
+#[test]
+fn a_substitution_the_missing_marker_would_still_block_names_no_marker() {
+    let sharp = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic abstract class Shelf<TItem>\n{\n    public abstract TItem top();\n}\n\npublic abstract class Sink<TItem>\n{\n    public abstract void put(TItem item);\n}\n\npublic class Report\n{\n    public static Shelf<Order> narrowed(Shelf<DatabaseEntity> shelf)\n    {\n        Shelf<Order> orders = shelf;\n        return orders;\n    }\n\n    public static Sink<DatabaseEntity> widened(Sink<Order> sink)\n    {\n        Sink<DatabaseEntity> entities = sink;\n        return entities;\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "25:31 invalid-local-assignment-value Shelf<DatabaseEntity> cannot be used as Shelf<Order>.",
+            "31:41 invalid-local-assignment-value Sink<Order> cannot be used as Sink<DatabaseEntity>.",
+        ]
+    );
 }
 
 /// Spec section 11.1's wording, "`X` cannot be used as `Y`", is true of every invariant mismatch of the same class,
@@ -9272,6 +9542,49 @@ fn a_php_template_key_bounded_by_a_backed_enum_keeps_upstreams_key_type() {
     );
 }
 
+/// Each catch clause of a generic class tests its own type arguments while the code runs, so its variable has the
+/// class's type with its type arguments, alone or in a union, and a later clause of `Exception` still catches. The plain
+/// PHP twin catches the class alone, so its variable has the class.
+#[test]
+fn a_catch_variable_of_a_generic_class_has_its_type_arguments() {
+    let failures =
+        "namespace Demo;\n\nimport RuntimeException;\n\npublic class Failure<TItem> : RuntimeException\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Exception;\nimport LogicException;\n\npublic class Report\n{\n    public static int run(int extra)\n    {\n        try {\n            return extra;\n        } catch (Failure<int> numbers) {\n            return numbers;\n        } catch (Failure<string> texts) {\n            return texts;\n        } catch (LogicException | Failure<bool> either) {\n            return either;\n        } catch (Exception failure) {\n            return failure;\n        }\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Exception;\n\nclass Report\n{\n    public static function run(int $extra): int\n    {\n        try {\n            return $extra;\n        } catch (Failure $numbers) {\n            return $numbers;\n        } catch (Exception $failure) {\n            return $failure;\n        }\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Failures.sharp", failures)]),
+        [
+            "Invalid return type for method `Report.run`: expected `int`, but found `Failure<int>`.",
+            "Invalid return type for method `Report.run`: expected `int`, but found `Failure<string>`.",
+            "Invalid return type for method `Report.run`: expected `int`, but found `Failure<bool>|LogicException`.",
+            "Invalid return type for method `Report.run`: expected `int`, but found `Exception`.",
+        ]
+    );
+    assert_eq!(
+        messages(("src/Demo/Report.php", php), &[("src/Demo/Failures.sharp", failures)]),
+        [
+            "Invalid return type for function `Demo\\Report::run`: expected `int`, but found `Demo\\Failure<mixed>`.",
+            "Invalid return type for function `Demo\\Report::run`: expected `int`, but found `Exception`.",
+        ]
+    );
+}
+
+/// A catch clause of a type parameter catches the type argument the method runs with, so its variable has the type
+/// parameter's type, and the type parameter's bound must be a `Throwable`, as C#'s CS0155 requires an `Exception`.
+#[test]
+fn a_catch_clause_of_a_type_parameter_catches_what_its_bound_holds() {
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\npublic class Report\n{\n    public static int run<TError : RuntimeException>(int extra)\n    {\n        try {\n            return extra;\n        } catch (TError failure) {\n            return failure;\n        }\n    }\n\n    public static int open<TItem>(int extra)\n    {\n        try {\n            return extra;\n        } catch (TItem) {\n            return 0;\n        }\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "12:20 invalid-return-statement Invalid return type for method `Report.run`: expected `int`, but found `TError`. | This has type `TError` | The type `TError` returned here is not compatible with the declared return type `int`. | Change the return value to match `int`, or update the method's return type declaration.",
+            "20:18 catch-type-not-throwable `TItem` is caught, so its bound must be a `Throwable`. | `TItem` may be a type that is never thrown. | Bound `TItem` by an exception class or interface, as in `<TItem : RuntimeException>`.",
+        ]
+    );
+}
+
 /// `Class<Box>` names the class itself, as C#'s `typeof(Box<>)` does, so its type argument may be a generic class
 /// without type arguments, and `typeof(Box)` is a `Class<Box>`. The plain PHP twin keeps Mago's issues.
 #[test]
@@ -9349,22 +9662,121 @@ fn an_override_of_a_method_returning_self_returns_self() {
     assert_eq!(explained(("src/Demo/Builder.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// A class value carries no type arguments until R5, so `new` on a class value of a generic PHP# class can't give the
-/// object its type arguments: it is refused as `new` and the class value the code writes, with or without type
-/// arguments. `new` on a class value of a class without type parameters, spec section 25, and `new Self(…)` in an
-/// instance method stay legal. The PHP twin's `new $type()` on a `class-string` of the PHP# class keeps Mago's issues.
+/// `new (type)(…)` creates an object from a class value, spec section 25: with the type arguments `new` names, or else
+/// those the value carries, as a `Class<Box<Order>>` carries `Order`. A `Class<Box>` carries none, so its `new` names
+/// them. The value must be a class value of a class: a `string`, or the class value of a type parameter whose bound
+/// holds a type that is no class, is refused. The class keeps a `required` constructor, because the value can hold any
+/// subclass. Each row's wrong return shows the type the `new` gives. The PHP twin's `new $type()` on a `class-string`
+/// of the PHP# class keeps Mago's issues.
 #[test]
-fn new_on_a_class_value_of_a_generic_class_is_not_supported_yet() {
-    let classes = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public Self copy() => new Self();\n\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    private Class<Box> kind = typeof(Box);\n\n    private Class<Plain> plain = typeof(Plain);\n\n    public Any? make() => new (this.kind)();\n\n    public Any? typed() => new (this.kind)<string>();\n\n    public Plain made() => new (this.plain)();\n\n    public Any? held()\n    {\n        return new (this.kind)();\n    }\n}\n";
+fn new_through_a_class_value_gives_the_object_the_type_arguments_it_names_or_the_value_carries() {
+    let classes = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public Self copy() => new Self();\n\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n}\n\npublic class Loose\n{\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    private Class<Box> kind = typeof(Box);\n\n    private Class<Plain> plain = typeof(Plain);\n\n    private Class<Box<Order>> orders = typeof(Box<Order>);\n\n    public Any? make() => new (this.kind)();\n\n    public Box<int> typed() => new (this.kind)<string>();\n\n    public Plain made() => new (this.plain)();\n\n    public Box<int> carried() => new (this.orders)();\n\n    public Any? text(string kind) => new (kind)();\n\n    public Loose loose(Class<Loose> type) => new (type)();\n\n    public TItem blank<TItem>()\n    {\n        const type = typeof(TItem);\n        return new (type)();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param class-string<Box> $type */\n    public static function make(string $type): mixed\n    {\n        return new $type();\n    }\n\n    /** @param class-string<Plain> $type */\n    public static function plain(string $type): Plain\n    {\n        return new $type();\n    }\n}\n";
-    let refused = "not-supported-yet `new (this.kind)()` is not supported yet in PHP#. | Not supported yet.";
 
     assert_eq!(explained(("src/Demo/Report.php", php), &[("src/Demo/Classes.sharp", classes)]), Vec::<String>::new());
     assert_eq!(explained(("src/Demo/Classes.sharp", classes), &[]), Vec::<String>::new());
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
-        [format!("9:31 {refused}"), format!("11:32 {refused}"), format!("17:20 {refused}")]
+        [
+            "11:31 missing-template-parameter `Box` needs its type argument. | `Box` has type parameters | A type, `new` and a static member name the type arguments of a generic class.",
+            "13:32 invalid-return-statement Box<string> cannot be used as Box<int>. | This has type `Box<string>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
+            "17:34 invalid-return-statement Box<Order> cannot be used as Box<int>. | This has type `Box<Order>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
+            "19:43 invalid-class-string-expression `kind` is a `string`, not a `Class`: `new (…)` creates an object from a class value. | Used as a class value here. | Get a class value with `typeof`, as in `typeof(Order)`.",
+            "21:46 unsafe-instantiation `new (type)(…)` needs a `required` constructor: the class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (type)(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
+            "26:21 invalid-class-string-expression `TItem` can stand for a type that is not a class. | Used as a class here. | Bound `TItem` by a class, as in `<TItem : Order>`.",
+        ]
+    );
+}
+
+/// `typeof(Box<Order>)` is a `Class<Box<Order>>`, spec section 25, and a static member read or called through a class
+/// value takes the type arguments the value carries, as one through `Box<Order>` takes its own, spec section 11. Each
+/// wrong return shows the type the expression has.
+#[test]
+fn a_class_value_with_type_arguments_carries_them_to_its_static_members() {
+    let classes = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Tally<TItem>\n{\n    public static List<TItem> items { get; set; } = [];\n\n    public static TItem? last() => null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public Class<Tally<int>> value() => typeof(Tally<Order>);\n\n    public List<int> items()\n    {\n        Class<Tally<Order>> type = typeof(Tally<Order>);\n        return type.items;\n    }\n\n    public int? last()\n    {\n        Class<Tally<Order>> type = typeof(Tally<Order>);\n        return type.last();\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
+        [
+            "5:41 invalid-return-statement Invalid return type for method `Report.value`: expected `Class<Tally<int>>`, but found `Class<Tally<Order>>`. | This has type `Class<Tally<Order>>` | The type `Class<Tally<Order>>` returned here is not compatible with the declared return type `Class<Tally<int>>`. | Change the return value to match `Class<Tally<int>>`, or update the method's return type declaration.",
+            "10:16 invalid-return-statement Invalid return type for method `Report.items`: expected `List<int>`, but found `List<Order>`. | This has type `List<Order>` | The type `List<Order>` returned here is not compatible with the declared return type `List<int>`. | Change the return value to match `List<int>`, or update the method's return type declaration.",
+            "16:16 invalid-return-statement Invalid return type for method `Report.last`: expected `int?`, but found `Order?`. | This has type `Order?` | The type `Order?` returned here is not compatible with the declared return type `int?`. | Change the return value to match `int?`, or update the method's return type declaration.",
+        ]
+    );
+}
+
+/// A class value keys no `Map`, spec section 12, though it runs as its plain class name: a `Map` type, a `Map` literal
+/// and the `Map` `groupBy` and `associateBy` infer from their key function keep the one rule, with or without type
+/// arguments, and so does a type written as a type argument. A class value is still a `Map`'s value, as in section 25.
+#[test]
+fn a_class_value_keys_no_map_written_as_a_type_a_literal_or_inferred() {
+    let classes = "namespace Demo;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public Class<Order> kind() => typeof(Order);\n}\n\npublic class Box<TItem>\n{\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Keys\n{\n    public Map<Class<Order>, int> typed() => [:];\n\n    public Map<Class<Box<Order>>, int> typedGeneric() => [:];\n\n    public Any literal() => [typeof(Order): 1];\n\n    public Any literalGeneric() => [typeof(Box<Order>): 1];\n\n    public Any grouped(List<Order> orders) => orders.groupBy((Order order) => order.kind());\n\n    public Any associated(List<Order> orders) => orders.associateBy((Order order) => order.kind());\n\n    public Any made() => new Box<Map<Class<Order>, int>>();\n\n    public Map<string, Class<Order>> values() => [\"order\": typeof(Order)];\n\n    public Map<int, List<Order>> byId(List<Order> orders) => orders.groupBy((Order order) => order.id);\n}\n";
+    let rule = "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value";
+    let help = "Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.";
+
+    assert_eq!(
+        worded(("src/Demo/Keys.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
+        [
+            format!(
+                "5:12 template-constraint-violation {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+            ),
+            format!(
+                "7:12 template-constraint-violation {rule}, and `Class<Box<Order>>` has none. | `Class<Box<Order>>` keys this `Map`. | {help}"
+            ),
+            format!(
+                "9:30 invalid-array-element-key {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+            ),
+            format!(
+                "11:37 invalid-array-element-key {rule}, and `Class<Box<Order>>` has none. | `Class<Box<Order>>` keys this `Map`. | {help}"
+            ),
+            format!(
+                "13:62 invalid-argument {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+            ),
+            format!(
+                "15:69 invalid-argument {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+            ),
+            format!(
+                "17:34 template-constraint-violation {rule}, and `Class<Order>` has none. | `Class<Order>` keys this `Map`. | {help}"
+            ),
+        ]
+    );
+}
+
+/// A type written as a type argument in a body, on `new`, a generic call or `typeof`, gets the checks every type a body
+/// writes gets, spec section 11: a generic class it names takes all its type arguments, and a `Map` it names takes a
+/// key with an `int` or `string` backing value, spec section 12.
+#[test]
+fn a_type_written_as_a_type_argument_is_checked_as_a_type() {
+    let classes = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n}\n\npublic class Pair<TFirst, TSecond>\n{\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Made\n{\n    public static Box<T> boxed<T>() => new Box<T>();\n\n    public void made()\n    {\n        const bare = new Box<Pair>();\n        const short = new Box<Pair<int>>();\n        const keyed = new Box<Map<Order, int>>();\n        const called = Made.boxed<Pair>();\n        const type = typeof(Box<Pair>);\n        const fine = new Box<Pair<int, Order>>();\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Made.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
+        [
+            "9:30 missing-template-parameter",
+            "10:31 missing-template-parameter",
+            "11:31 template-constraint-violation",
+            "12:35 missing-template-parameter",
+            "13:33 missing-template-parameter",
+        ]
+    );
+}
+
+/// A write through a class value, `type.count = 1`, writes the static field of the class the value holds, as a read
+/// through it reads that field, spec section 25. Through a `Class<Tally<Order>>` it writes the field `Tally<Order>`
+/// owns, so the written value must fit the field with `Order` as `TItem`, spec section 11, and a collection method
+/// changes that field. Reading the field twice reads it twice.
+#[test]
+fn a_write_through_a_class_value_writes_the_static_field_of_the_class_it_holds() {
+    let classes = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Plain\n{\n    public static int count { get; set; } = 0;\n}\n\npublic class Tally<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Writes\n{\n    public int plain()\n    {\n        Class<Plain> type = typeof(Plain);\n        type.count = 1;\n        type.count += 2;\n        type.count++;\n        return type.count + type.count;\n    }\n\n    public int generic(Order order)\n    {\n        Class<Tally<Order>> type = typeof(Tally<Order>);\n        type.count = 5;\n        type.items.add(order);\n        return type.count + type.items.count();\n    }\n\n    public void wrong()\n    {\n        Class<Plain> plain = typeof(Plain);\n        plain.count = \"one\";\n        Class<Tally<Order>> type = typeof(Tally<Order>);\n        type.items = [1];\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Writes.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
+        ["25:9 invalid-property-assignment-value", "27:9 invalid-property-assignment-value"]
     );
 }
 
@@ -9575,7 +9987,7 @@ fn a_method_value_of_a_subclass_that_adds_a_type_parameter_is_its_receiver() {
 /// it is called or read as a method value. The PHP twin's `static` keeps Mago's issues.
 #[test]
 fn self_in_a_receivers_type_argument_stays_the_class_that_wrote_it() {
-    let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public Function<Tree<Node>?()> wrong() => this.children().first;\n\n    public Tree<Node>? called() => this.children().first();\n}\n\npublic abstract class Tree<TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public Function<Tree<Node>?()> wrong() => this.children().first;\n\n    public Tree<Node>? called() => this.children().first();\n}\n\npublic abstract class Tree<out TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nabstract class Node\n{\n    /** @return Tree<static> */\n    abstract public function children(): Tree;\n\n    /** @return \\Closure(): (Tree<Node>|null) */\n    public function wrong(): \\Closure\n    {\n        return $this->children()->first(...);\n    }\n\n    /** @return Tree<Node>|null */\n    public function called(): ?Tree\n    {\n        return $this->children()->first();\n    }\n}\n\n/** @template-covariant TItem */\nabstract class Tree extends Node\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n";
 
     assert_eq!(
@@ -9604,7 +10016,7 @@ fn self_in_a_receivers_type_argument_stays_the_class_that_wrote_it() {
 #[test]
 fn a_call_and_its_method_value_give_one_type_on_every_receiver() {
     let invoice = "<?php\n\nnamespace Lib;\n\ntrait Fluent\n{\n    public function me(): self\n    {\n        return $this;\n    }\n}\n\nclass Invoice\n{\n    use Fluent;\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Invoice;\n\npublic class Order\n{\n}\n\npublic interface Named\n{\n    public string name();\n}\n\npublic interface Copyable\n{\n    public Self copy();\n}\n\npublic class Plain\n{\n    public Self same() => this;\n}\n\npublic class Box<TItem>\n{\n    public Self same() => this;\n\n    public bool nested(Box<List<TItem>> boxes) => boxes.same();\n\n    public Function<bool()> nestedValue(Box<List<TItem>> boxes) => boxes.same;\n\n    public bool own() => this.same();\n\n    public Function<bool()> ownValue() => this.same;\n}\n\npublic class OrderBox : Box<Order>\n{\n}\n\npublic class Pair<TKey, TValue> : Box<TKey>\n{\n    public TValue? value() => null;\n}\n\npublic abstract class Node\n{\n    public Self same() => this;\n\n    public abstract Tree<Self> children();\n\n    public bool tree() => this.children().same();\n\n    public Function<bool()> treeValue() => this.children().same;\n\n    public bool item() => this.children().first();\n\n    public Function<bool()> itemValue() => this.children().first;\n\n    public bool stored()\n    {\n        let first = this.children().first;\n        return first();\n    }\n}\n\npublic abstract class Tree<TItem> : Node\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static bool plain(Plain plain) => plain.same();\n\n    public static Function<bool()> plainValue(Plain plain) => plain.same;\n\n    public static bool boxed(Box<int> box) => box.same();\n\n    public static Function<bool()> boxedValue(Box<int> box) => box.same;\n\n    public static bool orders(OrderBox orders) => orders.same();\n\n    public static Function<bool()> ordersValue(OrderBox orders) => orders.same;\n\n    public static bool pairs(Pair<int, string> pair) => pair.same();\n\n    public static Function<bool()> pairsValue(Pair<int, string> pair) => pair.same;\n\n    public static bool bounded<TBox : Box<int>>(TBox box) => box.same();\n\n    public static Function<bool()> boundedValue<TBox : Box<int>>(TBox box) => box.same;\n\n    public static bool named<TBox : Box<int> & Named>(TBox box) => box.same();\n\n    public static Function<bool()> namedValue<TBox : Box<int> & Named>(TBox box) => box.same;\n\n    public static bool copied<TItem : Order & Copyable>(TItem item) => item.copy();\n\n    public static Function<bool()> copiedValue<TItem : Order & Copyable>(TItem item) => item.copy;\n\n    public static bool copiedBox<TBox : Box<int> & Copyable>(TBox box) => box.copy();\n\n    public static Function<bool()> copiedBoxValue<TBox : Box<int> & Copyable>(TBox box) => box.copy;\n\n    public static bool fluent(Invoice invoice) => invoice.me();\n\n    public static Function<bool()> fluentValue(Invoice invoice) => invoice.me;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Invoice;\n\npublic class Order\n{\n}\n\npublic interface Named\n{\n    public string name();\n}\n\npublic interface Copyable\n{\n    public Self copy();\n}\n\npublic class Plain\n{\n    public Self same() => this;\n}\n\npublic class Box<TItem>\n{\n    public Self same() => this;\n\n    public bool nested(Box<List<TItem>> boxes) => boxes.same();\n\n    public Function<bool()> nestedValue(Box<List<TItem>> boxes) => boxes.same;\n\n    public bool own() => this.same();\n\n    public Function<bool()> ownValue() => this.same;\n}\n\npublic class OrderBox : Box<Order>\n{\n}\n\npublic class Pair<TKey, TValue> : Box<TKey>\n{\n    public TValue? value() => null;\n}\n\npublic abstract class Node\n{\n    public Self same() => this;\n\n    public abstract Tree<Self> children();\n\n    public bool tree() => this.children().same();\n\n    public Function<bool()> treeValue() => this.children().same;\n\n    public bool item() => this.children().first();\n\n    public Function<bool()> itemValue() => this.children().first;\n\n    public bool stored()\n    {\n        let first = this.children().first;\n        return first();\n    }\n}\n\npublic abstract class Tree<out TItem> : Node\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static bool plain(Plain plain) => plain.same();\n\n    public static Function<bool()> plainValue(Plain plain) => plain.same;\n\n    public static bool boxed(Box<int> box) => box.same();\n\n    public static Function<bool()> boxedValue(Box<int> box) => box.same;\n\n    public static bool orders(OrderBox orders) => orders.same();\n\n    public static Function<bool()> ordersValue(OrderBox orders) => orders.same;\n\n    public static bool pairs(Pair<int, string> pair) => pair.same();\n\n    public static Function<bool()> pairsValue(Pair<int, string> pair) => pair.same;\n\n    public static bool bounded<TBox : Box<int>>(TBox box) => box.same();\n\n    public static Function<bool()> boundedValue<TBox : Box<int>>(TBox box) => box.same;\n\n    public static bool named<TBox : Box<int> & Named>(TBox box) => box.same();\n\n    public static Function<bool()> namedValue<TBox : Box<int> & Named>(TBox box) => box.same;\n\n    public static bool copied<TItem : Order & Copyable>(TItem item) => item.copy();\n\n    public static Function<bool()> copiedValue<TItem : Order & Copyable>(TItem item) => item.copy;\n\n    public static bool copiedBox<TBox : Box<int> & Copyable>(TBox box) => box.copy();\n\n    public static Function<bool()> copiedBoxValue<TBox : Box<int> & Copyable>(TBox box) => box.copy;\n\n    public static bool fluent(Invoice invoice) => invoice.me();\n\n    public static Function<bool()> fluentValue(Invoice invoice) => invoice.me;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Invoice;\n\nclass Order\n{\n}\n\ninterface Named\n{\n    public function name(): string;\n}\n\ninterface Copyable\n{\n    public function copy(): static;\n}\n\nclass Plain\n{\n    public function same(): static\n    {\n        return $this;\n    }\n}\n\n/** @template TItem */\nclass Box\n{\n    public function same(): static\n    {\n        return $this;\n    }\n\n    /** @param Box<list<TItem>> $boxes */\n    public function nested(Box $boxes): bool\n    {\n        return $boxes->same();\n    }\n\n    /**\n     * @param Box<list<TItem>> $boxes\n     * @return \\Closure(): bool\n     */\n    public function nestedValue(Box $boxes): \\Closure\n    {\n        return $boxes->same(...);\n    }\n\n    public function own(): bool\n    {\n        return $this->same();\n    }\n\n    /** @return \\Closure(): bool */\n    public function ownValue(): \\Closure\n    {\n        return $this->same(...);\n    }\n}\n\n/** @extends Box<Order> */\nclass OrderBox extends Box\n{\n}\n\n/**\n * @template TKey\n * @template TValue\n * @extends Box<TKey>\n */\nclass Pair extends Box\n{\n    /** @return TValue|null */\n    public function value(): mixed\n    {\n        return null;\n    }\n}\n\nabstract class Node\n{\n    public function same(): static\n    {\n        return $this;\n    }\n\n    /** @return Tree<static> */\n    abstract public function children(): Tree;\n\n    public function tree(): bool\n    {\n        return $this->children()->same();\n    }\n\n    /** @return \\Closure(): bool */\n    public function treeValue(): \\Closure\n    {\n        return $this->children()->same(...);\n    }\n\n    public function item(): bool\n    {\n        return $this->children()->first();\n    }\n\n    /** @return \\Closure(): bool */\n    public function itemValue(): \\Closure\n    {\n        return $this->children()->first(...);\n    }\n\n    public function stored(): bool\n    {\n        $first = $this->children()->first(...);\n        return $first();\n    }\n}\n\n/** @template-covariant TItem */\nabstract class Tree extends Node\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    public static function plain(Plain $plain): bool\n    {\n        return $plain->same();\n    }\n\n    /** @return \\Closure(): bool */\n    public static function plainValue(Plain $plain): \\Closure\n    {\n        return $plain->same(...);\n    }\n\n    /** @param Box<int> $box */\n    public static function boxed(Box $box): bool\n    {\n        return $box->same();\n    }\n\n    /**\n     * @param Box<int> $box\n     * @return \\Closure(): bool\n     */\n    public static function boxedValue(Box $box): \\Closure\n    {\n        return $box->same(...);\n    }\n\n    public static function orders(OrderBox $orders): bool\n    {\n        return $orders->same();\n    }\n\n    /** @return \\Closure(): bool */\n    public static function ordersValue(OrderBox $orders): \\Closure\n    {\n        return $orders->same(...);\n    }\n\n    /** @param Pair<int, string> $pair */\n    public static function pairs(Pair $pair): bool\n    {\n        return $pair->same();\n    }\n\n    /**\n     * @param Pair<int, string> $pair\n     * @return \\Closure(): bool\n     */\n    public static function pairsValue(Pair $pair): \\Closure\n    {\n        return $pair->same(...);\n    }\n\n    /**\n     * @template TBox of Box<int>\n     * @param TBox $box\n     */\n    public static function bounded(Box $box): bool\n    {\n        return $box->same();\n    }\n\n    /**\n     * @template TBox of Box<int>\n     * @param TBox $box\n     * @return \\Closure(): bool\n     */\n    public static function boundedValue(Box $box): \\Closure\n    {\n        return $box->same(...);\n    }\n\n    /**\n     * @template TBox of Box<int>&Named\n     * @param TBox $box\n     */\n    public static function named(Box $box): bool\n    {\n        return $box->same();\n    }\n\n    /**\n     * @template TBox of Box<int>&Named\n     * @param TBox $box\n     * @return \\Closure(): bool\n     */\n    public static function namedValue(Box $box): \\Closure\n    {\n        return $box->same(...);\n    }\n\n    /**\n     * @template TItem of Order&Copyable\n     * @param TItem $item\n     */\n    public static function copied(Order $item): bool\n    {\n        return $item->copy();\n    }\n\n    /**\n     * @template TItem of Order&Copyable\n     * @param TItem $item\n     * @return \\Closure(): bool\n     */\n    public static function copiedValue(Order $item): \\Closure\n    {\n        return $item->copy(...);\n    }\n\n    /**\n     * @template TBox of Box<int>&Copyable\n     * @param TBox $box\n     */\n    public static function copiedBox(Box $box): bool\n    {\n        return $box->copy();\n    }\n\n    /**\n     * @template TBox of Box<int>&Copyable\n     * @param TBox $box\n     * @return \\Closure(): bool\n     */\n    public static function copiedBoxValue(Box $box): \\Closure\n    {\n        return $box->copy(...);\n    }\n\n    public static function fluent(Invoice $invoice): bool\n    {\n        return $invoice->me();\n    }\n\n    /** @return \\Closure(): bool */\n    public static function fluentValue(Invoice $invoice): \\Closure\n    {\n        return $invoice->me(...);\n    }\n}\n";
     let others = [("src/Lib/Invoice.php", invoice)];
     let gives = |method: &str, found: &str| {
@@ -9826,7 +10238,7 @@ fn a_conditional_return_of_a_receiver_naming_its_own_type_parameter_replaces_it_
 /// CS0411. The PHP twin's `static` keeps Mago's issues.
 #[test]
 fn calling_a_stored_method_value_keeps_the_self_of_its_receiver() {
-    let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public T pick<T>(T value) => value;\n\n    public bool called()\n    {\n        let first = this.children().first;\n        return first();\n    }\n\n    public bool picked()\n    {\n        let pick = this.pick;\n        return pick(5);\n    }\n}\n\npublic abstract class Tree<TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Node\n{\n    public abstract Tree<Self> children();\n\n    public T pick<T>(T value) => value;\n\n    public bool called()\n    {\n        let first = this.children().first;\n        return first();\n    }\n\n    public bool picked()\n    {\n        let pick = this.pick;\n        return pick(5);\n    }\n}\n\npublic abstract class Tree<out TItem> : Node\n{\n    public TItem? first() => null;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nabstract class Node\n{\n    /** @return Tree<static> */\n    abstract public function children(): Tree;\n\n    /**\n     * @template T\n     * @param T $value\n     * @return T\n     */\n    public function pick(mixed $value): mixed\n    {\n        return $value;\n    }\n\n    public function called(): bool\n    {\n        $first = $this->children()->first(...);\n        return $first();\n    }\n\n    public function picked(): bool\n    {\n        $pick = $this->pick(...);\n        return $pick(5);\n    }\n}\n\n/** @template-covariant TItem */\nabstract class Tree extends Node\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n";
 
     assert_eq!(
@@ -9929,12 +10341,11 @@ fn a_generic_call_nothing_fixes_is_refused() {
     );
 }
 
-/// A call of a generic class's named constructor is refused, `new Box<int>.of(1)` and `new Box.of(1)` alike, and its
-/// object reports nothing again where a `Box<int>` goes. A non-generic class's named constructor takes no type
-/// argument, so `new Plain<int>.one(1)` gets the count error. The main constructor's `new Box(1)` still needs its type
-/// argument.
+/// A named constructor of a generic class takes the type arguments its `new` names, as the main constructor does:
+/// `new Box<int>.of(1)` checks its argument against `int` and creates a `Box<int>`, and `new Box.of(1)` names none. A
+/// non-generic class's named constructor takes no type argument, so `new Plain<int>.one(1)` gets the count error.
 #[test]
-fn a_named_constructor_call_of_a_generic_class_is_not_supported_yet() {
+fn a_named_constructor_of_a_generic_class_takes_the_type_arguments_of_its_new() {
     let others = [
         (
             "src/Demo/Box.sharp",
@@ -9945,15 +10356,20 @@ fn a_named_constructor_call_of_a_generic_class_is_not_supported_yet() {
             "namespace Demo;\n\npublic class Plain\n{\n    public Plain(public int count { get; }) { }\n\n    public Plain.one(int count) : this(count) { }\n}\n",
         ),
     ];
-    let shop = "namespace Demo;\n\npublic class Shop\n{\n    public Any named() => new Box.of(1);\n\n    public Any main() => new Box(1);\n\n    public Box<int> typed() => new Box<int>.of(1);\n\n    public Any plain() => new Plain<int>.one(1);\n}\n";
+    let shop = "namespace Demo;\n\npublic class Shop\n{\n    public Any named() => new Box.of(1);\n\n    public Any main() => new Box(1);\n\n    public Box<int> numbers() => new Box<int>.of(1);\n\n    public Box<int> texts() => new Box<string>.of(\"one\");\n\n    public Any wrong() => new Box<int>.of(\"one\");\n\n    public Any plain() => new Plain<int>.one(1);\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Shop.sharp", shop), &others),
+        messages(("src/Demo/Shop.sharp", shop), &others)[4],
+        "Too many type arguments for `Plain`: expected 0, but found 1."
+    );
+    assert_eq!(
+        issues(("src/Demo/Shop.sharp", shop), &others),
         [
-            "A named constructor is not supported yet in a generic class, because it runs as a static method every `Box<…>` shares.",
-            "`Box` needs its type argument.",
-            "A named constructor is not supported yet in a generic class, because it runs as a static method every `Box<…>` shares.",
-            "Too many type arguments for `Plain`: expected 0, but found 1.",
+            "5:31 missing-template-parameter",
+            "7:30 missing-template-parameter",
+            "11:32 invalid-return-statement",
+            "13:43 invalid-argument",
+            "15:36 excess-template-parameter",
         ]
     );
 }
@@ -9964,11 +10380,11 @@ fn a_named_constructor_call_of_a_generic_class_is_not_supported_yet() {
 /// `Map<string, int>`, as the literal `["k": [1]]` is `Map<string, List<int>>`, `non-empty-string` is `string`,
 /// `positive-int` is `int` and `class-string` is `Class<Object>`. A written type argument the value fits compiles. A
 /// `new` infers none, so it needs its type argument written. An argument the checker refuses, as it does
-/// `Pager.list() as List<int>`, adds no refusal of the type argument it fixes.
+/// `Pager.class() as Class<Object>`, adds no refusal of the type argument it fixes.
 #[test]
 fn a_type_argument_php_sharp_cant_write_is_refused() {
     let php = "<?php\n\nnamespace Lib;\n\nfinal class Pager\n{\n    /** @return array{a: int} */\n    public static function shape(): array\n    {\n        return ['a' => 1];\n    }\n\n    /** @return array-key */\n    public static function key(): int|string\n    {\n        return 1;\n    }\n\n    /** @return scalar */\n    public static function scalar(): int|float|string|bool\n    {\n        return 1;\n    }\n\n    /** @return numeric */\n    public static function numeric(): int|float|string\n    {\n        return 1;\n    }\n\n    /** @return resource */\n    public static function resource(): mixed\n    {\n        return STDIN;\n    }\n\n    /** @return list<int> */\n    public static function list(): array\n    {\n        return [1];\n    }\n\n    /** @return non-empty-string */\n    public static function text(): string\n    {\n        return 'a';\n    }\n\n    /** @return positive-int */\n    public static function count(): int\n    {\n        return 1;\n    }\n\n    /** @return class-string */\n    public static function class(): string\n    {\n        return self::class;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Pager;\n\npublic class Registry\n{\n    public static T keep<T>(T value) => value;\n\n    public T hold<T>(T value) => value;\n\n    public void run()\n    {\n        Registry.keep(Pager.shape());\n        Registry.keep(Pager.key());\n        Registry.keep(Pager.scalar());\n        Registry.keep(Pager.numeric());\n        this.hold(Pager.resource());\n        Registry.keep(Pager.list());\n        Registry.keep(Pager.text());\n        Registry.keep(Pager.count());\n        this.hold(Pager.class());\n        Registry.keep<Map<string, int>>(Pager.shape());\n        Registry.keep<int|string>(Pager.key());\n        Crate<Map<string, int>> crate = new Crate<Map<string, int>>(Pager.shape());\n        let inferred = new Crate(Pager.shape());\n        Registry.keep([1, 2]);\n        Registry.keep([\"k\": [1]]);\n        Registry.keep(Pager.list() as List<int>);\n    }\n}\n\npublic class Crate<T>\n{\n    public Crate(public T value) { }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pager;\n\npublic class Registry\n{\n    public static T keep<T>(T value) => value;\n\n    public T hold<T>(T value) => value;\n\n    public void run()\n    {\n        Registry.keep(Pager.shape());\n        Registry.keep(Pager.key());\n        Registry.keep(Pager.scalar());\n        Registry.keep(Pager.numeric());\n        this.hold(Pager.resource());\n        Registry.keep(Pager.list());\n        Registry.keep(Pager.text());\n        Registry.keep(Pager.count());\n        this.hold(Pager.class());\n        Registry.keep<Map<string, int>>(Pager.shape());\n        Registry.keep<int|string>(Pager.key());\n        Crate<Map<string, int>> crate = new Crate<Map<string, int>>(Pager.shape());\n        let inferred = new Crate(Pager.shape());\n        Registry.keep([1, 2]);\n        Registry.keep([\"k\": [1]]);\n        Registry.keep(Pager.class() as Class<Object>);\n    }\n}\n\npublic class Crate<T>\n{\n    public Crate(public T value) { }\n}\n";
     let refused = |line: u32, column: u32, method: &str, written: &str| {
         format!(
             "{line}:{column} missing-template-parameter The type argument `T` of the call to `{method}` would be `{written}`, which PHP# can't write. | `{method}` is called here | A PHP docblock type has no PHP# spelling, and the engine carries a type argument as one. | Write the type argument on the call."
@@ -9982,7 +10398,7 @@ fn a_type_argument_php_sharp_cant_write_is_refused() {
             refused(15, 9, "Registry.keep", "scalar"),
             refused(16, 9, "Registry.keep", "numeric"),
             refused(17, 9, "Registry.hold", "resource"),
-            "25:28 missing-template-parameter `Crate` needs its type argument. | `Crate` has type parameters | A type and `new` name the type arguments of a generic class.".to_owned(),
+            "25:28 missing-template-parameter `Crate` needs its type argument. | `Crate` has type parameters | A type, `new` and a static member name the type arguments of a generic class.".to_owned(),
         ]
     );
 }
@@ -11125,7 +11541,7 @@ fn a_message_names_a_variable_as_sharp_writes_it() {
     assert_eq!(
         named(("src/Demo/Order.sharp", sharp)),
         [
-            "5:47 redundant-type-comparison Redundant type assertion: `code` is already `string`. | Argument `code` already has type `string` | The assertion against `string` always holds because `code` is `string`. | Consider removing this assertion or replacing it with `default` if used in a `match` arm.",
+            "5:44 redundant-type-comparison `code` is already a `string`, so `is string` is always true. | Tests nothing. | Remove the test.",
             "7:48 impossible-type-comparison Impossible type assertion: `count` of type `int` can never be `string`. | Argument `count` has type `int` | The assertion expects `count` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
             "11:37 invalid-named-argument Invalid named argument `cost` for method `Order.take` | Unknown argument name `cost` | Call to method is here | Available parameters are: `amount`.",
         ]

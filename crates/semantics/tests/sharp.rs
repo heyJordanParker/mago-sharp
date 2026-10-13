@@ -3324,12 +3324,26 @@ fn new_creates_a_class_written_by_its_short_name_with_its_arguments() {
 
 #[test]
 fn new_outside_the_slice_is_not_supported_yet() {
-    let code =
-        leak(method("        const kind = new (Report);\n        const other = new class {};\n        return 1;\n"));
+    let code = leak(method("        const other = new class {};\n        return 1;\n"));
+
+    assert_eq!(issues(code), ["7:23 This expression is not supported yet in PHP#."]);
+}
+
+/// `new (type)(…)` creates an object from a class value, with or without type arguments, spec section 25. It calls
+/// the constructor, so it names no named constructor, and it takes its arguments as any `new` does. The analyzer
+/// decides what the value holds.
+#[test]
+fn new_through_a_class_value_calls_the_constructor_with_its_arguments() {
+    let code = leak(method(
+        "        const made = new (type)(extra);\n        const page = new (any)<Order>(extra);\n        const named = new (any)<Order>.fromJson(extra);\n        const bare = new (type);\n        return 1;\n",
+    ));
 
     assert_eq!(
         issues(code),
-        ["7:22 This expression is not supported yet in PHP#.", "8:23 This expression is not supported yet in PHP#."]
+        [
+            "9:39 `new` through a class value calls the class's constructor, so it names no other one.",
+            "10:22 This `new` without arguments is not supported yet in PHP#.",
+        ]
     );
 }
 
@@ -3679,20 +3693,13 @@ fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_not_supp
 }
 
 /// Every example of spec sections 11 and 25 is in the slice: type parameters on a class, an interface and a method,
-/// bounds, generic types, `Class<T>`, and type arguments on `new` and on a call. Section 11.1's `in` and `out`, and
-/// section 11's `value is TItem`, which needs `TItem`'s type argument while the code runs, are not supported yet.
+/// bounds, generic types, `Class<T>`, type arguments on `new` and on a call, `value is TItem`, and section 11.1's `in`
+/// and `out`.
 #[test]
-fn the_generics_examples_of_the_spec_are_in_the_slice_but_variance_and_a_test_of_a_type_parameter() {
+fn the_generics_examples_of_the_spec_are_in_the_slice() {
     let code = "namespace App.Tenant;\n\nimport Illuminate.Database.Eloquent.Model;\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    public TItem first(List<TItem> items) => items[0];\n}\n\npublic class Repository\n{\n    private Map<string, Class<Element>> elements = [:];\n\n    public PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query) => new PaginatedList<TItem>(query.rows());\n\n    public void share<TItem : DatabaseEntity & Shareable>(TItem item, Any body)\n    {\n        const page = new PaginatedList<Order>(this.rows());\n        const payload = Json.decode<WebhookPayload>(body);\n        const found = this?.find<Order>(1);\n    }\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n}\n\npublic interface Validator<in TItem>\n{\n    bool check(TItem item);\n}\n\npublic interface Source<out TItem>\n{\n    TItem next();\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class Inbox\n{\n    public bool holds<TItem>(List<TItem> items, Any value) => value is TItem;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "26:28 An `in` type parameter is not supported yet in PHP#.",
-            "31:25 An `out` type parameter is not supported yet in PHP#.",
-            "42:72 This type is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 /// A type parameter's name is `T`, or `T` and an uppercase letter, as C# names them, spec section 11.
@@ -3740,20 +3747,16 @@ fn a_type_parameter_list_that_declares_a_name_twice_is_an_error() {
 }
 
 /// Only a class or an interface declares variance, spec section 11.1, so `in` or `out` on a method's type parameter
-/// is an error. On a class's or an interface's, it is not supported yet: the engine checks a generic object's type
-/// arguments exactly, so a marker would let the checker accept a call the engine refuses.
+/// is an error, and on a class's or an interface's is not.
 #[test]
-fn in_or_out_is_not_supported_yet_and_an_error_on_a_method_type_parameter() {
+fn in_or_out_is_an_error_only_on_a_method_type_parameter() {
     let code = "namespace App.Tenant;\n\npublic class Box<out TItem, in TOther>\n{\n    public void run<out T, in TKey, TValue>() { }\n}\n\npublic interface Source<out TItem>\n{\n    TItem next<in T>();\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "3:18 An `out` type parameter is not supported yet in PHP#.",
-            "3:29 An `in` type parameter is not supported yet in PHP#.",
             "5:21 A method's type parameter takes no `out`: only a class or an interface declares variance, so remove it.",
             "5:28 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it.",
-            "8:25 An `out` type parameter is not supported yet in PHP#.",
             "10:16 A method's type parameter takes no `in`: only a class or an interface declares variance, so remove it.",
         ]
     );
@@ -3775,7 +3778,7 @@ fn a_bound_that_is_not_a_class_an_interface_or_a_generic_class_type_is_an_error(
             .collect::<Vec<_>>()
     );
     assert!(check("src/Report.sharp", code).iter().all(|issue| issue.notes
-        == ["A PHP# type parameter is a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<TItem : DatabaseEntity & Shareable>`."]));
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
 }
 
 /// A bound's type arguments are a parameter's types, so a `void` among them is refused as one, alone or joined with
@@ -3795,20 +3798,23 @@ fn a_type_argument_of_a_bound_is_never_void() {
 }
 
 /// A generic type goes wherever a type goes. `Map`'s key rule applies to `Map` alone, `Class<T>` takes a class, an
-/// interface or a type parameter, a class value with type arguments is not supported yet, a type argument is never
-/// `void`, and a type parameter takes no type arguments. The analyzer checks a generic class's arity and bounds.
+/// interface or a type parameter, a class value may carry its type arguments, a type argument is never `void`, and a
+/// type parameter takes no type arguments. The analyzer checks a generic class's arity and bounds, and refuses a class
+/// value as a `Map` key as it refuses one in a `Map` literal.
 #[test]
 fn a_generic_type_goes_wherever_a_type_goes_with_the_type_arguments_its_name_takes() {
-    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Order?, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Store\n{\n    private PaginatedList<Order?, Line> pages;\n    private Map<Order?, int> sizes = [:];\n    private Class<int> kind;\n    private Map<string, Class<List<int>>> kinds = [:];\n    private PaginatedList<void> nothing;\n    private Map<string, Class<PaginatedList<Order>>> named = [:];\n    private Map<Class<PaginatedList<Order>>, int> counts = [:];\n    private Map<Class<Order>, int> plain = [:];\n\n    public PaginatedList<Order> run<TItem>(Class<Order> type, Class<TItem> mine, PaginatedList<Map<string, Order>> pages)\n    {\n        PaginatedList<Line>? kept = null;\n        Class<PaginatedList<TItem>> pageType = typeof(PaginatedList<TItem>);\n        const none = typeof(PaginatedList<void>);\n        const own = typeof(TItem<int>);\n        return new PaginatedList<Order>(type);\n    }\n\n    public void take<TItem>(TItem<Order> value) { }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "6:17 A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value.",
             "7:19 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
-            "8:31 A class value with type arguments is not supported yet in PHP#.",
+            "8:31 `Class`'s type argument is a class, an interface or a type parameter, as in `Class<Order>`.",
             "9:27 A type argument cannot be `void`: `void` is only a return type.",
-            "17:29 A type parameter takes no type arguments: write `TItem`.",
+            "18:43 A type argument cannot be `void`: `void` is only a return type.",
+            "19:33 A type parameter takes no type arguments: write `typeof(TItem)`.",
+            "23:29 A type parameter takes no type arguments: write `TItem`.",
         ]
     );
 }
@@ -3829,90 +3835,56 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
     );
 }
 
-/// The engine does not read type arguments while the code runs until R3, so what reads one is not supported yet: `is`,
-/// `as` and a `match` arm of a type parameter or of a class with type arguments, which PHP has no test of, and
-/// `typeof`, `new` and a catch clause of a type parameter, alone or in a union.
+/// What reads a type argument runs in a body: `is`, `as` and a `match` arm of a type parameter or of a class with type
+/// arguments, `typeof`, `new`, a static member of a type parameter, and a catch clause of one, alone or in a union. A
+/// constant value has no type argument to read, and `new TItem` names none, because its type argument carries its own.
 #[test]
-fn what_needs_a_type_argument_while_the_code_runs_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public bool run<TItem>(Any value, List<TItem> items)\n    {\n        const a = value is TItem;\n        const b = value is TItem item;\n        const c = value as TItem;\n        const i = match (value) { TItem => 1, default => 0 };\n        const j = typeof(TItem);\n        const k = new TItem(value);\n        try {\n        } catch (TItem failure) {\n        }\n        try {\n        } catch (RuntimeException | TItem failure) {\n        }\n        const d = value is PaginatedList<Order> page;\n        const e = value as PaginatedList<Order>;\n        const f = match (value) { PaginatedList<Order> page => 1, default => 0 };\n        return a;\n    }\n}\n";
+fn a_type_argument_is_read_in_a_body_and_never_in_a_constant() {
+    let code = "namespace App.Tenant;\n\nclass Box<TItem>\n{\n    public bool run<TKey>(Any value, List<TItem> items)\n    {\n        const a = value is TItem item;\n        const b = value as TKey;\n        const c = match (value) { TItem => 1, PaginatedList<Order> page => 2, default => 0 };\n        const d = typeof(TItem);\n        const e = new TKey(value);\n        const f = TItem.make(value);\n        const g = TItem.LIMIT;\n        TKey.count = g;\n        try {\n        } catch (TItem failure) {\n        } catch (RuntimeException | TKey failure) {\n        }\n        return value is PaginatedList<Order> page;\n    }\n\n    public string named(string name = typeof(TItem)) => name;\n\n    public int limit(int size = TItem.LIMIT) => size;\n\n    public Any made(Any value) => new TItem<int>(value);\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "7:28 This type is not supported yet in PHP#.",
-            "8:28 This type is not supported yet in PHP#.",
-            "9:28 This type is not supported yet in PHP#.",
-            "10:35 This type is not supported yet in PHP#.",
-            "11:19 `typeof(TItem)` is not supported yet in PHP#.",
-            "12:19 `new TItem` is not supported yet in PHP#.",
-            "14:18 `catch (TItem)` is not supported yet in PHP#.",
-            "17:37 `catch (RuntimeException | TItem)` is not supported yet in PHP#.",
-            "19:28 This type is not supported yet in PHP#.",
-            "20:28 This type is not supported yet in PHP#.",
-            "21:35 This type is not supported yet in PHP#.",
+            "22:39 `typeof(TItem)` is not a constant: it reads the type argument the code runs with.",
+            "24:33 `TItem.LIMIT` is not a constant: it reads the type argument the code runs with.",
+            "26:44 `TItem` already carries the type arguments of the type it stands for.",
         ]
     );
 }
 
-/// A static member reached through a type parameter, as in `TItem.make()`, reads the type argument while the code
-/// runs, which R3 compiles, so it is not supported yet.
+/// Spec section 11 gives each type argument of a generic class its own static members, as C# does, so a static field,
+/// property or method uses the class's type parameters, in its signature and in its body, as `Box<int>.wrap(1)` gives
+/// them.
 #[test]
-fn a_static_member_of_a_type_parameter_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Box<TItem>\n{\n    public int run<TKey>(int extra)\n    {\n        TItem.make(extra);\n        const limit = TItem.LIMIT;\n        TItem.count = limit;\n        return TKey.count(extra);\n    }\n}\n";
+fn a_static_member_uses_its_class_type_parameters() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    private static int count = 0;\n\n    public static List<TItem> seen { get; set; } = [];\n\n    private static TItem? last = null;\n\n    public static List<TItem> wrap(TItem item) => [item];\n\n    public static int size()\n    {\n        List<TItem> items = [];\n        return items.count();\n    }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 A static member of `TItem` is not supported yet in PHP#.",
-            "8:23 A static member of `TItem` is not supported yet in PHP#.",
-            "9:9 A static member of `TItem` is not supported yet in PHP#.",
-            "10:16 A static member of `TKey` is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// G1 erases type arguments, so every `Box<…>` shares one static member, and a static method uses none of its class's
-/// type parameters: not in its signature nor in its body.
+/// A named constructor takes its class's type arguments where `new` names them, so a generic class declares one as a
+/// class without type parameters does, using its type parameters.
 #[test]
-fn a_static_member_cannot_use_its_class_type_parameters() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public static List<TItem> wrap(TItem item) => [item];\n\n    public static int count()\n    {\n        List<TItem> items = [];\n        return items.count();\n    }\n\n    public TItem? first(TItem item) => item;\n}\n";
-    let refusal = "A static member can't use `TItem`, because every `Box<…>` shares it.";
-
-    assert_eq!(issues(code), [format!("5:24 {refusal}"), format!("5:36 {refusal}"), format!("9:14 {refusal}")]);
-}
-
-/// Spec section 11 gives each type argument its own statics, as C# does, and the engine keeps one for every type
-/// argument, so a static field or property of a generic class is not supported yet, whatever its type. A static
-/// method and a constant run the same for every type argument, so they stay, and a class without type parameters
-/// keeps its static properties.
-#[test]
-fn a_static_property_of_a_generic_class_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\npublic class Counter<TItem>\n{\n    private static int count = 0;\n\n    public static int total { get; set; }\n\n    private static TItem? last = null;\n\n    public const int LIMIT = 3;\n\n    public static int limit() => Counter.LIMIT;\n}\n\npublic class Plain\n{\n    private static int count = 0;\n\n    public static int total { get; set; }\n}\n";
-    let refusal = "A static property is not supported yet in a generic class, because every `Counter<…>` shares it.";
-
-    assert_eq!(issues(code), [format!("5:13 {refusal}"), format!("7:12 {refusal}"), format!("9:13 {refusal}")]);
-}
-
-/// A named constructor runs as a static method, which a generic class's type arguments don't reach yet, so a generic
-/// class declares none. A class without type parameters keeps its named constructors.
-#[test]
-fn a_named_constructor_of_a_generic_class_is_not_supported_yet() {
+fn a_generic_class_declares_a_named_constructor() {
     let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public Box(public TItem item { get; }) { }\n\n    public Box.of(TItem item) : this(item) { }\n}\n\npublic class Plain\n{\n    public Plain(public int item { get; }) { }\n\n    public Plain.of(int item) : this(item) { }\n}\n";
 
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A class constant holds one value for every type argument, so its type uses none of its class's type parameters, nor
+/// `Self`, which carries them: the refusal names every type parameter `Self` carries.
+#[test]
+fn a_class_constant_cannot_use_its_class_type_parameters() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public const TItem EMPTY = 1;\n\n    public const int SIZE = 1;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public const Self? NONE = null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public const Self? NONE = null;\n}\n";
+
     assert_eq!(
         issues(code),
         [
-            "7:16 A named constructor is not supported yet in a generic class, because it runs as a static method every `Box<…>` shares."
+            "5:18 A constant can't use `TItem`, because every `Box<…>` shares it.",
+            "12:18 A constant can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
+            "17:18 A constant can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
         ]
     );
-}
-
-/// A class constant is a static member too, so its type uses none of its class's type parameters.
-#[test]
-fn a_class_constant_cannot_use_its_class_type_parameters() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public const TItem EMPTY = 1;\n\n    public const int SIZE = 1;\n}\n";
-
-    assert_eq!(issues(code), ["5:18 A static member can't use `TItem`, because every `Box<…>` shares it."]);
 }
 
 /// A static method's own type parameters are its own, so it uses them as any method does.
@@ -3924,21 +3896,16 @@ fn a_static_method_uses_its_own_type_parameters() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// `Self` is the class with its own type parameters, so a static member of a generic class can't return it or create
-/// one with `new Self()`, as it can't name `TItem`: the refusal names `Self` and every type parameter it carries. PHP's
-/// `self` there keeps its own refusal. A static member of a class without type parameters returns `Self`.
+/// `Self` is the class with its own type parameters, so a static member of a generic class returns it and creates one
+/// with `new Self()`, as `Box<int>.make()` makes a `Box<int>`. PHP's `self` there keeps its own refusal.
 #[test]
-fn a_static_member_of_a_generic_class_cannot_return_self() {
-    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public static Self make() => new Self();\n\n    public static self? none() => null;\n}\n\npublic class Plain\n{\n    public required Plain()\n    {\n    }\n\n    public static Self make() => new Self();\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n\npublic class Triple<TFirst, TSecond, TThird>\n{\n    public static Self? none() => null;\n}\n";
+fn a_static_member_of_a_generic_class_returns_self() {
+    let code = "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n    public required Box()\n    {\n    }\n\n    public static Self make() => new Self();\n\n    public static self? none() => null;\n}\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "9:19 A static member can't use `Self`, because every `Box<…>` shares it and `Self` carries `TItem`.",
-            "9:38 A static member can't use `Self`, because every `Box<…>` shares it and `Self` carries `TItem`.",
             "11:19 PHP# has no `self`: write the class's own name, `Box`, for the declaring class, or `Self` for the class a static method is called on.",
-            "25:19 A static member can't use `Self`, because every `Pair<…>` shares it and `Self` carries `TFirst` and `TSecond`.",
-            "30:19 A static member can't use `Self`, because every `Triple<…>` shares it and `Self` carries `TFirst`, `TSecond` and `TThird`.",
         ]
     );
 }
@@ -4114,6 +4081,38 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
         [
             "7:28 A type pattern is never nullable: null never matches a type.",
             "8:28 `as` converts to a type that is not nullable or `void`.",
+        ]
+    );
+}
+
+/// A function value keeps no type while the code runs, so `is`, `as` and a `match` arm of a function type are errors,
+/// alone or in a union, while `Any` and a union of types with a test are patterns.
+#[test]
+fn a_type_test_of_a_function_type_is_an_error() {
+    let code = leak(method(
+        "        const a = extra is Function<int(int)>;\n        const b = extra as Function<int(int)>;\n        const c = match (extra) { int|Function<int()> f => 1, default => 2 };\n        const d = extra is Any;\n        const e = extra is int|string n;\n        const f = extra as int|string;\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:28 A function type can't be tested: a function value doesn't keep its type while the code runs.",
+            "8:28 A function type can't be tested: a function value doesn't keep its type while the code runs.",
+            "9:39 A function type can't be tested: a function value doesn't keep its type while the code runs.",
+        ]
+    );
+}
+
+/// A class value is a string with no test, so `as` refuses its type and names every type it converts to.
+#[test]
+fn an_as_to_a_type_without_a_test_names_the_types_as_converts_to() {
+    let code = leak(method("        const a = extra as Class<Report>;\n        return extra;\n"));
+
+    let notes: Vec<_> = check("src/Report.sharp", code).into_iter().flat_map(|issue| issue.notes).collect();
+    assert_eq!(
+        notes,
+        [
+            "`as` converts to `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`."
         ]
     );
 }
@@ -4429,7 +4428,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const` and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, and `try` with `catch` and `finally`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `exit(code)`, `typeof(Class)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(

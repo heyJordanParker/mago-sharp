@@ -44,6 +44,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::written_static_property;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
@@ -53,6 +54,7 @@ use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::constant_access::field_storage;
+use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
@@ -76,7 +78,6 @@ use crate::resolver::method::report_non_documented_method;
 use crate::resolver::method::report_non_existent_method;
 use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
-use crate::resolver::static_property::StaticProperty;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
@@ -626,7 +627,9 @@ where
             Ok(())
         }
         Expression::Access(Access::Property(access)) => {
-            match StaticProperty::from_property_access(access, context.resolved_names) {
+            match written_static_property(context, block_context, access) {
+                // Reading `Counter.items` reported its missing type arguments, and the write back would again.
+                Some(static_property) if bare_generic_class(context, static_property.class).is_some() => Ok(()),
                 Some(static_property) => static_property_assignment::analyze(
                     context,
                     block_context,

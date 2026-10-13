@@ -23,9 +23,7 @@ use mago_reporting::Level;
 use mago_span::HasPosition;
 use mago_span::HasSpan;
 use mago_span::Span;
-use mago_syntax::cst::Access;
 use mago_syntax::cst::As;
-use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::LocalIdentifier;
@@ -69,6 +67,7 @@ use crate::utils::misc::check_for_paradox;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
 use crate::utils::names::display_missing_imports;
+use crate::utils::quoted_source;
 
 pub mod access;
 pub mod argument_list;
@@ -261,6 +260,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                     artifacts,
                 ),
                 Expression::TypeOf(expr) => expr.analyze(context, block_context, artifacts),
+                Expression::GenericClass(expr) => expr.analyze(context, block_context, artifacts),
                 Expression::List(list_expr) => {
                     context.collector.report_with_code(
                     IssueCode::ListUsedInReadContext,
@@ -372,6 +372,19 @@ where
     let mut is_refused = false;
     for hint in hints {
         is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
+
+        // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any` or of a
+        // union is `instanceof` a name spanning the whole type, and narrows to the type written, which the analysis
+        // records as the type the test reads.
+        let reads_type_arguments = match hint {
+            Hint::Identifier(name) => context.resolved_names.is_type_parameter(name),
+            Hint::Generic(_) | Hint::Mixed(_) | Hint::Union(_) => has_type_test(hint),
+            _ => false,
+        };
+        if reads_type_arguments {
+            let tested = get_type_from_hint(context, block_context, artifacts, hint);
+            artifacts.record_tested_type(hint, tested);
+        }
     }
 
     let Some(PhpShape { php, temporaries, tests }) =
@@ -432,6 +445,25 @@ where
         }
         _ => None,
     };
+    // An `as`, or an `is` of a type, whose value is always of the type tests nothing. PHP# says so in the words the user
+    // wrote, in place of PHP's report on the conditional it runs as.
+    let redundant_test = match node {
+        Node::Expression(Expression::Is(is)) if let Pattern::Type(TypePattern { hint, .. }) = is.pattern => {
+            Some((is.value, hint.span(), is.is.span.join(is.pattern.span())))
+        }
+        Node::Expression(Expression::As(r#as)) => {
+            Some((r#as.value, r#as.hint.span(), r#as.r#as.span.join(r#as.hint.span())))
+        }
+        _ => None,
+    }
+    .filter(|(value, hint, _)| {
+        // A value whose expression is refused has no type to be already of.
+        artifacts.get_expression_type(*value).is_some_and(|value| !is_refused_type(value))
+            && tests.iter().any(|(pattern, test)| {
+                pattern.contains(&hint.start)
+                    && artifacts.get_rc_expression_type(*test).is_some_and(|test| test.is_true())
+            })
+    });
     let is_code = |issue: &Issue, code: IssueCode| issue.code.as_deref() == Some(code.as_str());
     let issues: Vec<Issue> = issues
         .into_iter()
@@ -449,9 +481,37 @@ where
                 && (!is_code(issue, IssueCode::ReplacedBySyntax) || called.is_none())
                 && (!redundant || called.is_none_or(|call| call.value != b"is_object"))
                 && (!always_true
-                    || span.is_none_or(|span| !last_arm_test.is_some_and(|test| test.contains(&span.start))))
+                    || span.is_none_or(|span| {
+                        !last_arm_test.is_some_and(|test| test.contains(&span.start))
+                            && !redundant_test.is_some_and(|(value, _, test)| {
+                                test.contains(&span.start)
+                                    || (span.start == value.span().start && span.end > value.span().end)
+                            })
+                    }))
         })
         .collect();
+
+    if let Some((value, hint, test)) = redundant_test {
+        let value_text = quoted_source(context, value.span());
+        let hint_text = quoted_source(context, hint);
+        let article =
+            if hint_text.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+        let (consequence, help) = if let Node::Expression(Expression::As(_)) = node {
+            ("changes nothing", format!("Write `{value_text}` alone."))
+        } else {
+            ("is always true", "Remove the test.".to_owned())
+        };
+
+        context.collector.report_with_code(
+            IssueCode::RedundantTypeComparison,
+            Issue::help(format!(
+                "`{value_text}` is already {article} `{hint_text}`, so `{}` {consequence}.",
+                quoted_source(context, test)
+            ))
+            .with_annotation(Annotation::primary(test).with_message("Tests nothing."))
+            .with_help(help),
+        );
+    }
 
     if let Node::Expression(Expression::PatternMatch(pattern_match))
     | Node::Statement(Statement::PatternMatch(pattern_match)) = node
@@ -699,40 +759,26 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Parenthesized<'arena> {
 }
 
 /// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, it is `!x is T`, it
-/// is `typeof` or `new` of a type parameter, it tests or converts a value to a type with no
-/// [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as` or a `match` arm, or it reads or calls a
-/// member of a type parameter or of `typeof` of one through any chain of property reads. Its type is the error type in
-/// PHP# and `never` in PHP, a variable its `is` pattern names holds the type written beside it, and it adds no other
+/// calls a named constructor of a type parameter, or it tests or converts a value to a type with no
+/// [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as` or a `match` arm. Its type is the error type
+/// in PHP# and `never` in PHP, a variable its `is` pattern names holds the type written beside it, and it adds no other
 /// issue.
 pub(crate) fn is_refused<A>(expression: &Expression<'_>, context: &Context<'_, '_, A>) -> bool
 where
     A: Arena,
 {
-    let resolved_names = context.resolved_names;
-    let mut object = match expression {
-        Expression::Error(_) => return true,
-        Expression::TypeOf(type_of) => return resolved_names.is_type_parameter(&type_of.class),
+    match expression {
+        Expression::Error(_) => true,
         Expression::Instantiation(instantiation) => {
-            return matches!(instantiation.class, Expression::Identifier(class) if resolved_names.is_type_parameter(class));
+            instantiation.constructor.is_some()
+                && matches!(instantiation.class, Expression::Identifier(class) if context.resolved_names.is_type_parameter(class))
         }
         Expression::Is(is) => {
-            return matches!(is.value, Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)))
-                || type_pattern_hints(is.pattern).into_iter().any(|hint| is_untestable(hint, context));
+            matches!(is.value, Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)))
+                || type_pattern_hints(is.pattern).into_iter().any(|hint| !has_type_test(hint))
         }
-        Expression::As(r#as) => return is_untestable(r#as.hint, context),
-        Expression::PatternMatch(pattern_match) => return is_refused_match(pattern_match, context),
-        Expression::Access(Access::Property(access)) => access.object,
-        Expression::Call(Call::Method(call)) => call.object,
-        _ => return false,
-    };
-
-    while let Expression::Access(Access::Property(access)) = object {
-        object = access.object;
-    }
-
-    match object {
-        Expression::TypeOf(type_of) => resolved_names.is_type_parameter(&type_of.class),
-        Expression::ConstantAccess(access) => resolved_names.is_type_parameter(&access.name),
+        Expression::As(r#as) => !has_type_test(r#as.hint),
+        Expression::PatternMatch(pattern_match) => is_refused_match(pattern_match),
         _ => false,
     }
 }
@@ -746,21 +792,8 @@ pub(crate) fn is_refused_type(union: &TUnion) -> bool {
 
 /// Whether an arm of `pattern_match`, an expression or a statement, tests its value against a type no test can run
 /// on yet.
-pub(crate) fn is_refused_match<A>(pattern_match: &PatternMatch<'_>, context: &Context<'_, '_, A>) -> bool
-where
-    A: Arena,
-{
-    match_arm_hints(pattern_match).into_iter().any(|hint| is_untestable(hint, context))
-}
-
-/// Whether PHP has [no test](has_type_test) of `hint`, so no type test of it can run yet.
-fn is_untestable<A>(hint: &Hint<'_>, context: &Context<'_, '_, A>) -> bool
-where
-    A: Arena,
-{
-    let resolved_names = context.resolved_names;
-
-    !has_type_test(hint, &|span| resolved_names.is_type_parameter(&span))
+pub(crate) fn is_refused_match(pattern_match: &PatternMatch<'_>) -> bool {
+    match_arm_hints(pattern_match).into_iter().any(|hint| !has_type_test(hint))
 }
 
 /// The type of each type pattern in `pattern`, itself or a pattern inside it.

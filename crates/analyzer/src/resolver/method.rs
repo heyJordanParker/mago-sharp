@@ -47,6 +47,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::constant_access::field_storage;
+use crate::expression::instantiation::bare_generic_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::get_localized_property_type;
@@ -63,6 +64,7 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_method_name;
 use crate::utils::names::display_sharp_collection;
 use crate::utils::names::display_type;
+use crate::utils::template::check_private_method_reach;
 use crate::visibility::check_method_visibility;
 use crate::visibility::is_method_visible;
 use crate::visibility::is_visible_from_scope;
@@ -454,14 +456,15 @@ where
                     }
                 }
 
-                // `Self` on a PHP# receiver typed by a type parameter is that type parameter, spec section 11.
-                if context.dialect.is_sharp()
-                    && let TAtomic::GenericParameter(parameter) = written_atomic
-                {
-                    for resolved_method in &mut resolved_methods {
-                        if resolved_method.declaring_object.is_none() {
-                            resolved_method.static_class_type = StaticClassType::Generic(parameter.clone());
-                        }
+                for resolved_method in &mut resolved_methods {
+                    check_private_method_reach(context, object, &resolved_method.method_identifier, selector.span());
+
+                    // `Self` on a PHP# receiver typed by a type parameter is that type parameter, spec section 11.
+                    if context.dialect.is_sharp()
+                        && resolved_method.declaring_object.is_none()
+                        && let TAtomic::GenericParameter(parameter) = written_atomic
+                    {
+                        resolved_method.static_class_type = StaticClassType::Generic(parameter.clone());
                     }
                 }
                 result.resolved_methods.extend(resolved_methods);
@@ -1284,15 +1287,34 @@ where
                     .is_some_and(|metadata| metadata.flags.is_sharp())
             };
 
-            // `Class.name` is a static property of the class it names. `this` keeps no expression type: it is the
-            // `$this` local, the scope's class with its type parameters. A property plain PHP declares keeps PHP's
-            // array, which takes either collection literal.
+            // `Class.name` is a static property of the class it names, and `Counter<Order>.items` has `Counter`'s type
+            // parameters given by its type arguments, as `Orders.items` has them given by `Orders : Counter<Order>`.
+            // `this` keeps no expression type: it is the `$this` local, the scope's class with its type parameters. A
+            // property plain PHP declares keeps PHP's array, which takes either collection literal.
             if let Some(class) = context.resolved_names.static_property_class(access) {
                 let class = context.resolved_names.get(&class.name);
+                let declared = is_declared_in_sharp(class)
+                    .then(|| context.codebase.get_property_type(class, property_name.as_bytes()))??;
+                // A bare `Counter.items`, refused where it is read, reads as its bounds.
+                let bounds = bare_generic_class(context, access.object).map(|(_, bounds)| bounds);
+                let type_arguments = artifacts
+                    .get_expression_type(access.object)
+                    .and_then(TUnion::get_single_named_object)
+                    .and_then(|object| object.get_type_parameters())
+                    .or(bounds.as_deref());
+                let class_metadata = context.codebase.get_class_like(class)?;
+                let declaring_class = context
+                    .codebase
+                    .get_declaring_property_class(class, property_name.as_bytes())
+                    .and_then(|declaring_class| context.codebase.get_class_like(declaring_class.as_bytes()))?;
 
-                is_declared_in_sharp(class)
-                    .then(|| context.codebase.get_property_type(class, property_name.as_bytes()))?
-                    .cloned()
+                Some(localize_property_type(
+                    context,
+                    declared,
+                    type_arguments.unwrap_or_default(),
+                    class_metadata,
+                    declaring_class,
+                ))
             } else {
                 let receiver = if is_this(access.object, context.resolved_names) {
                     block_context.locals.get(&word("$this"))?.as_ref()

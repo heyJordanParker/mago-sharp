@@ -175,6 +175,7 @@ enum NodeKind: string
     case Literal = 'Literal';
     case Pipe = 'Pipe';
     case TypeOf = 'TypeOf';
+    case GenericClass = 'GenericClass';
     case LiteralFloat = 'LiteralFloat';
     case LiteralInteger = 'LiteralInteger';
     case LiteralString = 'LiteralString';

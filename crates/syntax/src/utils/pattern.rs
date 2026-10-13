@@ -91,21 +91,18 @@ pub struct PhpShape<'arena> {
 /// Builds, in `arena`, the PHP a PHP# `is`, `as` or `match` runs as.
 ///
 /// Returns `None` for any other node, and for a form the slice refuses, such as a nullable type pattern.
-/// `is_local` says whether the bare name at a span is a local or a parameter, and `is_type_parameter` whether it is a
-/// type parameter. `temporaries` is how many hidden variables the forms around this one hold, so the new ones are
-/// numbered after them.
+/// `is_local` says whether the bare name at a span is a local or a parameter. `temporaries` is how many hidden
+/// variables the forms around this one hold, so the new ones are numbered after them.
 pub fn php_shape<'arena, A>(
     arena: &'arena A,
     node: Node<'_, 'arena>,
     temporaries: u32,
     is_local: &dyn Fn(Span) -> bool,
-    is_type_parameter: &dyn Fn(Span) -> bool,
 ) -> Option<PhpShape<'arena>>
 where
     A: Arena,
 {
-    let mut shape =
-        Shape { arena, is_local, is_type_parameter, temporaries, first: temporaries, tests: std::vec::Vec::new() };
+    let mut shape = Shape { arena, is_local, temporaries, first: temporaries, tests: std::vec::Vec::new() };
     let php = match node {
         Node::Expression(Expression::Is(is)) => Node::Expression(shape.is(is)?),
         Node::Expression(Expression::As(r#as)) => Node::Expression(shape.r#as(r#as)?),
@@ -136,29 +133,57 @@ pub fn called_function(node: Node<'_, '_>) -> Option<LocalIdentifier<'static>> {
 
 /// Whether a type pattern or an `as` has PHP that tests a value against `hint`.
 ///
-/// A scalar type has `is_int`, `is_float`, `is_string` or `is_bool`, and a class has `instanceof`. `php_shape` builds no
-/// PHP for a form that tests any other type, so the semantic check refuses it. `is_type_parameter` says whether the
-/// name at a span is a type parameter, which no PHP tests until the engine reads type arguments.
+/// A scalar type has `is_int`, `is_float`, `is_string` or `is_bool`, and a class or a type parameter has `instanceof`.
+/// `Any`, a generic class with its type arguments, a `List`, `Map` or `Set` with its element types, and a union of
+/// types with a test have `instanceof` a name that spans the type. The analyzer records the type each
+/// stands for, and the bridge lowers that test to the engine's, which reads the type arguments the code runs with and
+/// walks a collection's elements. `php_shape` builds no PHP for a form that tests any other type, so the semantic check
+/// refuses it.
 #[must_use]
-pub fn has_type_test(hint: &Hint<'_>, is_type_parameter: &dyn Fn(Span) -> bool) -> bool {
-    type_test_of(hint, is_type_parameter).is_some()
+pub fn has_type_test(hint: &Hint<'_>) -> bool {
+    type_test_of(hint).is_some()
 }
 
 /// The PHP that tests a value against a type.
 enum TypeTest<'arena> {
     /// A call to the function that tests a scalar type.
     Scalar(LocalIdentifier<'static>),
-    /// `instanceof` the class.
+    /// `instanceof` the class. For a type parameter, a generic class with its type arguments and a collection, the
+    /// name spans the whole type, where the analyzer records the type the test reads and the bridge lowers the engine's
+    /// test of it.
     Class(Identifier<'arena>),
 }
 
 /// The PHP test of `hint`, which both `has_type_test` and `php_shape` read, so the checker accepts exactly the types
 /// the bridge lowers.
-fn type_test_of<'arena>(hint: &Hint<'arena>, is_type_parameter: &dyn Fn(Span) -> bool) -> Option<TypeTest<'arena>> {
+fn type_test_of<'arena>(hint: &Hint<'arena>) -> Option<TypeTest<'arena>> {
     match hint {
-        Hint::Identifier(class) if !is_type_parameter(class.span()) => Some(TypeTest::Class(*class)),
+        Hint::Identifier(class) => Some(TypeTest::Class(*class)),
+        Hint::Generic(generic) if is_engine_tested(hint) => {
+            Some(TypeTest::Class(Identifier::Local(LocalIdentifier { span: hint.span(), value: generic.name.value })))
+        }
+        hint if is_engine_tested(hint) => {
+            Some(TypeTest::Class(Identifier::Local(LocalIdentifier { span: hint.span(), value: b"" })))
+        }
         hint => scalar_test(hint).map(TypeTest::Scalar),
     }
+}
+
+/// Whether the engine's test of the type the analyzer records tests `hint`: `Any`, a generic class or a collection
+/// with its type arguments, and a union whose every member has a test. A class value is a string with no test, and a
+/// union with `null` is nullable, which no type pattern is.
+fn is_engine_tested(hint: &Hint<'_>) -> bool {
+    match hint {
+        Hint::Mixed(_) => true,
+        Hint::Generic(generic) => generic.name.value != b"Class",
+        Hint::Union(union) => is_tested_member(union.left) && is_tested_member(union.right),
+        _ => false,
+    }
+}
+
+/// Whether a member of a union has a test of its own.
+fn is_tested_member(hint: &Hint<'_>) -> bool {
+    matches!(hint, Hint::Identifier(_)) || scalar_test(hint).is_some() || is_engine_tested(hint)
 }
 
 /// The function that tests a value against a scalar type, at the type's span.
@@ -177,7 +202,6 @@ fn scalar_test(hint: &Hint<'_>) -> Option<LocalIdentifier<'static>> {
 struct Shape<'shape, 'arena, A> {
     arena: &'arena A,
     is_local: &'shape dyn Fn(Span) -> bool,
-    is_type_parameter: &'shape dyn Fn(Span) -> bool,
     /// The number of the last hidden variable.
     temporaries: u32,
     first: u32,
@@ -478,13 +502,14 @@ where
         })
     }
 
-    /// `instanceof` for a class, and the scalar test for a scalar type.
+    /// `instanceof` for a class, a type parameter or a generic class with its type arguments, and the scalar test for
+    /// a scalar type.
     fn type_test(
         &self,
         hint: &'arena Hint<'arena>,
         operand: &'arena Expression<'arena>,
     ) -> Option<&'arena Expression<'arena>> {
-        Some(match type_test_of(hint, self.is_type_parameter)? {
+        Some(match type_test_of(hint)? {
             TypeTest::Scalar(function) => self.call(function, operand),
             TypeTest::Class(class) => self.binary(
                 operand,

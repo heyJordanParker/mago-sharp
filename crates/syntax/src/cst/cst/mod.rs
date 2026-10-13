@@ -158,6 +158,7 @@ pub use crate::cst::cst::identifier::LocalIdentifier;
 pub use crate::cst::cst::identifier::QualifiedIdentifier;
 pub use crate::cst::cst::inline::Inline;
 pub use crate::cst::cst::inline::InlineKind;
+pub use crate::cst::cst::instantiation::GenericClass;
 pub use crate::cst::cst::instantiation::Instantiation;
 pub use crate::cst::cst::keyword::Keyword;
 pub use crate::cst::cst::literal::Literal;

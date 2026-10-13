@@ -10,6 +10,7 @@ use mago_word::word;
 
 use mago_codex::ttype;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -21,6 +22,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Try;
+use mago_syntax::cst::built_in_generic_arity;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -32,6 +34,7 @@ use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
 use crate::statement::analyze_statements;
+use crate::statement::get_type_from_hint;
 use crate::statement::report_hint_type_arguments;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
@@ -196,7 +199,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
         for (i, catch_clause) in self.catch_clauses.iter().enumerate() {
             let mut catch_block_context = original_block_context.clone();
             catch_block_context.flags.set_has_returned(false);
-            let caught_classes = get_caught_classes(context, &catch_clause.hint);
+            let (caught_classes, caught_types) =
+                get_caught_classes(context, &catch_block_context, artifacts, &catch_clause.hint);
             if context.dialect.is_sharp() {
                 report_hint_type_arguments(context, &catch_block_context, artifacts, &catch_clause.hint);
             }
@@ -278,12 +282,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
 
             catch_block_context.clauses = vec![];
             if let Some(catch_variable) = catch_clause.variable.as_ref() {
-                let exception_type = TUnion::new(
-                    caught_classes
-                        .iter()
-                        .map(|caught_class| TAtomic::Object(TObject::Named(TNamedObject::new(*caught_class))))
-                        .collect(),
-                );
+                let mut exception_types: Vec<TAtomic> = Vec::new();
+                for caught_class in &caught_classes {
+                    match caught_types.get(caught_class) {
+                        Some(types) => exception_types.extend(types.iter().cloned()),
+                        None => exception_types.push(TAtomic::Object(TObject::Named(TNamedObject::new(*caught_class)))),
+                    }
+                }
+                exception_types.dedup();
+                let exception_type = TUnion::new(exception_types.into());
 
                 let catch_var_name = php_variable_name(catch_variable.name);
                 catch_block_context.locals.insert(catch_var_name, Rc::new(exception_type));
@@ -451,17 +458,87 @@ fn intersect_definitely_defined_locals(definitely_defined_locals: &mut Option<Wo
     }
 }
 
-fn get_caught_classes<'arena, A>(context: &mut Context<'_, 'arena, A>, hint: &Hint<'arena>) -> WordSet
+/// The classes a catch clause's `hint` catches, and the type each of them gives the caught value when it is not the
+/// class itself: a generic PHP# class with its type arguments, or a type parameter, which catches the classes of its
+/// bound and gives the value its own type. A hint that catches no class stands for `Throwable`.
+fn get_caught_classes<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    hint: &Hint<'arena>,
+) -> (WordSet, WordMap<Vec<TAtomic>>)
 where
     A: Arena,
 {
     let mut caught_identifiers: WordMap<Span> = WordMap::default();
+    let mut caught_types: WordMap<Vec<TAtomic>> = WordMap::default();
 
-    fn walk<'arena, A>(context: &mut Context<'_, 'arena, A>, hint: &Hint<'arena>, caught: &mut WordMap<Span>)
-    where
+    fn walk<'ctx, 'arena, A>(
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+        hint: &Hint<'arena>,
+        caught: &mut WordMap<Span>,
+        caught_types: &mut WordMap<Vec<TAtomic>>,
+    ) where
         A: Arena,
     {
         match hint {
+            Hint::Identifier(identifier) if context.resolved_names.is_type_parameter(identifier) => {
+                let parameter = get_type_from_hint(context, block_context, artifacts, hint);
+                let mut bound_classes: Vec<Word> = parameter
+                    .types
+                    .iter()
+                    .filter_map(|atomic| match atomic {
+                        TAtomic::GenericParameter(TGenericParameter { constraint, .. }) => Some(constraint),
+                        _ => None,
+                    })
+                    .flat_map(|constraint| constraint.types.iter())
+                    .filter_map(|bound| match bound {
+                        TAtomic::Object(TObject::Named(named)) => Some(named.name),
+                        _ => None,
+                    })
+                    .collect();
+                let throwable = word(b"Throwable");
+                if bound_classes.is_empty()
+                    || !bound_classes.iter().all(|class| {
+                        context.codebase.get_class_like(class.as_bytes()).is_some_and(|metadata| {
+                            metadata.kind.is_interface()
+                                || context.codebase.is_instance_of(class.as_bytes(), throwable.as_bytes())
+                        })
+                    })
+                {
+                    let name = mago_bytes::BytesDisplay(identifier.value());
+                    context.collector.report_with_code(
+                        IssueCode::CatchTypeNotThrowable,
+                        Issue::error(format!("`{name}` is caught, so its bound must be a `Throwable`."))
+                            .with_annotation(
+                                Annotation::primary(hint.span())
+                                    .with_message(format!("`{name}` may be a type that is never thrown.")),
+                            )
+                            .with_help(format!(
+                                "Bound `{name}` by an exception class or interface, as in `<{name} : RuntimeException>`."
+                            )),
+                    );
+                    bound_classes = vec![throwable];
+                }
+
+                for class in bound_classes {
+                    caught.entry(class).or_insert(hint.span());
+                    caught_types.entry(class).or_default().extend(parameter.types.iter().cloned());
+                }
+                artifacts.record_tested_type(hint, parameter);
+            }
+            Hint::Generic(generic)
+                if context.dialect.is_sharp() && built_in_generic_arity(generic.name.value).is_none() =>
+            {
+                let class = word(context.resolved_names.get(&generic.name));
+                let caught_type = get_type_from_hint(context, block_context, artifacts, hint);
+
+                caught.entry(class).or_insert(hint.span());
+                caught_types.entry(class).or_default().extend(caught_type.types.iter().cloned());
+                artifacts.record_tested_type(hint, caught_type);
+            }
             Hint::Identifier(identifier) => {
                 let name_bytes = context.resolved_names.get(identifier);
                 let name = mago_bytes::BytesDisplay(name_bytes);
@@ -488,8 +565,8 @@ where
                 }
             }
             Hint::Union(union_hint) => {
-                walk(context, union_hint.left, caught);
-                walk(context, union_hint.right, caught);
+                walk(context, block_context, artifacts, union_hint.left, caught, caught_types);
+                walk(context, block_context, artifacts, union_hint.right, caught, caught_types);
             }
             _ => {
                 context.collector.report_with_code(
@@ -510,7 +587,7 @@ where
         }
     }
 
-    walk(context, hint, &mut caught_identifiers);
+    walk(context, block_context, artifacts, hint, &mut caught_identifiers, &mut caught_types);
 
     let throwable = word(b"Throwable");
     let mut caught_classes: WordSet =
@@ -617,5 +694,5 @@ where
         caught_classes.insert(throwable);
     }
 
-    caught_classes
+    (caught_classes, caught_types)
 }

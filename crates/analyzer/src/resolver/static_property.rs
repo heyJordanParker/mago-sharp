@@ -7,6 +7,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -25,11 +26,16 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::instantiation::bare_generic_class;
+use crate::expression::instantiation::report_missing_type_arguments;
 use crate::expression::unary::cast_type_to_string;
+use crate::resolver::class_name::generic_class_type;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::property::PropertyResolutionResult;
 use crate::resolver::property::ResolvedProperty;
+use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
+use crate::resolver::property::static_member_type_arguments;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_variable_id;
 use crate::utils::names::display_class_like_name;
@@ -122,6 +128,17 @@ where
     {
         result.encountered_null = true;
     }
+    // `Counter<Order>.items` reads the statics of `Counter` with `Order` for its type parameter, spec section 11, and so
+    // does `type.items` through a `Class<Counter<Order>>`. A bare `Counter.items` names none: once reported, it reads as
+    // the bounds a plain PHP call of `Counter::reset()` runs with, so nothing reports again on what it reads.
+    let type_arguments: Option<Vec<TUnion>> = match generic_class_type(artifacts, class_expression) {
+        Some(class) => class.get_type_parameters().map(<[_]>::to_vec),
+        None => bare_generic_class(context, class_expression).map(|(class, bounds)| {
+            report_missing_type_arguments(context, class, class_expression.span());
+
+            bounds
+        }),
+    };
 
     let mut property_names = vec![];
 
@@ -200,7 +217,6 @@ where
             result.has_ambiguous_path = true;
             continue;
         };
-
         for property_name in &property_names {
             if let Some(resolved_property) = find_static_property_in_class(
                 context,
@@ -209,9 +225,21 @@ where
                 *property_name,
                 access.name.span(),
                 class_expression,
+                type_arguments.as_deref(),
                 for_assignment,
                 &mut result,
             ) {
+                if let Some(declaring_class) = resolved_property.declaring_class_id {
+                    record_statics_type_arguments(
+                        context,
+                        artifacts,
+                        access.span,
+                        fqcn,
+                        declaring_class,
+                        type_arguments.as_deref(),
+                    );
+                }
+
                 result.properties.push(resolved_property);
             }
         }
@@ -220,7 +248,26 @@ where
     Ok(result)
 }
 
-/// Finds a static property in a class, gets its type, and handles template localization.
+/// Records the type arguments the access at `span` reads the statics of `declaring_class` with, through `class`, which
+/// the bridge keys them by, when `declaring_class` is a generic PHP# class, spec section 11.
+pub(crate) fn record_statics_type_arguments<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    span: Span,
+    class: Word,
+    declaring_class: Word,
+    type_arguments: Option<&[TUnion]>,
+) where
+    A: Arena,
+{
+    if let Some(arguments) = static_member_type_arguments(context, class, declaring_class, type_arguments) {
+        artifacts.inferred_type_arguments.insert((span.start.offset, span.end.offset), arguments);
+    }
+}
+
+/// Finds a static property in a class, gets its type, and handles template localization: the class's type parameters
+/// in it are `type_arguments`, when the access writes them.
+#[allow(clippy::too_many_arguments)]
 fn find_static_property_in_class<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -228,6 +275,7 @@ fn find_static_property_in_class<'ctx, 'arena, A>(
     property_name: Word,
     name_span: Span,
     class_expr: &Expression<'arena>,
+    type_arguments: Option<&[TUnion]>,
     for_assignment: bool,
     result: &mut PropertyResolutionResult,
 ) -> Option<ResolvedProperty>
@@ -318,6 +366,25 @@ where
         return None;
     };
 
+    // Each type argument of a generic PHP# class keeps its own statics, which plain PHP can't name, so to plain PHP the
+    // class declares none, as the engine runs it.
+    if !context.dialect.is_sharp()
+        && property_metadata.flags.is_static()
+        && declaring_class_metadata.flags.is_sharp()
+        && !declaring_class_metadata.template_types.is_empty()
+    {
+        result.has_invalid_path = true;
+        report_non_existent_property(
+            context,
+            declaring_class_metadata.original_name,
+            property_name,
+            name_span,
+            class_expr.span(),
+        );
+
+        return None;
+    }
+
     if !property_metadata.flags.is_static() {
         let classname = declaring_class_metadata.original_name;
         let issue = if context.dialect.is_sharp() {
@@ -386,6 +453,19 @@ where
             ..Default::default()
         },
     );
+    // The type arguments the access writes, or else the ones `class_metadata`'s header gives a generic PHP# class it
+    // inherits the field from, as `Orders : Counter<Order>` gives `Orders.items` the type `List<Order>`.
+    if type_arguments.is_some()
+        || (declaring_class_metadata.flags.is_sharp() && class_metadata.name != declaring_class_metadata.name)
+    {
+        property_type = localize_property_type(
+            context,
+            &property_type,
+            type_arguments.unwrap_or_default(),
+            class_metadata,
+            declaring_class_metadata,
+        );
+    }
 
     Some(ResolvedProperty {
         property_span: property_metadata.name_span.or(property_metadata.span),

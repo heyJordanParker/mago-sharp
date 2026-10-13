@@ -946,9 +946,8 @@ fn analyze_and_compile_report_the_same_error_after_a_throw_in_a_sharp_file() {
             .map(str::to_owned)
             .collect()
     };
-    let expected = [
-        "src/App/Page.sharp:17:16:error - invalid-return-statement: Box<string> cannot be used as Box<int>.",
-    ];
+    let expected =
+        ["src/App/Page.sharp:17:16:error - invalid-return-statement: Box<string> cannot be used as Box<int>."];
 
     assert_eq!(errors(&analyzed), expected, "{}", String::from_utf8_lossy(&analyzed.stdout));
     assert_eq!(errors(&compiled), expected, "{}", String::from_utf8_lossy(&compiled.stdout));

@@ -34,6 +34,7 @@ use crate::invocation::MethodTargetContext;
 use crate::invocation::template_inference::infer_templates_for_method_call;
 use crate::statement::function_like::check_template_arguments;
 use crate::statement::get_type_from_hint;
+use crate::statement::report_hint_type_arguments;
 use crate::utils::names::display_class_like_name;
 use crate::utils::template::get_template_types_for_class_member;
 use mago_names::display_sharp_member;
@@ -100,8 +101,14 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
             template_result,
         );
 
+        // A subclass passes its type arguments to the declaring class, and PHP#'s `Counter<Order>.track(order)` writes
+        // the declaring class's own.
         if let Some(instance_type) = get_named_static_class_type(&method_context.class_type)
-            && !instance_type.name.as_bytes().eq_ignore_ascii_case(declaring_class_metadata.original_name.as_bytes())
+            && (instance_type.type_parameters.is_some()
+                || !instance_type
+                    .name
+                    .as_bytes()
+                    .eq_ignore_ascii_case(declaring_class_metadata.original_name.as_bytes()))
             && let Some(calling_class_metadata) = context.codebase.get_class_like(instance_type.name.as_bytes())
         {
             for (template_name, _) in &declaring_class_metadata.template_types {
@@ -330,7 +337,8 @@ pub fn seed_method_type_arguments<'ctx, A>(
 }
 
 /// Converts the type arguments PHP# writes on `new` or a method call with the caller's type parameters in scope,
-/// reports them unless they fit the `templates` that `owner` declares at `owner_span`, and seeds each into
+/// reports each as a type a body writes, then reports them unless they fit the `templates` that `owner` declares at
+/// `owner_span`, and seeds each into
 /// `template_result` as the shallowest bound of its template, so it wins over inference from the arguments as a
 /// receiver's type arguments do. Returns the type arguments when their number fits.
 pub fn seed_type_arguments<A>(
@@ -349,7 +357,11 @@ where
     let arguments: Vec<TUnion> = type_arguments
         .arguments
         .iter()
-        .map(|argument| get_type_from_hint(context, block_context, artifacts, argument))
+        .map(|argument| {
+            report_hint_type_arguments(context, block_context, artifacts, argument);
+
+            get_type_from_hint(context, block_context, artifacts, argument)
+        })
         .collect();
 
     if !check_template_arguments(
