@@ -8,6 +8,7 @@ use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::NamedConstructor;
+use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::TypeParameterList;
@@ -66,6 +67,8 @@ pub struct MethodParts<'ast, 'arena> {
     pub type_parameters: Option<&'ast TypeParameterList<'arena>>,
     pub parameter_list: &'ast FunctionLikeParameterList<'arena>,
     pub return_type_hint: Option<&'ast FunctionLikeReturnTypeHint<'arena>>,
+    /// The events a method listens to. An operator and a named constructor listen to none.
+    pub on: Option<&'ast On<'arena>>,
     pub body: &'ast MethodBody<'arena>,
     pub returns_value: bool,
     pub returns_by_reference: bool,
@@ -80,9 +83,10 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             span: method.span(),
             attribute_lists: &method.attribute_lists,
             modifiers: &method.modifiers,
-            type_parameters: method.type_parameters.as_ref(),
+            type_parameters: method.type_parameters,
             parameter_list: &method.parameter_list,
             return_type_hint: method.return_type_hint.as_ref(),
+            on: method.on.as_ref(),
             body: &method.body,
             returns_value: method.returns_value(),
             returns_by_reference: method.ampersand.is_some(),
@@ -102,6 +106,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             type_parameters: None,
             parameter_list: &operator.parameter_list,
             return_type_hint: Some(&operator.return_type_hint),
+            on: None,
             body: &operator.body,
             returns_value: true,
             returns_by_reference: false,
@@ -121,6 +126,7 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             type_parameters: None,
             parameter_list: &named_constructor.parameter_list,
             return_type_hint: None,
+            on: None,
             body: &named_constructor.body,
             returns_value: false,
             returns_by_reference: false,

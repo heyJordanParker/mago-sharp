@@ -99,6 +99,9 @@ pub enum ParseError {
     /// Type parameters written on a PHP# named constructor, as in `Plain.of<T>(T value)`, with its class's name, at the
     /// type parameters. A named constructor takes its class's type arguments, as Dart's does, and declares none.
     NamedConstructorTypeParametersInSharp(Box<str>, Span),
+    /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
+    /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are.
+    MiscasedKeywordInSharp(&'static str, Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -138,7 +141,8 @@ impl HasFileId for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::NamedConstructorTypeParametersInSharp(_, span) => span.file_id,
+            | ParseError::NamedConstructorTypeParametersInSharp(_, span)
+            | ParseError::MiscasedKeywordInSharp(_, span) => span.file_id,
         }
     }
 }
@@ -182,7 +186,8 @@ impl HasSpan for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::NamedConstructorTypeParametersInSharp(_, span) => *span,
+            | ParseError::NamedConstructorTypeParametersInSharp(_, span)
+            | ParseError::MiscasedKeywordInSharp(_, span) => *span,
         }
     }
 }
@@ -310,6 +315,7 @@ impl std::fmt::Display for ParseError {
             ParseError::NamedConstructorTypeParametersInSharp(..) => {
                 "A named constructor takes its class's type arguments and declares none of its own.".to_string()
             }
+            ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
         };
 
         write!(f, "{message}")
@@ -364,7 +370,8 @@ impl From<&ParseError> for Issue {
             | ParseError::ComputedParameterInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
-            | ParseError::NestedTypeInSharp(..) => Issue::error(error.to_string())
+            | ParseError::NestedTypeInSharp(..)
+            | ParseError::MiscasedKeywordInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             ParseError::NamedConstructorTypeParametersInSharp(class, span) => Issue::error(error.to_string())

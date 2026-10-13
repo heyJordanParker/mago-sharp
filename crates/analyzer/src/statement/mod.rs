@@ -5,13 +5,16 @@ use std::sync::Arc;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::scanner::get_union_from_hint;
+use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -33,10 +36,11 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::DeclareBody;
+use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ExpressionStatement;
 use mago_syntax::cst::ForOf;
-use mago_syntax::cst::ForOfKeyValueTarget;
 use mago_syntax::cst::ForOfTarget;
 use mago_syntax::cst::ForOfVariable;
 use mago_syntax::cst::Foreach;
@@ -51,9 +55,11 @@ use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UseItems;
+use mago_syntax::error::ParseError;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
+use mago_word::empty_word;
 use mago_word::word;
 
 use crate::Context;
@@ -68,7 +74,9 @@ use crate::expression::is_refused_match;
 use crate::expression::match_arm_hints;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
+use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::report_invalid_template_arguments;
+use crate::statement::function_like::report_undefined_types;
 use crate::utils::docblock::populate_docblock_variables;
 use crate::utils::docblock::populate_docblock_variables_excluding;
 use crate::utils::expression::expression_has_observable_side_effect;
@@ -76,6 +84,8 @@ use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_function_like_id_from_call;
 use crate::utils::expression::is_variable;
 use crate::utils::misc::unwrap_expression;
+use crate::utils::names::display_sharp_type;
+use crate::utils::quoted_source;
 
 pub mod attributes;
 pub mod class_like;
@@ -144,6 +154,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
             }
 
             let result = match self {
+                // The semantic checks refuse a `.sharp` file's `declare`, whose help writes its body without it, so
+                // the body runs as written there, and its `return` ends the method.
+                Statement::Declare(declare) if context.dialect.is_sharp() => match &declare.body {
+                    DeclareBody::Statement(statement) => statement.analyze(context, block_context, artifacts),
+                    DeclareBody::ColonDelimited(body) => {
+                        analyze_statements(body.statements.as_slice(), context, block_context, artifacts)
+                    }
+                },
                 Statement::Inline(_)
                 | Statement::OpeningTag(_)
                 | Statement::Declare(_)
@@ -268,6 +286,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Break(r#break) => r#break.analyze(context, block_context, artifacts),
                 Statement::If(r#if) => r#if.analyze(context, block_context, artifacts),
                 Statement::Return(r#return) => r#return.analyze(context, block_context, artifacts),
+                Statement::Emit(emit) => analyze_emit(emit, context, block_context, artifacts),
                 Statement::Echo(echo) => echo.analyze(context, block_context, artifacts),
                 Statement::EchoTag(echo) => echo.analyze(context, block_context, artifacts),
                 Statement::Global(global) => global.analyze(context, block_context, artifacts),
@@ -389,7 +408,14 @@ where
     } else {
         get_type_from_hint(context, block_context, artifacts, hint)
     };
-    let local_type = (Rc::new(local_type), hint.span());
+    match miscased_local_keyword(hint, &local_type) {
+        // The parser reads `CONST total = 1;` as a local typed `CONST`, so the keyword's parse error is reported here.
+        Some(keyword) => {
+            context.collector.report(Issue::from(&ParseError::MiscasedKeywordInSharp(keyword, hint.span())));
+        }
+        None => report_undefined_types(context, &local_type, hint.span()),
+    }
+    let local_type = (Rc::new(known_type_or_error(local_type)), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
     Some(local_type)
@@ -457,6 +483,19 @@ where
     hint_type
 }
 
+/// The keyword `const` or `let` a local's written type spells in another case, as in `CONST total = 1;`, when that
+/// type names no declared type. A plain PHP class named `Let` keeps `Let total = …;` a local of that class.
+fn miscased_local_keyword(hint: &Hint<'_>, local_type: &TUnion) -> Option<&'static str> {
+    let Hint::Identifier(identifier) = hint else {
+        return None;
+    };
+
+    ["const", "let"].into_iter().find(|keyword| {
+        keyword.as_bytes().eq_ignore_ascii_case(identifier.value())
+            && matches!(local_type.get_single(), TAtomic::Reference(TReference::Symbol { .. }))
+    })
+}
+
 /// Analyzes a PHP# `for … of` as the PHP `foreach` over its collection, into the variables it declares. A written type
 /// binds its loop variable as a typed local's does.
 fn analyze_for_of<'ctx, 'arena, A>(
@@ -495,58 +534,153 @@ where
 
     foreach.analyze(context, block_context, artifacts)?;
 
-    if let ForOfTarget::KeyValue(pair) = &for_of.target {
-        report_key_mixing_a_backed_enum(context, artifacts, for_of, pair);
+    if let ForOfTarget::KeyValue(pair) = &for_of.target
+        && artifacts
+            .get_expression_type(for_of.expression)
+            .is_some_and(|map_type| keys_mix_a_backed_enum(context, map_type))
+    {
+        report_keys_read_back(context, IssueCode::InvalidForeachKey, for_of.expression, "the loop", pair.key.span());
     }
 
     Ok(())
 }
 
-/// Reports a loop over a `Map` whose key type mixes a backed enum with other types. The engine holds each key as its
-/// backing value, and the lowering reads it back as a case only through one enum's `from`, the backed enum
-/// [`get_sole_backed_enum`] finds in the key type.
-fn report_key_mixing_a_backed_enum<A>(
+/// Whether the keys of the `Map`s that `map_type` may be, taken together, mix a backed enum with other types, as
+/// `Status|int` or `Status|Rank` do. The engine holds each key of a `Map` as its backing value, and reads it back as a
+/// case only through one enum.
+pub(crate) fn keys_mix_a_backed_enum<A>(context: &Context<'_, '_, A>, map_type: &TUnion) -> bool
+where
+    A: Arena,
+{
+    let key_type = map_type.types.iter().fold(None, |key_type, atomic| match atomic {
+        TAtomic::Array(map @ TArray::Keyed(_)) => {
+            let key = get_array_parameters(map, context.codebase).0;
+            Some(add_optional_union_type(key, key_type.as_ref(), context.codebase))
+        }
+        _ => key_type,
+    });
+
+    key_type.is_some_and(|key_type| key_type_mixes_a_backed_enum(context, &key_type))
+}
+
+/// Whether `key_type` mixes a backed enum with other types, as `Status|int` or `Status|Rank` do: its keys need their
+/// backing values, and no one backed enum, the one [`get_sole_backed_enum`] finds, reads them all back.
+pub(crate) fn key_type_mixes_a_backed_enum<A>(context: &Context<'_, '_, A>, key_type: &TUnion) -> bool
+where
+    A: Arena,
+{
+    matches!(get_backing_key_type(key_type, context.codebase, context.dialect), Cow::Owned(_))
+        && get_sole_backed_enum(key_type, context.codebase, context.dialect).is_none()
+}
+
+/// Reports the `Map` `collection`, whose keys mix a backed enum with other types, where `reader`, the loop or `keys()`,
+/// reads them back at `span`.
+pub(crate) fn report_keys_read_back<A>(
     context: &mut Context<'_, '_, A>,
-    artifacts: &AnalysisArtifacts,
-    for_of: &ForOf<'_>,
-    pair: &ForOfKeyValueTarget<'_>,
+    code: IssueCode,
+    collection: &Expression<'_>,
+    reader: &str,
+    span: Span,
 ) where
     A: Arena,
 {
-    let Some(collection_type) = artifacts.get_expression_type(for_of.expression) else {
-        return;
-    };
-    let mixes_a_backed_enum = collection_type.types.iter().any(|atomic| match atomic {
-        TAtomic::Array(TArray::Keyed(keyed_array)) => {
-            keyed_array.get_generic_parameters().is_some_and(|(key_type, _)| {
-                matches!(get_backing_key_type(key_type, context.codebase, context.dialect), Cow::Owned(_))
-                    && get_sole_backed_enum(key_type, context.codebase, context.dialect).is_none()
-            })
-        }
-        _ => false,
-    });
-    if !mixes_a_backed_enum {
-        return;
-    }
-
-    let collection = context
-        .source_file
-        .contents
-        .get(for_of.expression.span().start.offset as usize..for_of.expression.span().end.offset as usize)
-        .map(|text| String::from_utf8_lossy(text).into_owned())
-        .unwrap_or_default();
+    let collection = quoted_source(context, collection.span());
 
     context.collector.report_with_code(
-        IssueCode::InvalidForeachKey,
+        code,
         Issue::error(format!(
-            "The keys of `{collection}` mix a backed enum with other types, so the loop cannot read them back."
+            "The keys of `{collection}` mix a backed enum with other types, so {reader} cannot read them back."
         ))
-        .with_annotation(Annotation::primary(pair.key.span()).with_message("Its key is read here."))
+        .with_annotation(Annotation::primary(span).with_message("Its key is read here."))
         .with_note(
             "The engine holds each key as its backing value, and reads it back as a case through one enum's `from`.",
         )
         .with_help("Key the `Map` by one backed enum alone."),
     );
+}
+
+/// Reports the `Map` at `collection`, whose keys mix a backed enum with other types, where `finder`, such as `has`,
+/// an index or a literal, looks a key up or puts one in, as `annotation` marks it.
+pub(crate) fn report_keys_sharing_entries<A>(
+    context: &mut Context<'_, '_, A>,
+    code: IssueCode,
+    collection: Span,
+    finder: &str,
+    annotation: Annotation,
+) where
+    A: Arena,
+{
+    let collection = quoted_source(context, collection);
+
+    context.collector.report_with_code(
+        code,
+        Issue::error(format!(
+            "The keys of `{collection}` mix a backed enum with other types, so {finder} cannot tell them apart."
+        ))
+        .with_annotation(annotation)
+        .with_note(
+            "The engine holds each key as its backing value, so a case and the `int` or `string` key of its backing value share one entry.",
+        )
+        .with_help("Key the `Map` by one backed enum alone."),
+    );
+}
+
+/// Analyzes a PHP# `emit`, spec section 15: it raises an event, so its value's type is an event. A refused value is
+/// `never`, and a value of a type that names no type is the error type: the error where each was written already
+/// reports it.
+fn analyze_emit<'ctx, 'arena, A>(
+    emit: &Emit<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    emit.value.analyze(context, block_context, artifacts)?;
+
+    let codebase = context.codebase;
+    let not_an_event = artifacts.get_expression_type(emit.value).filter(|value_type| {
+        !value_type.is_never()
+            && !value_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Error) || is_event(codebase, atomic))
+    });
+    if let Some(value_type) = not_an_event {
+        context.collector.report_with_code(
+            IssueCode::InvalidEvent,
+            Issue::error(format!(
+                "`emit` takes an event, and `{}` is not one.",
+                display_sharp_type(context, value_type)
+            ))
+            .with_annotation(Annotation::primary(emit.value.span()).with_message("Emitted here."))
+            .with_note("An event is a class that `event` declares, or a plain PHP class that `extern event` marks."),
+        );
+    }
+
+    Ok(())
+}
+
+/// Whether `atomic` is an object of an event.
+fn is_event(codebase: &CodebaseMetadata, atomic: &TAtomic) -> bool {
+    let TAtomic::Object(object) = atomic else {
+        return false;
+    };
+
+    object
+        .get_name()
+        .and_then(|name| codebase.get_class_like(name.as_bytes()))
+        .is_some_and(|class_like| is_event_class(codebase, class_like))
+}
+
+/// Whether `class_like` is an event, spec section 15: a class an `event` declares, or a plain PHP class an
+/// `extern event` marks.
+pub(crate) fn is_event_class(codebase: &CodebaseMetadata, class_like: &ClassLikeMetadata) -> bool {
+    class_like.flags.is_event()
+        || class_like.kind.is_class()
+            && codebase
+                .externs
+                .get(&(class_like.name, empty_word()))
+                .and_then(|declarations| declarations.first())
+                .is_some_and(|declaration| declaration.event)
 }
 
 /// The type a written type would give a value: every literal and narrowed scalar widened, and every list or map shape

@@ -7,6 +7,7 @@ use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
@@ -123,8 +124,10 @@ pub(crate) const fn expression_is_nullsafe(expr: &'_ Expression<'_>) -> bool {
     }
 }
 
-/// Analyzes the object of `->` or `?->`. A PHP# `?.` reads a missing key of an index as null, as `??` does, because
-/// `x[k]?.name` runs as `($x[$k] ?? null)?->name`, so that index is analyzed as the left side of `??` is.
+/// Analyzes the object of `->` or `?->`. A PHP# `?.` reads a missing key of the index directly before it as null, as
+/// `??` does, so that index is analyzed as the left side of `??` is (spec section 12). A `Map` read is then `V?`, as
+/// `check_sharp_map_read` types it, and so is a `List` read, so `rows[9]?.count()` is `int?`. The indexes before it
+/// stay bare reads: `cube[9]` in `cube[9][0]?.x` is not nullable.
 pub(crate) fn analyze_member_object<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -138,11 +141,24 @@ where
     let was_inside_general_use = block_context.flags.inside_general_use();
     let was_inside_isset = block_context.flags.inside_isset();
     block_context.flags.set_inside_general_use(true);
-    if is_null_safe && context.dialect.is_sharp() && matches!(object.unparenthesized(), Expression::ArrayAccess(_)) {
+    let index = match object.unparenthesized() {
+        Expression::ArrayAccess(access) if is_null_safe && context.dialect.is_sharp() => Some(access),
+        _ => None,
+    };
+    if index.is_some() {
         block_context.flags.set_inside_isset(true);
     }
 
     object.analyze(context, block_context, artifacts)?;
+
+    if let Some(access) = index
+        && artifacts
+            .get_expression_type(access.array)
+            .is_some_and(|indexed| indexed.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)))))
+        && let Some(element) = artifacts.get_expression_type(object).cloned()
+    {
+        artifacts.set_expression_type(object, element.as_nullable());
+    }
 
     block_context.flags.set_inside_general_use(was_inside_general_use);
     block_context.flags.set_inside_isset(was_inside_isset);

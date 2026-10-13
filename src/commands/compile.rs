@@ -6,6 +6,7 @@
 //! or renamed source loses its compiled file.
 
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use mago_database::error::DatabaseError;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
+use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_prelude::Prelude;
 use mago_reporting::IssueCollection;
 use mago_reporting::color::ColorChoice as ReportingColorChoice;
@@ -44,6 +46,9 @@ use crate::utils::create_orchestrator;
 
 /// The folder Composer installs packages into.
 const VENDOR: &[u8] = b"vendor/";
+
+/// The listener table in the `.sharp` folder, which the engine reads to run each PHP# listener, spec section 15.
+const LISTENERS: &str = "listeners.php";
 
 /// Command that compiles every PHP# file into the `.sharp` folder.
 #[derive(Parser, Debug, Default)]
@@ -94,11 +99,12 @@ impl CompileCommand {
         let compilations = server.compile(
             |path| unit::stamp(&root, path),
             |name| rules_files(&root, name),
-            |translations| lean.check(translations),
+            |translations, namespaces| lean.check(translations, namespaces),
         )?;
         let database = server.database();
 
         let mut written = BTreeSet::new();
+        let mut accepted = HashSet::new();
         let mut refused = IssueCollection::default();
         let mut refused_files = 0;
         let mut packaged_refusals = Vec::new();
@@ -120,6 +126,7 @@ impl CompileCommand {
                 Compilation::Accepted(bytes) => {
                     write_by_rename(&compiled, &bytes).map_err(DatabaseError::from)?;
                     written.insert(compiled);
+                    accepted.insert(file_id);
                 }
                 Compilation::Refused(errors) => {
                     refused.extend(errors);
@@ -134,6 +141,13 @@ impl CompileCommand {
         }
 
         let compiled_folder = root.join(unit::COMPILED_FOLDER);
+        let listeners: Vec<Listener> =
+            server.listeners().into_iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        if !listeners.is_empty() {
+            let table = compiled_folder.join(LISTENERS);
+            write_by_rename(&table, listener_table(&listeners).as_bytes()).map_err(DatabaseError::from)?;
+            written.insert(table);
+        }
         if compiled_folder.is_dir() {
             delete_all_but(&compiled_folder, &written, &compiled_folder.join(PACKAGE_FOLDER))
                 .map_err(DatabaseError::from)?;
@@ -182,6 +196,26 @@ impl CompileCommand {
 
         Ok(if failed || refused_files > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }.into())
     }
+}
+
+/// The PHP source of the listener table: one row per listener, in the order the engine runs them, of its class, its
+/// method, the events its `on` clause lists, and whether it takes the event. A full name holds no `'` and never ends
+/// in `\`, so each one is a single-quoted string as written.
+fn listener_table(listeners: &[Listener]) -> String {
+    let mut table = String::from("<?php\n\nreturn [\n");
+    for listener in listeners {
+        let events: Vec<String> = listener.events.iter().map(|event| format!("'{event}'")).collect();
+        table.push_str(&format!(
+            "    ['{}', '{}', [{}], {}],\n",
+            listener.class,
+            listener.method,
+            events.join(", "),
+            listener.takes_event
+        ));
+    }
+    table.push_str("];\n");
+
+    table
 }
 
 /// `count` PHP# files, in words.

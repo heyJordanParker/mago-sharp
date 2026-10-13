@@ -14,28 +14,29 @@ where
     A: Arena,
 {
     pub(crate) fn parse_optional_implements(&mut self) -> Result<Option<Implements<'arena>>, ParseError> {
-        Ok(match self.stream.peek_kind(0)? {
-            Some(T!["implements"]) => Some(Implements {
-                implements: self.expect_any_keyword()?,
-                types: {
-                    let mut types = self.new_vec();
-                    let mut commas = self.new_vec();
-                    loop {
-                        types.push(self.parse_identifier()?);
+        if !self.is_at_php_keyword(T!["implements"])? {
+            return Ok(None);
+        }
 
-                        match self.stream.peek_kind(0)? {
-                            Some(T![","]) => {
-                                commas.push(self.stream.consume()?);
-                            }
-                            _ => break,
+        Ok(Some(Implements {
+            implements: self.expect_any_keyword()?,
+            types: {
+                let mut types = self.new_vec();
+                let mut commas = self.new_vec();
+                loop {
+                    types.push(self.parse_identifier()?);
+
+                    match self.stream.peek_kind(0)? {
+                        Some(T![","]) => {
+                            commas.push(self.stream.consume()?);
                         }
+                        _ => break,
                     }
+                }
 
-                    TokenSeparatedSequence::new(types, commas)
-                },
-            }),
-            _ => None,
-        })
+                TokenSeparatedSequence::new(types, commas)
+            },
+        }))
     }
 
     /// PHP#'s `: Base, Interface` header, as spec section 22 writes it. Each entry is a type, as in C#'s base list, so
@@ -69,26 +70,27 @@ where
     }
 
     pub(crate) fn parse_optional_extends(&mut self) -> Result<Option<Extends<'arena>>, ParseError> {
-        Ok(match self.stream.peek_kind(0)? {
-            Some(T!["extends"]) => Some(Extends {
-                extends: self.expect_any_keyword()?,
-                types: {
-                    let mut types = self.new_vec();
-                    let mut commas = self.new_vec();
-                    loop {
-                        types.push(self.parse_identifier()?);
+        if !self.is_at_php_keyword(T!["extends"])? {
+            return Ok(None);
+        }
 
-                        match self.stream.peek_kind(0)? {
-                            Some(T![","]) => {
-                                commas.push(self.stream.consume()?);
-                            }
-                            _ => break,
+        Ok(Some(Extends {
+            extends: self.expect_any_keyword()?,
+            types: {
+                let mut types = self.new_vec();
+                let mut commas = self.new_vec();
+                loop {
+                    types.push(self.parse_identifier()?);
+
+                    match self.stream.peek_kind(0)? {
+                        Some(T![","]) => {
+                            commas.push(self.stream.consume()?);
                         }
+                        _ => break,
                     }
-                    TokenSeparatedSequence::new(types, commas)
-                },
-            }),
-            _ => None,
-        })
+                }
+                TokenSeparatedSequence::new(types, commas)
+            },
+        }))
     }
 }

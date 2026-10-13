@@ -302,7 +302,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
                 Ok(input)
             },
             |_| Ok(Vec::new()),
-            |_| Ok(Default::default()),
+            |_, _| Ok(Default::default()),
         )
         .expect("the compile runs");
     let [(_, Compilation::Accepted(bytes))] = compiled.as_slice() else {

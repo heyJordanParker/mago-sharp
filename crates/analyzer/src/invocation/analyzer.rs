@@ -9,6 +9,7 @@ use mago_bytes::trim_start_byte;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_union_type;
@@ -63,12 +64,14 @@ use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
 use crate::invocation::resolver::resolve_invocation_type;
+use crate::invocation::return_type_fetcher::keys_a_map_by_its_function;
 use crate::invocation::template_inference::infer_parameter_templates_from_argument;
 use crate::invocation::template_inference::infer_unfixed_templates;
 use crate::invocation::template_result::get_class_template_parameters_from_result;
 use crate::invocation::template_result::populate_template_result_from_invocation;
 use crate::invocation::template_result::refine_template_result_for_function_like;
 use crate::statement::function_like::is_member_read;
+use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::takes_declared_type;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::names::display_variable_name;
@@ -190,6 +193,13 @@ where
     }
 
     populate_template_result_from_invocation(context, invocation, template_result);
+    if context.dialect.is_sharp() && keys_a_map_by_its_function(&invocation.target) {
+        for template in template_result.template_types.values_mut().flatten() {
+            if matches!(template.defining_entity, GenericParent::FunctionLike(_)) {
+                template.constraint = get_mixed();
+            }
+        }
+    }
 
     // In PHP# the type arguments of the receiver and those the call writes bind their templates before any argument,
     // so an argument infers only the others, as `map`'s `R` from `paid.map(this.format)`, and a wrong argument is the
@@ -1660,6 +1670,13 @@ where
         _ => invocation_target_parameter.get_type(),
     };
     let parameter_type = parameter_type.cloned().unwrap_or_else(get_mixed);
+    let parameter_type = if context.dialect.is_sharp() && keys_a_map_by_its_function(invocation_target) {
+        without_method_template_bounds(&parameter_type)
+    } else if invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) {
+        known_type_or_error(parameter_type)
+    } else {
+        parameter_type
+    };
 
     resolve_type_in_class_context(
         context,
@@ -1669,6 +1686,28 @@ where
         calling_instance_type,
         method_class_type,
     )
+}
+
+/// The type of the key function of a `groupBy` or `associateBy`, `\Closure(T): G`, with its method's `G` unbounded.
+fn without_method_template_bounds(key_function: &TUnion) -> TUnion {
+    let types = key_function.types.iter().map(|atomic| {
+        let TAtomic::Callable(TCallable::Signature(signature)) = atomic else {
+            unreachable!("the stub declares the key function as `\\Closure(T): G`");
+        };
+        let mut signature = signature.clone();
+        let Some(return_type) = signature.get_return_type_mut() else {
+            unreachable!("the stub declares the key function's return type as `G`");
+        };
+        let keys = return_type.types.iter().map(|key| match key {
+            TAtomic::GenericParameter(key) => TAtomic::GenericParameter(key.with_constraint(get_mixed())),
+            _ => unreachable!("the stub declares the key function's return type as `G`"),
+        });
+        *return_type = return_type.clone_with_types(keys.collect());
+
+        TAtomic::Callable(TCallable::Signature(signature))
+    });
+
+    key_function.clone_with_types(types.collect())
 }
 
 /// Expands `self`/`static`/`parent` and class-level context in a type declared on a function-like,

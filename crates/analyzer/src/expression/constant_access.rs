@@ -71,7 +71,9 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
         let constant_metadata = context.codebase.get_constant_or_global(name_bytes, unqualified_name);
 
         let Some(constant_metadata) = constant_metadata else {
-            if let Some(literal_type) = get_literal_constant_type(name_bytes) {
+            // The name as written, since a `.sharp` file resolves `TRUE` into its namespace, and the semantic checks
+            // refuse it as `true` written in another case.
+            if let Some(literal_type) = get_literal_constant_type(unqualified_name) {
                 artifacts.set_expression_type(self, literal_type);
                 return Ok(());
             }

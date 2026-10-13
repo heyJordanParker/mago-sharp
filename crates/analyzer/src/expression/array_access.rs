@@ -22,6 +22,8 @@ use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::with_declared_kinds;
+use crate::statement::keys_mix_a_backed_enum;
+use crate::statement::report_keys_sharing_entries;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_array_access_id;
@@ -82,6 +84,20 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
             && container_type.as_ref().is_some_and(|container_type| {
                 container_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
             });
+
+        // The engine holds a `Map`'s key as its backing value, so a `Map` whose keys mix a backed enum with other types
+        // cannot tell a case from the key of its backing value where an index looks it up, as in `m[k] ?? 0`.
+        if context.dialect.is_sharp()
+            && container_type.as_ref().is_some_and(|container_type| keys_mix_a_backed_enum(context, container_type))
+        {
+            report_keys_sharing_entries(
+                context,
+                IssueCode::InvalidArrayAccess,
+                self.array.span(),
+                "the index",
+                Annotation::primary(self.index.span()).with_message("Its key is looked up here."),
+            );
+        }
 
         if !has_no_index
             && let Some(keyed_array_var_id) = &keyed_array_var_id
@@ -163,10 +179,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
 /// Spec section 12 types a PHP# `Map` read `V?`, because a key is often missing. A bare read throws on a missing
 /// key, so a `Map` is read only where the read is handled: `??` and `?.` read a missing key as null, as `isset`
 /// does, and so do `is`, `as` and `match`, whose PHP reads the index they test with `??`. A refused bare read keeps
-/// the type `V` it would have when it runs, so it is reported once. A `List` read stays bare, because a `List`'s keys
-/// run without gaps. A place is the collections it is declared as, whatever literal it holds, and a place that may be
-/// a `Map` is read as one. A place that may be a `Set` has no index at all, which the `Set`'s own rule refuses, so
-/// this rule adds no second report to its bare read.
+/// the type `V` it would have when it runs, so it is reported once. A bare `List` read is allowed, because a `List`'s
+/// keys run without gaps, and keeps its element type. `analyze_member_object` types the `List` index directly before
+/// `?.` nullable, as a missing index reads as null there. A place is the collections it is declared as, whatever
+/// literal it holds, and a place that may be a `Map` is read as one. A place that may be a `Set` has no index at all,
+/// which the `Set`'s own rule refuses, so this rule adds no second report to its bare read.
 pub(crate) fn check_sharp_map_read<'arena, A>(
     access: &ArrayAccess<'arena>,
     context: &mut Context<'_, 'arena, A>,
@@ -175,16 +192,7 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
 ) where
     A: Arena,
 {
-    let has_map =
-        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
-    let has_set =
-        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
-    let (may_be_map, may_be_set) = match get_declared_collection(context, block_context, artifacts, access.array) {
-        Some(declared) => (has_map(&declared), has_set(&declared)),
-        None => artifacts
-            .get_expression_type(access.array)
-            .map_or((false, false), |container| (has_map(container), has_set(container))),
-    };
+    let (may_be_map, may_be_set) = get_indexed_kinds(access, context, block_context, artifacts);
     if !may_be_map {
         return;
     }
@@ -200,6 +208,59 @@ pub(crate) fn check_sharp_map_read<'arena, A>(
                 .with_annotation(Annotation::primary(access.span()).with_message("This read throws when the key is missing."))
                 .with_help("Read it with `??`, as in `map[key] ?? fallback`, or with `map.get(key)`, which gives null for a missing key. `+=`, `++` and `--` read first, so write `m[k] = (m[k] ?? 0) + 1`."),
         );
+    }
+}
+
+/// Spec section 12 makes a `List` index a place, as a Rust `Vec` index and a Go slice index are, so a change through
+/// it changes the element the list stores. A change through a `Map` index is refused, as Go refuses `m[k].x = 5`,
+/// because a `Map` read is a copy. Gives whether `access`, which a change goes through, indexes a `List` alone. A
+/// place that may be a `Set` has no index, which the `Set`'s own rule refuses, so it gets no second report.
+pub(crate) fn check_change_through_index<'arena, A>(
+    access: &ArrayAccess<'arena>,
+    context: &mut Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+) -> bool
+where
+    A: Arena,
+{
+    let (may_be_map, may_be_set) = get_indexed_kinds(access, context, block_context, artifacts);
+    if may_be_map && !may_be_set {
+        context.collector.report_with_code(
+            IssueCode::InvalidPassByReference,
+            Issue::error("A `Map` read is a copy: read it, change it, and store it back.")
+                .with_annotation(
+                    Annotation::primary(access.span()).with_message("This reads a copy of the value at this key."),
+                )
+                .with_note("A change to the copy never reaches the `Map`.")
+                .with_help("Change a local and store it back, as in `List<int> counts = map[key] ?? []; counts.add(5); map[key] = counts;`."),
+        );
+    }
+
+    !may_be_map && !may_be_set
+}
+
+/// Whether the collection `access` indexes may be a `Map` and whether it may be a `Set`. A place is the collections
+/// it is declared as, whatever literal it holds.
+fn get_indexed_kinds<'arena, A>(
+    access: &ArrayAccess<'arena>,
+    context: &Context<'_, 'arena, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
+) -> (bool, bool)
+where
+    A: Arena,
+{
+    let has_map =
+        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
+    let has_set =
+        |container: &TUnion| container.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))));
+
+    match get_declared_collection(context, block_context, artifacts, access.array) {
+        Some(declared) => (has_map(&declared), has_set(&declared)),
+        None => artifacts
+            .get_expression_type(access.array)
+            .map_or((false, false), |container| (has_map(container), has_set(container))),
     }
 }
 

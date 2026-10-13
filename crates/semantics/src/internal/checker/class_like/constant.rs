@@ -104,7 +104,8 @@ pub fn check_class_like_constant<'ast, 'arena>(
             | Modifier::Override(_)
             | Modifier::Required(_)
             | Modifier::Extern(_)
-            | Modifier::Lazy(_) => {}
+            | Modifier::Lazy(_)
+            | Modifier::Internal(_) => {}
         }
     }
 

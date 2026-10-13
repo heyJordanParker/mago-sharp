@@ -39,6 +39,7 @@ where
     }
 
     fn parse_optional_closure_use_clause(&mut self) -> Result<Option<ClosureUseClause<'arena>>, ParseError> {
+        self.read_php_construct()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["use"]) => Some(self.parse_closure_use_clause()?),
             _ => None,

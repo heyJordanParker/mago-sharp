@@ -16,6 +16,7 @@ use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
+use mago_codex::symbol::SymbolKind;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
@@ -28,6 +29,7 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::template::GenericTemplate;
@@ -89,6 +91,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use crate::utils::names::display_sharp_accessor;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::template::find_broken_marker;
 use crate::utils::template::find_template_uses;
@@ -96,6 +99,7 @@ use crate::utils::template::find_template_uses;
 pub mod constant;
 pub mod enum_case;
 pub mod initialization;
+pub mod listener;
 pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
@@ -154,6 +158,60 @@ where
         Issue::error(format!("Cannot use `{class_name}` as a class name: it is reserved."))
             .with_annotation(Annotation::primary(name_span).with_message("Class declared here."))
             .with_note("PHP# reserves this name for a type."),
+    );
+}
+
+/// Refuses a class-like whose full name is also a namespace, as `App\Tenant\Store` is beside a class in
+/// `App\Tenant\Store\`, when either is PHP#: spec section 23. A plain PHP class may still share its name with a
+/// namespace of plain PHP, as PHP allows.
+fn report_class_like_named_as_a_namespace<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    name_span: Span,
+) where
+    A: Arena,
+{
+    let name = class_like_metadata.name.as_bytes();
+    // The codebase keeps a namespace after its last class-like leaves it, so the class-likes decide.
+    if !context.codebase.namespace_exists(name) {
+        return;
+    }
+
+    let sharp = context.dialect.is_sharp();
+    let Some(inside) = context
+        .codebase
+        .class_likes
+        .values()
+        .filter(|other| {
+            (sharp || other.flags.is_sharp())
+                && other.name.as_bytes().strip_prefix(name).is_some_and(|rest| rest.starts_with(b"\\"))
+        })
+        .min_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()))
+    else {
+        return;
+    };
+
+    let (full_name, inside_name) = if sharp {
+        (
+            class_like_metadata.original_name.to_string().replace('\\', "."),
+            inside.original_name.to_string().replace('\\', "."),
+        )
+    } else {
+        (class_like_metadata.original_name.to_string(), inside.original_name.to_string())
+    };
+    let kind = class_like_metadata.kind.as_str();
+    let article = if matches!(class_like_metadata.kind, SymbolKind::Enum | SymbolKind::Interface) { "an" } else { "a" };
+
+    context.collector.report_with_code(
+        IssueCode::NameAlreadyInUse,
+        Issue::error(format!(
+            "`{full_name}` is both {article} {kind} and a namespace: rename the {kind} or the folder."
+        ))
+        .with_annotation(Annotation::primary(name_span).with_message(format!("The {kind} is declared here.")))
+        .with_annotation(
+            Annotation::secondary(inside.name_span.unwrap_or(inside.span))
+                .with_message(format!("`{inside_name}` is in the namespace `{full_name}`.")),
+        ),
     );
 }
 
@@ -523,6 +581,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
         }
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         let should_check_unused = 'check_unused: {
             if !context.settings.find_unused_definitions {
@@ -645,6 +704,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
         }
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         // Call plugin on_leave_interface hooks
         if context.plugin_registry.has_interface_hooks() {
@@ -928,6 +988,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
         check_duplicate_enum_case_values(context, artifacts, name, self);
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        listener::check_listener(class_like_metadata, self.members.as_slice(), context);
 
         if context.settings.find_unused_definitions
             && !class_like_metadata.flags.is_unchecked()
@@ -1062,6 +1123,7 @@ where
     }
 
     context.prepare_class_initializers(class_like_metadata)?;
+    report_class_like_named_as_a_namespace(context, class_like_metadata, name_span.unwrap_or(declaration_span));
 
     let name = display_class_like_name(context, class_like_metadata.original_name);
 
@@ -1222,18 +1284,24 @@ where
                             })
                         });
 
-                    if !is_implemented {
+                    if !is_implemented && context.dialect.is_sharp() {
+                        // PHP# states a property, not its hooks, so it reports the property once.
+                        report_unstated_property(
+                            context,
+                            class_like_metadata,
+                            name_span.unwrap_or(declaration_span),
+                            parent_metadata,
+                            *property_name,
+                            parent_property,
+                            hook_metadata.span,
+                        );
+
+                        break;
+                    } else if !is_implemented {
                         let fqcn = parent_metadata.original_name;
                         let hook_span = hook_metadata.span;
-                        let (missing_hook, abstract_hook) = if context.dialect.is_sharp() {
-                            let accessor = display_sharp_accessor(context, fqcn, *property_name, *hook_name);
-                            (accessor.clone(), accessor)
-                        } else {
-                            (
-                                format!("{property_name}::{hook_name}()"),
-                                format!("{fqcn}::{property_name}::{hook_name}()"),
-                            )
-                        };
+                        let missing_hook = format!("{property_name}::{hook_name}()");
+                        let abstract_hook = format!("{fqcn}::{property_name}::{hook_name}()");
                         let property = display_property_name(context, *property_name);
 
                         context.collector.report_with_code(
@@ -1428,6 +1496,53 @@ where
     }
 
     Ok(())
+}
+
+/// Reports a PHP# class or event, declared at `span`, that does not give the property `property_name` that `parent`
+/// states at `stated`. An event gives its properties through its parameters, which are set once, by `new`, spec
+/// section 15, so it cannot give a property stated with `set`.
+fn report_unstated_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    span: Span,
+    parent: &ClassLikeMetadata,
+    property_name: Word,
+    parent_property: &PropertyMetadata,
+    stated: Span,
+) where
+    A: Arena,
+{
+    let name = display_class_like_name(context, class_like_metadata.original_name);
+    let property = display_property_name(context, property_name);
+    let mixed = get_mixed();
+    let written = display_sharp_type(
+        context,
+        parent_property.type_metadata.as_ref().map_or(&mixed, |metadata| &metadata.type_union),
+    );
+    let parent_name = display_class_like_name(context, parent.original_name);
+    let settable = parent_property.hooks.contains_key(&word(b"set"));
+    let issue = if class_like_metadata.flags.is_event() && settable {
+        Issue::error(format!(
+            "`{name}` cannot give `{property}`, which `{parent_name}` states with `set`: an event's properties are set once, by `new`."
+        ))
+    } else {
+        let help = if class_like_metadata.flags.is_event() {
+            format!("Add the parameter `{written} {property}`.")
+        } else if settable {
+            format!("Add the property `public {written} {property} {{ get; set; }}`.")
+        } else {
+            format!("Add the property `public {written} {property} {{ get; }}`.")
+        };
+
+        Issue::error(format!("`{name}` does not give `{property}`, which `{parent_name}` states.")).with_help(help)
+    };
+
+    context.collector.report_with_code(
+        IssueCode::UnimplementedAbstractPropertyHook,
+        issue
+            .with_annotation(Annotation::primary(span).with_message("Declared here."))
+            .with_annotation(Annotation::secondary(stated).with_message("Stated here.")),
+    );
 }
 
 #[allow(clippy::unwrap_used)]
@@ -3327,7 +3442,7 @@ where
     };
 
     context.collector.report_with_code(
-        IssueCode::IncompatibleStaticModifier,
+        IssueCode::NamedConstructorClash,
         Issue::error(message).with_annotation(Annotation::primary(primary_span).with_message("Declared here.")),
     );
 
@@ -4525,6 +4640,34 @@ fn report_unfit_interface_property<A>(
     if property.flags.is_static() != stated.flags.is_static() {
         let (given, help) = ("as `static`".to_owned(), format!("Remove `static`{place}."));
         report(context, IssueCode::IncompatibleStaticModifier, given, "on each object".to_owned(), help);
+    }
+
+    // PHP refuses a readonly, a `private(set)` or a get-only virtual property for one stated with `set`.
+    let set = word(b"set");
+    let given_settable = !property.flags.is_readonly()
+        && property.write_visibility == Visibility::Public
+        && (!property.flags.is_virtual_property() || property.hooks.contains_key(&set));
+    if stated.hooks.contains_key(&set) && !given_settable {
+        if owner.flags.is_event() {
+            context.collector.report_with_code(
+                IssueCode::IncompatiblePropertyAccess,
+                Issue::error(format!(
+                    "`{name}` cannot give `{property_name}`, which `{interface_name}` states with `set`: an event's properties are set once, by `new`."
+                ))
+                .with_annotation(Annotation::primary(property_span).with_message("Given here."))
+                .with_annotation(Annotation::secondary(stated_span).with_message("Stated here.")),
+            );
+        } else {
+            let given = if property.flags.is_init() {
+                "with `init`".to_owned()
+            } else if property.flags.is_readonly() || property.write_visibility == Visibility::Public {
+                "get-only".to_owned()
+            } else {
+                format!("with `{} set`", property.write_visibility)
+            };
+            let help = format!("Declare `{property_name}` with `{{ get; set; }}`{place}.");
+            report(context, IssueCode::IncompatiblePropertyAccess, given, "with `set`".to_owned(), help);
+        }
     }
 
     if let Some((given, stated_type)) =

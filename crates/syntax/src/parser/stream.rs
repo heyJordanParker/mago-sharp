@@ -206,6 +206,24 @@ where
         }
     }
 
+    /// Reads the nth (0-indexed) significant token ahead as `kind` from now on. The token is one a `lookahead(n)`
+    /// already buffered.
+    pub(crate) fn read_as(&mut self, n: usize, kind: TokenKind) {
+        if let Some(token) = self.buffer.get_mut(n) {
+            token.kind = kind;
+        }
+    }
+
+    /// Reads the nth (0-indexed) significant token ahead as the keyword `word`, of kind `kind`, from now on, as `Return`
+    /// reads as `return`. `word` spells the token in another case, so the token keeps its span. The token is one a
+    /// `lookahead(n)` already buffered.
+    pub(crate) fn read_as_keyword(&mut self, n: usize, kind: TokenKind, word: &'static str) {
+        if let Some(token) = self.buffer.get_mut(n) {
+            token.kind = kind;
+            token.value = word.as_bytes();
+        }
+    }
+
     /// Peeks at the kind of the nth (0-indexed) significant token ahead.
     ///
     /// More efficient than `lookahead(n)?.map(|t| t.kind)` as it avoids
@@ -227,19 +245,19 @@ where
         }
     }
 
-    /// Peeks past the `(` at the head of the stream to the `)` that closes it, and returns the kind of the token after
-    /// that `)`, or `None` at the end of the file. It reads ahead with a copy of the lexer, so it consumes nothing.
+    /// Peeks past the first `(` ahead to the `)` that closes it, and returns the token after that `)`, or `None` at the
+    /// end of the file. It reads ahead with a copy of the lexer, so it consumes nothing.
     ///
     /// # Errors
     ///
     /// Returns a [`ParseError`] if the lexer fails to produce a token.
-    pub fn peek_kind_after_parentheses(&mut self) -> Result<Option<TokenKind>, ParseError> {
+    pub fn peek_after_parentheses(&mut self) -> Result<Option<Token<'input>>, ParseError> {
         let mut tokens = self.peek_tokens();
         let mut depth = 0usize;
         while let Some(token) = tokens.next() {
             match token?.kind {
                 T!["("] => depth += 1,
-                T![")"] if depth == 1 => return Ok(tokens.next().transpose()?.map(|token| token.kind)),
+                T![")"] if depth == 1 => return Ok(tokens.next().transpose()?),
                 T![")"] => depth -= 1,
                 _ => {}
             }

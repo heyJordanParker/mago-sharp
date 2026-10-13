@@ -42,6 +42,7 @@ use crate::expression::is_refused;
 use crate::statement::function_like::body_return_type;
 use crate::statement::function_like::expect_type;
 use crate::statement::function_like::get_scope_static_class_type;
+use crate::statement::function_like::known_type_or_error;
 use crate::utils::docblock::check_docblock_type_incompatibility;
 use crate::utils::docblock::get_type_from_var_docblock;
 use crate::utils::expression::get_direct_variable_id;
@@ -69,18 +70,28 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     where
         A: Arena,
     {
-        // A PHP# named constructor returns the object it creates, spec section 9.1, so its `return;` takes no value.
+        // A PHP# constructor creates the object, spec section 9.1, so its `return;` takes no value: a named constructor
+        // returns the object, and PHP discards a value the main constructor returns.
         if let Some(return_value) = self.value.as_ref()
-            && block_context
-                .scope
-                .get_function_like()
-                .is_some_and(|function_like| function_like.flags.is_named_constructor())
+            && let Some(function_like) = block_context.scope.get_function_like()
         {
-            context.collector.report_with_code(
-                IssueCode::InvalidReturnStatement,
-                Issue::error("A named constructor returns the object it creates: write `return;`.")
-                    .with_annotation(Annotation::primary(return_value.span()).with_message("Returned here.")),
-            );
+            let message = if function_like.flags.is_named_constructor() {
+                Some("A named constructor returns the object it creates: write `return;`.")
+            } else if context.dialect.is_sharp()
+                && function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
+            {
+                Some("A constructor creates its object and returns nothing: write `return;`.")
+            } else {
+                None
+            };
+
+            if let Some(message) = message {
+                context.collector.report_with_code(
+                    IssueCode::InvalidReturnStatement,
+                    Issue::error(message)
+                        .with_annotation(Annotation::primary(return_value.span()).with_message("Returned here.")),
+                );
+            }
         }
 
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
@@ -292,7 +303,7 @@ pub fn handle_return_value<'ctx, A>(
             require_return_value = !expected_type.has_nullish();
         }
 
-        expected_type
+        if function_like_metadata.flags.is_sharp() { known_type_or_error(expected_type) } else { expected_type }
     } else {
         require_return_value = false;
 

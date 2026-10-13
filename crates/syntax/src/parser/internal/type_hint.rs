@@ -80,18 +80,16 @@ where
                 Hint::Nullable(nullable)
             }
             T!["("] => Hint::Parenthesized(self.parse_parenthesized_type_hint()?),
-            T!["array"] => Hint::Array(self.expect_any_keyword()?),
-            T!["callable"] => Hint::Callable(self.expect_any_keyword()?),
+            _ if self.is_at_php_keyword(T!["array"])? => Hint::Array(self.expect_any_keyword()?),
+            _ if self.is_at_php_keyword(T!["callable"])? => Hint::Callable(self.expect_any_keyword()?),
             T!["null"] => Hint::Null(self.expect_any_keyword()?),
             T!["true"] => Hint::True(self.expect_any_keyword()?),
             T!["false"] => Hint::False(self.expect_any_keyword()?),
             T!["static"] => Hint::Static(self.expect_any_keyword()?),
             T!["self"] => Hint::Self_(self.expect_any_keyword()?),
             T!["parent"] => Hint::Parent(self.expect_any_keyword()?),
-            T![Identifier | "list" | "class"] if self.is_at_generic_hint()? => {
-                Hint::Generic(self.parse_generic_hint()?)
-            }
-            T!["function"] if self.is_at_function_hint()? => Hint::Function(self.parse_function_hint()?),
+            T![Identifier] if self.is_at_function_hint()? => Hint::Function(self.parse_function_hint()?),
+            T![Identifier] if self.is_at_generic_hint()? => Hint::Generic(self.parse_generic_hint()?),
             T!["enum" | "from" | QualifiedIdentifier | FullyQualifiedIdentifier] => {
                 Hint::Identifier(self.parse_identifier()?)
             }
@@ -192,8 +190,8 @@ where
     fn is_at_conditional(&mut self) -> Result<bool, ParseError> {
         let ends_pattern = |token: Option<Token<'_>>| {
             token.is_none_or(|token| {
-                matches!(token.kind, T![")" | "]" | "}" | "{" | "," | ";" | "=>" | "and" | "or"])
-                    || (token.kind == T![Identifier] && token.value == b"when")
+                matches!(token.kind, T![")" | "]" | "}" | "{" | "," | ";" | "=>"])
+                    || (token.kind == T![Identifier] && matches!(token.value, b"when" | b"and" | b"or"))
             })
         };
 
@@ -204,13 +202,10 @@ where
         })
     }
 
-    /// Whether a PHP# type with type arguments starts here: a name, which may be `List`, followed by `<`. The lexer
-    /// reads `Class` as PHP's `class` keyword, which starts a type only here, as in `Class<Order>` of spec section 25.
+    /// Whether a PHP# type with type arguments starts here: a name, such as `List` or `Class`, followed by `<`.
     pub(crate) fn is_at_generic_hint(&mut self) -> Result<bool, ParseError> {
         Ok(self.dialect.is_sharp()
-            && self.stream.lookahead(0)?.is_some_and(|token| {
-                matches!(token.kind, T![Identifier | "list"]) || (token.kind == T!["class"] && token.value == b"Class")
-            })
+            && self.stream.peek_kind(0)? == Some(T![Identifier])
             && self.stream.peek_kind(1)? == Some(T!["<"]))
     }
 
@@ -313,14 +308,13 @@ where
         })
     }
 
-    /// Whether a PHP# function type starts here: `Function` followed by `<`. The lexer reads `Function` as PHP's
-    /// `function` keyword, which PHP# writes only here.
+    /// Whether a PHP# function type starts here: `Function` followed by `<`.
     pub(crate) fn is_at_function_hint(&mut self) -> Result<bool, ParseError> {
         Ok(self.dialect.is_sharp()
             && self
                 .stream
                 .lookahead(0)?
-                .is_some_and(|token| token.kind == T!["function"] && token.value == b"Function")
+                .is_some_and(|token| token.kind == T![Identifier] && token.value == b"Function")
             && self.stream.peek_kind(1)? == Some(T!["<"]))
     }
 

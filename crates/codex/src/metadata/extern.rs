@@ -18,4 +18,6 @@ pub struct ExternMetadata {
     pub target: (Word, Word),
     /// The fully qualified class names of the effects its `uses` names. Empty when it declares its target pure.
     pub effects: Vec<Word>,
+    /// Whether it is an `extern event`, which marks its plain PHP class as an event, spec section 15.
+    pub event: bool,
 }

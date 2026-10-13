@@ -11,6 +11,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
@@ -499,6 +500,9 @@ where
                 }
                 _ => name,
             }
+        }
+        TAtomic::Reference(TReference::Symbol { name, .. }) => {
+            sharp_class_like_name(context.codebase, &context.imported_names, &context.short_name_counts, *name)
         }
         TAtomic::GenericParameter(parameter) => parameter.parameter_name.to_string(),
         TAtomic::Callable(TCallable::Signature(signature)) => {

@@ -263,6 +263,223 @@ fn a_construct_outside_the_slice_returns_its_not_supported_error() {
     assert_eq!(lowered.diagnostics(), ["9:9 compile error: This statement is not supported yet in PHP#."]);
 }
 
+/// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something
+/// only inside its own PHP# construct, as C#'s contextual keywords are. Each names a property, a local and a
+/// parameter, and each reads as the variable or property of its name.
+///
+/// ```php
+/// $list = $extra + $this->list; return $list;
+/// ```
+#[test]
+fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() {
+    let words = [
+        "fn",
+        "or",
+        "and",
+        "die",
+        "use",
+        "var",
+        "xor",
+        "echo",
+        "eval",
+        "from",
+        "goto",
+        "list",
+        "array",
+        "clone",
+        "empty",
+        "endif",
+        "isset",
+        "print",
+        "trait",
+        "unset",
+        "elseif",
+        "endfor",
+        "global",
+        "parent",
+        "switch",
+        "declare",
+        "default",
+        "extends",
+        "foreach",
+        "include",
+        "require",
+        "callable",
+        "endwhile",
+        "function",
+        "endswitch",
+        "insteadof",
+        "enddeclare",
+        "endforeach",
+        "implements",
+        "instanceof",
+        "include_once",
+        "require_once",
+        "__halt_compiler",
+        "get",
+        "set",
+        "init",
+        "field",
+        "value",
+        "of",
+        "via",
+        "uses",
+        "not",
+    ];
+
+    for word in words {
+        let lowered = Lowered::new(&format!(
+            "namespace App.Tenant;\n\nclass Report\n{{\n    private int {word} = 1;\n\n    public int run(int extra)\n    {{\n        const {word} = extra + this.{word};\n        return {word};\n    }}\n\n    public int read(int {word}) => {word};\n}}\n"
+        ));
+
+        assert_eq!(
+            lowered.body(),
+            format!(
+                "STMT_LIST\n  ASSIGN\n    VAR\n      ZVAL \"{word}\"\n    BINARY_OP [1]\n      VAR\n        ZVAL \"extra\"\n      PROP\n        VAR\n          ZVAL \"this\"\n        ZVAL \"{word}\"\n  RETURN\n    VAR\n      ZVAL \"{word}\"\n"
+            ),
+            "{word}"
+        );
+        assert_eq!(
+            lowered.declared("read"),
+            format!(
+                "METHOD [1] \"read\" @13-13\n  PARAM_LIST\n    PARAM\n      ZVAL [1] \"int\"\n      ZVAL \"{word}\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    RETURN\n      VAR\n        ZVAL \"{word}\"\n  ZVAL [1] \"int\"\n  null\n"
+            ),
+            "{word}"
+        );
+    }
+}
+
+/// Any word names a method, a property or a field, a keyword PHP# uses included, as in TypeScript and PHP: a member's
+/// name is written only where it is declared and after `.`, so it never reads as the keyword. A PHP# class can then
+/// override a plain PHP method named `is` or `lazy`, as Eloquent's `Model::is` and `Collection::lazy` are.
+///
+/// ```php
+/// return $this->is($this) ? $this->lazy()->match() : $this->default;
+/// ```
+#[test]
+fn any_word_names_a_member() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    private int return = 2;\n\n    public int default { get; } = 3;\n\n    public bool is(Report other) => other.default == this.default;\n\n    public int match() => this.return;\n\n    public Report lazy() => this;\n\n    public int run(int extra)\n    {\n        return this.is(this) ? this.lazy().match() : this.default;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(
+        lowered.body(),
+        "STMT_LIST\n  RETURN\n    CONDITIONAL\n      METHOD_CALL\n        VAR\n          ZVAL \"this\"\n        ZVAL \"is\"\n        ARG_LIST\n          VAR\n            ZVAL \"this\"\n      METHOD_CALL\n        METHOD_CALL\n          VAR\n            ZVAL \"this\"\n          ZVAL \"lazy\"\n          ARG_LIST\n        ZVAL \"match\"\n        ARG_LIST\n      PROP\n        VAR\n          ZVAL \"this\"\n        ZVAL \"default\"\n"
+    );
+}
+
+/// A PHP keyword PHP# doesn't use names a class, and so does a capitalized PHP# keyword, since PHP#'s keywords are
+/// lowercase. Code reads each one as a type and creates it. PHP reaches the class by its full name, as the engine
+/// takes any class name but the reserved type names.
+///
+/// ```php
+/// $print = new \App\Shop\Print(); $refund = new \App\Shop\Return(); return $print->n() + $refund->n();
+/// ```
+#[test]
+fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_a_class() {
+    let print = ("src/Shop/Print.sharp", "namespace App.Shop;\n\npublic class Print\n{\n    public int n() => 1;\n}\n");
+    let r#return =
+        ("src/Shop/Return.sharp", "namespace App.Shop;\n\npublic class Return\n{\n    public int n() => 2;\n}\n");
+    let lowered = Lowered::with(
+        "namespace App.Shop;\n\npublic class Match\n{\n    public int run(int extra)\n    {\n        Print print = new Print();\n        Return refund = new Return();\n        return print.n() + refund.n();\n    }\n}\n",
+        &[print, r#return],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        "STMT_LIST\n  ASSIGN\n    VAR\n      ZVAL \"print\"\n    NEW\n      ZVAL \"App\\\\Shop\\\\Print\"\n      ARG_LIST\n  ASSIGN\n    VAR\n      ZVAL \"refund\"\n    NEW\n      ZVAL \"App\\\\Shop\\\\Return\"\n      ARG_LIST\n  RETURN\n    BINARY_OP [1]\n      METHOD_CALL\n        VAR\n          ZVAL \"print\"\n        ZVAL \"n\"\n        ARG_LIST\n      METHOD_CALL\n        VAR\n          ZVAL \"refund\"\n        ZVAL \"n\"\n        ARG_LIST\n"
+    );
+}
+
+/// An event is a class, so a PHP-only word or a capitalized PHP# keyword names one, as `Print` does. It lowers to the
+/// final class `[32]` the engine declares, whose constructor promotes `id`.
+#[test]
+fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_an_event() {
+    let lowered = Lowered::new("namespace App.Shop;\n\npublic event Print(int id);\n");
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App\\Shop"
+                null
+              CLASS [32] "Print" @3-3
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "__construct" @3-3
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "id"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                null
+                null
+        "#}
+    );
+}
+
+/// Only a file declares a type, so in a class body a class named after a type's keyword or a modifier is a member's
+/// type, as `Struct`, `Class` and `Lazy` are here, and an operator's return type keeps its name.
+#[test]
+fn a_class_named_after_a_type_keyword_or_a_modifier_types_a_member() {
+    let r#struct =
+        ("src/Shop/Struct.sharp", "namespace App.Shop;\n\npublic class Struct\n{\n    public Struct() { }\n}\n");
+    let class = ("src/Shop/Class.sharp", "namespace App.Shop;\n\npublic class Class\n{\n    public Class() { }\n}\n");
+    let lazy = (
+        "src/Shop/Lazy.sharp",
+        "namespace App.Shop;\n\npublic class Lazy\n{\n    public Lazy() { }\n\n    public static Lazy operator +(Lazy a, Lazy b) { return a; }\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App.Shop;\n\npublic class Report\n{\n    public Struct shape { get; set; }\n    public Class kind { get; set; }\n\n    public Report()\n    {\n        this.shape = new Struct();\n        this.kind = new Class();\n    }\n\n    public Lazy sum(Lazy a, Lazy b) => a + b;\n}\n",
+        &[r#struct, class, lazy],
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert!(
+        lowered.tree().contains("ZVAL \"shape\"") && lowered.tree().contains("ZVAL \"kind\""),
+        "{}",
+        lowered.tree()
+    );
+}
+
+/// Each keyword an error on a keyword, `true`, `false` or `null` written in another case names compiles once written
+/// in lowercase, in every place the error fires: a statement on two lines and two keywords on one line included.
+#[test]
+fn the_lowercase_keyword_a_keyword_in_another_case_names_compiles() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public static int count() { return 1; }\n\n    public int run(bool flag, List<int> items)\n    {\n        const base = 2;\n        let total = 1;\n        if (flag) { }\n        const c = new\n            Report();\n        new Report();\n        let on = true;\n        let off = false;\n        int? none = null;\n        if (flag) { return 5; }\n        try { total = 3; } catch (Exception e) { total = 4; } finally { }\n        if (flag) { total = 5; } else if (items.count() == 0) { total = 6; } else { total = 7; }\n        do { total = 8; } while (off);\n        for (const item of items) { if (flag) { break; } continue; }\n        return flag ? base : total;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+}
+
+/// The PHP# form each refusal of `isset`, `empty`, `unset`, `array` and `list` quotes compiles.
+#[test]
+fn the_php_sharp_form_a_refused_php_construct_names_compiles() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(int? value, List<int> items, List<int> pair, Map<string, int> map, string key)\n    {\n        const listed = [1, 2];\n        const first = pair[0];\n        map.remove(key);\n        return value != null && items.count() == 0 && listed.count() == first;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+}
+
 /// The lowering takes only a checked program, so an enum the slice refuses lowers no node of the enum.
 #[test]
 fn an_enum_the_slice_refuses_returns_its_error_and_no_nodes() {
@@ -1804,6 +2021,48 @@ fn the_base_class_constructor_can_be_inherited() {
     }
 }
 
+/// ```php
+/// public function __construct() { parent::__construct(); }
+/// ```
+///
+/// A PHP# base class without a constructor gets one for its initial values that are not constant, so `: super()` and
+/// the constructor that runs a subclass's initial values call it, with the base class in another file or the same one.
+#[test]
+fn super_calls_the_constructor_a_base_class_gets_for_its_initial_values() {
+    let base = (
+        "src/Lib/Stamped.sharp",
+        "namespace Lib;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"p\");\n}\n",
+    );
+    let parent_construct = "  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n";
+    for (code, body) in [
+        (
+            "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            format!("STMT_LIST\n{parent_construct}"),
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"q\");\n}\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            format!("STMT_LIST\n{parent_construct}"),
+        ),
+        (
+            "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    private string extra = strtoupper(\"e\");\n}\n",
+            format!(
+                "STMT_LIST\n  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"extra\"\n    CALL\n      ZVAL \"strtoupper\"\n      ARG_LIST\n        ZVAL \"e\"\n{parent_construct}"
+            ),
+        ),
+    ] {
+        let lowered = Lowered::with(code, &[base]);
+        assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "{code}");
+        // `Report` is the file's last class, so its constructor is the last one.
+        let report = lowered
+            .nodes()
+            .iter()
+            .rposition(|node| node.kind == sharp_kind::SHARP_AST_METHOD && lowered.text(node.text) == "__construct")
+            .expect("Report declares a constructor") as u32;
+
+        assert_eq!(lowered.render(lowered.child(report, 2)), body, "{code}");
+    }
+}
+
 /// `: super()` with no constructor above the class does nothing, as C#'s `: base()` on `object`.
 #[test]
 fn super_with_no_constructor_above_lowers_to_nothing() {
@@ -2799,43 +3058,82 @@ fn a_backed_enum_key_goes_into_map_get_as_its_backing_value() {
 }
 
 /// ```php
-/// $counts->delete($status->value);
-/// $counts->delete(key: \Lib\Calc::Closed->value);
+/// \array_key_exists($status->value, $counts) && $counts->delete($status->value) === null;
+/// \array_key_exists(array: $counts, key: \Lib\Calc::Closed->value) && $counts->delete(\Lib\Calc::Closed->value) === null;
+/// return \array_key_exists($status->value, $counts);
 /// ```
 ///
-/// `Map.delete` declares its parameter as the `Map`'s key type, so a case going in as its key is its `->value`,
-/// passed by position or by name.
+/// `Map.has` and `Map.remove` declare their parameter as the `Map`'s key type, so a case going in as its key is its
+/// `->value`, passed by position or by name. A key that reads a class goes in by name, after the `Map`, as the call
+/// reads them.
 #[test]
-fn a_backed_enum_key_goes_into_map_delete_as_its_backing_value() {
+fn a_backed_enum_key_goes_into_map_has_and_remove_as_its_backing_value() {
     assert_eq!(
         body_in(
-            "void run(Map<Calc, int> counts, Calc status)",
-            "        counts.delete(status);\n        counts.delete(key: Calc.Closed);\n",
+            "bool run(Map<Calc, int> counts, Calc status)",
+            "        counts.remove(status);\n        counts.remove(key: Calc.Closed);\n        return counts.has(status);\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
         ),
         indoc! {r#"
             STMT_LIST
-              METHOD_CALL
-                VAR
-                  ZVAL "counts"
-                ZVAL "delete"
-                ARG_LIST
-                  PROP
-                    VAR
-                      ZVAL "status"
-                    ZVAL "value"
-              METHOD_CALL
-                VAR
-                  ZVAL "counts"
-                ZVAL "delete"
-                ARG_LIST
-                  NAMED_ARG
-                    ZVAL "key"
+              AND
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
                     PROP
-                      CLASS_CONST
-                        ZVAL "Lib\\Calc"
-                        ZVAL "Closed"
+                      VAR
+                        ZVAL "status"
                       ZVAL "value"
+                    VAR
+                      ZVAL "counts"
+                BINARY_OP [16]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "counts"
+                    ZVAL "delete"
+                    ARG_LIST
+                      PROP
+                        VAR
+                          ZVAL "status"
+                        ZVAL "value"
+                  ZVAL null
+              AND
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    NAMED_ARG
+                      ZVAL "array"
+                      VAR
+                        ZVAL "counts"
+                    NAMED_ARG
+                      ZVAL "key"
+                      PROP
+                        CLASS_CONST
+                          ZVAL "Lib\\Calc"
+                          ZVAL "Closed"
+                        ZVAL "value"
+                BINARY_OP [16]
+                  METHOD_CALL
+                    VAR
+                      ZVAL "counts"
+                    ZVAL "delete"
+                    ARG_LIST
+                      PROP
+                        CLASS_CONST
+                          ZVAL "Lib\\Calc"
+                          ZVAL "Closed"
+                        ZVAL "value"
+                  ZVAL null
+              RETURN
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "status"
+                      ZVAL "value"
+                    VAR
+                      ZVAL "counts"
         "#}
     );
 }
@@ -2959,6 +3257,55 @@ fn a_set_literal_holds_each_element_under_its_key() {
                         ARG_LIST
                           VAR
                             ZVAL "name"
+        "#}
+    );
+}
+
+/// ```php
+/// $sets = [[1 => 1, 1 => 1], [2 => 2]];
+/// $named['b'] = ['y' => 'y'];
+/// ```
+///
+/// A list literal inside a literal whose elements are declared `Set`s, or written into a `Map` entry declared a
+/// `Set`, is that `Set`, each element under its key.
+#[test]
+fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
+    assert_eq!(
+        body_in(
+            "void run(Map<string, Set<string>> named)",
+            "        List<Set<int>> sets = [[1, 1], [2]];\n        named[\"b\"] = [\"y\"];\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "sets"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 1
+                        ZVAL 1
+                      ARRAY_ELEM
+                        ZVAL 1
+                        ZVAL 1
+                    null
+                  ARRAY_ELEM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 2
+                        ZVAL 2
+                    null
+              ASSIGN
+                DIM
+                  VAR
+                    ZVAL "named"
+                  ZVAL "b"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "y"
+                    ZVAL "y"
         "#}
     );
 }
@@ -3359,18 +3706,20 @@ fn set_methods_read_and_change_each_element_under_its_key() {
 /// $tags = \Sharp\Set::from($tags);
 /// $count = \count($tags);
 /// $kept = $tags->filterValues($keep);
+/// $priced = $prices->filterValues($positive);
 /// $tags->any($keep);
 /// return \array_values($tags);
 /// ```
 ///
-/// `count` and `toList` are PHP's functions on the array. `filter` keeps each element under its key, as
-/// `Sharp\Collection`'s `filterValues` does, and any other `Set` method is the `Sharp\Collection` method of its name.
+/// `count` and `toList` are PHP's functions on the array. A `Set`'s and a `Map`'s `filter` keep each element under its
+/// key, as `Sharp\Collection`'s `filterValues` does, and any other `Set` method is the `Sharp\Collection` method of its
+/// name.
 #[test]
 fn set_count_to_list_and_filter_are_the_php_that_reads_the_array() {
     assert_eq!(
         body_in(
-            "List<string> run(Set<string> tags, Function<bool(string)> keep)",
-            "        const count = tags.count();\n        const kept = tags.filter(keep);\n        tags.any(keep);\n        return tags.toList();\n",
+            "List<string> run(Set<string> tags, Function<bool(string)> keep, Map<string, int> prices, Function<bool(int)> positive)",
+            "        const count = tags.count();\n        const kept = tags.filter(keep);\n        const priced = prices.filter(positive);\n        tags.any(keep);\n        return tags.toList();\n",
             &[]
         ),
         indoc! {r#"
@@ -3402,6 +3751,16 @@ fn set_count_to_list_and_filter_are_the_php_that_reads_the_array() {
                   ARG_LIST
                     VAR
                       ZVAL "keep"
+              ASSIGN
+                VAR
+                  ZVAL "priced"
+                METHOD_CALL
+                  VAR
+                    ZVAL "prices"
+                  ZVAL "filterValues"
+                  ARG_LIST
+                    VAR
+                      ZVAL "positive"
               METHOD_CALL
                 VAR
                   ZVAL "tags"
@@ -3453,7 +3812,8 @@ fn every_collection_counts_with_php_count() {
 }
 
 /// Each method `INLINED_COLLECTION_METHODS` names lowers to PHP on the array, never to a call of the method itself,
-/// which `Sharp\Collection` may not have. Only `filter` stays a method call, of `filterValues`, which keeps the keys.
+/// which `Sharp\Collection` may not have. Only `filter` stays a method call, of `filterValues`, which keeps the keys of
+/// a `Map` and a `Set`.
 #[test]
 fn every_inlined_collection_method_lowers_to_php_on_the_array() {
     for (collection, method) in INLINED_COLLECTION_METHODS {
@@ -3461,9 +3821,10 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
             "Map" => "Map<string, int>",
             _ => &format!("{collection}<int>"),
         };
-        let argument = match method {
-            "add" | "remove" | "contains" | "indexOf" => "1",
-            "filter" => "value => value > 0",
+        let argument = match (collection, method) {
+            ("Map", "has" | "remove") => "\"a\"",
+            (_, "add" | "remove" | "contains" | "indexOf") => "1",
+            (_, "filter") => "value => value > 0",
             _ => "",
         };
         let body = Lowered::new(&format!(
@@ -3741,14 +4102,19 @@ fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
 ///     && \array_find_key(\App\Tenant\Report::pick($xs, $x = 2), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($x)) === 0
 ///     && ((${'index#2'} = \array_find_key((${'receiver#1'} = $this->bumped())->items, (fn (${'value#3'}) => fn (${'element#4'}) =>
 ///         ${'element#4'} === ${'value#3'})($this->n))) !== null) && ${'receiver#1'}->items->removeAt(${'index#2'}) === null;
+///
+/// return \array_key_exists(array: $this->bumped()->counts, key: $this->n)
+///     && \array_key_exists(array: (${'receiver#1'} = $this->bumped())->counts, key: $this->n)
+///     && ${'receiver#1'}->counts->delete($this->n) === null;
 /// ```
 ///
-/// PHP's `in_array` and `array_search` read their value before their array, so a search whose receiver or value runs
-/// code takes the form that runs the receiver first, as the call runs it: `this.bump(xs)` changes `this.n` before
-/// `contains` reads it, `Report.pick(xs, x = 2)` assigns `x` before `indexOf` reads it, and `this.bumped()` changes
-/// `this.n` before `remove` reads it.
+/// PHP's `in_array`, `array_search` and `array_key_exists` read their value before their array, so a search whose
+/// receiver or value runs code takes the form that runs the receiver first, as the call runs it: `this.bump(xs)`
+/// changes `this.n` before `contains` reads it, `Report.pick(xs, x = 2)` assigns `x` before `indexOf` reads it, and
+/// `this.bumped()` changes `this.n` before a `List`'s `remove` reads it, and before a `Map`'s `has` and `remove`, which
+/// name `\array_key_exists`'s arguments to read the `Map` first.
 #[test]
-fn a_list_search_runs_its_receiver_before_its_value() {
+fn a_search_runs_its_receiver_before_its_value() {
     assert_eq!(
         Lowered::new(
             "namespace App.Tenant;\n\nclass Report\n{\n    private int n = 1;\n\n    public List<int> items { get; set; } = [];\n\n    public List<int> bump(List<int> xs)\n    {\n        this.n = this.n + 1;\n        return xs;\n    }\n\n    public Report bumped()\n    {\n        this.n = this.n + 1;\n        return this;\n    }\n\n    public static List<int> pick(List<int> xs, int ignored) => xs;\n\n    public bool run(List<int> xs)\n    {\n        let x = 1;\n        return this.bump(xs).contains(this.n) && Report.pick(xs, x = 2).indexOf(x) == 0 && this.bumped().items.remove(this.n);\n    }\n}\n"
@@ -3922,6 +4288,70 @@ fn a_list_search_runs_its_receiver_before_its_value() {
                         ARG_LIST
                           VAR
                             ZVAL "index#2"
+                      ZVAL null
+        "#}
+    );
+    assert_eq!(
+        Lowered::new(
+            "namespace App.Tenant;\n\nclass Report\n{\n    private int n = 1;\n\n    public Map<int, int> counts { get; set; } = [:];\n\n    public Report bumped()\n    {\n        this.n = this.n + 1;\n        return this;\n    }\n\n    public bool run()\n    {\n        return this.bumped().counts.has(this.n) && this.bumped().counts.remove(this.n);\n    }\n}\n"
+        )
+        .body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                AND
+                  CALL
+                    ZVAL "array_key_exists"
+                    ARG_LIST
+                      NAMED_ARG
+                        ZVAL "array"
+                        PROP
+                          METHOD_CALL
+                            VAR
+                              ZVAL "this"
+                            ZVAL "bumped"
+                            ARG_LIST
+                          ZVAL "counts"
+                      NAMED_ARG
+                        ZVAL "key"
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "n"
+                  AND
+                    CALL
+                      ZVAL "array_key_exists"
+                      ARG_LIST
+                        NAMED_ARG
+                          ZVAL "array"
+                          PROP
+                            ASSIGN
+                              VAR
+                                ZVAL "receiver#1"
+                              METHOD_CALL
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "bumped"
+                                ARG_LIST
+                            ZVAL "counts"
+                        NAMED_ARG
+                          ZVAL "key"
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "n"
+                    BINARY_OP [16]
+                      METHOD_CALL
+                        PROP
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "counts"
+                        ZVAL "delete"
+                        ARG_LIST
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "n"
                       ZVAL null
         "#}
     );
@@ -4107,6 +4537,484 @@ fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
                           VAR
                             ZVAL "index#1"
                       ZVAL null
+        "#}
+    );
+}
+
+/// ```php
+/// $grid[0]->clear();
+/// !isset($sets[0][4]) && $sets[0]->put(4, 4) !== null;
+/// $maps[0]->put('c', 3);
+/// $maps[0]['d'] ?? $maps[0]->put('d', 4);
+/// ((${'index#2'} = \array_find_key($grid[${'index#1'} = $this->next()], …)) !== null)
+///     && $grid[${'index#1'}]->removeAt(${'index#2'}) === null;
+/// return (($stock['a'] ?? null) === null) ? null : \count($stock['a']);
+/// ```
+///
+/// Spec section 12 makes a `List` index a place, which only the engine's collection of the element reaches, so a
+/// change through it is a `Sharp\Collection` method on the index: `clear`, and `put` for a `Set`'s `add` and for a
+/// write into a `Map` element, whose `??=` puts only for a missing key. An index that runs something is held in a
+/// hidden variable, so it runs once. A null-safe method that runs as PHP reads a missing `Map` key as null.
+#[test]
+fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
+    assert_eq!(
+        body_in(
+            "int? run(List<List<int>> grid, List<Set<int>> sets, List<Map<string, int>> maps, Map<string, List<int>> stock)",
+            "        grid[0].clear();\n        sets[0].add(4);\n        maps[0][\"c\"] = 3;\n        maps[0][\"d\"] ??= 4;\n        grid[this.next()].remove(2);\n        return stock[\"a\"]?.count();\n    }\n\n    private int next()\n    {\n        return 0;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                DIM
+                  VAR
+                    ZVAL "grid"
+                  ZVAL 0
+                ZVAL "clear"
+                ARG_LIST
+              AND
+                UNARY_OP [14]
+                  ISSET
+                    DIM
+                      DIM
+                        VAR
+                          ZVAL "sets"
+                        ZVAL 0
+                      ZVAL 4
+                BINARY_OP [17]
+                  METHOD_CALL
+                    DIM
+                      VAR
+                        ZVAL "sets"
+                      ZVAL 0
+                    ZVAL "put"
+                    ARG_LIST
+                      ZVAL 4
+                      ZVAL 4
+                  ZVAL null
+              METHOD_CALL
+                DIM
+                  VAR
+                    ZVAL "maps"
+                  ZVAL 0
+                ZVAL "put"
+                ARG_LIST
+                  ZVAL "c"
+                  ZVAL 3
+              COALESCE
+                DIM
+                  DIM
+                    VAR
+                      ZVAL "maps"
+                    ZVAL 0
+                  ZVAL "d"
+                METHOD_CALL
+                  DIM
+                    VAR
+                      ZVAL "maps"
+                    ZVAL 0
+                  ZVAL "put"
+                  ARG_LIST
+                    ZVAL "d"
+                    ZVAL 4
+              AND
+                BINARY_OP [17]
+                  ASSIGN
+                    VAR
+                      ZVAL "index#2"
+                    CALL
+                      ZVAL "array_find_key"
+                      ARG_LIST
+                        DIM
+                          VAR
+                            ZVAL "grid"
+                          ASSIGN
+                            VAR
+                              ZVAL "index#1"
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "next"
+                              ARG_LIST
+                        CALL
+                          ARROW_FUNC "" @13-13
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "value#3"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            ARROW_FUNC "" @13-13
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "element#4"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "element#4"
+                                VAR
+                                  ZVAL "value#3"
+                              null
+                              null
+                            null
+                            null
+                          ARG_LIST
+                            ZVAL 2
+                  ZVAL null
+                BINARY_OP [16]
+                  METHOD_CALL
+                    DIM
+                      VAR
+                        ZVAL "grid"
+                      VAR
+                        ZVAL "index#1"
+                    ZVAL "removeAt"
+                    ARG_LIST
+                      VAR
+                        ZVAL "index#2"
+                  ZVAL null
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    COALESCE
+                      DIM
+                        VAR
+                          ZVAL "stock"
+                        ZVAL "a"
+                      ZVAL null
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      DIM
+                        VAR
+                          ZVAL "stock"
+                        ZVAL "a"
+        "#}
+    );
+}
+
+/// ```php
+/// $rows[0]?->add(5); // every index before ?-> carries ZEND_DIM_IS
+/// $maybe[1]?->insert(0, 6);
+/// $this->held[0]?->add(7);
+/// $maybe[0]?->entries();
+/// ($maybe[2] === null) ? null : $maybe[2]->clear();
+/// return ($maybe[3] === null) ? null : \in_array(4, $maybe[3], true);
+/// ```
+///
+/// Spec section 12 makes a `List` index a place, so a change after `?.` on one runs on the index itself, as a change
+/// without `?.` does, and reaches the element the list stores, here a local's, a nullable element's and a hooked
+/// property's. A `List` index read with `?.` is handled where it is read, as a `Map` read is, so `?.` skips a missing
+/// index as it skips a null element. The index carries `ZEND_DIM_IS` on every path, so a missing index reads as null:
+/// a change, a method that changes nothing, and the test an inlined method runs first.
+#[test]
+fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
+    assert_eq!(
+        child_body(
+            "bool? run(List<List<int>> rows, List<List<int>?> maybe)",
+            "        rows[0]?.add(5);\n        maybe[1]?.insert(0, 6);\n        this.held[0]?.add(7);\n        maybe[0]?.entries();\n        maybe[2]?.clear();\n        return maybe[3]?.contains(4);\n",
+            "<?php namespace App\\Tenant; class Base { /** @var list<list<int>> */ public array $held = [[1]] { set { $this->held = $value; } } }"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              NULLSAFE_METHOD_CALL
+                DIM [1]
+                  VAR
+                    ZVAL "rows"
+                  ZVAL 0
+                ZVAL "add"
+                ARG_LIST
+                  ZVAL 5
+              NULLSAFE_METHOD_CALL
+                DIM [1]
+                  VAR
+                    ZVAL "maybe"
+                  ZVAL 1
+                ZVAL "insert"
+                ARG_LIST
+                  ZVAL 0
+                  ZVAL 6
+              NULLSAFE_METHOD_CALL
+                DIM [1]
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "held"
+                  ZVAL 0
+                ZVAL "add"
+                ARG_LIST
+                  ZVAL 7
+              NULLSAFE_METHOD_CALL
+                DIM [1]
+                  VAR
+                    ZVAL "maybe"
+                  ZVAL 0
+                ZVAL "entries"
+                ARG_LIST
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  DIM [1]
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL 2
+                  ZVAL null
+                ZVAL null
+                METHOD_CALL
+                  DIM
+                    VAR
+                      ZVAL "maybe"
+                    ZVAL 2
+                  ZVAL "clear"
+                  ARG_LIST
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    DIM [1]
+                      VAR
+                        ZVAL "maybe"
+                      ZVAL 3
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "in_array"
+                    ARG_LIST
+                      ZVAL 4
+                      DIM
+                        VAR
+                          ZVAL "maybe"
+                        ZVAL 3
+                      ZVAL true
+        "#}
+    );
+}
+
+/// ```php
+/// $cube[9][0]?->add(1); // only [0] carries ZEND_DIM_IS
+/// ($cube[9][0] === null) ? null : $cube[9][0]->clear();
+/// …
+/// ```
+///
+/// Only the index directly before `?.` reads a missing key as null (spec section 12). The indexes before it stay bare
+/// reads, so `cube[9][0]?.add(1)` throws on `cube[9]`, as a bare `cube[9]` does, on every path a method takes.
+#[test]
+fn a_null_safe_call_through_nested_list_indexes_marks_only_the_last() {
+    assert_eq!(
+        body_in(
+            "List<Any?> run(List<List<List<int>>> cube)",
+            "        cube[9][0]?.add(1);\n        cube[9][0]?.clear();\n        cube[9][0]?.remove(1);\n        return [cube[9][0]?.count(), cube[9][0]?.contains(1), cube[9][0]?.entries()];\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              NULLSAFE_METHOD_CALL
+                DIM [1]
+                  DIM
+                    VAR
+                      ZVAL "cube"
+                    ZVAL 9
+                  ZVAL 0
+                ZVAL "add"
+                ARG_LIST
+                  ZVAL 1
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  DIM [1]
+                    DIM
+                      VAR
+                        ZVAL "cube"
+                      ZVAL 9
+                    ZVAL 0
+                  ZVAL null
+                ZVAL null
+                METHOD_CALL
+                  DIM
+                    DIM
+                      VAR
+                        ZVAL "cube"
+                      ZVAL 9
+                    ZVAL 0
+                  ZVAL "clear"
+                  ARG_LIST
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  DIM [1]
+                    DIM
+                      VAR
+                        ZVAL "cube"
+                      ZVAL 9
+                    ZVAL 0
+                  ZVAL null
+                ZVAL null
+                AND
+                  BINARY_OP [17]
+                    ASSIGN
+                      VAR
+                        ZVAL "index#1"
+                      CALL
+                        ZVAL "array_search"
+                        ARG_LIST
+                          ZVAL 1
+                          DIM
+                            DIM
+                              VAR
+                                ZVAL "cube"
+                              ZVAL 9
+                            ZVAL 0
+                          ZVAL true
+                    ZVAL false
+                  BINARY_OP [16]
+                    METHOD_CALL
+                      DIM
+                        DIM
+                          VAR
+                            ZVAL "cube"
+                          ZVAL 9
+                        ZVAL 0
+                      ZVAL "removeAt"
+                      ARG_LIST
+                        VAR
+                          ZVAL "index#1"
+                    ZVAL null
+              RETURN
+                ARRAY [3]
+                  ARRAY_ELEM
+                    CONDITIONAL [1]
+                      BINARY_OP [16]
+                        DIM [1]
+                          DIM
+                            VAR
+                              ZVAL "cube"
+                            ZVAL 9
+                          ZVAL 0
+                        ZVAL null
+                      ZVAL null
+                      CALL
+                        ZVAL "count"
+                        ARG_LIST
+                          DIM
+                            DIM
+                              VAR
+                                ZVAL "cube"
+                              ZVAL 9
+                            ZVAL 0
+                    null
+                  ARRAY_ELEM
+                    CONDITIONAL [1]
+                      BINARY_OP [16]
+                        DIM [1]
+                          DIM
+                            VAR
+                              ZVAL "cube"
+                            ZVAL 9
+                          ZVAL 0
+                        ZVAL null
+                      ZVAL null
+                      CALL
+                        ZVAL "in_array"
+                        ARG_LIST
+                          ZVAL 1
+                          DIM
+                            DIM
+                              VAR
+                                ZVAL "cube"
+                              ZVAL 9
+                            ZVAL 0
+                          ZVAL true
+                    null
+                  ARRAY_ELEM
+                    NULLSAFE_METHOD_CALL
+                      DIM [1]
+                        DIM
+                          VAR
+                            ZVAL "cube"
+                          ZVAL 9
+                        ZVAL 0
+                      ZVAL "entries"
+                      ARG_LIST
+                    null
+        "#}
+    );
+}
+
+/// ```php
+/// $this->sizes->put('a', $extra);
+/// $this->sizes['b'] ?? $this->sizes->put('b', 2);
+/// (${'receiver#1'} = $this->me())->sizes['c'] ?? ${'receiver#1'}->sizes->put('c', 3);
+/// ```
+///
+/// PHP gives no reference to a hooked property, so a write into the `Map` one holds reaches it, and its `set` hook,
+/// only through the engine's collection of the property, as a change through a `List` index reaches the element. It
+/// is a `put` on the property, and a `??=` puts only for a missing key, holding an object that runs something in a
+/// hidden variable. A property without hooks keeps PHP's write, as `literals_are_short_arrays_and_an_index_is_a_dim`
+/// shows.
+#[test]
+fn a_write_into_a_map_a_hooked_property_holds_puts_it_through_the_property() {
+    assert_eq!(
+        child_body(
+            "void run(int extra)",
+            "        this.sizes[\"a\"] = extra;\n        this.sizes[\"b\"] ??= 2;\n        this.me().sizes[\"c\"] ??= 3;\n    }\n\n    private Report me()\n    {\n        return this;\n",
+            "<?php namespace App\\Tenant; class Base { /** @var array<string, int> */ public array $sizes = ['a' => 0] { set { $this->sizes = $value; } } }"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              METHOD_CALL
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "sizes"
+                ZVAL "put"
+                ARG_LIST
+                  ZVAL "a"
+                  VAR
+                    ZVAL "extra"
+              COALESCE
+                DIM
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "sizes"
+                  ZVAL "b"
+                METHOD_CALL
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "sizes"
+                  ZVAL "put"
+                  ARG_LIST
+                    ZVAL "b"
+                    ZVAL 2
+              COALESCE
+                DIM
+                  PROP
+                    ASSIGN
+                      VAR
+                        ZVAL "receiver#1"
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "me"
+                        ARG_LIST
+                    ZVAL "sizes"
+                  ZVAL "c"
+                METHOD_CALL
+                  PROP
+                    VAR
+                      ZVAL "receiver#1"
+                    ZVAL "sizes"
+                  ZVAL "put"
+                  ARG_LIST
+                    ZVAL "c"
+                    ZVAL 3
         "#}
     );
 }
@@ -5645,7 +6553,7 @@ fn let_and_const_locals_assign_their_variables() {
 #[test]
 fn typed_locals_assign_their_variables_and_drop_the_type() {
     assert_eq!(
-        body("        Calc? found = null;\n        const int base = 2;\n        return base;\n"),
+        body("        string? found = null;\n        const int base = 2;\n        return base;\n"),
         indoc! {r#"
             STMT_LIST
               ASSIGN
@@ -7410,6 +8318,18 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
     );
 }
 
+/// Spec section 15: an `on` clause adds nothing to its class, because `mago compile` lists each listener in
+/// `.sharp/listeners.php`, so a listener lowers to its method alone.
+#[test]
+fn a_listener_lowers_to_its_method_alone() {
+    let code = "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n\npublic event OrderPaid(int orderId) : OrderEvent;\n\npublic class Notices\n{\n    public void send(OrderEvent e) on OrderPaid { }\n\n    public void refresh() on OrderPaid, OrderEvent => this.send(new OrderPaid(1));\n}\n";
+
+    assert_eq!(
+        Lowered::new(code).tree(),
+        Lowered::new(&code.replace(" on OrderPaid, OrderEvent", "").replace(" on OrderPaid", "")).tree()
+    );
+}
+
 /// ```php
 /// /** @extends \Lib\PaginatedList<\Lib\Order> */
 /// class OrderPage extends \Lib\PaginatedList { }
@@ -7495,11 +8415,11 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 ///
 /// Spec section 15: an event is a final class, `[32]` `ZEND_ACC_FINAL`, whose constructor promotes each parameter to a
 /// public get-only property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, and its header is the `implements` name
-/// list. An interface's get-only property is a public property, `[1]`, with an abstract `get` hook.
+/// list. An interface's get-only property, written bare, is a public property, `[1]`, with an abstract `get` hook.
 #[test]
 fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic interface OrderEvent\n{\n    public int orderId { get; }\n}\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n\npublic class Order\n{\n    public OrderPaid pay(int orderId) => new OrderPaid(orderId);\n}\n",
+        "namespace App;\n\npublic interface OrderEvent\n{\n    int orderId { get; }\n}\n\npublic event OrderPaid(int orderId, int amount = 0) : OrderEvent;\n\npublic class Order\n{\n    public OrderPaid pay(int orderId) => new OrderPaid(orderId);\n}\n",
     );
 
     assert_eq!(
@@ -7589,6 +8509,40 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                     null
                 null
                 null
+        "#}
+    );
+}
+
+/// ```php
+/// \Sharp\Internal\emit(new \App\OrderPaid(1));
+/// \Sharp\Internal\emit($paid);
+/// ```
+///
+/// Spec section 15: `emit` raises the event its expression gives, through the one function the engine adds, which runs
+/// every listener of the event before it returns.
+#[test]
+fn emit_is_a_call_of_the_engine_emit() {
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Order\n{\n    public void run(OrderPaid paid)\n    {\n        emit new OrderPaid(1);\n        emit paid;\n    }\n}\n",
+        &[("src/OrderPaid.sharp", "namespace App;\n\npublic event OrderPaid(int orderId);\n")],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              CALL
+                ZVAL "Sharp\\Internal\\emit"
+                ARG_LIST
+                  NEW
+                    ZVAL "App\\OrderPaid"
+                    ARG_LIST
+                      ZVAL 1
+              CALL
+                ZVAL "Sharp\\Internal\\emit"
+                ARG_LIST
+                  VAR
+                    ZVAL "paid"
         "#}
     );
 }
@@ -11118,16 +12072,18 @@ fn null_safe_calls_and_reads_are_nullsafe_kinds() {
 }
 
 /// ```php
-/// return ($extra[0] ?? null)?->value ?? ($extra[1] ?? null)?->total();
+/// return $extra[0]?->value ?? $extra[1]?->total() ?? ($named['a'] ?? null)?->value; // the List indexes carry ZEND_DIM_IS
 /// ```
 ///
-/// `?.` reads a missing key as null, as `??` does, so the index it reads from is the left side of a `COALESCE`.
+/// `?.` reads a missing key of the index directly before it as null, as `??` does (spec section 12). A `List` index is
+/// the index itself, marked with `ZEND_DIM_IS`, so the engine reads only that index quietly. A `Map` index is the left
+/// side of a `COALESCE`.
 #[test]
-fn null_safe_access_on_an_index_coalesces_a_missing_key_to_null() {
+fn null_safe_access_reads_a_missing_index_as_null() {
     assert_eq!(
         body_in(
-            "int? run(List<Calc?> extra)",
-            "        return extra[0]?.value ?? (extra[1])?.total();\n",
+            "int? run(List<Calc?> extra, Map<string, Calc?> named)",
+            "        return extra[0]?.value ?? (extra[1])?.total() ?? named[\"a\"]?.value;\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; final class Calc { public int $value = 0; public function total(): int { return 0; } }",
@@ -11138,22 +12094,27 @@ fn null_safe_access_on_an_index_coalesces_a_missing_key_to_null() {
               RETURN
                 COALESCE
                   NULLSAFE_PROP
-                    COALESCE
-                      DIM
-                        VAR
-                          ZVAL "extra"
-                        ZVAL 0
-                      ZVAL null
+                    DIM [1]
+                      VAR
+                        ZVAL "extra"
+                      ZVAL 0
                     ZVAL "value"
-                  NULLSAFE_METHOD_CALL
-                    COALESCE
-                      DIM
+                  COALESCE
+                    NULLSAFE_METHOD_CALL
+                      DIM [1]
                         VAR
                           ZVAL "extra"
                         ZVAL 1
-                      ZVAL null
-                    ZVAL "total"
-                    ARG_LIST
+                      ZVAL "total"
+                      ARG_LIST
+                    NULLSAFE_PROP
+                      COALESCE
+                        DIM
+                          VAR
+                            ZVAL "named"
+                          ZVAL "a"
+                        ZVAL null
+                      ZVAL "value"
         "#}
     );
 }
@@ -11248,53 +12209,6 @@ fn if_else_if_and_else_are_if_lists_of_if_elems() {
                       STMT_LIST
                         RETURN
                           ZVAL 3
-        "#}
-    );
-}
-
-/// ```php
-/// if ($extra < 0) throw new \App\Tenant\Failure($extra);
-/// if ($extra > 1) return 1;
-/// ```
-///
-/// A guard clause's `IF_ELEM` holds the `THROW` or `RETURN` itself, with no `STMT_LIST`, as php-src's grammar builds
-/// `if (c) return x;`.
-#[test]
-fn a_guard_clause_is_an_if_elem_holding_its_throw_or_return() {
-    assert_eq!(
-        body_in(
-            RUN,
-            "        if (extra < 0) throw new Failure(extra);\n        if (extra > 1) return 1;\n        return extra;\n",
-            &[(
-                "src/App/Tenant/Failure.php",
-                "<?php namespace App\\Tenant; final class Failure extends \\Exception { public function __construct(int $code) { parent::__construct('', $code); } }",
-            )]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              IF
-                IF_ELEM
-                  BINARY_OP [20]
-                    VAR
-                      ZVAL "extra"
-                    ZVAL 0
-                  THROW
-                    NEW
-                      ZVAL "App\\Tenant\\Failure"
-                      ARG_LIST
-                        VAR
-                          ZVAL "extra"
-              IF
-                IF_ELEM
-                  GREATER
-                    VAR
-                      ZVAL "extra"
-                    ZVAL 1
-                  RETURN
-                    ZVAL 1
-              RETURN
-                VAR
-                  ZVAL "extra"
         "#}
     );
 }
@@ -11532,19 +12446,31 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 /// }
 /// foreach ($keys as $key => $n) {
 /// }
+/// $cases = \array_map(fn (${'key#1'}) => \Lib\Calc::from(${'key#1'}), \array_keys($statuses));
+/// $names = \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($skus));
+/// $ids = \array_keys($keys);
+/// $maybe = ($optional === null) ? null : \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($optional));
+/// $stock['5'] = 1;
+/// $stocked = \array_map(fn (${'key#1'}) => (string) ${'key#1'}, \array_keys($stock));
+/// foreach (\Lib\Calc::rows() as $row => $n) {
+/// }
 /// ```
 ///
-/// A `Map` keyed by a backed enum holds each key as its backing value, so a loop reads each key back as its case,
-/// through `from` on the enum. PHP stores an all-digit `string` key as an `int`, so a loop over a `Map<string, V>`
-/// reads each key back through `(string)`. Both follow the `Map`'s key type, written on the key or not. An `int` key
-/// type changes nothing.
+/// A `Map` keyed by a backed enum holds each key as its backing value, so a loop and `keys()` read each key back as
+/// its case, through `from` on the enum. PHP stores an all-digit `string` key as an `int`, so a loop over a
+/// `Map<string, V>` and its `keys()` read each key back through `(string)`, a null-safe `keys()` too, and a `keys()`
+/// after a write of the key `"5"`. Both follow the `Map`'s key type, written on the key or not. An `int` key type changes nothing, and a loop over a PHP iterable that
+/// is no array, such as a `Generator`, takes each key as it comes.
 #[test]
-fn a_loop_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
+fn a_map_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
     assert_eq!(
         body_in(
-            "int run(int extra, Map<Calc, int> statuses, Map<string, int> skus, Map<int, int> keys)",
-            "        for (const [status, int n] of statuses) {\n            extra += n;\n        }\n        for (const [string sku, n] of skus) {\n        }\n        for (const [key, n] of keys) {\n        }\n        return 1;\n",
-            &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
+            "int run(int extra, Map<Calc, int> statuses, Map<string, int> skus, Map<int, int> keys, Map<string, int>? optional, Map<string, int> stock)",
+            "        for (const [status, int n] of statuses) {\n            extra += n;\n        }\n        for (const [string sku, n] of skus) {\n        }\n        for (const [key, n] of keys) {\n        }\n        const cases = statuses.keys();\n        const names = skus.keys();\n        const ids = keys.keys();\n        const maybe = optional?.keys();\n        stock[\"5\"] = 1;\n        const stocked = stock.keys();\n        for (const [row, n] of Calc.rows()) {\n        }\n        return 1;\n",
+            &[(
+                "src/Lib/Calc.php",
+                "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; /** @return \\Generator<string, int> */ public static function rows(): \\Generator { yield 'a' => 1; } }"
+            )]
         ),
         indoc! {r#"
             STMT_LIST
@@ -11593,6 +12519,143 @@ fn a_loop_key_reads_back_through_from_or_a_cast_by_the_map_key_type() {
                   ZVAL "n"
                 VAR
                   ZVAL "key"
+                STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "cases"
+                CALL
+                  ZVAL "array_map"
+                  ARG_LIST
+                    ARROW_FUNC "" @16-16
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "key#1"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STATIC_CALL
+                        ZVAL "Lib\\Calc"
+                        ZVAL "from"
+                        ARG_LIST
+                          VAR
+                            ZVAL "key#1"
+                      null
+                      null
+                    CALL
+                      ZVAL "array_keys"
+                      ARG_LIST
+                        VAR
+                          ZVAL "statuses"
+              ASSIGN
+                VAR
+                  ZVAL "names"
+                CALL
+                  ZVAL "array_map"
+                  ARG_LIST
+                    ARROW_FUNC "" @17-17
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "key#1"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      CAST [6]
+                        VAR
+                          ZVAL "key#1"
+                      null
+                      null
+                    CALL
+                      ZVAL "array_keys"
+                      ARG_LIST
+                        VAR
+                          ZVAL "skus"
+              ASSIGN
+                VAR
+                  ZVAL "ids"
+                CALL
+                  ZVAL "array_keys"
+                  ARG_LIST
+                    VAR
+                      ZVAL "keys"
+              ASSIGN
+                VAR
+                  ZVAL "maybe"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "optional"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "array_map"
+                    ARG_LIST
+                      ARROW_FUNC "" @19-19
+                        PARAM_LIST
+                          PARAM
+                            null
+                            ZVAL "key#1"
+                            null
+                            null
+                            null
+                            null
+                        null
+                        CAST [6]
+                          VAR
+                            ZVAL "key#1"
+                        null
+                        null
+                      CALL
+                        ZVAL "array_keys"
+                        ARG_LIST
+                          VAR
+                            ZVAL "optional"
+              ASSIGN
+                DIM
+                  VAR
+                    ZVAL "stock"
+                  ZVAL "5"
+                ZVAL 1
+              ASSIGN
+                VAR
+                  ZVAL "stocked"
+                CALL
+                  ZVAL "array_map"
+                  ARG_LIST
+                    ARROW_FUNC "" @21-21
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "key#1"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      CAST [6]
+                        VAR
+                          ZVAL "key#1"
+                      null
+                      null
+                    CALL
+                      ZVAL "array_keys"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
+              FOREACH
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "rows"
+                  ARG_LIST
+                VAR
+                  ZVAL "n"
+                VAR
+                  ZVAL "row"
                 STMT_LIST
               RETURN
                 ZVAL 1

@@ -273,8 +273,8 @@ public class Report
         Map<int, string>? labels = null;
         sizes["a"] = (sizes["a"] ?? 0) + numbers[1];
         this.sizes["b"] = array_sum(numbers);
-        const nested = ["x": ["a": items[1].rate]];
-        nested["x"]["a"] = items[0]?.rate ?? items[1].rate;
+        const nested = [["a": items[1].rate]];
+        nested[0]["a"] = items[0]?.rate ?? items[1].rate;
         for (const [string name, size] of sizes) {
             this.sizes[name] = size;
         }
@@ -481,7 +481,7 @@ public static class Slug
 
 public interface OrderEvent
 {
-    public int orderId { get; }
+    int orderId { get; }
 }
 
 public event OrderPaid(int orderId, int amount = 0) : OrderEvent;
@@ -491,6 +491,18 @@ public class Order
     public OrderPaid pay(int orderId) => new OrderPaid(orderId);
 
     public int amountOf(OrderPaid paid) => paid.amount;
+
+    public void settle(int orderId)
+    {
+        emit new OrderPaid(orderId);
+    }
 }
 
 public event Shipped(int shipmentId);
+
+public class Receipts
+{
+    private void deliver(OrderEvent e) on OrderPaid { }
+
+    public void count() on OrderPaid, Shipped { }
+}

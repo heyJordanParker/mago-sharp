@@ -876,7 +876,7 @@ where
         },
     );
 
-    signature_union
+    if function_like_metadata.flags.is_sharp() { known_type_or_error(signature_union) } else { signature_union }
 }
 
 pub(super) fn add_properties_to_context<'ctx, A>(
@@ -1818,36 +1818,60 @@ pub fn report_undefined_type_references<A>(context: &mut Context<'_, '_, A>, typ
 where
     A: Arena,
 {
-    if type_metadata.inferred {
-        return;
+    if !type_metadata.inferred {
+        report_undefined_types(context, &type_metadata.type_union, type_metadata.span);
     }
+}
 
-    for type_ref in type_metadata.type_union.get_all_child_nodes() {
+/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares.
+pub(crate) fn report_undefined_types<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
+where
+    A: Arena,
+{
+    for type_ref in type_union.get_all_child_nodes() {
         let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref else {
             continue;
         };
 
-        let issue = if context.dialect.is_sharp() {
-            let name = display_class_like_name(context, *name);
-            Issue::error(format!("Cannot find type `{name}`."))
-                .with_annotation(
-                    Annotation::primary(type_metadata.span)
-                        .with_message(format!("`{name}` is not defined in the current codebase")),
-                )
-                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
-        } else {
-            Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
-                .with_annotation(
-                    Annotation::primary(type_metadata.span)
-                        .with_message(format!("`{name}` is not defined in the current codebase")),
-                )
-                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
-                .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
-                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.")
-        };
-        context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
+        report_undefined_type(context, *name, span);
     }
+}
+
+/// Reports the type `name`, written at `span`, as not found in the codebase.
+pub(crate) fn report_undefined_type<A>(context: &mut Context<'_, '_, A>, name: Word, span: Span)
+where
+    A: Arena,
+{
+    let issue = if context.dialect.is_sharp() {
+        let name = display_class_like_name(context, name);
+        Issue::error(format!("Cannot find type `{name}`."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+            )
+            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and the file imports it with `import`.")
+    } else {
+        Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{name}` is not defined in the current codebase")),
+            )
+            .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+            .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
+            .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present.")
+    };
+    context.collector.report_with_code(IssueCode::NonExistentClassLike, issue);
+}
+
+/// `declared`, a type a PHP# declaration writes, or an error when it names a type no analyzed file or stub declares.
+/// `report_undefined_types` reports that type where it is written, so a value of it adds no second issue, as a refused
+/// index read adds none.
+pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
+    let names_unknown_type = declared
+        .get_all_child_nodes()
+        .into_iter()
+        .any(|node| matches!(node, TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { .. }))));
+
+    if names_unknown_type { TUnion::from_atomic(TAtomic::Error) } else { declared }
 }
 
 /// Reports generic classes a declared type applies with the wrong number of arguments, or with an
@@ -2041,7 +2065,7 @@ where
 }
 
 /// Reports each PHP# `Map` written in `type_union` whose key type [`is_map_key`] refuses: a class value, or a class or
-/// an enum without a backing value.
+/// an enum without a backing value. A key type that names no type is reported as a type that cannot be found.
 pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
@@ -2057,12 +2081,15 @@ where
         let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
             continue;
         };
-        if is_map_key(context, key_type) {
+        if is_map_key(context, key_type)
+            || key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. })))
+        {
             continue;
         }
 
         let key_id = display_sharp_type(context, key_type);
-        context.collector.report_with_code(IssueCode::TemplateConstraintViolation, map_key_error(&key_id, span));
+        let error = map_key_error(context, key_type, &key_id, span);
+        context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
     }
 }
 
@@ -2092,11 +2119,21 @@ where
     }
 }
 
-/// The error for a PHP# `Map` keyed by `key_id`, a type [`is_map_key`] refuses, written or inferred at `span`. A `Map`
-/// type, a `Map` literal and the `Map` a collection method infers state the rule in these words.
-pub(crate) fn map_key_error(key_id: &str, span: Span) -> Issue {
+/// The error for a PHP# `Map` keyed by `key_type`, written `key_id`, a type [`is_map_key`] refuses, written or inferred
+/// at `span`. A `Map` type, a `Map` literal and the `Map` a collection method infers state the rule in these words. A
+/// key type whose other parts key a `Map`, as `Status?`, is refused for its `null` alone.
+pub(crate) fn map_key_error<A>(context: &Context<'_, '_, A>, key_type: &TUnion, key_id: &str, span: Span) -> Issue
+where
+    A: Arena,
+{
+    let reason = if key_type.is_nullable() && is_map_key(context, &key_type.to_non_nullable()) {
+        "may be null"
+    } else {
+        "has none"
+    };
+
     Issue::error(format!(
-        "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` has none."
+        "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` {reason}."
     ))
     .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
     .with_help("Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.")

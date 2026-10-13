@@ -68,7 +68,61 @@ pub enum Compilation {
 /// A `.sharp` file lowered and translated to Lean, or the errors that refused it.
 type Lowered = Result<(Unit, Vec<(Vec<u8>, InlineForm)>, Translation), IssueCollection>;
 
+/// A PHP# listener, spec section 15: a method with an `on` clause, which the engine runs when an event it lists is
+/// raised.
+#[derive(Debug)]
+pub struct Listener {
+    /// The file that declares it.
+    pub file_id: FileId,
+    /// The fully qualified name of its class.
+    pub class: Word,
+    pub method: Word,
+    /// The fully qualified names its `on` clause lists, in their written order.
+    pub events: Vec<Word>,
+    /// Whether it takes the event as its parameter.
+    pub takes_event: bool,
+}
+
 impl IncrementalAnalysisService {
+    /// Every PHP# listener of the last analysis, in the order the engine runs them: by its class's full name, then by
+    /// its place in its class.
+    #[must_use]
+    pub fn listeners(&self) -> Vec<Listener> {
+        let mut listeners: Vec<(Word, u32, Listener)> = self
+            .codebase
+            .function_likes
+            .iter()
+            .filter(|(_, method)| !method.listens.is_empty())
+            .filter_map(|((class, _), method)| {
+                let class = self.codebase.class_likes.get(class)?;
+                let events = method
+                    .listens
+                    .iter()
+                    .map(|event| {
+                        self.codebase.get_class_like(event.as_bytes()).map_or(*event, |event| event.original_name)
+                    })
+                    .collect();
+
+                Some((
+                    class.name,
+                    method.span.start.offset,
+                    Listener {
+                        file_id: method.span.file_id,
+                        class: class.original_name,
+                        method: method.original_name,
+                        events,
+                        takes_event: !method.parameters.is_empty(),
+                    },
+                ))
+            })
+            .collect();
+        listeners.sort_unstable_by(|(a, a_offset, _), (b, b_offset, _)| {
+            a.as_bytes().cmp(b.as_bytes()).then(a_offset.cmp(b_offset))
+        });
+
+        listeners.into_iter().map(|(_, _, listener)| listener).collect()
+    }
+
     /// Compiles each `.sharp` file of the last analysis, in file name order.
     ///
     /// A file is accepted when the analysis reported no error-level issue in it. The standard library's files, those
@@ -83,9 +137,10 @@ impl IncrementalAnalysisService {
     ///
     /// A file that states a law also lists its proof file and every source its laws reach. A file outside `vendor/`
     /// lists the workspace-relative Lean files `rules` gives for its name, whose structure rules may judge it. `check`
-    /// gets the Lean translation of every accepted file and returns the issues of each file whose law is not proved
-    /// or that breaks a structure rule, which refuse that file whatever pragma, ignore entry or baseline the analysis
-    /// honors. It runs before any input is stamped, so a proof file it creates is stamped present.
+    /// gets the Lean translation of every accepted file and the namespace of every class-like PHP or PHP# code
+    /// declares, in the project or `vendor/`, refused or not, and returns the issues of each file whose law is not proved or that breaks a structure rule, which refuse that
+    /// file whatever pragma, ignore entry or baseline the analysis honors. It runs before any input is stamped, so a
+    /// proof file it creates is stamped present.
     ///
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there. It is called once per input. An input no file is at is stored absent: its size, modification
@@ -99,7 +154,7 @@ impl IncrementalAnalysisService {
         &mut self,
         mut stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
         mut rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
-        check: impl FnOnce(Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        check: impl FnOnce(Vec<Translation>, &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>>,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
         if !self.initialized {
             return Err(OrchestratorError::General("analyze() must be called before compile()".to_string()));
@@ -148,7 +203,21 @@ impl IncrementalAnalysisService {
                 )
             })
             .collect();
-        let mut refused = check(translations)
+        let mut namespaces: Vec<String> = self
+            .codebase
+            .class_likes
+            .values()
+            .filter(|class_like| !class_like.flags.is_built_in())
+            .filter_map(|class_like| {
+                let name = class_like.original_name.as_str_lossy();
+                let (namespace, _) = name.rsplit_once('\\')?;
+
+                Some(namespace.replace('\\', "."))
+            })
+            .collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        let mut refused = check(translations, &namespaces)
             .map_err(|error| OrchestratorError::General(format!("The Lean step failed: {error}.")))?;
 
         let mut reads = self.reads();
@@ -645,10 +714,15 @@ mod tests {
 
     /// The service after a full analysis of `database`.
     fn analyzed(database: &Database<'static>) -> IncrementalAnalysisService {
+        analyzed_with(database, Settings::default())
+    }
+
+    /// The service after a full analysis of `database` under `settings`.
+    fn analyzed_with(database: &Database<'static>, settings: Settings) -> IncrementalAnalysisService {
         let mut service = IncrementalAnalysisService::new(
             database.read_only(),
             prelude,
-            Settings::default(),
+            settings,
             ParserSettings::default(),
             Arc::clone(&PLUGIN_REGISTRY),
         );
@@ -687,7 +761,7 @@ mod tests {
     }
 
     /// Proves every law, as a Lean step that refuses nothing.
-    fn proved(_: Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>> {
+    fn proved(_: Vec<Translation>, _: &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>> {
         Ok(HashMap::default())
     }
 
@@ -1466,7 +1540,7 @@ mod tests {
                     Ok(present.then(|| Input { path: path.to_vec(), size: 1, mtime_ns: 0, hash: [1; 16] }))
                 },
                 module_leans,
-                |translations| {
+                |translations, _| {
                     assert_eq!(translations.len(), 4);
                     created.set(true);
                     Ok(HashMap::default())
@@ -1490,7 +1564,7 @@ mod tests {
         let money = FileId::new(b"app/Shared/Money.sharp");
 
         let compiled = service
-            .compile(empty_stamp, module_leans, |_| {
+            .compile(empty_stamp, module_leans, |_, _| {
                 let mut issues = IssueCollection::default();
                 issues.push(Issue::error("Law addKeepsCurrency is not proven."));
                 Ok(HashMap::from_iter([(money, issues)]))
@@ -1514,10 +1588,39 @@ mod tests {
         let mut service = analyzed(&database);
 
         let error = service
-            .compile(empty_stamp, module_leans, |_| Err(std::io::Error::other("lake crashed")))
+            .compile(empty_stamp, module_leans, |_, _| Err(std::io::Error::other("lake crashed")))
             .expect_err("the Lean step failed");
 
         assert_eq!(error.to_string(), "The Lean step failed: lake crashed.");
+    }
+
+    /// A structure rule judges every import of PHP# code, of plain PHP too, so the Lean step gets the namespace of
+    /// every class-like the project and `vendor/` declare, a refused file's too: a type error in the only file of
+    /// `App.Shared.Schema` keeps the namespace a rule names. A built-in class-like names none.
+    #[test]
+    fn the_lean_step_gets_the_namespace_of_every_class_like_the_codebase_declares_a_refused_one_too() {
+        let refused = ORDER.replace("namespace App;", "namespace App.Shared.Schema;").replace("extra + 1", "\"one\"");
+        let database = project(&[
+            ("app/Order.sharp", ORDER),
+            ("app/Shared/Schema/Order.sharp", &refused),
+            ("app/Legacy/Rate.php", "<?php\n\nnamespace App\\Legacy;\n\nfinal class Rate {}\n"),
+            (
+                "vendor/illuminate/support/Facades/DB.php",
+                "<?php\n\nnamespace Illuminate\\Support\\Facades;\n\nclass DB {}\n",
+            ),
+        ]);
+        let mut service = analyzed(&database);
+        let mut given = Vec::new();
+
+        service
+            .compile(empty_stamp, module_leans, |translations, namespaces| {
+                assert_eq!(translations.len(), 1);
+                given = namespaces.to_vec();
+                Ok(HashMap::default())
+            })
+            .expect("the compile runs");
+
+        assert_eq!(given, ["App", "App.Legacy", "App.Shared.Schema", "Illuminate.Support.Facades"]);
     }
 
     /// A project whose `Report` reads what the headers of `Invoice`, `Taxable` and `Status` say they inherit, and whose
@@ -1628,6 +1731,66 @@ mod tests {
                 outcomes(&clean)
             );
             assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
+
+    /// Each spec section 23 refusal of `service`, as `file: message`.
+    fn named_like_a_namespace(service: &IncrementalAnalysisService) -> Vec<String> {
+        let mut refusals: Vec<String> = service
+            .collect_all_issues()
+            .iter()
+            .filter(|issue| issue.code.as_deref() == Some("name-already-in-use"))
+            .map(|issue| {
+                let file = service.database().get(&issue.primary_span().expect("a primary span").file_id);
+                format!("{}: {}", String::from_utf8_lossy(&file.expect("the file exists").name), issue.message)
+            })
+            .collect();
+        refusals.sort_unstable();
+        refusals
+    }
+
+    /// Spec section 23 refuses `Store` while a PHP# class sits in the namespace `App.Tenant.Store`, so a file added to
+    /// or removed from `app/Tenant/Store/` changes whether the unchanged file of `Store` is refused, in a one-off compile
+    /// and under `mago analyze --watch`, which analyzes with `diff`. In the last row the namespace already holds a plain
+    /// PHP class, and only the PHP# file added to it refuses the plain PHP `Store`.
+    #[test]
+    fn a_compile_after_the_folder_named_like_a_class_gains_or_loses_a_class_matches_a_clean_compile() {
+        let store = ("app/Tenant/Store.sharp", "namespace App.Tenant;\n\npublic class Store\n{\n}\n".to_string());
+        let receipts = (
+            "app/Tenant/Store/Receipts.sharp",
+            "namespace App.Tenant.Store;\n\npublic class Receipts\n{\n}\n".to_string(),
+        );
+        let php_store = ("app/Tenant/Store.php", "<?php\n\nnamespace App\\Tenant;\n\nclass Store\n{\n}\n".to_string());
+        let php_order =
+            ("app/Tenant/Store/Order.php", "<?php\n\nnamespace App\\Tenant\\Store;\n\nclass Order\n{\n}\n".to_string());
+        let alone = vec![store.clone()];
+        let beside = vec![store, receipts.clone()];
+        let php = vec![php_store.clone(), php_order.clone()];
+        let php_beside = vec![php_store, php_order, receipts];
+        let refused = "app/Tenant/Store.sharp: `App.Tenant.Store` is both a class and a namespace: rename the class or the folder.";
+        let php_refused = "app/Tenant/Store.php: `App\\Tenant\\Store` is both a class and a namespace: rename the class or the folder.";
+
+        for diff in [false, true] {
+            for (before, after, expected) in
+                [(&alone, &beside, vec![refused]), (&beside, &alone, vec![]), (&php, &php_beside, vec![php_refused])]
+            {
+                let (base, edited) = (shop_project(before), shop_project(after));
+
+                let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
+                compile(&mut warm, empty_stamp);
+                warm.update_database(edited.read_only());
+                warm.analyze_incremental(None).expect("the warm path runs");
+                let warm_compiled = compile(&mut warm, empty_stamp);
+                let mut clean = analyzed(&edited);
+                let clean_compiled = compile(&mut clean, empty_stamp);
+
+                let names =
+                    |files: &[(&str, String)]| files.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
+                let row = format!("diff {diff}: {} to {}", names(before), names(after));
+                assert_eq!(named_like_a_namespace(&clean), expected, "{row}");
+                assert_eq!(named_like_a_namespace(&warm), expected, "{row}");
+                assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
+            }
         }
     }
 }

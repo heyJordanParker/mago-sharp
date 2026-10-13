@@ -86,10 +86,7 @@ where
             return Ok(match self.stream.peek_kind(2)? {
                 Some(T!["|"]) => first.kind == T![Identifier] && self.is_at_union_typed_local()?,
                 Some(T!["<"]) => {
-                    (matches!(first.kind, T![Identifier | "list"])
-                        && first.value.first().is_some_and(u8::is_ascii_uppercase))
-                        || (first.kind == T!["function"] && first.value == b"Function")
-                        || (first.kind == T!["class"] && first.value == b"Class")
+                    first.kind == T![Identifier] && first.value.first().is_some_and(u8::is_ascii_uppercase)
                 }
                 _ => false,
             });
@@ -97,9 +94,6 @@ where
         if self.is_at_generic_hint()? {
             return Ok(hint.value.first().is_some_and(u8::is_ascii_uppercase)
                 && self.stream.peek_kind_after_type_arguments(1)? != Some(T!["."]));
-        }
-        if self.is_at_function_hint()? {
-            return Ok(true);
         }
 
         if hint.kind != T![Identifier] {
