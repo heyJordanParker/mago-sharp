@@ -1,0 +1,278 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use mago_word::Word;
+use mago_word::ascii_lowercase_word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::metadata::CodebaseMetadata;
+use crate::misc::GenericParent;
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::object::r#enum::TEnum;
+use crate::ttype::atomic::object::named::TNamedObject;
+use crate::ttype::union::TUnion;
+
+/// Specifies the kind of class-like structure a string refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TClassLikeStringKind {
+    /// The string refers to a class name (`class-string`).
+    Class,
+    /// The string refers to an interface name (`interface-string`).
+    Interface,
+    /// The string refers to an enum name (`enum-string`).
+    Enum,
+    /// The string refers to a trait name (`trait-string`).
+    Trait,
+}
+
+/// Represents a string that is specifically the name of a class, interface, or enum,
+/// often constrained by a type (`T` in `*-string<T>`).
+///
+/// Examples: `class-string`, `interface-string<MyInterface>`, `enum-string<MyEnum>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TClassLikeString {
+    Any {
+        kind: TClassLikeStringKind,
+    },
+    Generic {
+        kind: TClassLikeStringKind,
+        parameter_name: Word,
+        defining_entity: GenericParent,
+        constraint: Arc<TAtomic>,
+    },
+    Literal {
+        value: Word,
+    },
+    OfType {
+        kind: TClassLikeStringKind,
+        constraint: Arc<TAtomic>,
+    },
+}
+
+impl TClassLikeStringKind {
+    #[must_use]
+    pub fn as_bytes(&self) -> &'static [u8] {
+        match self {
+            TClassLikeStringKind::Class => b"class-string",
+            TClassLikeStringKind::Interface => b"interface-string",
+            TClassLikeStringKind::Enum => b"enum-string",
+            TClassLikeStringKind::Trait => b"trait-string",
+        }
+    }
+}
+
+impl TClassLikeString {
+    /// Creates a new `class-string` instance with a specific kind.
+    #[inline]
+    #[must_use]
+    pub fn any(kind: TClassLikeStringKind) -> Self {
+        Self::Any { kind }
+    }
+
+    /// Creates a new `class-string<T>` instance with a specific kind.
+    #[inline]
+    #[must_use]
+    pub fn of_type(kind: TClassLikeStringKind, constraint: TAtomic) -> Self {
+        Self::OfType { kind, constraint: Arc::new(constraint) }
+    }
+
+    /// Creates a new `class-string<T>` instance with a generic parameter.
+    #[inline]
+    #[must_use]
+    pub fn generic(
+        kind: TClassLikeStringKind,
+        parameter_name: Word,
+        defining_entity: GenericParent,
+        constraint: TAtomic,
+    ) -> Self {
+        Self::Generic { kind, parameter_name, defining_entity, constraint: Arc::new(constraint) }
+    }
+
+    /// Creates a new `class-string` instance with a literal value.
+    #[inline]
+    #[must_use]
+    pub const fn literal(value: Word) -> Self {
+        Self::Literal { value }
+    }
+
+    /// Creates a new `class-string` instance.
+    #[inline]
+    #[must_use]
+    pub const fn class_string() -> Self {
+        Self::Any { kind: TClassLikeStringKind::Class }
+    }
+
+    /// Creates a new `class-string<T>` instance.
+    #[inline]
+    #[must_use]
+    pub fn class_string_of_type(constraint: TAtomic) -> Self {
+        Self::OfType { kind: TClassLikeStringKind::Class, constraint: Arc::new(constraint) }
+    }
+
+    /// Creates a new `interface-string` instance.
+    #[inline]
+    #[must_use]
+    pub const fn interface_string() -> Self {
+        Self::Any { kind: TClassLikeStringKind::Interface }
+    }
+
+    /// Creates a new `enum-string` instance.
+    #[inline]
+    #[must_use]
+    pub const fn enum_string() -> Self {
+        Self::Any { kind: TClassLikeStringKind::Enum }
+    }
+
+    /// Creates a new `trait-string` instance.
+    #[inline]
+    #[must_use]
+    pub const fn trait_string() -> Self {
+        Self::Any { kind: TClassLikeStringKind::Trait }
+    }
+
+    /// Checks if this represents a class-like string derived from a generic parameter (`Generic` variant).
+    #[inline]
+    #[must_use]
+    pub const fn is_generic(&self) -> bool {
+        matches!(self, Self::Generic { .. })
+    }
+
+    /// Checks if this represents a literal class-like string with a known name (`Literal` variant).
+    #[inline]
+    #[must_use]
+    pub const fn is_literal(&self) -> bool {
+        matches!(self, Self::Literal { .. })
+    }
+
+    /// Checks if this type has an explicit constraint `<T>` (`Generic` or `OfType` variants).
+    #[inline]
+    #[must_use]
+    pub const fn has_constraint(&self) -> bool {
+        matches!(self, Self::Generic { .. } | Self::OfType { .. })
+    }
+
+    /// Returns the base kind (class, interface, enum) if explicitly stored (`Any`, `Generic`, `OfType`).
+    /// Returns `None` for the `Literal` variant, as the kind must be looked up externally.
+    #[inline]
+    #[must_use]
+    pub const fn kind(&self) -> Option<TClassLikeStringKind> {
+        match self {
+            Self::Any { kind } => Some(*kind),
+            Self::Generic { kind, .. } => Some(*kind),
+            Self::Literal { .. } => None,
+            Self::OfType { kind, .. } => Some(*kind),
+        }
+    }
+
+    /// Returns the literal string value (class/interface/enum name) if this is a `Literal` variant.
+    #[inline]
+    #[must_use]
+    pub fn literal_value(&self) -> Option<Word> {
+        match self {
+            Self::Literal { value } => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Returns the constraint type `<T>` if this is a `Generic` or `OfType` variant.
+    #[inline]
+    #[must_use]
+    pub fn constraint(&self) -> Option<&TAtomic> {
+        match self {
+            Self::Generic { constraint, .. } => Some(constraint),
+            Self::OfType { constraint, .. } => Some(constraint),
+            _ => None,
+        }
+    }
+
+    /// Returns the atomic type representation of the object type this string refers to.
+    #[inline]
+    #[must_use]
+    pub fn get_object_type(&self, codebase: &CodebaseMetadata) -> TAtomic {
+        match self {
+            TClassLikeString::Any { .. } => TAtomic::Object(TObject::Any),
+            TClassLikeString::Generic { parameter_name, defining_entity, constraint, .. } => {
+                TAtomic::GenericParameter(TGenericParameter::new(
+                    *parameter_name,
+                    Arc::new(TUnion::from_single(Cow::Owned(constraint.as_ref().clone()))),
+                    *defining_entity,
+                ))
+            }
+            TClassLikeString::Literal { value } => {
+                if codebase.symbols.contains_enum(ascii_lowercase_word(value.as_bytes())) {
+                    TAtomic::Object(TObject::Enum(TEnum::new(*value)))
+                } else {
+                    TAtomic::Object(TObject::Named(TNamedObject::new(*value)))
+                }
+            }
+            TClassLikeString::OfType { constraint, .. } => constraint.as_ref().clone(),
+        }
+    }
+}
+
+impl TType for TClassLikeString {
+    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        let mut children = vec![];
+
+        if let Some(constraint) = self.constraint() {
+            children.push(TypeRef::Atomic(constraint));
+        }
+
+        children
+    }
+
+    fn needs_population(&self) -> bool {
+        match self {
+            TClassLikeString::Any { .. } => false,
+            TClassLikeString::Generic { constraint, .. } => constraint.needs_population(),
+            TClassLikeString::Literal { .. } => false,
+            TClassLikeString::OfType { constraint, .. } => constraint.needs_population(),
+        }
+    }
+
+    fn is_expandable(&self) -> bool {
+        match self {
+            TClassLikeString::Any { .. } => false,
+            TClassLikeString::Generic { constraint, .. } => constraint.is_expandable(),
+            TClassLikeString::Literal { .. } => false,
+            TClassLikeString::OfType { constraint, .. } => constraint.is_expandable(),
+        }
+    }
+
+    fn get_id(&self) -> Word {
+        match self {
+            TClassLikeString::Any { kind } => word(kind.as_bytes()),
+            TClassLikeString::Generic { kind, parameter_name, defining_entity, constraint } => {
+                concat_word!(
+                    kind.as_bytes(),
+                    b"<'",
+                    parameter_name.as_bytes(),
+                    b".",
+                    defining_entity.id_word().as_bytes(),
+                    b" extends ",
+                    constraint.get_id().as_bytes(),
+                    b">"
+                )
+            }
+            TClassLikeString::Literal { value } => {
+                concat_word!(b"class-string('", value, b"')")
+            }
+            TClassLikeString::OfType { kind, constraint } => {
+                concat_word!(kind.as_bytes(), b"<", constraint.get_id(), b">")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for TClassLikeStringKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", mago_bytes::BytesDisplay(self.as_bytes()))
+    }
+}

@@ -1,0 +1,449 @@
+use schemars::JsonSchema;
+
+use mago_database::GlobSettings;
+use mago_php_version::PHPVersion;
+
+use crate::integration::IntegrationSet;
+use crate::rule::AmbiguousConstantAccessConfig;
+use crate::rule::AmbiguousFunctionCallConfig;
+use crate::rule::ArrayStyleConfig;
+use crate::rule::AssertDescriptionConfig;
+use crate::rule::AssertionStyleConfig;
+use crate::rule::BlockStatementConfig;
+use crate::rule::BracedStringInterpolationConfig;
+use crate::rule::ClassNameConfig;
+use crate::rule::CombineConsecutiveIssetsConfig;
+use crate::rule::Config;
+use crate::rule::ConstantConditionConfig;
+use crate::rule::ConstantNameConfig;
+use crate::rule::CyclomaticComplexityConfig;
+use crate::rule::DeprecatedCastConfig;
+use crate::rule::DeprecatedShellExecuteStringConfig;
+use crate::rule::DeprecatedSwitchSemicolonConfig;
+use crate::rule::DisallowedFunctionsConfig;
+use crate::rule::DisallowedTypeInstantiationConfig;
+use crate::rule::EnumNameConfig;
+use crate::rule::ExcessiveNestingConfig;
+use crate::rule::ExcessiveParameterListConfig;
+use crate::rule::ExplicitNullableParamConfig;
+use crate::rule::ExplicitOctalConfig;
+use crate::rule::FileNameConfig;
+use crate::rule::FinalControllerConfig;
+use crate::rule::FunctionNameConfig;
+use crate::rule::HalsteadConfig;
+use crate::rule::IdentityComparisonConfig;
+use crate::rule::IneffectiveFormatIgnoreNextConfig;
+use crate::rule::IneffectiveFormatIgnoreRegionConfig;
+use crate::rule::InlineVariableReturnConfig;
+use crate::rule::InstanceofStringableConfig;
+use crate::rule::InterfaceNameConfig;
+use crate::rule::InvalidOpenTagConfig;
+use crate::rule::KanDefectConfig;
+use crate::rule::LiteralNamedArgumentConfig;
+use crate::rule::LoopDoesNotIterateConfig;
+use crate::rule::LowercaseKeywordConfig;
+use crate::rule::LowercaseTypeHintConfig;
+use crate::rule::MethodNameConfig;
+use crate::rule::MiddlewareInRoutesConfig;
+use crate::rule::MissingDocsConfig;
+use crate::rule::NoAliasFunctionConfig;
+use crate::rule::NoAlternativeSyntaxConfig;
+use crate::rule::NoArrayAccumulationInLoopConfig;
+use crate::rule::NoAssignInArgumentConfig;
+use crate::rule::NoAssignInConditionConfig;
+use crate::rule::NoBooleanFlagParameterConfig;
+use crate::rule::NoClosingTagConfig;
+use crate::rule::NoDbSchemaChangeConfig;
+use crate::rule::NoDeadStoreConfig;
+use crate::rule::NoDebugSymbolsConfig;
+use crate::rule::NoDirectDbQueryConfig;
+use crate::rule::NoDuplicateMatchArmConfig;
+use crate::rule::NoElseClauseConfig;
+use crate::rule::NoEmptyCatchClauseConfig;
+use crate::rule::NoEmptyCommentConfig;
+use crate::rule::NoEmptyConfig;
+use crate::rule::NoEmptyLoopConfig;
+use crate::rule::NoErrorControlOperatorConfig;
+use crate::rule::NoEvalConfig;
+use crate::rule::NoFfiConfig;
+use crate::rule::NoFullyQualifiedGlobalClassLikeConfig;
+use crate::rule::NoFullyQualifiedGlobalConstantConfig;
+use crate::rule::NoFullyQualifiedGlobalFunctionConfig;
+use crate::rule::NoGlobalConfig;
+use crate::rule::NoGotoConfig;
+use crate::rule::NoHashCommentConfig;
+use crate::rule::NoHashEmojiConfig;
+use crate::rule::NoImplicitModelQueryConfig;
+use crate::rule::NoIniSetConfig;
+use crate::rule::NoInlineConfig;
+use crate::rule::NoInsecureComparisonConfig;
+use crate::rule::NoIsNullConfig;
+use crate::rule::NoIssetConfig;
+use crate::rule::NoIteratorToArrayInForeachConfig;
+use crate::rule::NoLiteralNamespaceStringConfig;
+use crate::rule::NoLiteralPasswordConfig;
+use crate::rule::NoMissingFormatArgumentConfig;
+use crate::rule::NoMultiAssignmentsConfig;
+use crate::rule::NoNegatedTernaryConfig;
+use crate::rule::NoNestedTernaryConfig;
+use crate::rule::NoNoopConfig;
+use crate::rule::NoNullPropertyInitConfig;
+use crate::rule::NoOnlyConfig;
+use crate::rule::NoParameterShadowingConfig;
+use crate::rule::NoPhpTagTerminatorConfig;
+use crate::rule::NoProtectedInFinalConfig;
+use crate::rule::NoRedundantBinaryStringPrefixConfig;
+use crate::rule::NoRedundantBlockConfig;
+use crate::rule::NoRedundantContinueConfig;
+use crate::rule::NoRedundantElseConfig;
+use crate::rule::NoRedundantFileConfig;
+use crate::rule::NoRedundantFinalConfig;
+use crate::rule::NoRedundantIssetConfig;
+use crate::rule::NoRedundantLabelConfig;
+use crate::rule::NoRedundantLiteralReturnConfig;
+use crate::rule::NoRedundantMathConfig;
+use crate::rule::NoRedundantMethodOverrideConfig;
+use crate::rule::NoRedundantNullsafeConfig;
+use crate::rule::NoRedundantParenthesesConfig;
+use crate::rule::NoRedundantReadonlyConfig;
+use crate::rule::NoRedundantStringConcatConfig;
+use crate::rule::NoRedundantUseConfig;
+use crate::rule::NoRedundantVariableConfig;
+use crate::rule::NoRedundantWriteVisibilityConfig;
+use crate::rule::NoRedundantYieldFromConfig;
+use crate::rule::NoRequestAllConfig;
+use crate::rule::NoRequestVariableConfig;
+use crate::rule::NoRolesAsCapabilitiesConfig;
+use crate::rule::NoSelfAssignmentConfig;
+use crate::rule::NoServiceStateMutationConfig;
+use crate::rule::NoShellExecuteStringConfig;
+use crate::rule::NoShortBoolCastConfig;
+use crate::rule::NoShortOpeningTagConfig;
+use crate::rule::NoShorthandTernaryConfig;
+use crate::rule::NoSideEffectsWithDeclarationsConfig;
+use crate::rule::NoSprintfConcatConfig;
+use crate::rule::NoTrailingSpaceConfig;
+use crate::rule::NoUnderscoreClassConfig;
+use crate::rule::NoUnescapedOutputConfig;
+use crate::rule::NoUnsafeFinallyConfig;
+use crate::rule::NoUnusedClosureCaptureConfig;
+use crate::rule::NoUnusedGlobalConfig;
+use crate::rule::NoUnusedStaticConfig;
+use crate::rule::NoVariableVariableConfig;
+use crate::rule::NoVoidReferenceReturnConfig;
+use crate::rule::NonceVerificationConfig;
+use crate::rule::OptionalParamOrderConfig;
+use crate::rule::PreferAnonymousMigrationConfig;
+use crate::rule::PreferArraySpreadConfig;
+use crate::rule::PreferArrayValidationRulesConfig;
+use crate::rule::PreferArrowFunctionConfig;
+use crate::rule::PreferCastsMethodConfig;
+use crate::rule::PreferDedicatedStatusAssertionConfig;
+use crate::rule::PreferEarlyContinueConfig;
+use crate::rule::PreferEarlyReturnConfig;
+use crate::rule::PreferExplodeOverPregSplitConfig;
+use crate::rule::PreferFakeHelperConfig;
+use crate::rule::PreferFirstClassCallableConfig;
+use crate::rule::PreferInterfaceConfig;
+use crate::rule::PreferPreIncrementConfig;
+use crate::rule::PreferSelfReturnTypeConfig;
+use crate::rule::PreferStaticClosureConfig;
+use crate::rule::PreferTestAttributeConfig;
+use crate::rule::PreferTimestampFactoryConfig;
+use crate::rule::PreferViewArrayConfig;
+use crate::rule::PreferWhileLoopConfig;
+use crate::rule::PreparedSqlConfig;
+use crate::rule::PropertyNameConfig;
+use crate::rule::PslArrayFunctionsConfig;
+use crate::rule::PslDataStructuresConfig;
+use crate::rule::PslDatetimeConfig;
+use crate::rule::PslMathFunctionsConfig;
+use crate::rule::PslOutputConfig;
+use crate::rule::PslRandomnessFunctionsConfig;
+use crate::rule::PslRegexFunctionsConfig;
+use crate::rule::PslSleepFunctionsConfig;
+use crate::rule::PslStringFunctionsConfig;
+use crate::rule::ReadableLiteralConfig;
+use crate::rule::RedundantStaticConfig;
+use crate::rule::RequireNamespaceConfig;
+use crate::rule::RequirePregQuoteDelimiterConfig;
+use crate::rule::SensitiveParameterConfig;
+use crate::rule::SingleClassPerFileConfig;
+use crate::rule::SortedIntegerKeysConfig;
+use crate::rule::StrContainsConfig;
+use crate::rule::StrStartsWithConfig;
+use crate::rule::StrictAssertionsConfig;
+use crate::rule::StrictBehaviorConfig;
+use crate::rule::StrictTypesConfig;
+use crate::rule::StringStyleConfig;
+use crate::rule::SuspiciousExplodeArgumentsConfig;
+use crate::rule::SwitchContinueToBreakConfig;
+use crate::rule::TaggedFixmeConfig;
+use crate::rule::TaggedTodoConfig;
+use crate::rule::TaintedDataToSinkConfig;
+use crate::rule::TooManyEnumCasesConfig;
+use crate::rule::TooManyMethodsConfig;
+use crate::rule::TooManyPropertiesConfig;
+use crate::rule::TraitNameConfig;
+use crate::rule::UseCompoundAssignmentConfig;
+use crate::rule::UseDedicatedExpectationConfig;
+use crate::rule::UseSimplerExpectationConfig;
+use crate::rule::UseSpecificAssertionsConfig;
+use crate::rule::UseSpecificExpectationsConfig;
+use crate::rule::UseWpFunctionsConfig;
+use crate::rule::ValidDocblockConfig;
+use crate::rule::ValidatedSanitizedInputConfig;
+use crate::rule::VariableNameConfig;
+use crate::rule::YodaConditionsConfig;
+
+#[derive(Debug, Clone, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct Settings {
+    pub php_version: PHPVersion,
+    pub integrations: IntegrationSet,
+    pub rules: RulesSettings,
+    #[schemars(skip)]
+    pub glob: GlobSettings,
+}
+
+#[derive(Debug, Clone, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(default, deny_unknown_fields, bound = "C: serde::Serialize + serde::de::DeserializeOwned")
+)]
+#[schemars(bound = "C: JsonSchema")]
+pub struct RuleSettings<C: Config> {
+    pub enabled: bool,
+
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    pub exclude: Vec<String>,
+
+    #[cfg_attr(feature = "serde", serde(flatten))]
+    pub config: C,
+}
+
+#[derive(Debug, Clone, Default, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct RulesSettings {
+    pub ambiguous_constant_access: RuleSettings<AmbiguousConstantAccessConfig>,
+    pub ambiguous_function_call: RuleSettings<AmbiguousFunctionCallConfig>,
+    pub use_dedicated_expectation: RuleSettings<UseDedicatedExpectationConfig>,
+    pub use_simpler_expectation: RuleSettings<UseSimplerExpectationConfig>,
+    pub use_specific_expectations: RuleSettings<UseSpecificExpectationsConfig>,
+    pub array_style: RuleSettings<ArrayStyleConfig>,
+    pub assert_description: RuleSettings<AssertDescriptionConfig>,
+    pub assertion_style: RuleSettings<AssertionStyleConfig>,
+    pub block_statement: RuleSettings<BlockStatementConfig>,
+    pub braced_string_interpolation: RuleSettings<BracedStringInterpolationConfig>,
+    pub class_name: RuleSettings<ClassNameConfig>,
+    pub combine_consecutive_issets: RuleSettings<CombineConsecutiveIssetsConfig>,
+    pub constant_name: RuleSettings<ConstantNameConfig>,
+    pub cyclomatic_complexity: RuleSettings<CyclomaticComplexityConfig>,
+    pub disallowed_functions: RuleSettings<DisallowedFunctionsConfig>,
+    pub disallowed_type_instantiation: RuleSettings<DisallowedTypeInstantiationConfig>,
+    pub enum_name: RuleSettings<EnumNameConfig>,
+    pub excessive_nesting: RuleSettings<ExcessiveNestingConfig>,
+    pub excessive_parameter_list: RuleSettings<ExcessiveParameterListConfig>,
+    pub final_controller: RuleSettings<FinalControllerConfig>,
+    pub halstead: RuleSettings<HalsteadConfig>,
+    pub kan_defect: RuleSettings<KanDefectConfig>,
+    pub literal_named_argument: RuleSettings<LiteralNamedArgumentConfig>,
+    pub loop_does_not_iterate: RuleSettings<LoopDoesNotIterateConfig>,
+    pub lowercase_keyword: RuleSettings<LowercaseKeywordConfig>,
+    pub method_name: RuleSettings<MethodNameConfig>,
+    pub no_debug_symbols: RuleSettings<NoDebugSymbolsConfig>,
+    pub no_request_variable: RuleSettings<NoRequestVariableConfig>,
+    pub no_shell_execute_string: RuleSettings<NoShellExecuteStringConfig>,
+    pub no_short_opening_tag: RuleSettings<NoShortOpeningTagConfig>,
+    pub no_shorthand_ternary: RuleSettings<NoShorthandTernaryConfig>,
+    pub no_sprintf_concat: RuleSettings<NoSprintfConcatConfig>,
+    pub optional_param_order: RuleSettings<OptionalParamOrderConfig>,
+    pub deprecated_cast: RuleSettings<DeprecatedCastConfig>,
+    pub deprecated_shell_execute_string: RuleSettings<DeprecatedShellExecuteStringConfig>,
+    pub deprecated_switch_semicolon: RuleSettings<DeprecatedSwitchSemicolonConfig>,
+    pub prepared_sql: RuleSettings<PreparedSqlConfig>,
+    pub prefer_anonymous_migration: RuleSettings<PreferAnonymousMigrationConfig>,
+    pub prefer_array_validation_rules: RuleSettings<PreferArrayValidationRulesConfig>,
+    pub prefer_casts_method: RuleSettings<PreferCastsMethodConfig>,
+    pub prefer_datetimeimmutable_create_from_timestamp: RuleSettings<PreferTimestampFactoryConfig>,
+    pub prefer_dedicated_status_assertion: RuleSettings<PreferDedicatedStatusAssertionConfig>,
+    pub prefer_array_spread: RuleSettings<PreferArraySpreadConfig>,
+    pub prefer_explode_over_preg_split: RuleSettings<PreferExplodeOverPregSplitConfig>,
+    pub prefer_fake_helper: RuleSettings<PreferFakeHelperConfig>,
+    pub prefer_first_class_callable: RuleSettings<PreferFirstClassCallableConfig>,
+    pub no_void_reference_return: RuleSettings<NoVoidReferenceReturnConfig>,
+    pub no_underscore_class: RuleSettings<NoUnderscoreClassConfig>,
+    pub no_trailing_space: RuleSettings<NoTrailingSpaceConfig>,
+    pub no_redundant_write_visibility: RuleSettings<NoRedundantWriteVisibilityConfig>,
+    pub no_redundant_string_concat: RuleSettings<NoRedundantStringConcatConfig>,
+    pub no_duplicate_match_arm: RuleSettings<NoDuplicateMatchArmConfig>,
+    pub no_redundant_binary_string_prefix: RuleSettings<NoRedundantBinaryStringPrefixConfig>,
+    pub no_redundant_parentheses: RuleSettings<NoRedundantParenthesesConfig>,
+    pub no_redundant_method_override: RuleSettings<NoRedundantMethodOverrideConfig>,
+    pub no_redundant_isset: RuleSettings<NoRedundantIssetConfig>,
+    pub no_redundant_nullsafe: RuleSettings<NoRedundantNullsafeConfig>,
+    pub no_redundant_math: RuleSettings<NoRedundantMathConfig>,
+    pub no_redundant_label: RuleSettings<NoRedundantLabelConfig>,
+    pub no_redundant_literal_return: RuleSettings<NoRedundantLiteralReturnConfig>,
+    pub no_redundant_final: RuleSettings<NoRedundantFinalConfig>,
+    pub no_redundant_readonly: RuleSettings<NoRedundantReadonlyConfig>,
+    pub no_redundant_file: RuleSettings<NoRedundantFileConfig>,
+    pub no_redundant_continue: RuleSettings<NoRedundantContinueConfig>,
+    pub no_redundant_else: RuleSettings<NoRedundantElseConfig>,
+    pub no_redundant_block: RuleSettings<NoRedundantBlockConfig>,
+    pub no_redundant_use: RuleSettings<NoRedundantUseConfig>,
+    pub no_redundant_variable: RuleSettings<NoRedundantVariableConfig>,
+    pub no_dead_store: RuleSettings<NoDeadStoreConfig>,
+    pub no_unused_static: RuleSettings<NoUnusedStaticConfig>,
+    pub no_unused_global: RuleSettings<NoUnusedGlobalConfig>,
+    pub no_unused_closure_capture: RuleSettings<NoUnusedClosureCaptureConfig>,
+    pub no_redundant_yield_from: RuleSettings<NoRedundantYieldFromConfig>,
+    pub no_self_assignment: RuleSettings<NoSelfAssignmentConfig>,
+    pub no_protected_in_final: RuleSettings<NoProtectedInFinalConfig>,
+    pub redundant_static: RuleSettings<RedundantStaticConfig>,
+    pub no_php_tag_terminator: RuleSettings<NoPhpTagTerminatorConfig>,
+    pub nonce_verification: RuleSettings<NonceVerificationConfig>,
+    pub no_noop: RuleSettings<NoNoopConfig>,
+    pub no_only: RuleSettings<NoOnlyConfig>,
+    pub no_multi_assignments: RuleSettings<NoMultiAssignmentsConfig>,
+    pub no_negated_ternary: RuleSettings<NoNegatedTernaryConfig>,
+    pub no_nested_ternary: RuleSettings<NoNestedTernaryConfig>,
+    pub no_hash_emoji: RuleSettings<NoHashEmojiConfig>,
+    pub no_hash_comment: RuleSettings<NoHashCommentConfig>,
+    pub no_variable_variable: RuleSettings<NoVariableVariableConfig>,
+    pub no_goto: RuleSettings<NoGotoConfig>,
+    pub no_global: RuleSettings<NoGlobalConfig>,
+    pub no_ffi: RuleSettings<NoFfiConfig>,
+    pub no_eval: RuleSettings<NoEvalConfig>,
+    pub no_error_control_operator: RuleSettings<NoErrorControlOperatorConfig>,
+    pub no_empty: RuleSettings<NoEmptyConfig>,
+    pub no_is_null: RuleSettings<NoIsNullConfig>,
+    pub no_iterator_to_array_in_foreach: RuleSettings<NoIteratorToArrayInForeachConfig>,
+    pub no_isset: RuleSettings<NoIssetConfig>,
+    pub no_empty_loop: RuleSettings<NoEmptyLoopConfig>,
+    pub no_missing_format_argument: RuleSettings<NoMissingFormatArgumentConfig>,
+    pub no_empty_comment: RuleSettings<NoEmptyCommentConfig>,
+    pub no_empty_catch_clause: RuleSettings<NoEmptyCatchClauseConfig>,
+    pub no_else_clause: RuleSettings<NoElseClauseConfig>,
+    pub no_closing_tag: RuleSettings<NoClosingTagConfig>,
+    pub no_boolean_flag_parameter: RuleSettings<NoBooleanFlagParameterConfig>,
+    pub no_assign_in_argument: RuleSettings<NoAssignInArgumentConfig>,
+    pub no_assign_in_condition: RuleSettings<NoAssignInConditionConfig>,
+    pub no_fully_qualified_global_class_like: RuleSettings<NoFullyQualifiedGlobalClassLikeConfig>,
+    pub no_fully_qualified_global_constant: RuleSettings<NoFullyQualifiedGlobalConstantConfig>,
+    pub no_fully_qualified_global_function: RuleSettings<NoFullyQualifiedGlobalFunctionConfig>,
+    pub no_alias_function: RuleSettings<NoAliasFunctionConfig>,
+    pub lowercase_type_hint: RuleSettings<LowercaseTypeHintConfig>,
+    pub identity_comparison: RuleSettings<IdentityComparisonConfig>,
+    pub suspicious_explode_arguments: RuleSettings<SuspiciousExplodeArgumentsConfig>,
+    pub ineffective_format_ignore_next: RuleSettings<IneffectiveFormatIgnoreNextConfig>,
+    pub ineffective_format_ignore_region: RuleSettings<IneffectiveFormatIgnoreRegionConfig>,
+    pub inline_variable_return: RuleSettings<InlineVariableReturnConfig>,
+    pub instanceof_stringable: RuleSettings<InstanceofStringableConfig>,
+    pub interface_name: RuleSettings<InterfaceNameConfig>,
+    pub invalid_open_tag: RuleSettings<InvalidOpenTagConfig>,
+    pub file_name: RuleSettings<FileNameConfig>,
+    pub function_name: RuleSettings<FunctionNameConfig>,
+    pub explicit_nullable_param: RuleSettings<ExplicitNullableParamConfig>,
+    pub explicit_octal: RuleSettings<ExplicitOctalConfig>,
+    pub prefer_arrow_function: RuleSettings<PreferArrowFunctionConfig>,
+    pub prefer_early_continue: RuleSettings<PreferEarlyContinueConfig>,
+    pub prefer_early_return: RuleSettings<PreferEarlyReturnConfig>,
+    pub prefer_interface: RuleSettings<PreferInterfaceConfig>,
+    pub prefer_static_closure: RuleSettings<PreferStaticClosureConfig>,
+    pub prefer_test_attribute: RuleSettings<PreferTestAttributeConfig>,
+    pub prefer_view_array: RuleSettings<PreferViewArrayConfig>,
+    pub prefer_while_loop: RuleSettings<PreferWhileLoopConfig>,
+    pub psl_array_functions: RuleSettings<PslArrayFunctionsConfig>,
+    pub psl_data_structures: RuleSettings<PslDataStructuresConfig>,
+    pub psl_datetime: RuleSettings<PslDatetimeConfig>,
+    pub psl_math_functions: RuleSettings<PslMathFunctionsConfig>,
+    pub psl_output: RuleSettings<PslOutputConfig>,
+    pub psl_randomness_functions: RuleSettings<PslRandomnessFunctionsConfig>,
+    pub psl_regex_functions: RuleSettings<PslRegexFunctionsConfig>,
+    pub psl_sleep_functions: RuleSettings<PslSleepFunctionsConfig>,
+    pub psl_string_functions: RuleSettings<PslStringFunctionsConfig>,
+    pub str_contains: RuleSettings<StrContainsConfig>,
+    pub str_starts_with: RuleSettings<StrStartsWithConfig>,
+    pub strict_behavior: RuleSettings<StrictBehaviorConfig>,
+    pub strict_types: RuleSettings<StrictTypesConfig>,
+    pub tagged_fixme: RuleSettings<TaggedFixmeConfig>,
+    pub tagged_todo: RuleSettings<TaggedTodoConfig>,
+    pub too_many_enum_cases: RuleSettings<TooManyEnumCasesConfig>,
+    pub too_many_methods: RuleSettings<TooManyMethodsConfig>,
+    pub too_many_properties: RuleSettings<TooManyPropertiesConfig>,
+    pub trait_name: RuleSettings<TraitNameConfig>,
+    pub validated_sanitized_input: RuleSettings<ValidatedSanitizedInputConfig>,
+    pub valid_docblock: RuleSettings<ValidDocblockConfig>,
+    pub variable_name: RuleSettings<VariableNameConfig>,
+    pub constant_condition: RuleSettings<ConstantConditionConfig>,
+    pub no_array_accumulation_in_loop: RuleSettings<NoArrayAccumulationInLoopConfig>,
+    pub no_ini_set: RuleSettings<NoIniSetConfig>,
+    pub no_parameter_shadowing: RuleSettings<NoParameterShadowingConfig>,
+    pub no_inline: RuleSettings<NoInlineConfig>,
+    pub no_side_effects_with_declarations: RuleSettings<NoSideEffectsWithDeclarationsConfig>,
+    pub no_insecure_comparison: RuleSettings<NoInsecureComparisonConfig>,
+    pub no_literal_password: RuleSettings<NoLiteralPasswordConfig>,
+    pub tainted_data_to_sink: RuleSettings<TaintedDataToSinkConfig>,
+    pub sensitive_parameter: RuleSettings<SensitiveParameterConfig>,
+    pub property_name: RuleSettings<PropertyNameConfig>,
+    pub no_unsafe_finally: RuleSettings<NoUnsafeFinallyConfig>,
+    pub strict_assertions: RuleSettings<StrictAssertionsConfig>,
+    pub use_specific_assertions: RuleSettings<UseSpecificAssertionsConfig>,
+    pub no_request_all: RuleSettings<NoRequestAllConfig>,
+    pub no_service_state_mutation: RuleSettings<NoServiceStateMutationConfig>,
+    pub middleware_in_routes: RuleSettings<MiddlewareInRoutesConfig>,
+    pub use_compound_assignment: RuleSettings<UseCompoundAssignmentConfig>,
+    pub require_preg_quote_delimiter: RuleSettings<RequirePregQuoteDelimiterConfig>,
+    pub require_namespace: RuleSettings<RequireNamespaceConfig>,
+    pub sorted_integer_keys: RuleSettings<SortedIntegerKeysConfig>,
+    pub string_style: RuleSettings<StringStyleConfig>,
+    pub single_class_per_file: RuleSettings<SingleClassPerFileConfig>,
+    pub readable_literal: RuleSettings<ReadableLiteralConfig>,
+    pub yoda_conditions: RuleSettings<YodaConditionsConfig>,
+    pub no_short_bool_cast: RuleSettings<NoShortBoolCastConfig>,
+    pub no_alternative_syntax: RuleSettings<NoAlternativeSyntaxConfig>,
+    pub prefer_pre_increment: RuleSettings<PreferPreIncrementConfig>,
+    pub prefer_self_return_type: RuleSettings<PreferSelfReturnTypeConfig>,
+    pub switch_continue_to_break: RuleSettings<SwitchContinueToBreakConfig>,
+    pub no_null_property_init: RuleSettings<NoNullPropertyInitConfig>,
+    pub use_wp_functions: RuleSettings<UseWpFunctionsConfig>,
+    pub no_direct_db_query: RuleSettings<NoDirectDbQueryConfig>,
+    pub no_implicit_model_query: RuleSettings<NoImplicitModelQueryConfig>,
+    pub no_db_schema_change: RuleSettings<NoDbSchemaChangeConfig>,
+    pub no_unescaped_output: RuleSettings<NoUnescapedOutputConfig>,
+    pub no_roles_as_capabilities: RuleSettings<NoRolesAsCapabilitiesConfig>,
+    pub missing_docs: RuleSettings<MissingDocsConfig>,
+    pub no_literal_namespace_string: RuleSettings<NoLiteralNamespaceStringConfig>,
+}
+
+impl<C: Config> RuleSettings<C> {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub fn default_enabled() -> bool {
+        C::default_enabled()
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            php_version: PHPVersion::PHP80,
+            integrations: IntegrationSet::empty(),
+            rules: RulesSettings::default(),
+            glob: GlobSettings::default(),
+        }
+    }
+}
+
+impl<C: Config> Default for RuleSettings<C> {
+    fn default() -> Self {
+        Self { enabled: C::default_enabled(), exclude: Vec::new(), config: C::default() }
+    }
+}

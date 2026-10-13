@@ -1,0 +1,1930 @@
+use mago_allocator::Arena;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use foldhash::HashMap;
+
+use mago_word::Word;
+use mago_word::ascii_lowercase_word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
+use mago_codex::misc::GenericParent;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::add_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::reference::TReference;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::atomic_comparator;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::expander;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::expander::get_signature_of_function_like_metadata;
+use mago_codex::ttype::get_arraykey;
+use mago_codex::ttype::get_backing_key_type;
+use mago_codex::ttype::get_keyed_array;
+use mago_codex::ttype::get_list;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_void;
+use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
+use mago_codex::visibility::Visibility;
+use mago_names::binding::php_variable_name;
+use mago_names::display_sharp_member;
+use mago_php_version::feature::Feature;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionLikeParameterList;
+use mago_syntax::cst::Statement;
+use mago_text_edit::Safety;
+use mago_text_edit::TextEdit;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::context::block::ReferenceConstraint;
+use crate::context::block::ReferenceConstraintSource;
+use crate::error::AnalysisError;
+use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_set_literal_type;
+use crate::resolver::property::localize_property_type;
+use crate::resolver::property::resolve_declared_property;
+use crate::statement::analyze_statements;
+use crate::statement::attributes::AttributeTarget;
+use crate::statement::attributes::analyze_attributes;
+use crate::statement::class_like::property::analyze_property_hook;
+use crate::statement::r#return::handle_return_value;
+use crate::statement::r#static::infer_static_local_types;
+use crate::utils::expression::get_variable_id;
+use crate::utils::int_refused_for_float;
+use crate::utils::names::display_atomic;
+use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_nullable_type;
+use crate::utils::names::display_sharp_type;
+use crate::utils::names::display_type;
+use crate::utils::names::display_value_type;
+use crate::utils::names::display_variable_name;
+use crate::utils::report_int_for_float;
+
+pub mod function;
+pub mod rejected_nullable_parameter;
+pub mod unused_parameter;
+
+#[derive(Debug, Clone, Copy)]
+pub enum FunctionLikeBody<'ast, 'arena> {
+    Statements(&'ast [Statement<'arena>], Span),
+    /// An arrow function's or a PHP# method's expression body, which returns the expression.
+    Expression(&'ast Expression<'arena>),
+    /// A PHP# `void` method's or constructor's expression body, which runs the expression as a statement.
+    ExpressionStatement(&'ast Expression<'arena>),
+}
+
+impl HasSpan for FunctionLikeBody<'_, '_> {
+    fn span(&self) -> Span {
+        match self {
+            FunctionLikeBody::Statements(_, span) => *span,
+            FunctionLikeBody::Expression(expr) | FunctionLikeBody::ExpressionStatement(expr) => expr.span(),
+        }
+    }
+}
+
+pub fn resolve_closure_like_type<A>(
+    context: &Context<'_, '_, A>,
+    closure_span: Span,
+    function_metadata: &FunctionLikeMetadata,
+    inner_has_returned: bool,
+    inner_artifacts: AnalysisArtifacts,
+) -> TUnion
+where
+    A: Arena,
+{
+    let function_identifier = FunctionLikeIdentifier::for_closure(context.source_file, closure_span);
+
+    let mut signature = get_signature_of_function_like_metadata(
+        &function_identifier,
+        function_metadata,
+        context.codebase,
+        &TypeExpansionOptions::default(),
+    );
+
+    if function_metadata.template_types.is_empty() {
+        if function_metadata.flags.has_yield() && function_metadata.return_type_metadata.is_none() {
+            let mut key_type = None;
+            for k in inner_artifacts.inferred_yield_key_types {
+                key_type = Some(add_optional_union_type(k, key_type.as_ref(), context.codebase));
+            }
+
+            let mut value_type = None;
+            for v in inner_artifacts.inferred_yield_value_types {
+                value_type = Some(add_optional_union_type(v, value_type.as_ref(), context.codebase));
+            }
+
+            let mut return_type = None;
+            for r in inner_artifacts.inferred_return_types {
+                return_type = Some(add_optional_union_type((*r).clone(), return_type.as_ref(), context.codebase));
+            }
+
+            let generator = TNamedObject::new_with_type_parameters(
+                word("Generator"),
+                Some(vec![
+                    key_type.unwrap_or_else(get_mixed),
+                    value_type.unwrap_or_else(get_mixed),
+                    get_mixed(),
+                    return_type.unwrap_or_else(get_void),
+                ]),
+            );
+
+            signature.return_type = Some(Arc::new(TUnion::from_atomic(TAtomic::Object(TObject::Named(generator)))));
+        } else if !function_metadata.flags.has_yield() {
+            let mut inferred_return_type = None;
+            for inferred_return in inner_artifacts.inferred_return_types {
+                inferred_return_type = Some(add_optional_union_type(
+                    (*inferred_return).clone(),
+                    inferred_return_type.as_ref(),
+                    context.codebase,
+                ));
+            }
+
+            if let Some(inferred_return_type) = inferred_return_type {
+                signature.return_type = Some(Arc::new(inferred_return_type));
+            } else if inner_has_returned {
+                signature.return_type = Some(Arc::new(get_never()));
+            } else {
+                signature.return_type = Some(Arc::new(get_void()));
+            }
+        }
+    }
+
+    TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)))
+}
+
+/// Brings each local a PHP# lambda captures into the lambda's block, as a closure's `use` clause does. Spec section 3
+/// captures the variable itself, so a captured local that code writes is captured by reference, as the engine runs
+/// it, and [`merge_captured_references`] carries the lambda's writes back.
+pub fn capture_lambda_locals<A>(
+    context: &Context<'_, '_, A>,
+    lambda: Span,
+    block_context: &mut BlockContext<'_>,
+    lambda_block_context: &mut BlockContext<'_>,
+) where
+    A: Arena,
+{
+    for (name, local) in context.resolved_names.captures(&lambda) {
+        let variable = php_variable_name(name);
+        block_context.add_conditionally_referenced_variable(variable.as_bytes());
+
+        let mut variable_type = block_context.locals.get(&variable).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
+        if context.resolved_names.is_written(local) {
+            Rc::make_mut(&mut variable_type).set_by_reference(true);
+            lambda_block_context.references_to_external_scope.insert(variable);
+        }
+
+        lambda_block_context.locals.insert(variable, variable_type);
+        lambda_block_context.variables_possibly_in_scope.insert(variable);
+    }
+}
+
+/// The parameter types a closure takes from the callable types it is written for, by position, as a call's argument
+/// takes them from its parameter's type.
+pub fn closure_parameter_types<A>(context: &Context<'_, '_, A>, expected: &TUnion) -> HashMap<usize, TUnion>
+where
+    A: Arena,
+{
+    let mut parameter_types: HashMap<usize, TUnion> = HashMap::default();
+    let signatures = expected.types.iter().filter_map(|atomic| match atomic {
+        TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
+        _ => None,
+    });
+    for (index, parameter) in signatures.flat_map(|signature| signature.parameters.iter().enumerate()) {
+        let Some(parameter_type) = parameter.get_type_signature() else {
+            continue;
+        };
+
+        let parameter_type = match parameter_types.remove(&index) {
+            Some(existing) => add_union_type(existing, parameter_type, context.codebase, CombinerOptions::default()),
+            None => parameter_type.clone(),
+        };
+        parameter_types.insert(index, parameter_type);
+    }
+
+    parameter_types
+}
+
+/// Spec section 14.2: a PHP# lambda's parameter types are optional where its function type is known. Before a
+/// lambda written for `expected`, such as the value of a typed local or property, or a returned value, this gives
+/// the lambda the parameter types of `expected`, as a call does for a lambda passed to a function type.
+pub fn expect_function_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    expression: &Expression<'_>,
+    expected: Option<&TUnion>,
+) where
+    A: Arena,
+{
+    if context.dialect.is_sharp()
+        && matches!(expression.unparenthesized(), Expression::ArrowFunction(_) | Expression::Closure(_))
+        && let Some(expected) = expected
+    {
+        artifacts.inferred_parameter_types = Some(closure_parameter_types(context, expected));
+    }
+}
+
+/// Joins the type each variable a closure captured by reference has at the end of the closure into its type in the
+/// enclosing block, because the closure may have run.
+pub fn merge_captured_references<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &mut BlockContext<'_>,
+    mut closure_block_context: BlockContext<'_>,
+) where
+    A: Arena,
+{
+    for referenced_variable in closure_block_context.references_to_external_scope {
+        let Some(inner_type) = closure_block_context.locals.remove(&referenced_variable) else {
+            continue;
+        };
+
+        let variable_type = match block_context.locals.remove(&referenced_variable) {
+            Some(existing_type) => Rc::new(add_union_type(
+                Rc::unwrap_or_clone(inner_type),
+                &existing_type,
+                context.codebase,
+                context.settings.combiner_options(),
+            )),
+            None => inner_type,
+        };
+
+        block_context.locals.insert(referenced_variable, variable_type);
+    }
+}
+
+pub fn analyze_function_like<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    parent_artifacts: &mut AnalysisArtifacts,
+    block_context: &mut BlockContext<'ctx>,
+    function_like_metadata: &'ctx FunctionLikeMetadata,
+    parameter_list: &'ast FunctionLikeParameterList<'arena>,
+    body: FunctionLikeBody<'ast, 'arena>,
+    inferred_parameter_types: Option<HashMap<usize, TUnion>>,
+) -> Result<AnalysisArtifacts, AnalysisError>
+where
+    A: Arena,
+{
+    let mut previous_type_resolution_context = std::mem::replace(
+        &mut context.type_resolution_context,
+        function_like_metadata.type_resolution_context.clone().unwrap_or_default(),
+    );
+
+    let mut artifacts =
+        AnalysisArtifacts::new().with_variable_definedness_targets(parent_artifacts.variable_definedness_targets());
+
+    if let Some(return_type) = &function_like_metadata.return_type_metadata {
+        report_undefined_type_references(context, return_type);
+        report_invalid_template_arguments(context, return_type);
+
+        // Only check native declaration if effective type is from docblock (to avoid duplicates)
+        if return_type.from_docblock
+            && let Some(native_return) = &function_like_metadata.return_type_declaration_metadata
+        {
+            report_undefined_type_references(context, native_return);
+        }
+    }
+
+    if let Some(effective_return) = &function_like_metadata.return_type_metadata
+        && effective_return.from_docblock
+        && let Some(native_return) = &function_like_metadata.return_type_declaration_metadata
+    {
+        let expanded_docblock =
+            expand_type_metadata(context, block_context, &mut artifacts, function_like_metadata, effective_return);
+        let expanded_native =
+            expand_type_metadata(context, block_context, &mut artifacts, function_like_metadata, native_return);
+
+        let is_compatible = union_comparator::is_contained_by(
+            context.codebase,
+            &expanded_docblock,
+            &expanded_native,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::default(),
+        );
+
+        if !is_compatible {
+            let docblock_type_str = effective_return.type_union.get_id();
+            let native_type_str = native_return.type_union.get_id();
+
+            let issue = Issue::error(format!(
+                "Docblock return type `{docblock_type_str}` is incompatible with native return type `{native_type_str}`."
+            ))
+            .with_annotation(
+                Annotation::primary(native_return.span)
+                    .with_message(format!("Native return type is `{native_type_str}`...")),
+            )
+            .with_annotation(
+                Annotation::secondary(effective_return.span)
+                    .with_message(format!("...but docblock declares `{docblock_type_str}`")),
+            )
+            .with_note("The docblock return type must be compatible with the native return type declaration.")
+            .with_help(format!(
+                "Either change the docblock return type to match `{native_type_str}`, or update the native return type to be compatible with `{docblock_type_str}`."
+            ));
+
+            context.collector.report_with_code(IssueCode::DocblockTypeMismatch, issue);
+        }
+    }
+
+    add_parameter_types_to_context(
+        context,
+        block_context,
+        &mut artifacts,
+        function_like_metadata,
+        parameter_list,
+        inferred_parameter_types,
+    )?;
+
+    // A closure that declares its receiver is analyzed against that receiver, whatever class
+    // it is written in.
+    if let Some(receiver) = &function_like_metadata.refined_this_type {
+        block_context.locals.insert(Word::from("$this"), Rc::new(expand_receiver(context, &receiver.type_union)));
+    } else if !block_context.scope.is_static()
+        && let Some(class_like_metadata) = block_context.scope.get_class_like()
+    {
+        block_context.locals.insert(
+            Word::from("$this"),
+            Rc::new(wrap_atomic(TAtomic::Object(get_this_type(
+                context,
+                class_like_metadata,
+                Some(function_like_metadata),
+            )))),
+        );
+    }
+
+    if let FunctionLikeBody::Statements(statements, _) = body {
+        for statement in statements {
+            let Statement::Global(global) = statement else {
+                if statement.is_noop() {
+                    continue;
+                }
+                break;
+            };
+
+            for variable in &global.variables {
+                if let Some(var_id) = get_variable_id(variable) {
+                    block_context.conditionally_referenced_variable_ids.insert(Word::from(var_id));
+                }
+            }
+        }
+    }
+
+    if let Some(calling_class) = block_context.scope.get_class_like_name()
+        && let Some(class_like_metadata) = context.codebase.get_class_like(calling_class.as_bytes())
+    {
+        add_properties_to_context(context, block_context, class_like_metadata, Some(function_like_metadata))?;
+    }
+
+    if !function_like_metadata.flags.is_unchecked() {
+        match body {
+            FunctionLikeBody::Statements(statements, _) => {
+                artifacts.static_local_types =
+                    infer_static_local_types(context, block_context, &artifacts, statements)?;
+                analyze_statements(statements, context, block_context, &mut artifacts)?;
+            }
+            FunctionLikeBody::Expression(value) => {
+                let return_type = function_like_metadata.return_type_metadata.as_ref();
+                expect_function_type(
+                    context,
+                    &mut artifacts,
+                    value,
+                    return_type.map(|return_type| &return_type.type_union),
+                );
+                if let Some(return_type) = return_type {
+                    check_sharp_literal_kind(context, value, &return_type.type_union);
+                }
+
+                block_context.flags.set_inside_return(true);
+                value.analyze(context, block_context, &mut artifacts)?;
+                block_context.flags.set_inside_return(false);
+                block_context.conditionally_referenced_variable_ids.clear();
+
+                let value_type =
+                    artifacts.get_rc_expression_type(value).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
+
+                handle_return_value(context, block_context, &mut artifacts, Some(value), value_type, value.span());
+            }
+            FunctionLikeBody::ExpressionStatement(value) => {
+                value.analyze(context, block_context, &mut artifacts)?;
+            }
+        }
+    }
+
+    if let Some(function_metadata) = block_context.scope.get_function_like()
+        && !block_context.flags.has_returned()
+        && let Some(return_type) = &function_metadata.return_type_metadata
+        && !return_type.type_union.is_void()
+        && !function_like_metadata.flags.has_yield()
+    {
+        let expanded_type =
+            expand_type_metadata(context, block_context, &mut artifacts, function_like_metadata, return_type);
+
+        // A conditional return type whose branches are all `void`/`never` erases to `void`, which
+        // the check above cannot see through since it only sees the unexpanded conditional.
+        if !expanded_type.is_void() {
+            let (kind, name) = match block_context.scope.get_class_like() {
+                Some(class_like) if context.dialect.is_sharp() && function_metadata.kind.is_method() => {
+                    let class_name = display_class_like_name(context, class_like.original_name);
+
+                    ("method", word(display_sharp_member(class_name, function_metadata.original_name)))
+                }
+                _ => ("function", function_metadata.name),
+            };
+
+            report_missing_return(
+                context,
+                kind,
+                name,
+                function_metadata.name_span.unwrap_or(function_metadata.span),
+                body.span(),
+                &expanded_type,
+            );
+        }
+    }
+
+    check_return_type_width(context, block_context, &mut artifacts, function_like_metadata);
+    check_thrown_types(context, block_context, &mut artifacts, function_like_metadata);
+
+    std::mem::swap(&mut context.type_resolution_context, &mut previous_type_resolution_context);
+    parent_artifacts.expression_types.extend(std::mem::take(&mut artifacts.expression_types));
+    parent_artifacts.inferred_type_arguments.extend(std::mem::take(&mut artifacts.inferred_type_arguments));
+    parent_artifacts.variable_definedness.extend(std::mem::take(&mut artifacts.variable_definedness));
+    parent_artifacts.resolved_method_calls.append(&mut artifacts.resolved_method_calls);
+    parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));
+    parent_artifacts.function_values.append(&mut artifacts.function_values);
+    parent_artifacts.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
+    parent_artifacts.pending_readonly_property_writes.append(&mut artifacts.pending_readonly_property_writes);
+
+    Ok(artifacts)
+}
+
+fn add_parameter_types_to_context<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    function_like_metadata: &'ctx FunctionLikeMetadata,
+    parameter_list: &FunctionLikeParameterList<'arena>,
+    mut inferred_parameter_types: Option<HashMap<usize, TUnion>>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let is_overriding_method = function_like_metadata.kind.is_method()
+        && block_context.scope.get_class_like_name().is_some_and(|class_name| {
+            context.codebase.method_is_overriding(class_name.as_bytes(), function_like_metadata.name.as_bytes())
+        });
+
+    for (i, parameter_metadata) in function_like_metadata.parameters.iter().enumerate() {
+        let parameter_variable_str = parameter_metadata.get_name().0;
+
+        if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
+            report_undefined_type_references(context, parameter_type);
+            report_invalid_template_arguments(context, parameter_type);
+
+            // Only check native declaration if effective type is from docblock (to avoid duplicates)
+            if parameter_type.from_docblock
+                && let Some(native_type) = parameter_metadata.get_type_declaration_metadata()
+            {
+                report_undefined_type_references(context, native_type);
+            }
+        }
+
+        let declared_parameter_type = if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
+            let effective_type =
+                expand_type_metadata(context, block_context, artifacts, function_like_metadata, parameter_type);
+
+            if parameter_type.from_docblock
+                && let Some(native_type) = parameter_metadata.get_type_declaration_metadata()
+            {
+                let expanded_native =
+                    expand_type_metadata(context, block_context, artifacts, function_like_metadata, native_type);
+
+                let is_compatible = union_comparator::is_contained_by_with_erased_template_arguments(
+                    context.codebase,
+                    &effective_type,
+                    &expanded_native,
+                    &mut ComparisonResult::default(),
+                );
+
+                if !is_compatible {
+                    let docblock_type_str = effective_type.get_id();
+                    let native_type_str = native_type.type_union.get_id();
+                    let param_name = parameter_metadata.name.0;
+
+                    let issue = Issue::error(format!(
+                        "Docblock type `{docblock_type_str}` for parameter `{param_name}` is incompatible with native type `{native_type_str}`."
+                    ))
+                    .with_annotation(
+                        Annotation::primary(native_type.span)
+                            .with_message(format!("Native type is `{native_type_str}`...")),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(parameter_type.span)
+                            .with_message(format!("...but docblock declares `{docblock_type_str}`")),
+                    )
+                    .with_note("The docblock type must be compatible with the native type declaration.")
+                    .with_help(format!(
+                        "Either change the docblock type to match `{native_type_str}`, or update the native type to be compatible with `{docblock_type_str}`."
+                    ));
+
+                    context.collector.report_with_code(IssueCode::DocblockTypeMismatch, issue);
+                } else if !is_overriding_method
+                    && !effective_type.has_template_types()
+                    && !expanded_native.has_template_types()
+                    && !expanded_native.contains_unspecified_template_arguments()
+                {
+                    let dropped: Vec<&TAtomic> = expanded_native
+                        .types
+                        .iter()
+                        .filter(|native_atomic| {
+                            !effective_type.types.iter().any(|docblock_atomic| {
+                                atomic_comparator::is_contained_by(
+                                    context.codebase,
+                                    native_atomic,
+                                    docblock_atomic,
+                                    false,
+                                    &mut ComparisonResult::default(),
+                                ) || atomic_comparator::is_contained_by(
+                                    context.codebase,
+                                    docblock_atomic,
+                                    native_atomic,
+                                    false,
+                                    &mut ComparisonResult::default(),
+                                )
+                            })
+                        })
+                        .collect();
+
+                    if !dropped.is_empty() {
+                        let docblock_type_str = effective_type.get_id();
+                        let native_type_str = expanded_native.get_id();
+                        let param_name = parameter_metadata.name.0;
+                        let dropped_list =
+                            dropped.iter().map(|a| a.get_id().to_string()).collect::<Vec<_>>().join("`, `");
+
+                        let issue = Issue::error(format!(
+                            "Docblock type `{docblock_type_str}` for parameter `{param_name}` drops part of native type `{native_type_str}`."
+                        ))
+                            .with_annotation(
+                                Annotation::primary(native_type.span)
+                                    .with_message(format!("Native type accepts `{native_type_str}`, including `{dropped_list}`...")),
+                            )
+                            .with_annotation(
+                                Annotation::secondary(parameter_type.span)
+                                    .with_message(format!("...but docblock only covers `{docblock_type_str}`")),
+                            )
+                            .with_note("Callers can still pass values of the excluded branches.")
+                            .with_note("The docblock tells the analyzer those branches are impossible.")
+                            .with_note("Narrowing checks can then collapse to `never` in the body.")
+                            .with_help(format!(
+                                "Widen the docblock to `{native_type_str}`, or tighten the native type."
+                            ))
+                        ;
+
+                        context.collector.report_with_code(IssueCode::DocblockParameterNarrowing, issue);
+                    }
+                }
+            }
+
+            effective_type
+        } else {
+            get_mixed()
+        };
+
+        // TODO(azjezz): consider comparing declared and inferred types instead
+        // and choosing the more specific one, this current solution is a bit naive.
+        let declared_type_is_specific = parameter_metadata.get_type_metadata().is_some_and(|tm| {
+            let union = &tm.type_union;
+
+            !union.is_vanilla_array() && !union.is_vanilla_mixed()
+        });
+
+        let mut final_parameter_type = if declared_type_is_specific {
+            declared_parameter_type
+        } else if let Some(inferred_map) = inferred_parameter_types.as_mut()
+            && let Some(inferred_type) = inferred_map.remove(&i)
+            && !is_unresolved_template_with_mixed_bound(&inferred_type)
+            && (parameter_metadata.get_type_metadata().is_none()
+                || union_comparator::is_contained_by(
+                    context.codebase,
+                    &inferred_type,
+                    &declared_parameter_type,
+                    true,
+                    true,
+                    false,
+                    &mut ComparisonResult::default(),
+                ))
+        {
+            if parameter_metadata.get_type_metadata().is_some()
+                && !declared_parameter_type.can_be_null()
+                && inferred_type.is_nullable()
+            {
+                inferred_type.to_non_nullable()
+            } else {
+                inferred_type
+            }
+        } else {
+            declared_parameter_type
+        };
+
+        if parameter_metadata.flags.is_by_reference() {
+            final_parameter_type.set_by_reference(parameter_metadata.flags.is_by_reference());
+
+            let constraint_type = parameter_metadata
+                .out_type
+                .as_ref()
+                .map(|type_metadata| {
+                    expand_type_metadata(context, block_context, artifacts, function_like_metadata, type_metadata)
+                })
+                .unwrap_or_else(|| final_parameter_type.clone());
+
+            block_context.by_reference_constraints.insert(
+                parameter_variable_str,
+                ReferenceConstraint::new(
+                    parameter_metadata.span,
+                    ReferenceConstraintSource::Parameter,
+                    Some(Rc::new(constraint_type)),
+                ),
+            );
+        }
+
+        let Some(parameter_node) = parameter_list.parameters.get(i) else {
+            continue;
+        };
+
+        analyze_attributes(
+            context,
+            block_context,
+            artifacts,
+            parameter_node.attribute_lists.as_slice(),
+            if parameter_node.is_promoted_property() {
+                AttributeTarget::PromotedProperty
+            } else {
+                AttributeTarget::Parameter
+            },
+        )?;
+
+        if let Some(default_value) = parameter_node.default_value.as_ref() {
+            block_context.in_constant_expression(|block_context| {
+                default_value.value.analyze(context, block_context, artifacts)
+            })?;
+
+            // PHP# writes `mixed` as `Any`, which never holds null, so its default is checked too.
+            if !parameter_metadata.flags.is_variadic()
+                && let Some(parameter_type_metadata) = parameter_metadata.get_type_metadata()
+                && (context.dialect.is_sharp() || !parameter_type_metadata.type_union.is_mixed())
+            {
+                let expected_type = expand_type_metadata(
+                    context,
+                    block_context,
+                    artifacts,
+                    function_like_metadata,
+                    parameter_type_metadata,
+                );
+
+                check_parameter_default_value(
+                    context,
+                    parameter_metadata,
+                    &expected_type,
+                    default_value.value,
+                    artifacts,
+                );
+            }
+        }
+
+        // Spec section 7 gives a PHP# variadic parameter its values as a list.
+        let final_parameter_type = if parameter_metadata.flags.is_variadic() {
+            if function_like_metadata.flags.forbids_named_arguments() || context.dialect.is_sharp() {
+                get_list(final_parameter_type)
+            } else {
+                get_keyed_array(get_arraykey(), final_parameter_type)
+            }
+        } else {
+            final_parameter_type
+        };
+
+        block_context.locals.insert(parameter_variable_str, Rc::new(final_parameter_type));
+
+        if parameter_node.is_promoted_property()
+            && let Some(hook_list) = &parameter_node.hooks
+        {
+            let property_name = php_variable_name(parameter_node.variable.name);
+            for hook in &hook_list.hooks {
+                analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Reports a body that can end without returning a value, though the `kind` named `name`, declared at `declaration`,
+/// returns `expected_type`: a function, or a PHP# `get` accessor, which returns its property's type.
+pub(crate) fn report_missing_return<A>(
+    context: &mut Context<'_, '_, A>,
+    kind: &str,
+    name: Word,
+    declaration: Span,
+    body: Span,
+    expected_type: &TUnion,
+) where
+    A: Arena,
+{
+    let expected_return_type_id = display_type(context, expected_type);
+
+    let help_message = if expected_type.is_nullable() {
+        "Ensure all code paths end with a `return` statement. You may need to add `return null;` to the paths that currently don't return a value.".to_string()
+    } else {
+        let nullable_return_type_id =
+            display_nullable_type(context, expected_type, format!("{expected_return_type_id}|null"));
+
+        format!(
+            "Add a `return` statement that provides a value of type '{expected_return_type_id}' to all paths, or change the {kind}'s return type to '{nullable_return_type_id}' and return `null` explicitly."
+        )
+    };
+
+    context.collector.report_with_code(
+        IssueCode::MissingReturnStatement,
+        Issue::error(format!("Missing return statement in {kind} `{name}`"))
+            .with_annotation(
+                Annotation::primary(declaration)
+                    .with_message(format!("This {kind} is declared to return '{expected_return_type_id}'...")),
+            )
+            .with_annotation(
+                Annotation::secondary(body).with_message("...but this path can exit without returning a value."),
+            )
+            .with_note(format!("A {kind} that does not explicitly return a value will implicitly return `null`."))
+            .with_help(help_message),
+    );
+}
+
+/// Checks if a type is a single unresolved template parameter with a mixed bound.
+/// Such types shouldn't override explicit type hints as they provide no additional information.
+fn is_unresolved_template_with_mixed_bound(union: &TUnion) -> bool {
+    if union.types.len() != 1 {
+        return false;
+    }
+
+    if let Some(TAtomic::GenericParameter(param)) = union.types.first() {
+        param.constraint.is_mixed() || param.constraint.is_vanilla_mixed()
+    } else {
+        false
+    }
+}
+
+fn expand_type_metadata<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    function_like_metadata: &FunctionLikeMetadata,
+    type_metadata: &TypeMetadata,
+) -> TUnion
+where
+    A: Arena,
+{
+    add_symbol_references(
+        &type_metadata.type_union,
+        block_context.scope.get_function_like_identifier().as_ref(),
+        artifacts,
+    );
+
+    let mut signature_union = type_metadata.type_union.clone();
+
+    let calling_class = block_context.scope.get_class_like_name();
+
+    expander::expand_union(
+        context.codebase,
+        &mut signature_union,
+        &TypeExpansionOptions {
+            self_class: calling_class,
+            static_class_type: if let Some(calling_class) = calling_class {
+                StaticClassType::Name(calling_class)
+            } else {
+                StaticClassType::None
+            },
+            function_is_final: if let Some(method_metadata) = &function_like_metadata.method_metadata {
+                method_metadata.is_final
+            } else {
+                false
+            },
+            ..Default::default()
+        },
+    );
+
+    signature_union
+}
+
+pub(super) fn add_properties_to_context<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    block_context: &mut BlockContext<'ctx>,
+    class_like_metadata: &'ctx ClassLikeMetadata,
+    function_like_metadata: Option<&'ctx FunctionLikeMetadata>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let Some(calling_class) = block_context.scope.get_class_like_name() else {
+        return Ok(());
+    };
+
+    // Seed every property name reachable on this class: all real declarations, plus magic
+    // `@property*` annotations for names without one.
+    let property_names = class_like_metadata.declaring_property_ids.keys().chain(
+        class_like_metadata
+            .magic_property_ids
+            .keys()
+            .filter(|name| !class_like_metadata.declaring_property_ids.contains_key(name)),
+    );
+
+    for property_name in property_names {
+        // These types seed `$this->prop`, i.e. internal access: the real property when it is
+        // visible from within this class, the `@property*` annotation otherwise.
+        let Some(resolution) = resolve_declared_property(
+            context.codebase,
+            class_like_metadata,
+            *property_name,
+            true, // `instance_access`
+            Some(calling_class),
+        ) else {
+            return Err(AnalysisError::InternalError(
+                format!(
+                    "Could not load property metadata for `{property_name}` in class-like `{}`.",
+                    class_like_metadata.name,
+                ),
+                class_like_metadata.span,
+            ));
+        };
+
+        let property_metadata = resolution.property;
+        let property_class_metadata = resolution.declaring_class;
+
+        if !property_metadata.hooks.is_empty()
+            && property_metadata.hooks.contains_key(&word(b"set"))
+            && !property_metadata.hooks.contains_key(&word(b"get"))
+        {
+            continue;
+        }
+
+        let mut property_type = resolution.declared_type(context.codebase);
+
+        let property_name_bytes = property_name.as_bytes();
+        let raw_property_name = property_name_bytes.strip_prefix(b"$").unwrap_or(property_name_bytes);
+
+        let expression_id = if property_metadata.flags.is_static() {
+            concat_word!(class_like_metadata.name.as_bytes(), b"::$", raw_property_name)
+        } else {
+            let this_type = get_this_type(context, class_like_metadata, function_like_metadata);
+
+            property_type = localize_property_type(
+                context,
+                &property_type,
+                this_type.get_type_parameters().unwrap_or_default(),
+                class_like_metadata,
+                property_class_metadata,
+            );
+
+            concat_word!(b"$this->", raw_property_name)
+        };
+
+        if resolution.is_magic()
+            || (property_metadata.type_declaration_metadata.is_some() && !property_metadata.flags.has_default())
+        {
+            property_type.set_possibly_undefined(true, None);
+        }
+
+        expander::expand_union(
+            context.codebase,
+            &mut property_type,
+            &TypeExpansionOptions {
+                self_class: Some(calling_class),
+                static_class_type: StaticClassType::Name(calling_class),
+                function_is_final: function_like_metadata
+                    .is_some_and(|m| m.method_metadata.as_ref().is_some_and(|metadata| metadata.is_final)),
+                ..Default::default()
+            },
+        );
+
+        block_context.locals.insert(expression_id, Rc::new(property_type));
+    }
+
+    Ok(())
+}
+
+/// A closure's declared receiver with its class references resolved, as the body holds `$this`.
+pub fn expand_receiver<A>(context: &Context<'_, '_, A>, receiver: &TUnion) -> TUnion
+where
+    A: Arena,
+{
+    let mut expanded = receiver.clone();
+    expander::expand_union(context.codebase, &mut expanded, &TypeExpansionOptions::default());
+    expanded
+}
+
+/// The class a closure's declared receiver names, which member access in its body resolves
+/// against. A receiver bounded by a type parameter names its bound's class.
+pub fn receiver_class<'ctx, A>(context: &Context<'ctx, '_, A>, receiver: &TUnion) -> Option<&'ctx ClassLikeMetadata>
+where
+    A: Arena,
+{
+    expand_receiver(context, receiver).types.iter().find_map(|atomic| match atomic {
+        TAtomic::Object(TObject::Named(named)) => context.codebase.get_class_like(named.name.as_bytes()),
+        TAtomic::GenericParameter(TGenericParameter { constraint, .. }) => receiver_class(context, constraint),
+        _ => None,
+    })
+}
+
+/// Constructs the `$this` type for instance methods/hooks.
+///
+/// This handles:
+/// - Enum types (returns `TEnum`)
+/// - Class template parameters (preserves generics)
+/// - Required interfaces and parent classes (intersection types)
+/// - Method-level where constraints (when `function_like_metadata` is provided)
+pub fn get_this_type<A>(
+    context: &Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    function_like_metadata: Option<&FunctionLikeMetadata>,
+) -> TObject
+where
+    A: Arena,
+{
+    if class_like_metadata.kind.is_enum() {
+        return TObject::Enum(TEnum { name: class_like_metadata.original_name, case: None });
+    }
+
+    let mut intersections = vec![];
+    for required_interface in &class_like_metadata.require_implements {
+        let Some(interface_metadata) = context.codebase.get_interface(required_interface.as_bytes()) else {
+            continue;
+        };
+
+        let TObject::Named(mut interface_type) = get_this_type(context, interface_metadata, function_like_metadata)
+        else {
+            continue;
+        };
+
+        let interface_intersactions = std::mem::take(&mut interface_type.intersection_types);
+
+        interface_type.is_static = false;
+        interface_type.is_this = false;
+        intersections.push(TAtomic::Object(TObject::Named(interface_type)));
+        if let Some(interface_intersactions) = interface_intersactions {
+            intersections.extend(interface_intersactions);
+        }
+    }
+
+    for required_class in &class_like_metadata.require_extends {
+        let Some(parent_class_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+            continue;
+        };
+
+        let TObject::Named(mut parent_type) = get_this_type(context, parent_class_metadata, function_like_metadata)
+        else {
+            continue;
+        };
+
+        let parent_intersections = std::mem::take(&mut parent_type.intersection_types);
+
+        parent_type.is_static = false;
+        parent_type.is_this = false;
+        intersections.push(TAtomic::Object(TObject::Named(parent_type)));
+        if let Some(parent_intersections) = parent_intersections {
+            intersections.extend(parent_intersections);
+        }
+    }
+
+    let mut type_parameters = vec![];
+    for (template_name, template) in &class_like_metadata.template_types {
+        // Check for method-level where constraints if function_like_metadata is provided
+        if let Some(constraint) = function_like_metadata
+            .and_then(|flm| flm.method_metadata.as_ref())
+            .and_then(|method_metadata| method_metadata.where_constraints.get(template_name))
+        {
+            type_parameters.push(constraint.type_union.clone());
+        } else {
+            let defining_entity = &template.defining_entity;
+            let constraint = &template.constraint;
+
+            type_parameters.push(wrap_atomic(TAtomic::GenericParameter(TGenericParameter {
+                parameter_name: *template_name,
+                constraint: Arc::new(constraint.clone()),
+                defining_entity: *defining_entity,
+                intersection_types: None,
+            })));
+        }
+    }
+
+    TObject::Named(TNamedObject {
+        name: class_like_metadata.original_name,
+        type_parameters: if type_parameters.is_empty() { None } else { Some(type_parameters) },
+        variances: None,
+        is_static: true,
+        is_this: true,
+        intersection_types: if intersections.is_empty() { None } else { Some(intersections) },
+        remapped_parameters: false,
+    })
+}
+
+fn add_symbol_references(
+    parameter_type: &TUnion,
+    calling_function_like_id: Option<&FunctionLikeIdentifier>,
+    artifacts: &mut AnalysisArtifacts,
+) {
+    for type_node in parameter_type.get_all_child_nodes() {
+        if let TypeRef::Atomic(atomic) = type_node {
+            match atomic {
+                TAtomic::Reference(TReference::Symbol { name, .. })
+                | TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Function(name))) => {
+                    let name = ascii_lowercase_word(name.as_bytes());
+                    match calling_function_like_id {
+                        Some(FunctionLikeIdentifier::Function(calling_function)) => {
+                            artifacts.symbol_references.add_symbol_reference_to_symbol(*calling_function, name, true);
+                        }
+                        Some(FunctionLikeIdentifier::Method(calling_classlike, calling_function)) => {
+                            artifacts.symbol_references.add_class_member_reference_to_symbol(
+                                (*calling_classlike, *calling_function),
+                                name,
+                                true,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                TAtomic::Callable(TCallable::Alias(FunctionLikeIdentifier::Method(name, member_name))) => {
+                    let method = (ascii_lowercase_word(name.as_bytes()), ascii_lowercase_word(member_name.as_bytes()));
+                    match calling_function_like_id {
+                        Some(FunctionLikeIdentifier::Function(calling_function)) => {
+                            artifacts.symbol_references.add_symbol_reference_to_class_member(
+                                *calling_function,
+                                method,
+                                true,
+                            );
+                        }
+                        Some(FunctionLikeIdentifier::Method(calling_classlike, calling_function)) => {
+                            artifacts.symbol_references.add_class_member_reference_to_class_member(
+                                (*calling_classlike, *calling_function),
+                                method,
+                                true,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Flags declared return types that are strictly wider than the union of every
+/// value the body actually returns.
+fn check_return_type_width<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    function_like_metadata: &'ctx FunctionLikeMetadata,
+) where
+    A: Arena,
+{
+    // Spec section 14.4 makes a `?` on a PHP# method that never returns null an error, so a PHP# file checks the
+    // `null` branch even when the setting is off.
+    let null_branch_only = !context.settings.find_overly_wide_return_types;
+    if null_branch_only && !context.dialect.is_sharp() {
+        return;
+    }
+
+    if function_like_metadata.flags.has_yield()
+        || function_like_metadata.flags.is_abstract()
+        || function_like_metadata.flags.is_unchecked()
+    {
+        return;
+    }
+
+    let Some(return_type_metadata) = function_like_metadata.return_type_metadata.as_ref() else {
+        return;
+    };
+
+    // A PHP# method keeps a `?` a subclass's override may need. A PHP method keeps Mago's rule, which skips the
+    // override itself.
+    let keeps_declared_type = if context.dialect.is_sharp() {
+        function_like_metadata
+            .method_metadata
+            .as_ref()
+            .is_some_and(|method| !method.is_final && method.visibility != Visibility::Private)
+            && block_context.scope.get_class_like().is_some_and(|class_like| !class_like.flags.is_final())
+    } else {
+        function_like_metadata.kind.is_method()
+            && block_context.scope.get_class_like_name().is_some_and(|class_name| {
+                context.codebase.method_is_overriding(class_name.as_bytes(), function_like_metadata.name.as_bytes())
+            })
+    };
+
+    if keeps_declared_type {
+        return;
+    }
+
+    if artifacts.inferred_return_types.is_empty() {
+        return;
+    }
+
+    let any_return_is_uninformative = artifacts.inferred_return_types.iter().any(|ret| {
+        ret.is_mixed() || ret.is_never() || ret.is_void() || ret.has_template_types() || ret.is_generic_parameter()
+    });
+
+    if any_return_is_uninformative {
+        return;
+    }
+
+    check_return_type_metadata_width(
+        context,
+        block_context,
+        artifacts,
+        function_like_metadata,
+        return_type_metadata,
+        null_branch_only,
+    );
+
+    // The effective (docblock) type and the native hint are separate declarations
+    // with separate source spans, so each overly-wide one needs its own fix. When
+    // a docblock overrides the return type, check the native hint too; without an
+    // override `return_type_metadata` already *is* the native declaration, so this
+    // would just be a duplicate check.
+    if return_type_metadata.from_docblock
+        && let Some(native_return_type_metadata) = function_like_metadata.return_type_declaration_metadata.as_ref()
+    {
+        check_return_type_metadata_width(
+            context,
+            block_context,
+            artifacts,
+            function_like_metadata,
+            native_return_type_metadata,
+            null_branch_only,
+        );
+    }
+}
+
+fn check_return_type_metadata_width<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    function_like_metadata: &'ctx FunctionLikeMetadata,
+    return_type_metadata: &TypeMetadata,
+    null_branch_only: bool,
+) where
+    A: Arena,
+{
+    let declared = &return_type_metadata.type_union;
+    if declared.is_mixed()
+        || declared.is_void()
+        || declared.is_never()
+        || declared.has_template_types()
+        || declared.is_generic_parameter()
+    {
+        return;
+    }
+
+    let expanded_declared =
+        expand_type_metadata(context, block_context, artifacts, function_like_metadata, return_type_metadata);
+
+    let any_inferred_matches = |declared_atomic: &TAtomic| -> bool {
+        artifacts.inferred_return_types.iter().any(|ret| {
+            ret.types.iter().any(|inferred_atomic| {
+                atomic_comparator::is_contained_by(
+                    context.codebase,
+                    inferred_atomic,
+                    declared_atomic,
+                    false,
+                    &mut ComparisonResult::default(),
+                ) || atomic_comparator::is_contained_by(
+                    context.codebase,
+                    declared_atomic,
+                    inferred_atomic,
+                    false,
+                    &mut ComparisonResult::default(),
+                )
+            })
+        })
+    };
+
+    let inferred_fully_in_declared = artifacts.inferred_return_types.iter().all(|ret| {
+        ret.types.iter().all(|inferred_atomic| {
+            expanded_declared.types.iter().any(|declared_atomic| {
+                atomic_comparator::is_contained_by(
+                    context.codebase,
+                    inferred_atomic,
+                    declared_atomic,
+                    false,
+                    &mut ComparisonResult::default(),
+                )
+            })
+        })
+    });
+
+    if !inferred_fully_in_declared {
+        return;
+    }
+
+    let unused_atomics = expanded_declared
+        .types
+        .iter()
+        .filter(|declared_atomic| !any_inferred_matches(declared_atomic))
+        .filter(|declared_atomic| !null_branch_only || declared_atomic.is_null())
+        .collect::<Vec<_>>();
+    if unused_atomics.is_empty() {
+        return;
+    }
+
+    let unused_list =
+        unused_atomics.iter().map(|atomic| display_atomic(context, atomic)).collect::<Vec<_>>().join("`, `");
+
+    let declared_str = display_type(context, &expanded_declared);
+    let return_span = return_type_metadata.span;
+    let function_label = function_like_metadata.name;
+
+    let narrowed_type_text = get_narrowed_return_type_text(context, return_span, &unused_atomics);
+
+    let mut issue = Issue::help(format!(
+        "Declared return type `{declared_str}` for `{function_label}` has unused branches: `{unused_list}`."
+    ))
+    .with_annotation(
+        Annotation::primary(return_span)
+            .with_message(format!("Declared as `{declared_str}`, but `{unused_list}` is never returned.")),
+    )
+    .with_annotation(
+        Annotation::secondary(function_like_metadata.name_span.unwrap_or(function_like_metadata.span))
+            .with_message("No path in this body produces that value."),
+    )
+    .with_note("A return type wider than the body produces is misleading.")
+    .with_note("Callers must handle branches the function never actually returns.")
+    .with_note("It can hide dead code paths meant to produce the missing variant.");
+
+    issue = if let Some(narrowed_type_text) = &narrowed_type_text {
+        issue.with_help(format!("Remove `{unused_list}` from the return type, giving `{narrowed_type_text}`."))
+    } else {
+        issue.with_help(format!("Remove `{unused_list}` from the return type, or add a branch that returns it."))
+    };
+
+    if unused_atomics.iter().any(|unused_atomic| unused_atomic.is_null()) {
+        issue = context.as_null_check_error(issue);
+    }
+
+    context.collector.propose_with_code(IssueCode::OverlyWideReturnType, issue, |edits| {
+        if let Some(narrowed_type_text) = narrowed_type_text {
+            edits.push(
+                TextEdit::replace(return_span.to_range(), narrowed_type_text).with_safety(Safety::PotentiallyUnsafe),
+            );
+        }
+    });
+}
+
+/// Attempts to compute replacement source text for `return_span` with the given
+/// atomics removed from the union, by re-slicing the original declaration text
+/// rather than re-rendering the type from scratch.
+///
+/// This preserves the author's original formatting (spacing, generic parameters,
+/// docblock-only syntax, etc.) for the branches that remain, and only gives up
+/// (returning `None`) when a branch we need to remove can't be unambiguously
+/// located in the source text, e.g. because it's expressed differently than its
+/// canonical id (a type alias, a differently-cased keyword, ...).
+fn get_narrowed_return_type_text<A>(
+    context: &Context<'_, '_, A>,
+    return_span: Span,
+    unused_atomics: &[&TAtomic],
+) -> Option<String>
+where
+    A: Arena,
+{
+    let start = return_span.start_offset() as usize;
+    let end = return_span.end_offset() as usize;
+    let source_text = std::str::from_utf8(context.source_file.contents.get(start..end)?).ok()?;
+
+    // PHP writes a nullable type `?int`, and PHP# writes it `int?`.
+    let (mut nullable_marker, rest) = if let Some(rest) = source_text.strip_prefix('?') {
+        (Some(true), rest)
+    } else if let Some(rest) = source_text.strip_suffix('?') {
+        (Some(false), rest)
+    } else {
+        (None, source_text)
+    };
+
+    let mut segments = split_top_level_union_members(rest);
+
+    for atomic in unused_atomics {
+        if atomic.is_null() {
+            if nullable_marker.is_some() {
+                nullable_marker = None;
+                continue;
+            }
+
+            let position = segments.iter().position(|segment| segment.trim().eq_ignore_ascii_case("null"))?;
+            segments.remove(position);
+        } else {
+            let atomic_id = atomic.get_id().to_string();
+            let position = segments.iter().position(|segment| segment_matches_atomic(segment.trim(), &atomic_id))?;
+            segments.remove(position);
+        }
+    }
+
+    if segments.is_empty() {
+        // Everything but the implicit `null` from the `?` was removed, so
+        // the narrowed type is spelled `null` rather than a bare, invalid `?`.
+        // If nothing at all remains, give up.
+        return nullable_marker.map(|_| "null".to_string());
+    }
+
+    let narrowed = segments.iter().map(|segment| segment.trim()).collect::<Vec<_>>().join("|");
+
+    Some(match nullable_marker {
+        Some(true) => format!("?{narrowed}"),
+        Some(false) => format!("{narrowed}?"),
+        None => narrowed,
+    })
+}
+
+/// Whether a source-text `segment` denotes the same type as the canonical
+/// `atomic_id`.
+///
+/// A bare collection keyword like `array` carries no generic parameters in the
+/// source, whereas its canonical id always spells them out (bare `array` becomes
+/// `array<array-key, mixed>`; the same goes for `iterable`). A native return type
+/// hint can only ever be such a bare keyword, since native syntax has no generics
+/// at all. So an unparameterized segment matches on its base keyword alone, while
+/// anything the author did parameterize must still match verbatim (ignoring case).
+fn segment_matches_atomic(segment: &str, atomic_id: &str) -> bool {
+    if segment.eq_ignore_ascii_case(atomic_id) {
+        return true;
+    }
+
+    let is_bare = !segment.contains(['<', '{', '(']);
+    is_bare && segment.eq_ignore_ascii_case(base_keyword(atomic_id))
+}
+
+/// The leading type keyword of a canonical id, i.e. the part before any generic
+/// parameters, shape body, or callable signature (`array<array-key, mixed>` -> `array`).
+fn base_keyword(atomic_id: &str) -> &str {
+    match atomic_id.find(['<', '{', '(']) {
+        Some(index) => &atomic_id[..index],
+        None => atomic_id,
+    }
+}
+
+/// Splits a type hint's source text on top-level `|` characters, i.e. those not
+/// nested inside generic parameters, shapes, or callable signatures.
+fn split_top_level_union_members(text: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start = 0;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' | ')' | ']' | '}' => depth -= 1,
+            '|' if depth == 0 => {
+                segments.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    segments.push(&text[start..]);
+    segments
+}
+
+fn check_thrown_types<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    function_like_metadata: &'ctx FunctionLikeMetadata,
+) where
+    A: Arena,
+{
+    if !context.check_throws() {
+        // If the setting is disabled, or the file is PHP#, we skip the check.
+        return;
+    }
+
+    if block_context.possibly_thrown_exceptions.is_empty() {
+        // No exceptions are thrown in this block, so we can skip the check.
+        return;
+    }
+
+    let function_name = &function_like_metadata.original_name;
+
+    let (function_kind, function_name) = if function_like_metadata.kind.is_method() {
+        let Some(class_like_metadata) = block_context.scope.get_class_like() else {
+            return;
+        };
+
+        let name = concat_word!(&class_like_metadata.original_name, "::", function_name);
+
+        ("method", name)
+    } else {
+        ("function", *function_name)
+    };
+
+    let expected_throw_types = context
+        .codebase
+        .get_function_like_thrown_types(block_context.scope.get_class_like(), function_like_metadata)
+        .iter()
+        .map(|thrown_type| expand_type_metadata(context, block_context, artifacts, function_like_metadata, thrown_type))
+        .collect::<Vec<_>>();
+
+    for (thrown_type, thrown_spans) in &block_context.possibly_thrown_exceptions {
+        // Skip if exception is in unchecked lists
+        if is_exception_unchecked(context, *thrown_type) {
+            continue;
+        }
+
+        let thrown_type_union = TUnion::from_atomic(TAtomic::Object(TObject::new_named(*thrown_type)));
+
+        let mut is_expected = false;
+        for expected_type in &expected_throw_types {
+            if union_comparator::is_contained_by(
+                context.codebase,
+                &thrown_type_union,
+                expected_type,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::default(),
+            ) {
+                is_expected = true;
+                break;
+            }
+        }
+
+        if is_expected {
+            continue;
+        }
+
+        let mut issue = Issue::error(format!("Potentially unhandled exception `{thrown_type}` in `{function_name}`."));
+
+        for span in thrown_spans {
+            issue = issue.with_annotation(Annotation::primary(*span).with_message("Exception may be thrown here"));
+        }
+
+        issue = issue
+            .with_annotation(
+                Annotation::secondary(function_like_metadata.span)
+                    .with_message(format!("This {function_kind} does not declare that it throws `{thrown_type}`")),
+            )
+            .with_note(format!(
+                "All possible exceptions must be caught or declared in a `@throws` tag in the {function_kind}'s docblock.",
+            ))
+            .with_help(format!(
+                "You can add `@throws {thrown_type}` to the {function_kind}'s docblock or wrap the throwing code in a `try-catch` block."
+            ));
+
+        context.collector.report_with_code(IssueCode::UnhandledThrownType, issue);
+    }
+}
+
+/// Checks if an exception should be ignored based on the unchecked exception settings.
+///
+/// Returns `true` if the exception is:
+/// - In `unchecked_exception_classes` (exact match only)
+/// - In `unchecked_exceptions` or is a subclass of any exception in that set (hierarchy-aware)
+fn is_exception_unchecked<A>(context: &Context<'_, '_, A>, exception_name: Word) -> bool
+where
+    A: Arena,
+{
+    // Check exact match in unchecked_exception_classes
+    if context
+        .settings
+        .unchecked_exception_classes
+        .iter()
+        .any(|unchecked| exception_name.as_bytes().eq_ignore_ascii_case(unchecked.as_bytes()))
+    {
+        return true;
+    }
+
+    if context.settings.unchecked_exceptions.iter().any(|unchecked| {
+        exception_name.as_bytes().eq_ignore_ascii_case(unchecked.as_bytes())
+            || context.codebase.is_instance_of(exception_name.as_bytes(), unchecked.as_bytes())
+    }) {
+        return true;
+    }
+
+    false
+}
+
+/// Checks if a type union contains a reference to a specific function-level template parameter.
+fn type_contains_function_template_param(
+    type_union: &TUnion,
+    param_name: Word,
+    function_identifier: (Word, Word),
+) -> bool {
+    type_union.types.iter().any(|atomic| {
+        if let TAtomic::GenericParameter(gp) = atomic
+            && gp.parameter_name == param_name
+            && let GenericParent::FunctionLike(fn_id) = gp.defining_entity
+            && fn_id == function_identifier
+        {
+            return true;
+        }
+
+        if let TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic {
+            parameter_name: name,
+            defining_entity: GenericParent::FunctionLike(fn_id),
+            ..
+        })) = atomic
+            && *name == param_name
+            && *fn_id == function_identifier
+        {
+            return true;
+        }
+
+        atomic.get_all_child_nodes().iter().any(|node| match node {
+            TypeRef::Atomic(TAtomic::GenericParameter(gp)) => {
+                gp.parameter_name == param_name
+                    && matches!(gp.defining_entity, GenericParent::FunctionLike(fn_id) if fn_id == function_identifier)
+            }
+            TypeRef::Atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic {
+                parameter_name: name,
+                defining_entity: GenericParent::FunctionLike(fn_id),
+                ..
+            }))) => *name == param_name && *fn_id == function_identifier,
+            TypeRef::Union(u) => type_contains_function_template_param(u, param_name, function_identifier),
+            _ => false,
+        })
+    })
+}
+
+/// Checks for unused template parameters in a function-like declaration.
+///
+/// A template parameter is considered "used" if it appears in:
+/// - A parameter type
+/// - The return type
+pub fn check_unused_function_template_parameters<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    function_like_metadata: &'ctx FunctionLikeMetadata,
+    name_span: Span,
+    kind_str: &str,
+    display_name: Word,
+) where
+    A: Arena,
+{
+    if !context.settings.find_unused_definitions {
+        return;
+    }
+
+    if function_like_metadata.template_types.is_empty() {
+        return;
+    }
+
+    let Some((_, template)) = function_like_metadata.template_types.first() else {
+        return;
+    };
+
+    let GenericParent::FunctionLike(function_identifier) = template.defining_entity else {
+        return;
+    };
+
+    'templates: for (template_name, _) in &function_like_metadata.template_types {
+        if template_name.as_bytes().starts_with(b"_") {
+            continue;
+        }
+
+        for param in &function_like_metadata.parameters {
+            if let Some(type_metadata) = &param.type_metadata
+                && type_contains_function_template_param(&type_metadata.type_union, *template_name, function_identifier)
+            {
+                continue 'templates;
+            }
+        }
+
+        if let Some(return_type_metadata) = &function_like_metadata.return_type_metadata
+            && type_contains_function_template_param(
+                &return_type_metadata.type_union,
+                *template_name,
+                function_identifier,
+            )
+        {
+            continue;
+        }
+
+        context.collector.report_with_code(
+            IssueCode::UnusedTemplateParameter,
+            Issue::warning(format!(
+                "Template parameter `{template_name}` is never used in {kind_str} `{display_name}`."
+            ))
+            .with_annotation(
+                Annotation::primary(name_span)
+                    .with_message(format!("Template `{template_name}` is defined on this {kind_str} but never referenced")),
+            )
+            .with_help(format!(
+                "Remove the unused `@template {template_name}` from the docblock, or use it in a parameter or return type."
+            )),
+        );
+    }
+}
+
+/// Verifies that a parameter's default value is assignable to the parameter's declared type.
+fn check_parameter_default_value<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    parameter_metadata: &'ctx FunctionLikeParameterMetadata,
+    declared_type: &TUnion,
+    default_expression: &Expression<'arena>,
+    artifacts: &mut AnalysisArtifacts,
+) where
+    A: Arena,
+{
+    check_sharp_literal_kind(context, default_expression, declared_type);
+
+    // A PHP# type holds null only when it is written with `?`, so its `Any` is checked and it has no implicitly
+    // nullable parameter.
+    let is_sharp = context.dialect.is_sharp();
+
+    if (declared_type.is_mixed() && !is_sharp)
+        || declared_type.has_template_types()
+        || declared_type.is_generic_parameter()
+    {
+        return;
+    }
+
+    let Some(default_type) = get_set_literal_type(context, artifacts, default_expression, declared_type)
+        .or_else(|| artifacts.get_expression_type(default_expression).cloned())
+    else {
+        return;
+    };
+    let default_type = &default_type;
+
+    if default_type.is_never() {
+        return;
+    }
+
+    let allow_implicit_null_default = !is_sharp
+        && default_type.is_null()
+        && context.settings.version.is_supported(Feature::ImplicitlyNullableParameterTypes);
+
+    let mut comparison_result = ComparisonResult::with_sharp_rules(is_sharp);
+    if union_comparator::is_contained_by(
+        context.codebase,
+        default_type,
+        declared_type,
+        allow_implicit_null_default,
+        false,
+        false,
+        &mut comparison_result,
+    ) {
+        return;
+    }
+
+    if let Some(value) = int_refused_for_float(&comparison_result, artifacts, default_expression) {
+        report_int_for_float(context, IssueCode::InvalidParameterDefaultValue, value, declared_type);
+
+        return;
+    }
+
+    let default_type_str = display_value_type(context, default_type, declared_type);
+    let declared_type_str = display_type(context, declared_type);
+    let param_name = display_variable_name(context, parameter_metadata.name.0.as_bytes());
+
+    let issue = Issue::error(format!(
+        "Default value for parameter `{param_name}` is not assignable to its declared type."
+    ))
+    .with_annotation(
+        Annotation::primary(default_expression.span())
+            .with_message(format!("This default value has type `{default_type_str}`")),
+    )
+    .with_annotation(
+        Annotation::secondary(parameter_metadata.span)
+            .with_message(format!("Parameter `{param_name}` is declared with type `{declared_type_str}`")),
+    )
+    .with_note("A parameter's default value must be assignable to the parameter's declared type.")
+    .with_help(
+        "Change the default value to match the declared type, or widen the parameter type to accept the default.",
+    );
+
+    context.collector.report_with_code(IssueCode::InvalidParameterDefaultValue, issue);
+}
+
+/// Reports errors for any undefined type references in the given type metadata.
+///
+/// This function scans the type union for unresolved `TReference::Symbol` entries,
+/// which indicate types that were not found during the population phase.
+pub fn report_undefined_type_references<A>(context: &mut Context<'_, '_, A>, type_metadata: &TypeMetadata)
+where
+    A: Arena,
+{
+    if type_metadata.inferred {
+        return;
+    }
+
+    for type_ref in type_metadata.type_union.get_all_child_nodes() {
+        let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref else {
+            continue;
+        };
+
+        context.collector.report_with_code(
+            IssueCode::NonExistentClassLike,
+            Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
+                .with_annotation(
+                    Annotation::primary(type_metadata.span)
+                        .with_message(format!("`{name}` is not defined in the current codebase")),
+                )
+                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+                .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
+                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present."),
+        );
+    }
+}
+
+/// Reports generic classes a declared type applies with the wrong number of arguments, or with an
+/// argument outside its type parameter's bound.
+///
+/// A declaration is checked where it is written, so the mistake is reported at the declaration
+/// rather than at whichever call first happens to reach it.
+pub fn report_invalid_template_arguments<A>(context: &mut Context<'_, '_, A>, type_metadata: &TypeMetadata)
+where
+    A: Arena,
+{
+    if type_metadata.inferred {
+        return;
+    }
+
+    report_map_keys_without_backing_value(context, &type_metadata.type_union, type_metadata.span);
+    report_unsupported_set_elements(context, &type_metadata.type_union, type_metadata.span);
+
+    let codebase = context.codebase;
+    for type_ref in type_metadata.type_union.get_all_child_nodes() {
+        let TypeRef::Atomic(TAtomic::Object(TObject::Named(named))) = type_ref else {
+            continue;
+        };
+        let (Some(arguments), Some(class)) = (&named.type_parameters, codebase.get_class_like(named.name.as_bytes()))
+        else {
+            continue;
+        };
+
+        let class_name = display_class_like_name(context, class.original_name);
+        let expected = class.template_types.len();
+        let required = class.template_types.values().take_while(|template| template.default.is_none()).count();
+        if arguments.len() < required || arguments.len() > expected {
+            let (code, message) = if arguments.len() < required {
+                (
+                    IssueCode::MissingTemplateParameter,
+                    format!(
+                        "Too few template arguments for `{class_name}`: expected at least {required}, but found {}.",
+                        arguments.len()
+                    ),
+                )
+            } else {
+                (
+                    IssueCode::ExcessTemplateParameter,
+                    format!(
+                        "Too many template arguments for `{class_name}`: expected {expected}, but found {}.",
+                        arguments.len()
+                    ),
+                )
+            };
+
+            context.collector.report_with_code(
+                code,
+                Issue::error(message)
+                    .with_annotation(
+                        Annotation::primary(type_metadata.span)
+                            .with_message(format!("`{class_name}` is applied here.")),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(class.name_span.unwrap_or(class.span))
+                            .with_message(format!("`{class_name}` declares {expected} template parameters.")),
+                    ),
+            );
+            continue;
+        }
+
+        for (argument, (template_name, template)) in arguments.iter().zip(class.template_types.iter()) {
+            // An explicit `mixed` argument is the written form of "any argument", which Mago accepts
+            // for every bound.
+            if argument.is_mixed() || template.constraint.is_mixed() || template.constraint.has_template_types() {
+                continue;
+            }
+
+            let options = TypeExpansionOptions::default();
+            let mut expanded_argument = argument.clone();
+            expander::expand_union(codebase, &mut expanded_argument, &options);
+            let mut constraint = template.constraint.clone();
+            expander::expand_union(codebase, &mut constraint, &options);
+            if union_comparator::is_contained_by(
+                codebase,
+                &expanded_argument,
+                &constraint,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::default(),
+            ) {
+                continue;
+            }
+
+            let argument_id = display_type(context, &expanded_argument);
+            let constraint_id = display_type(context, &constraint);
+            context.collector.report_with_code(
+                IssueCode::TemplateConstraintViolation,
+                Issue::error(format!(
+                    "Template argument `{argument_id}` does not satisfy `{class_name}`'s `{template_name}`."
+                ))
+                .with_annotation(
+                    Annotation::primary(type_metadata.span)
+                        .with_message(format!("`{argument_id}` is supplied for `{template_name}` here...")),
+                )
+                .with_annotation(
+                    Annotation::secondary(class.name_span.unwrap_or(class.span))
+                        .with_message(format!("...but `{template_name}` is bounded by `{constraint_id}`.")),
+                )
+                .with_help(format!("Supply a type contained by `{constraint_id}`.")),
+            );
+        }
+    }
+}
+
+/// Reports each PHP# `Map` written in `type_union` whose key type is a class or an enum without a backing value.
+/// Spec section 12 keys a `Map` by an `int`, a `string` or a type with an `int` or `string` backing value, which
+/// runs as its backing value.
+pub fn report_map_keys_without_backing_value<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    for type_ref in type_union.get_all_child_nodes() {
+        let TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) = type_ref else {
+            continue;
+        };
+        let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
+            continue;
+        };
+        if get_backing_key_type(key_type, context.codebase).is_always_array_key(true) {
+            continue;
+        }
+
+        let key_id = display_sharp_type(context, key_type);
+        context.collector.report_with_code(IssueCode::TemplateConstraintViolation, map_key_error(&key_id, span));
+    }
+}
+
+/// Reports each PHP# `Set` written in `type_union` whose element type is a class or an enum without a backing value.
+/// A `Set` runs keyed by each element, so the first `Set` slice holds `int`, `string` and backed enums, and the
+/// semantic checks refuse every other element a type can name without the codebase.
+pub(crate) fn report_unsupported_set_elements<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+
+    for type_ref in type_union.get_all_child_nodes() {
+        let TypeRef::Atomic(TAtomic::Array(TArray::Set(element_type))) = type_ref else {
+            continue;
+        };
+        if get_backing_key_type(element_type, context.codebase).is_always_array_key(true) {
+            continue;
+        }
+
+        context.collector.report_with_code(
+            IssueCode::NotSupportedYet,
+            Issue::error("This type is not supported yet in PHP#.").with_annotation(Annotation::primary(span)),
+        );
+    }
+}
+
+/// The error for a PHP# `Map` keyed by `key_id`, a type that is not `int`, not `string` and has no `int` or `string`
+/// backing value, written at `span`. A `Map` type and a `Map` literal state the rule in these words.
+pub(crate) fn map_key_error(key_id: &str, span: Span) -> Issue {
+    Issue::error(format!(
+        "A `Map`'s keys are `int`, `string` or a type with an `int` or `string` backing value, and `{key_id}` has none."
+    ))
+    .with_annotation(Annotation::primary(span).with_message(format!("`{key_id}` keys this `Map`.")))
+    .with_help("Key the `Map` by an `int`, a `string` or a backed enum, such as `enum Status : string`.")
+}

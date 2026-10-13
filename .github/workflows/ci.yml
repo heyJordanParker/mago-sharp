@@ -1,0 +1,241 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable, nightly]
+        exclude:
+          - { os: macos-latest, rust: nightly }
+
+    runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: keep local sources out of Cargo.lock
+        if: matrix.os == 'macos-latest'
+        run: |
+          if git grep -nE '(path|git)\+file://' -- '*Cargo.lock'; then
+            echo "::error::A committed Cargo.lock names a local source. Keep the [patch] in an untracked .cargo/config.toml."
+            exit 1
+          fi
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      - name: cache rust toolchain
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-rust-${{ matrix.rust }}
+          shared-key: ${{ runner.os }}-rust-${{ matrix.rust }}
+          cache-on-failure: true
+
+      - name: Install PHP
+        uses: shivammathur/setup-php@master
+        with:
+          php-version: "8.3"
+          tools: "composer:v2"
+
+      - name: Install composer dependencies
+        run: composer install
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Install elan and Lean
+        uses: ./.github/actions/setup-lean
+
+      - name: Test PHP SDK
+        run: just test-sdk
+
+      - name: cargo check
+        if: matrix.os == 'macos-latest'
+        run: cargo check --workspace --locked
+
+      # Workspace builds merge features, so only a build of the bridge alone shows what php links.
+      - name: cargo check the PHP# bridge alone
+        if: matrix.os == 'macos-latest'
+        run: cargo check -p mago-sharp-bridge --locked
+
+      - name: keep the file watcher out of the PHP# bridge
+        if: matrix.os == 'macos-latest'
+        run: |
+          if output=$(cargo tree -p mago-sharp-bridge -e normal -i notify --locked 2>&1); then
+            echo "$output"
+            echo "::error::mago-sharp-bridge depends on notify, so php would link a file watcher"
+            exit 1
+          fi
+          echo "$output" | grep -q "did not match any packages"
+
+      - name: Verify the PHP SDK's NodeKind is generated from the syntax tree
+        if: matrix.os == 'macos-latest'
+        run: |
+          php scripts/regen-sdk-node-kinds.php
+          git diff --exit-code composer/src/Sdk/Syntax/NodeKind.php
+
+      - name: cargo fmt
+        if: matrix.os == 'macos-latest'
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: cargo test (property)
+        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        run: cargo test -p mago-codex --features property-tests --locked
+
+      # Linux builds the release binary here because the Composer steps below run it. macOS builds
+      # its own in release-build, alongside the tests instead of after them.
+      - name: cargo build
+        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        run: cargo build --release --locked
+
+      # git archive ships what Packagist ships, and a mirrored copy finds the project's autoloader the way a real install does.
+      - name: install the Composer package by name
+        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "mago") | .version')
+          package="$RUNNER_TEMP/mago-sharp-package"
+          project="$RUNNER_TEMP/mago-sharp-project"
+          mkdir -p "$package" "$project"
+          git archive HEAD | tar -x -C "$package"
+          cat > "$project/composer.json" <<JSON
+          {
+              "repositories": [
+                  {
+                      "type": "path",
+                      "url": "$package",
+                      "options": {"symlink": false, "versions": {"heyjordanparker/mago-sharp": "$version"}}
+                  }
+              ],
+              "require": {"heyjordanparker/mago-sharp": "$version"}
+          }
+          JSON
+          composer install --no-interaction --working-dir="$project"
+          binary_dir="$project/vendor/heyjordanparker/mago-sharp/composer/bin/$version/mago-$version-$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p "$binary_dir"
+          cp target/release/mago "$binary_dir/mago"
+          output=$("$project/vendor/bin/mago" --version 2>&1)
+          echo "$output"
+          test "$output" = "mago $version"
+
+      - name: Validate composer code format
+        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        run: ./target/release/mago format --dry-run
+
+      - name: Lint composer code
+        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        run: ./target/release/mago lint --reporting-format=github
+
+      - name: Analyze composer code
+        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        run: ./target/release/mago analyze --reporting-format=github
+
+  release-build:
+    runs-on: macos-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: cache rust toolchain
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-rust-release
+          cache-on-failure: true
+
+      - name: cargo build
+        run: cargo build --release --locked
+
+  # cd.yml builds the WebAssembly package only for a release, so this job runs its build steps on every pull request.
+  wasm-build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: cache rust toolchain
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-rust-wasm
+          cache-on-failure: true
+
+      - name: Cache wasm-pack
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}
+
+      - name: Install wasm-pack and build WASM
+        run: |
+          if ! command -v wasm-pack &>/dev/null; then
+            cargo install wasm-pack --version 0.13.1 --locked
+          fi
+          cd crates/wasm
+          wasm-pack build -d pkg --release
+
+      - name: check the files cd.yml packs
+        run: |
+          for file in mago_wasm.d.ts mago_wasm.js mago_wasm_bg.js mago_wasm_bg.wasm package.json; do
+            test -f "crates/wasm/pkg/$file" || { echo "::error::wasm-pack wrote no crates/wasm/pkg/$file"; exit 1; }
+          done
+
+  typos-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Search for misspellings
+        uses: crate-ci/typos@master
+
+  # The one required check: it passes only when every job above passed, so a job added later
+  # blocks merges without a change to the repository's rules.
+  ci-passed:
+    if: always()
+    needs: [build-and-test, release-build, wasm-build, typos-check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}

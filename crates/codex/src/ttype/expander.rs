@@ -1,0 +1,3044 @@
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::sync::Arc;
+
+use std::collections::HashSet;
+
+use foldhash::fast::FixedState;
+use mago_word::Word;
+use mago_word::ascii_lowercase_word;
+
+use crate::identifier::function_like::FunctionLikeIdentifier;
+use crate::metadata::CodebaseMetadata;
+use crate::metadata::class_like::ClassLikeMetadata;
+use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::alias::TAlias;
+use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::array::key::ArrayKey;
+use crate::ttype::atomic::callable::TCallable;
+use crate::ttype::atomic::callable::TCallableSignature;
+use crate::ttype::atomic::callable::parameter::TCallableParameter;
+use crate::ttype::atomic::derived::TDerived;
+use crate::ttype::atomic::derived::index_access::TIndexAccess;
+use crate::ttype::atomic::derived::int_mask::TIntMask;
+use crate::ttype::atomic::derived::int_mask_of::TIntMaskOf;
+use crate::ttype::atomic::derived::intersection::TDerivedIntersection;
+use crate::ttype::atomic::derived::key_of::TKeyOf;
+use crate::ttype::atomic::derived::new::TNew;
+use crate::ttype::atomic::derived::properties_of::TPropertiesOf;
+use crate::ttype::atomic::derived::template_type::TTemplateType;
+use crate::ttype::atomic::derived::value_of::TValueOf;
+use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::mixed::TMixed;
+use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::object::named::TNamedObject;
+use crate::ttype::atomic::reference::TGlobalReferenceSelector;
+use crate::ttype::atomic::reference::TReference;
+use crate::ttype::atomic::reference::TReferenceMemberSelector;
+use crate::ttype::atomic::scalar::TScalar;
+use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use crate::ttype::atomic::scalar::int::TInteger;
+use crate::ttype::atomic::scalar::string::TString;
+use crate::ttype::atomic::scalar::string::TStringLiteral;
+use crate::ttype::combiner;
+use crate::ttype::union::TUnion;
+
+thread_local! {
+    /// Thread-local set for tracking currently expanding aliases (cycle detection).
+    /// Uses a HashSet for accurate tracking without false positives from hash collisions.
+    pub(crate) static EXPANDING_ALIASES: RefCell<HashSet<(Word, Word), FixedState>> = const { RefCell::new(HashSet::with_hasher(FixedState::with_seed(0))) };
+
+    /// Thread-local set for tracking objects whose type parameters are being expanded (cycle detection).
+    static EXPANDING_OBJECT_PARAMS: RefCell<HashSet<Word, FixedState>> = const { RefCell::new(HashSet::with_hasher(FixedState::with_seed(0))) };
+
+    /// Thread-local set for tracking class constants whose inferred initializer is currently
+    /// being expanded. Used to break cycles like `const int b = self::b;` where the inferred
+    /// type of a constant is a reference to itself.
+    static EXPANDING_CONSTANTS: RefCell<HashSet<(Word, Word), FixedState>> = const { RefCell::new(HashSet::with_hasher(FixedState::with_seed(0))) };
+}
+
+/// RAII guard to ensure alias expansion state is properly cleaned up.
+/// This guarantees the alias is removed from the set even if the expansion panics.
+pub(crate) struct AliasExpansionGuard {
+    class_name: Word,
+    alias_name: Word,
+}
+
+impl AliasExpansionGuard {
+    #[must_use]
+    pub(crate) fn new(class_name: Word, alias_name: Word) -> Self {
+        EXPANDING_ALIASES.with(|set| set.borrow_mut().insert((class_name, alias_name)));
+        Self { class_name, alias_name }
+    }
+}
+
+impl Drop for AliasExpansionGuard {
+    fn drop(&mut self) {
+        EXPANDING_ALIASES.with(|set| set.borrow_mut().remove(&(self.class_name, self.alias_name)));
+    }
+}
+
+/// RAII guard for object type parameter expansion cycle detection.
+struct ObjectParamsExpansionGuard {
+    object_name: Word,
+}
+
+impl ObjectParamsExpansionGuard {
+    #[must_use]
+    fn try_new(object_name: Word) -> Option<Self> {
+        EXPANDING_OBJECT_PARAMS.with(|set| {
+            let mut set = set.borrow_mut();
+            if set.contains(&object_name) {
+                None
+            } else {
+                set.insert(object_name);
+                Some(Self { object_name })
+            }
+        })
+    }
+}
+
+impl Drop for ObjectParamsExpansionGuard {
+    fn drop(&mut self) {
+        EXPANDING_OBJECT_PARAMS.with(|set| set.borrow_mut().remove(&self.object_name));
+    }
+}
+
+/// RAII guard for class constant inferred-initializer expansion cycle detection.
+///
+/// A constant whose initializer references itself (directly via `self::FOO` or
+/// transitively via another constant) would otherwise drive `expand_member_reference`
+/// into infinite recursion. The guard tracks `(class_name, constant_name)` pairs that
+/// are currently being expanded and refuses re-entry.
+struct ConstantExpansionGuard {
+    class_name: Word,
+    constant_name: Word,
+}
+
+impl ConstantExpansionGuard {
+    #[must_use]
+    fn try_new(class_name: Word, constant_name: Word) -> Option<Self> {
+        EXPANDING_CONSTANTS.with(|set| {
+            let mut set = set.borrow_mut();
+            if set.contains(&(class_name, constant_name)) {
+                None
+            } else {
+                set.insert((class_name, constant_name));
+                Some(Self { class_name, constant_name })
+            }
+        })
+    }
+}
+
+impl Drop for ConstantExpansionGuard {
+    fn drop(&mut self) {
+        EXPANDING_CONSTANTS.with(|set| set.borrow_mut().remove(&(self.class_name, self.constant_name)));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum StaticClassType {
+    #[default]
+    None,
+    /// The late-static type is bound to this exact class at the call site.
+    Exact(Word),
+    /// The class is known, but late-static identity must be preserved.
+    Name(Word),
+    /// The late-static type is bound to a potentially specialized object.
+    Object(TObject),
+    Generic(TGenericParameter),
+}
+
+#[derive(Debug, Default)]
+pub struct TypeExpansionOptions {
+    pub self_class: Option<Word>,
+    pub static_class_type: StaticClassType,
+    pub function_is_final: bool,
+    /// True when expanding the return type of a method resolved through `@mixin`:
+    /// a pre-bound `static` that reaches the receiver through mixin tags rebinds
+    /// to the receiver. Elsewhere the mixin relationship between two class names
+    /// says nothing about how a value was obtained, so no rebinding happens.
+    pub allow_mixin_static_rebind: bool,
+}
+
+/// Expands a type union, resolving special types like `self`, `static`, `parent`,
+/// type aliases, class constants, and generic type parameters.
+pub fn expand_union(codebase: &CodebaseMetadata, return_type: &mut TUnion, options: &TypeExpansionOptions) {
+    if !return_type.is_expandable() {
+        return;
+    }
+
+    let mut types = std::mem::take(&mut return_type.types).into_owned();
+    let mut new_return_type_parts: Vec<TAtomic> = Vec::new();
+    let mut skip_mask: u64 = 0;
+
+    for (i, return_type_part) in types.iter_mut().enumerate() {
+        let mut skip_key = false;
+        expand_atomic(return_type_part, codebase, options, &mut skip_key, &mut new_return_type_parts);
+
+        if skip_key && i < 64 {
+            skip_mask |= 1u64 << i;
+        }
+    }
+
+    if skip_mask != 0 {
+        let mut idx = 0usize;
+        types.retain(|_| {
+            let retain = idx >= 64 || (skip_mask & (1u64 << idx)) == 0;
+            idx += 1;
+            retain
+        });
+
+        new_return_type_parts.append(&mut types);
+
+        if new_return_type_parts.is_empty() {
+            new_return_type_parts.push(TAtomic::Mixed(TMixed::new()));
+        }
+
+        types = if new_return_type_parts.len() > 1 {
+            combiner::combine(new_return_type_parts, codebase, combiner::CombinerOptions::default())
+        } else {
+            new_return_type_parts
+        };
+    } else if types.len() > 1 {
+        types = combiner::combine(types, codebase, combiner::CombinerOptions::default());
+    }
+
+    return_type.types = Cow::Owned(types);
+}
+
+pub(crate) fn expand_atomic(
+    return_type_part: &mut TAtomic,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+    skip_key: &mut bool,
+    new_return_type_parts: &mut Vec<TAtomic>,
+) {
+    match return_type_part {
+        TAtomic::Array(array_type) => match array_type {
+            TArray::Keyed(keyed_data) => {
+                if let Some((key_parameter, value_parameter)) = &mut keyed_data.parameters {
+                    expand_union(codebase, Arc::make_mut(key_parameter), options);
+                    expand_union(codebase, Arc::make_mut(value_parameter), options);
+                }
+
+                if let Some(known_items) = &mut keyed_data.known_items {
+                    // Check if any keys need resolution
+                    let needs_key_resolution = known_items.keys().any(|k| k.is_class_like_constant());
+
+                    if needs_key_resolution {
+                        let old_items = std::mem::take(known_items);
+                        for (key, (is_optional, mut value_type)) in old_items {
+                            expand_union(codebase, &mut value_type, options);
+                            let resolved_key = resolve_array_key(key, codebase, options);
+                            known_items.insert(resolved_key, (is_optional, value_type));
+                        }
+                    } else {
+                        for (_, item_type) in known_items.values_mut() {
+                            expand_union(codebase, item_type, options);
+                        }
+                    }
+                }
+            }
+            TArray::List(list_data) => {
+                expand_union(codebase, Arc::make_mut(&mut list_data.element_type), options);
+
+                if let Some(known_elements) = &mut list_data.known_elements {
+                    for (_, element_type) in known_elements.values_mut() {
+                        expand_union(codebase, element_type, options);
+                    }
+                }
+            }
+            TArray::Set(element_type) => expand_union(codebase, Arc::make_mut(element_type), options),
+        },
+        TAtomic::Object(object) => {
+            if let Some(parameter) = resolve_generic_static_type(object, codebase, options) {
+                *skip_key = true;
+                new_return_type_parts.push(TAtomic::GenericParameter(parameter));
+            } else {
+                expand_object(object, codebase, options);
+            }
+        }
+        TAtomic::Callable(TCallable::Signature(signature)) => {
+            if let Some(return_type) = signature.get_return_type_mut() {
+                expand_union(codebase, return_type, options);
+            }
+
+            for param in signature.get_parameters_mut() {
+                if let Some(param_type) = param.get_type_signature_mut() {
+                    expand_union(codebase, param_type, options);
+                }
+            }
+
+            for constraint in &mut signature.constraints {
+                expand_union(codebase, Arc::make_mut(&mut constraint.input_type), options);
+                if !contains_parameter_variable(&constraint.parameter_type) {
+                    expand_union(codebase, Arc::make_mut(&mut constraint.parameter_type), options);
+                }
+            }
+        }
+        TAtomic::GenericParameter(parameter) => {
+            expand_union(codebase, Arc::make_mut(&mut parameter.constraint), options);
+        }
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
+            let mut atomic_return_type_parts = vec![];
+            expand_atomic(Arc::make_mut(constraint), codebase, options, &mut false, &mut atomic_return_type_parts);
+
+            if !atomic_return_type_parts.is_empty() {
+                *Arc::make_mut(constraint) = atomic_return_type_parts.remove(0);
+            }
+        }
+        TAtomic::Reference(TReference::Member { class_like_name, member_selector }) => {
+            *skip_key = true;
+            expand_member_reference(*class_like_name, member_selector, codebase, options, new_return_type_parts);
+        }
+        TAtomic::Reference(TReference::Global { selector }) => {
+            *skip_key = true;
+            expand_global_reference(selector, codebase, options, new_return_type_parts);
+        }
+        TAtomic::Callable(TCallable::Alias(id)) => {
+            if let Some(value) = get_atomic_of_function_like_identifier(id, codebase) {
+                *skip_key = true;
+                new_return_type_parts.push(value);
+            }
+        }
+        TAtomic::Conditional(conditional) => {
+            *skip_key = true;
+
+            let mut then = (*conditional.then).clone();
+            let mut otherwise = (*conditional.otherwise).clone();
+
+            expand_union(codebase, &mut then, options);
+            expand_union(codebase, &mut otherwise, options);
+
+            new_return_type_parts.extend(then.types.into_owned());
+            new_return_type_parts.extend(otherwise.types.into_owned());
+        }
+        TAtomic::Alias(alias) => {
+            *skip_key = true;
+            new_return_type_parts.extend(expand_alias(alias, codebase, options));
+        }
+        TAtomic::Derived(derived) => {
+            *skip_key = true;
+            new_return_type_parts.extend(match derived {
+                TDerived::KeyOf(key_of) => expand_key_of(key_of, codebase, options),
+                TDerived::ValueOf(value_of) => expand_value_of(value_of, codebase, options),
+                TDerived::IndexAccess(index_access) => expand_index_access(index_access, codebase, options),
+                TDerived::IntMask(int_mask) => expand_int_mask(int_mask, codebase, options),
+                TDerived::IntMaskOf(int_mask_of) => expand_int_mask_of(int_mask_of, codebase, options),
+                TDerived::PropertiesOf(properties_of) => expand_properties_of(properties_of, codebase, options),
+                TDerived::New(new_type) => expand_new(new_type, codebase, options),
+                TDerived::TemplateType(template_type) => expand_template_type(template_type, codebase, options),
+                TDerived::Intersection(intersection) => expand_derived_intersection(intersection, codebase, options),
+            });
+        }
+        TAtomic::Iterable(iterable) => {
+            expand_union(codebase, Arc::make_mut(&mut iterable.key_type), options);
+            expand_union(codebase, Arc::make_mut(&mut iterable.value_type), options);
+        }
+        _ => {}
+    }
+}
+
+fn expand_derived_intersection(
+    intersection: &TDerivedIntersection,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> Vec<TAtomic> {
+    let mut base_type = intersection.get_base_type().clone();
+    expand_union(codebase, &mut base_type, options);
+    let mut results = base_type.types.into_owned();
+
+    for intersection_type in intersection.get_intersection_types().unwrap_or_default() {
+        let mut expanded_intersection = TUnion::from_atomic(intersection_type.clone());
+        expand_union(codebase, &mut expanded_intersection, options);
+
+        let mut next_results = Vec::with_capacity(results.len() * expanded_intersection.types.len());
+        for base in results {
+            for additional in expanded_intersection.types.as_ref() {
+                if let Some(string) = base.intersect_strings(additional) {
+                    next_results.push(string);
+                    continue;
+                }
+
+                let mut result = base.clone();
+                if !result.add_intersection_type(additional.clone()) {
+                    return vec![TAtomic::Derived(TDerived::Intersection(intersection.clone()))];
+                }
+                next_results.push(result);
+            }
+        }
+        results = next_results;
+    }
+
+    results
+}
+
+/// Resolves a `ClassLikeConstant` array key to its concrete `Integer` or `String` value.
+///
+/// Looks up the class constant or enum case in the codebase metadata and returns:
+/// - `ArrayKey::Integer(value)` if the constant resolves to a literal integer
+/// - `ArrayKey::String(value)` if the constant resolves to a literal string
+/// - The original key unchanged if it cannot be resolved
+fn resolve_array_key(key: ArrayKey, codebase: &CodebaseMetadata, options: &TypeExpansionOptions) -> ArrayKey {
+    let ArrayKey::ClassLikeConstant { class_like_name, constant_name } = key else {
+        return key;
+    };
+
+    // Resolve self/static/this/parent to the actual class name
+    let resolved_class_name = {
+        let name_lc = ascii_lowercase_word(class_like_name.as_bytes());
+        match name_lc.as_bytes() {
+            b"self" => options.self_class.unwrap_or(class_like_name),
+            b"static" | b"$this" => {
+                if let StaticClassType::Exact(name) | StaticClassType::Name(name) = &options.static_class_type {
+                    *name
+                } else {
+                    options.self_class.unwrap_or(class_like_name)
+                }
+            }
+            b"parent" => {
+                if let Some(self_class) = options.self_class
+                    && let Some(class_metadata) = codebase.get_class_like(self_class.as_bytes())
+                    && let Some(parent) = class_metadata.direct_parent_class
+                {
+                    parent
+                } else {
+                    class_like_name
+                }
+            }
+            _ => class_like_name,
+        }
+    };
+
+    let Some(class_like) = codebase.get_class_like(resolved_class_name.as_bytes()) else {
+        return ArrayKey::ClassLikeConstant { class_like_name, constant_name };
+    };
+
+    // Try class constants first
+    if let Some(constant) = class_like.constants.get(&constant_name)
+        && let Some(inferred) = &constant.inferred_type
+    {
+        match inferred {
+            TAtomic::Scalar(TScalar::Integer(TInteger::Literal(i))) => {
+                return ArrayKey::Integer(*i);
+            }
+            TAtomic::Scalar(TScalar::String(TString { literal: Some(TStringLiteral::Value(s)), .. })) => {
+                return ArrayKey::from_string(*s);
+            }
+            _ => {}
+        }
+    }
+
+    // Try enum cases
+    if let Some(enum_case) = class_like.enum_cases.get(&constant_name)
+        && let Some(value_type) = &enum_case.value_type
+    {
+        match value_type {
+            TAtomic::Scalar(TScalar::Integer(TInteger::Literal(i))) => {
+                return ArrayKey::Integer(*i);
+            }
+            TAtomic::Scalar(TScalar::String(TString { literal: Some(TStringLiteral::Value(s)), .. })) => {
+                return ArrayKey::from_string(*s);
+            }
+            _ => {}
+        }
+    }
+
+    // Cannot resolve - keep as-is
+    ArrayKey::ClassLikeConstant { class_like_name, constant_name }
+}
+
+#[cold]
+fn expand_member_reference(
+    class_like_name: Word,
+    member_selector: &TReferenceMemberSelector,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+    new_return_type_parts: &mut Vec<TAtomic>,
+) {
+    if let TReferenceMemberSelector::Identifier(member_name) = member_selector
+        && member_name.as_bytes().eq_ignore_ascii_case(b"class")
+    {
+        new_return_type_parts.push(TAtomic::Scalar(TScalar::literal_class_string(class_like_name)));
+        return;
+    }
+
+    let Some(class_like) = codebase.get_class_like(class_like_name.as_bytes()) else {
+        new_return_type_parts.push(TAtomic::Mixed(TMixed::new()));
+        return;
+    };
+
+    for (constant_name, constant) in &class_like.constants {
+        if !member_selector.matches(*constant_name) {
+            continue;
+        }
+
+        if let Some(inferred_type) = constant.inferred_type.as_ref() {
+            let Some(_guard) = ConstantExpansionGuard::try_new(class_like_name, *constant_name) else {
+                new_return_type_parts.push(TAtomic::Never);
+                continue;
+            };
+
+            let mut inferred_type = inferred_type.clone();
+            let mut skip_inferred_type = false;
+            expand_atomic(&mut inferred_type, codebase, options, &mut skip_inferred_type, new_return_type_parts);
+
+            if !skip_inferred_type {
+                new_return_type_parts.push(inferred_type);
+            }
+        } else if let Some(type_metadata) = constant.type_metadata.as_ref() {
+            let mut constant_type = type_metadata.type_union.clone();
+            expand_union(codebase, &mut constant_type, options);
+            new_return_type_parts.extend(constant_type.types.into_owned());
+        } else {
+            new_return_type_parts.push(TAtomic::Mixed(TMixed::new()));
+        }
+    }
+
+    if matches!(member_selector, TReferenceMemberSelector::Wildcard) && !class_like.enum_cases.is_empty() {
+        new_return_type_parts.push(TAtomic::Object(TObject::new_enum(class_like.original_name)));
+    } else {
+        for enum_case_name in class_like.enum_cases.keys() {
+            if !member_selector.matches(*enum_case_name) {
+                continue;
+            }
+            new_return_type_parts
+                .push(TAtomic::Object(TObject::new_enum_case(class_like.original_name, *enum_case_name)));
+        }
+    }
+
+    if let TReferenceMemberSelector::Identifier(member_name) = member_selector
+        && let Some(type_alias) = class_like.type_aliases.get(member_name)
+    {
+        let mut alias_type = type_alias.type_union.clone();
+        expand_union(codebase, &mut alias_type, options);
+        new_return_type_parts.extend(alias_type.types.into_owned());
+    }
+
+    if new_return_type_parts.is_empty() {
+        new_return_type_parts.push(TAtomic::Mixed(TMixed::new()));
+    }
+}
+
+fn expand_global_reference(
+    selector: &TGlobalReferenceSelector,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+    new_return_type_parts: &mut Vec<TAtomic>,
+) {
+    for (constant_name, constant) in &codebase.constants {
+        if !selector.matches(*constant_name) {
+            continue;
+        }
+
+        if let Some(inferred_type) = constant.inferred_type.as_ref() {
+            let mut inferred_type = inferred_type.clone();
+            expand_union(codebase, &mut inferred_type, options);
+            new_return_type_parts.extend(inferred_type.types.into_owned());
+        } else if let Some(type_metadata) = constant.type_metadata.as_ref() {
+            let mut constant_type = type_metadata.type_union.clone();
+            expand_union(codebase, &mut constant_type, options);
+            new_return_type_parts.extend(constant_type.types.into_owned());
+        } else {
+            new_return_type_parts.push(TAtomic::Mixed(TMixed::new()));
+        }
+    }
+
+    if new_return_type_parts.is_empty() {
+        new_return_type_parts.push(TAtomic::Mixed(TMixed::new()));
+    }
+}
+
+fn expand_object(object: &mut TObject, codebase: &CodebaseMetadata, options: &TypeExpansionOptions) {
+    resolve_special_class_names(object, codebase, options);
+
+    if let TObject::Named(named) = object
+        && named.intersection_types.is_none()
+        && let Some(class_metadata) = codebase.get_class_like(named.name.as_bytes())
+        && class_metadata.kind.is_enum()
+    {
+        *object = TObject::new_enum(class_metadata.original_name);
+        return;
+    }
+
+    let TObject::Named(named) = object else {
+        return;
+    };
+
+    let has_params = named.type_parameters.as_ref().is_some_and(|p| !p.is_empty());
+    let class_metadata = codebase.get_class_like(named.name.as_bytes());
+    let has_required_intersections =
+        class_metadata.map(|m| !m.require_extends.is_empty() || !m.require_implements.is_empty()).unwrap_or(false);
+    let needs_default_params = !has_params && class_metadata.map(|m| !m.template_types.is_empty()).unwrap_or(false);
+
+    if !has_params && !has_required_intersections && !needs_default_params {
+        return;
+    }
+
+    let Some(_guard) = ObjectParamsExpansionGuard::try_new(named.name) else {
+        return;
+    };
+
+    if has_required_intersections && let Some(class_metadata) = class_metadata {
+        for &required in class_metadata.require_extends.iter().chain(&class_metadata.require_implements) {
+            named.add_intersection_type(TAtomic::Object(TObject::Named(TNamedObject::new(required))));
+        }
+    }
+
+    expand_or_fill_type_parameters(named, codebase, options);
+}
+
+fn resolve_generic_static_type(
+    object: &TObject,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> Option<TGenericParameter> {
+    let StaticClassType::Generic(parameter) = &options.static_class_type else {
+        return None;
+    };
+    let TObject::Named(named) = object else {
+        return None;
+    };
+
+    let special = classify_special_class_name(named.name.as_bytes());
+    if matches!(special, SpecialClassName::None) && !named.is_static && !named.is_this {
+        return None;
+    }
+
+    if matches!(special, SpecialClassName::None)
+        && !generic_parameter_can_resolve_static(parameter, named.name, codebase)
+    {
+        return None;
+    }
+
+    let mut parameter = parameter.clone();
+    for intersection in named.intersection_types.iter().flatten() {
+        parameter.add_intersection_type(intersection.clone());
+    }
+
+    Some(parameter)
+}
+
+fn generic_parameter_can_resolve_static(
+    parameter: &TGenericParameter,
+    expected_class: Word,
+    codebase: &CodebaseMetadata,
+) -> bool {
+    parameter.constraint.types.iter().any(|atomic| match atomic {
+        TAtomic::Object(TObject::Named(object)) => {
+            codebase.is_instance_of(object.name.as_bytes(), expected_class.as_bytes())
+        }
+        TAtomic::Object(TObject::Enum(object)) => {
+            codebase.is_instance_of(object.name.as_bytes(), expected_class.as_bytes())
+        }
+        TAtomic::GenericParameter(parameter) => {
+            generic_parameter_can_resolve_static(parameter, expected_class, codebase)
+        }
+        _ => false,
+    })
+}
+
+/// Classifies a class-like name as one of the PHP "special" tokens that require
+/// resolution against the expansion options. The check is case-insensitive but
+/// avoids the (relatively expensive) `ascii_lowercase_word` interning step on
+/// the common path where the input is not a special name at all.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum SpecialClassName {
+    None,
+    SelfType,
+    Static,
+    Parent,
+    This,
+}
+
+#[inline]
+fn classify_special_class_name(name: &[u8]) -> SpecialClassName {
+    match name.len() {
+        4 => {
+            if name.eq_ignore_ascii_case(b"self") {
+                SpecialClassName::SelfType
+            } else {
+                SpecialClassName::None
+            }
+        }
+        5 => {
+            if name == b"$this" || name.eq_ignore_ascii_case(b"$this") {
+                SpecialClassName::This
+            } else {
+                SpecialClassName::None
+            }
+        }
+        6 => {
+            if name.eq_ignore_ascii_case(b"static") {
+                SpecialClassName::Static
+            } else if name.eq_ignore_ascii_case(b"parent") {
+                SpecialClassName::Parent
+            } else {
+                SpecialClassName::None
+            }
+        }
+        _ => SpecialClassName::None,
+    }
+}
+
+/// Resolves `static`, `$this`, `self`, and `parent` to their concrete class names.
+fn resolve_special_class_names(object: &mut TObject, codebase: &CodebaseMetadata, options: &TypeExpansionOptions) {
+    let TObject::Named(named) = object else {
+        return;
+    };
+
+    let special = classify_special_class_name(named.name.as_bytes());
+    if matches!(special, SpecialClassName::None) && !named.is_static && !named.is_this {
+        return;
+    }
+
+    let needs_static_resolution = matches!(special, SpecialClassName::Static | SpecialClassName::This) || named.is_this;
+
+    if needs_static_resolution && let StaticClassType::Object(TObject::Enum(static_enum)) = &options.static_class_type {
+        *object = TObject::Enum(static_enum.clone());
+        return;
+    }
+
+    // A pre-bound `static` type also rebinds to an enum receiver, but only when
+    // the receiver is compatible: an instance of the named class, or reaching it
+    // through `@mixin` tags.
+    if matches!(special, SpecialClassName::None)
+        && named.is_static
+        && let StaticClassType::Object(TObject::Enum(static_enum)) = &options.static_class_type
+        && (codebase.is_instance_of(static_enum.name.as_bytes(), named.name.as_bytes())
+            || (options.allow_mixin_static_rebind && reaches_through_mixins(static_enum.name, named.name, codebase)))
+    {
+        *object = TObject::Enum(static_enum.clone());
+        return;
+    }
+
+    let TObject::Named(named) = object else {
+        return;
+    };
+
+    let was_this = named.is_this;
+    match special {
+        SpecialClassName::Static | SpecialClassName::This => {
+            resolve_static_type(named, was_this, false, codebase, options)
+        }
+        SpecialClassName::SelfType => {
+            if let Some(self_class) = options.self_class {
+                named.name = self_class;
+            }
+        }
+        SpecialClassName::Parent => {
+            if let Some(self_class) = options.self_class
+                && let Some(class_metadata) = codebase.get_class_like(self_class.as_bytes())
+                && let Some(parent) = class_metadata.direct_parent_class
+            {
+                named.name = parent;
+            }
+        }
+        SpecialClassName::None if named.is_static => resolve_static_type(named, was_this, true, codebase, options),
+        SpecialClassName::None => {}
+    }
+}
+
+/// Resolves a `static` or `$this` type to a named object using the static class type from options.
+///
+/// `is_this_type`: true when the original type was `$this` (same instance), false for `static`.
+/// `check_compatibility`: when true, verifies the static type is compatible before resolving.
+fn resolve_static_type(
+    named: &mut TNamedObject,
+    is_this_type: bool,
+    check_compatibility: bool,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) {
+    match &options.static_class_type {
+        StaticClassType::Exact(static_class)
+            if !check_compatibility || codebase.is_instance_of(static_class.as_bytes(), named.name.as_bytes()) =>
+        {
+            named.name = *static_class;
+            named.is_static = false;
+            named.is_this = false;
+        }
+        StaticClassType::Object(TObject::Named(static_obj)) => {
+            // When `check_compatibility` is false, `named.name` is the literal
+            // `static`/`$this` keyword rather than a class name, so no
+            // compatibility or mixin-reachability question arises.
+            let mut crosses_mixin = false;
+            if check_compatibility
+                && !codebase.is_instance_of(static_obj.name.as_bytes(), named.name.as_bytes())
+                && !intersection_object_names(static_obj)
+                    .any(|name| codebase.is_instance_of(name.as_bytes(), named.name.as_bytes()))
+            {
+                crosses_mixin = options.allow_mixin_static_rebind
+                    && (reaches_through_mixins(static_obj.name, named.name, codebase)
+                        || intersection_object_names(static_obj)
+                            .any(|name| reaches_through_mixins(name, named.name, codebase)));
+
+                if !crosses_mixin {
+                    return;
+                }
+            }
+
+            if let Some(intersections) = &static_obj.intersection_types {
+                named.intersection_types.get_or_insert_with(Vec::new).extend(intersections.iter().cloned());
+            }
+
+            // When the receiver reaches the declaring class through `@mixin`, the
+            // declaring class's type parameters do not apply to it; the receiver's
+            // own parameters (if any) are the correct ones.
+            if crosses_mixin
+                || (static_obj.type_parameters.is_some() && should_use_static_type_params(named, static_obj, codebase))
+            {
+                named.type_parameters.clone_from(&static_obj.type_parameters);
+            }
+
+            named.name = static_obj.name;
+            let effectively_final = is_effectively_final(&static_obj.name, codebase, options);
+            named.is_static = !effectively_final;
+            named.is_this = !effectively_final && is_this_type;
+        }
+        StaticClassType::Name(static_class)
+            if (!check_compatibility || codebase.is_instance_of(static_class.as_bytes(), named.name.as_bytes())) =>
+        {
+            named.name = *static_class;
+            let effectively_final = is_effectively_final(static_class, codebase, options);
+            named.is_static = !effectively_final;
+            named.is_this = !effectively_final && is_this_type;
+        }
+        _ => {}
+    }
+}
+
+/// Checks whether a class is effectively final for the purpose of `$this`/`static` resolution.
+///
+/// A class is effectively final when it cannot be extended, meaning `static` === `self`:
+///
+/// - The class is declared `final`
+/// - The class is anonymous
+/// - The method is declared `final`
+fn is_effectively_final(class_name: &Word, codebase: &CodebaseMetadata, options: &TypeExpansionOptions) -> bool {
+    if options.function_is_final {
+        return true;
+    }
+
+    codebase.get_class_like(class_name.as_bytes()).is_some_and(|meta| meta.name_span.is_none() || meta.flags.is_final())
+}
+
+/// Iterates the class names of an object's intersection types.
+fn intersection_object_names(obj: &TNamedObject) -> impl Iterator<Item = Word> {
+    obj.intersection_types
+        .iter()
+        .flatten()
+        .filter_map(|t| if let TAtomic::Object(obj) = t { obj.get_name() } else { None })
+}
+
+/// Checks whether `class_name` reaches `target_name` through a chain of `@mixin`
+/// tags. Methods pulled in via `@mixin` have their `static` return types pre-bound
+/// to the mixin class, so rebinding them to the class carrying the tag must treat
+/// that class as compatible.
+fn reaches_through_mixins(class_name: Word, target_name: Word, codebase: &CodebaseMetadata) -> bool {
+    let Some(metadata) = codebase.get_class_like(class_name.as_bytes()) else {
+        return false;
+    };
+
+    // Direct mixins cover the overwhelmingly common case; the walk only
+    // descends into (and only allocates for) mixins that are chained.
+    let mut visited = HashSet::with_hasher(FixedState::with_seed(0));
+    let mut stack = Vec::new();
+    let mut current = metadata;
+    loop {
+        for (mixin_name, mixin_metadata) in direct_mixins(current, codebase) {
+            if codebase.is_instance_of(mixin_name.as_bytes(), target_name.as_bytes()) {
+                return true;
+            }
+
+            if let Some(mixin_metadata) = mixin_metadata
+                && !mixin_metadata.mixins.is_empty()
+                && visited.insert(mixin_name)
+            {
+                stack.push(mixin_metadata);
+            }
+        }
+
+        let Some(next) = stack.pop() else {
+            return false;
+        };
+        current = next;
+    }
+}
+
+/// Iterates the classes directly named by a class's `@mixin` tags, along with
+/// their metadata if known. A generic-parameter mixin (`@mixin T`) names its
+/// classes through the template constraint.
+fn direct_mixins<'ctx>(
+    metadata: &'ctx ClassLikeMetadata,
+    codebase: &'ctx CodebaseMetadata,
+) -> impl Iterator<Item = (Word, Option<&'ctx ClassLikeMetadata>)> {
+    metadata.mixins.iter().flat_map(|mixin| mixin.type_union.types.as_ref().iter()).flat_map(move |mixin_type| {
+        let atomics = match mixin_type {
+            TAtomic::GenericParameter(TGenericParameter { constraint, .. }) => constraint.types.as_ref(),
+            other => std::slice::from_ref(other),
+        };
+
+        atomics.iter().filter_map(move |atomic| {
+            let mixin_name = atomic.get_object_or_enum_name()?;
+            Some((mixin_name, codebase.get_class_like(mixin_name.as_bytes())))
+        })
+    })
+}
+
+/// Returns true if we should use the static object's type parameters instead of the current ones.
+/// This is true when current params are None or came from omitted/defaulted template arguments.
+fn should_use_static_type_params(named: &TNamedObject, static_obj: &TNamedObject, codebase: &CodebaseMetadata) -> bool {
+    let Some(current_params) = &named.type_parameters else {
+        return true;
+    };
+
+    let Some(class_metadata) = codebase.get_class_like(static_obj.name.as_bytes()) else {
+        return false;
+    };
+
+    let templates = &class_metadata.template_types;
+
+    current_params.len() == templates.len()
+        && current_params.iter().zip(templates.values()).all(|(current, template)| {
+            current.from_template_fallback()
+                || current == &template.constraint
+                || template.default.as_ref().is_some_and(|default| current == default)
+        })
+}
+
+/// Expands existing type parameters and fills omitted arguments.
+fn expand_or_fill_type_parameters(
+    named: &mut TNamedObject,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) {
+    if let Some(class_metadata) = codebase.get_class_like(named.name.as_bytes()) {
+        let template_count = class_metadata.template_types.len();
+        let supplied_count = named.type_parameters.as_ref().map_or(0, Vec::len);
+
+        if supplied_count < template_count {
+            let mut params = named.type_parameters.take().unwrap_or_default();
+            params.extend(class_metadata.template_types.values().skip(supplied_count).map(|template| {
+                if let Some(default) = &template.default {
+                    let mut default = default.clone();
+                    default.set_from_template_default(true);
+                    default
+                } else {
+                    let mut constraint = template.constraint.clone();
+                    constraint.set_from_unspecified_template(true);
+                    constraint
+                }
+            }));
+            named.type_parameters = Some(params);
+        }
+    }
+
+    if let Some(params) = &mut named.type_parameters {
+        for param in params.iter_mut() {
+            expand_union(codebase, param, options);
+        }
+    }
+}
+
+#[must_use]
+pub fn get_signature_of_function_like_identifier(
+    function_like_identifier: &FunctionLikeIdentifier,
+    codebase: &CodebaseMetadata,
+) -> Option<TCallableSignature> {
+    get_signature_of_function_like_identifier_with_options(function_like_identifier, codebase, false)
+}
+
+/// Builds a callable signature without eagerly expanding types that depend on one of its
+/// parameters.
+///
+/// This is used for first-class and partial callables, where the concrete argument is only
+/// available when the resulting callable is invoked.
+#[must_use]
+pub fn get_parameter_dependent_signature_of_function_like_identifier(
+    function_like_identifier: &FunctionLikeIdentifier,
+    codebase: &CodebaseMetadata,
+) -> Option<TCallableSignature> {
+    get_signature_of_function_like_identifier_with_options(function_like_identifier, codebase, true)
+}
+
+fn get_signature_of_function_like_identifier_with_options(
+    function_like_identifier: &FunctionLikeIdentifier,
+    codebase: &CodebaseMetadata,
+    preserve_parameter_dependencies: bool,
+) -> Option<TCallableSignature> {
+    let (function_like_metadata, options) = match function_like_identifier {
+        FunctionLikeIdentifier::Function(name) => {
+            (codebase.get_function(name.as_bytes())?, TypeExpansionOptions::default())
+        }
+        FunctionLikeIdentifier::Closure(name) => (codebase.get_closure(name)?, TypeExpansionOptions::default()),
+        FunctionLikeIdentifier::Method(classlike_name, method_name) => (
+            codebase.get_declaring_method(classlike_name.as_bytes(), method_name.as_bytes())?,
+            TypeExpansionOptions {
+                self_class: Some(*classlike_name),
+                static_class_type: StaticClassType::Name(*classlike_name),
+                ..Default::default()
+            },
+        ),
+    };
+
+    Some(get_signature_of_function_like_metadata_with_options(
+        function_like_identifier,
+        function_like_metadata,
+        codebase,
+        &options,
+        preserve_parameter_dependencies,
+    ))
+}
+
+#[must_use]
+pub fn get_atomic_of_function_like_identifier(
+    function_like_identifier: &FunctionLikeIdentifier,
+    codebase: &CodebaseMetadata,
+) -> Option<TAtomic> {
+    let signature = get_signature_of_function_like_identifier(function_like_identifier, codebase)?;
+
+    Some(TAtomic::Callable(TCallable::Signature(signature)))
+}
+
+#[must_use]
+pub fn get_signature_of_function_like_metadata(
+    function_like_identifier: &FunctionLikeIdentifier,
+    function_like_metadata: &FunctionLikeMetadata,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> TCallableSignature {
+    get_signature_of_function_like_metadata_with_options(
+        function_like_identifier,
+        function_like_metadata,
+        codebase,
+        options,
+        false,
+    )
+}
+
+fn get_signature_of_function_like_metadata_with_options(
+    function_like_identifier: &FunctionLikeIdentifier,
+    function_like_metadata: &FunctionLikeMetadata,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+    preserve_parameter_dependencies: bool,
+) -> TCallableSignature {
+    let parameters: Vec<_> = function_like_metadata
+        .parameters
+        .iter()
+        .map(|parameter_metadata| {
+            let type_signature = if let Some(t) = parameter_metadata.get_type_metadata() {
+                let mut t = t.type_union.clone();
+                if !preserve_parameter_dependencies || !contains_parameter_variable(&t) {
+                    expand_union(codebase, &mut t, options);
+                }
+                Some(Arc::new(t))
+            } else {
+                None
+            };
+
+            TCallableParameter::new(
+                type_signature,
+                parameter_metadata.flags.is_by_reference(),
+                parameter_metadata.flags.is_variadic(),
+                parameter_metadata.flags.has_default(),
+            )
+            .with_name(Some(*parameter_metadata.get_name()))
+        })
+        .collect();
+
+    let return_type = if let Some(type_metadata) = function_like_metadata.return_type_metadata.as_ref() {
+        let mut return_type = type_metadata.type_union.clone();
+        if !preserve_parameter_dependencies || !contains_parameter_variable(&return_type) {
+            expand_union(codebase, &mut return_type, options);
+        }
+        Some(Arc::new(return_type))
+    } else {
+        None
+    };
+
+    let is_closure = matches!(function_like_identifier, FunctionLikeIdentifier::Closure(_));
+    TCallableSignature {
+        effects: function_like_metadata.flags.is_sharp().then(Vec::new),
+        ..TCallableSignature::new(function_like_metadata.flags.is_pure(), is_closure)
+            .with_parameters(parameters)
+            .with_return_type(return_type)
+            .with_source(Some(*function_like_identifier))
+    }
+}
+
+#[must_use]
+pub fn contains_parameter_variable(union: &TUnion) -> bool {
+    union.get_all_child_nodes().into_iter().any(|node| {
+        matches!(
+            node,
+            TypeRef::Atomic(TAtomic::Variable(variable))
+                if !variable.as_bytes().eq_ignore_ascii_case(b"$this")
+        )
+    })
+}
+
+#[cold]
+fn expand_key_of(
+    return_type_key_of: &TKeyOf,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> Vec<TAtomic> {
+    let mut target_type = return_type_key_of.get_target_type().clone();
+    expand_union(codebase, &mut target_type, options);
+
+    let Some(new_return_types) = TKeyOf::get_key_of_targets(&target_type.types, codebase, false) else {
+        return vec![TAtomic::Derived(TDerived::KeyOf(return_type_key_of.clone()))];
+    };
+
+    new_return_types.types.into_owned()
+}
+
+#[cold]
+fn expand_value_of(
+    return_type_value_of: &TValueOf,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> Vec<TAtomic> {
+    let mut target_type = return_type_value_of.get_target_type().clone();
+    expand_union(codebase, &mut target_type, options);
+
+    let Some(new_return_types) = TValueOf::get_value_of_targets(&target_type.types, codebase, false) else {
+        return vec![TAtomic::Derived(TDerived::ValueOf(return_type_value_of.clone()))];
+    };
+
+    new_return_types.types.into_owned()
+}
+
+#[cold]
+fn expand_index_access(
+    return_type_index_access: &TIndexAccess,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> Vec<TAtomic> {
+    let mut target_type = return_type_index_access.get_target_type().clone();
+    expand_union(codebase, &mut target_type, options);
+
+    let mut index_type = return_type_index_access.get_index_type().clone();
+    expand_union(codebase, &mut index_type, options);
+
+    let Some(new_return_types) =
+        TIndexAccess::get_indexed_access_result(&target_type.types, &index_type.types, codebase, false)
+    else {
+        return vec![TAtomic::Derived(TDerived::IndexAccess(return_type_index_access.clone()))];
+    };
+
+    new_return_types.types.into_owned()
+}
+
+#[cold]
+fn expand_new(new_type: &TNew, codebase: &CodebaseMetadata, options: &TypeExpansionOptions) -> Vec<TAtomic> {
+    let mut target_type = new_type.get_target_type().clone();
+    expand_union(codebase, &mut target_type, options);
+
+    let Some(new_return_types) = TNew::get_new_targets(&target_type.types, codebase) else {
+        return vec![TAtomic::Derived(TDerived::New(new_type.clone()))];
+    };
+
+    new_return_types.types.into_owned()
+}
+
+#[cold]
+fn expand_template_type(
+    template_type: &TTemplateType,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> Vec<TAtomic> {
+    let mut expanded = template_type.clone();
+    expand_union(codebase, expanded.get_object_mut(), options);
+    expand_union(codebase, expanded.get_class_name_mut(), options);
+    expand_union(codebase, expanded.get_template_name_mut(), options);
+
+    let Some(resolved) = expanded.resolve(codebase) else {
+        return vec![TAtomic::Mixed(TMixed::new())];
+    };
+
+    resolved.types.into_owned()
+}
+
+#[cold]
+fn expand_int_mask(int_mask: &TIntMask, codebase: &CodebaseMetadata, options: &TypeExpansionOptions) -> Vec<TAtomic> {
+    let mut literal_values = Vec::new();
+
+    for value in int_mask.get_values() {
+        let mut expanded = value.clone();
+        expand_union(codebase, &mut expanded, options);
+
+        if let Some(int_val) = expanded.get_single_literal_int_value() {
+            literal_values.push(int_val);
+        }
+    }
+
+    if literal_values.is_empty() {
+        return vec![TAtomic::Scalar(TScalar::int())];
+    }
+
+    let combinations = TIntMask::calculate_mask_combinations(&literal_values);
+    combinations.into_iter().map(|v| TAtomic::Scalar(TScalar::literal_int(v))).collect()
+}
+
+#[cold]
+fn expand_int_mask_of(
+    int_mask_of: &TIntMaskOf,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> Vec<TAtomic> {
+    let mut target = int_mask_of.get_target_type().clone();
+    expand_union(codebase, &mut target, options);
+
+    let mut literal_values = Vec::new();
+    for atomic in target.types.iter() {
+        if let Some(int_val) = atomic.get_literal_int_value() {
+            literal_values.push(int_val);
+        }
+    }
+
+    if literal_values.is_empty() {
+        return vec![TAtomic::Scalar(TScalar::int())];
+    }
+
+    let combinations = TIntMask::calculate_mask_combinations(&literal_values);
+    combinations.into_iter().map(|v| TAtomic::Scalar(TScalar::literal_int(v))).collect()
+}
+
+#[cold]
+fn expand_properties_of(
+    properties_of: &TPropertiesOf,
+    codebase: &CodebaseMetadata,
+    options: &TypeExpansionOptions,
+) -> Vec<TAtomic> {
+    let mut target_type = properties_of.get_target_type().clone();
+    expand_union(codebase, &mut target_type, options);
+
+    let Some(mut keyed_array) =
+        TPropertiesOf::get_properties_of_targets(&target_type.types, codebase, properties_of.visibility(), false)
+    else {
+        return vec![TAtomic::Derived(TDerived::PropertiesOf(properties_of.clone()))];
+    };
+
+    let mut skip_keyed_array = false;
+    let mut expanded_parts = vec![];
+    expand_atomic(&mut keyed_array, codebase, options, &mut skip_keyed_array, &mut expanded_parts);
+    if skip_keyed_array {
+        expanded_parts
+    } else {
+        expanded_parts.push(keyed_array);
+        expanded_parts
+    }
+}
+
+#[cold]
+fn expand_alias(alias: &TAlias, codebase: &CodebaseMetadata, options: &TypeExpansionOptions) -> Vec<TAtomic> {
+    let class_name = alias.get_class_name();
+    let alias_name = alias.get_alias_name();
+
+    // Check for cycle using the HashSet
+    let is_cycle = EXPANDING_ALIASES.with(|set| set.borrow().contains(&(class_name, alias_name)));
+
+    if is_cycle {
+        return vec![TAtomic::Alias(alias.clone())];
+    }
+
+    let Some(mut expanded_union) = alias.resolve(codebase).cloned() else {
+        return vec![TAtomic::Alias(alias.clone())];
+    };
+
+    let _guard = AliasExpansionGuard::new(class_name, alias_name);
+
+    expand_union(codebase, &mut expanded_union, options);
+
+    expanded_union.types.into_owned()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use mago_allocator::LocalArena;
+
+    use std::borrow::Cow;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use mago_database::Database;
+    use mago_database::DatabaseReader;
+    use mago_database::file::File;
+
+    use mago_names::resolver::NameResolver;
+
+    use mago_syntax::parser::parse_file;
+    use mago_word::WordSet;
+    use mago_word::word;
+
+    use crate::metadata::CodebaseMetadata;
+    use crate::misc::GenericParent;
+    use crate::populator::populate_codebase;
+    use crate::reference::SymbolReferences;
+    use crate::scanner::scan_program;
+    use crate::ttype::atomic::array::TArray;
+    use crate::ttype::atomic::array::keyed::TKeyedArray;
+    use crate::ttype::atomic::array::list::TList;
+    use crate::ttype::atomic::callable::TCallable;
+    use crate::ttype::atomic::callable::TCallableSignature;
+    use crate::ttype::atomic::callable::parameter::TCallableParameter;
+    use crate::ttype::atomic::conditional::TConditional;
+    use crate::ttype::atomic::derived::TDerived;
+    use crate::ttype::atomic::derived::index_access::TIndexAccess;
+    use crate::ttype::atomic::derived::key_of::TKeyOf;
+    use crate::ttype::atomic::derived::value_of::TValueOf;
+    use crate::ttype::atomic::generic::TGenericParameter;
+    use crate::ttype::atomic::iterable::TIterable;
+    use crate::ttype::atomic::object::r#enum::TEnum;
+    use crate::ttype::atomic::object::named::TNamedObject;
+    use crate::ttype::atomic::reference::TReference;
+    use crate::ttype::atomic::reference::TReferenceMemberSelector;
+    use crate::ttype::atomic::scalar::TScalar;
+    use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
+    use crate::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
+    use crate::ttype::flags::UnionFlags;
+    use crate::ttype::get_int;
+    use crate::ttype::get_mixed;
+    use crate::ttype::get_never;
+    use crate::ttype::get_null;
+    use crate::ttype::get_string;
+    use crate::ttype::get_void;
+
+    fn create_test_codebase(code: &'static str) -> CodebaseMetadata {
+        let file = File::ephemeral(Cow::Borrowed(b"code.php"), Cow::Borrowed(code.as_bytes()));
+        let config =
+            mago_database::DatabaseConfiguration::new(std::path::Path::new("/"), vec![], vec![], vec![], vec![])
+                .into_static();
+        let database = Database::single(file, config);
+
+        let mut codebase = CodebaseMetadata::new();
+        let arena = LocalArena::new();
+        for file in database.files() {
+            let program = parse_file(&arena, &file);
+            assert!(!program.has_errors(), "Parse failed: {:?}", program.errors);
+            let resolved_names = NameResolver::new(&arena).resolve(program);
+            let program_codebase =
+                scan_program(&arena, &file, program, &resolved_names, mago_php_version::PHPVersion::LATEST);
+
+            codebase.extend(program_codebase);
+        }
+
+        populate_codebase(&mut codebase, &mut SymbolReferences::new(), WordSet::default(), HashSet::default());
+
+        codebase
+    }
+
+    fn options_with_self(self_class: &str) -> TypeExpansionOptions {
+        TypeExpansionOptions { self_class: Some(ascii_lowercase_word(self_class.as_bytes())), ..Default::default() }
+    }
+
+    fn options_with_static(static_class: &str) -> TypeExpansionOptions {
+        TypeExpansionOptions {
+            self_class: Some(ascii_lowercase_word(static_class.as_bytes())),
+            static_class_type: StaticClassType::Name(ascii_lowercase_word(static_class.as_bytes())),
+            ..Default::default()
+        }
+    }
+
+    fn options_with_static_object(object: TObject) -> TypeExpansionOptions {
+        TypeExpansionOptions {
+            self_class: object.get_name(),
+            static_class_type: StaticClassType::Object(object),
+            ..Default::default()
+        }
+    }
+
+    macro_rules! assert_expands_to {
+        ($codebase:expr, $input:expr, $expected:expr) => {
+            assert_expands_to!($codebase, $input, $expected, &TypeExpansionOptions::default())
+        };
+        ($codebase:expr, $input:expr, $expected:expr, $options:expr) => {{
+            let mut actual = $input.clone();
+            expand_union($codebase, &mut actual, $options);
+            assert_eq!(
+                actual.types.as_ref(),
+                $expected.types.as_ref(),
+                "Type expansion mismatch.\nInput: {:?}\nExpected: {:?}\nActual: {:?}",
+                $input,
+                $expected,
+                actual
+            );
+        }};
+    }
+
+    fn make_self_object() -> TUnion {
+        TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(word("self")))))
+    }
+
+    fn make_static_object() -> TUnion {
+        TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(word("static")))))
+    }
+
+    fn make_parent_object() -> TUnion {
+        TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(word("parent")))))
+    }
+
+    fn make_named_object(name: &str) -> TUnion {
+        TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(ascii_lowercase_word(name.as_bytes())))))
+    }
+
+    #[test]
+    fn test_expand_null_type() {
+        let codebase = CodebaseMetadata::new();
+        let null_type = get_null();
+        assert_expands_to!(&codebase, null_type, get_null());
+    }
+
+    #[test]
+    fn test_expand_void_type() {
+        let codebase = CodebaseMetadata::new();
+        let void_type = get_void();
+        assert_expands_to!(&codebase, void_type, get_void());
+    }
+
+    #[test]
+    fn test_expand_never_type() {
+        let codebase = CodebaseMetadata::new();
+        let never_type = get_never();
+        assert_expands_to!(&codebase, never_type, get_never());
+    }
+
+    #[test]
+    fn test_expand_int_type() {
+        let codebase = CodebaseMetadata::new();
+        let int_type = get_int();
+        assert_expands_to!(&codebase, int_type, get_int());
+    }
+
+    #[test]
+    fn test_expand_mixed_type() {
+        let codebase = CodebaseMetadata::new();
+        let mixed_type = get_mixed();
+        assert_expands_to!(&codebase, mixed_type, get_mixed());
+    }
+
+    #[test]
+    fn test_expand_keyed_array_with_self_key() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let mut keyed = TKeyedArray::new();
+        keyed.parameters = Some((Arc::new(make_self_object()), Arc::new(get_int())));
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Array(TArray::Keyed(keyed)) = &actual.types[0]
+            && let Some((key, _)) = &keyed.parameters
+        {
+            assert!(key.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_keyed_array_with_self_value() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let mut keyed = TKeyedArray::new();
+        keyed.parameters = Some((Arc::new(get_string()), Arc::new(make_self_object())));
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Array(TArray::Keyed(keyed)) = &actual.types[0]
+            && let Some((_, value)) = &keyed.parameters
+        {
+            assert!(value.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_keyed_array_known_items() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        use crate::ttype::atomic::array::key::ArrayKey;
+        use std::collections::BTreeMap;
+
+        let mut keyed = TKeyedArray::new();
+        let mut known_items = BTreeMap::new();
+        known_items.insert(ArrayKey::String(word("key")), (false, make_self_object()));
+        keyed.known_items = Some(known_items);
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Array(TArray::Keyed(keyed)) = &actual.types[0]
+            && let Some(items) = &keyed.known_items
+        {
+            let (_, item_type) = items.get(&ArrayKey::String(word("key"))).unwrap();
+            assert!(item_type.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_list_with_self_element() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let list = TList::new(Arc::new(make_self_object()));
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::List(list)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Array(TArray::List(list)) = &actual.types[0] {
+            assert!(list.element_type.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_list_known_elements() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        use std::collections::BTreeMap;
+
+        let mut list = TList::new(Arc::new(get_mixed()));
+        let mut known_elements = BTreeMap::new();
+        known_elements.insert(0, (false, make_self_object()));
+        list.known_elements = Some(known_elements);
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::List(list)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Array(TArray::List(list)) = &actual.types[0]
+            && let Some(elements) = &list.known_elements
+        {
+            let (_, element_type) = elements.get(&0).unwrap();
+            assert!(element_type.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_nested_array() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let inner_list = TList::new(Arc::new(make_self_object()));
+        let inner_array = TUnion::from_atomic(TAtomic::Array(TArray::List(inner_list)));
+
+        let mut outer = TKeyedArray::new();
+        outer.parameters = Some((Arc::new(make_self_object()), Arc::new(inner_array)));
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(outer)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Array(TArray::Keyed(keyed)) = &actual.types[0]
+            && let Some((key, value)) = &keyed.parameters
+        {
+            assert!(key.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+            if let TAtomic::Array(TArray::List(inner)) = &value.types[0] {
+                assert!(inner.element_type.types.iter().any(|t| {
+                    if let TAtomic::Object(TObject::Named(named)) = t {
+                        named.name == ascii_lowercase_word(b"foo")
+                    } else {
+                        false
+                    }
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn test_expand_empty_array() {
+        let codebase = CodebaseMetadata::new();
+        let keyed = TKeyedArray::new();
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed.clone())));
+        let expected = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+        assert_expands_to!(&codebase, input, expected);
+    }
+
+    #[test]
+    fn test_expand_non_empty_list() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let mut list = TList::new(Arc::new(make_self_object()));
+        list.non_empty = true;
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::List(list)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Array(TArray::List(list)) = &actual.types[0] {
+            assert!(list.non_empty);
+            assert!(list.element_type.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_self_to_class_name() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = make_self_object();
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t {
+                named.name == ascii_lowercase_word(b"foo")
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn test_expand_static_to_class_name() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = make_static_object();
+        let options = options_with_static("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t {
+                named.name == ascii_lowercase_word(b"foo")
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn test_expand_static_with_object_type() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = make_static_object();
+        let static_obj = TObject::Named(TNamedObject::new(ascii_lowercase_word(b"foo")));
+        let options = options_with_static_object(static_obj);
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t {
+                named.name == ascii_lowercase_word(b"foo") && named.is_static && !named.is_this
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn test_expand_static_replaces_defaulted_type_parameters_with_receiver_parameters() {
+        let code = "<?php
+            /**
+             * @template TKey of array-key
+             * @template TValue
+             */
+            final class Collection {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let mut input = TNamedObject::new_static(ascii_lowercase_word(b"collection"));
+        let mut default_key = crate::ttype::get_arraykey();
+        default_key.set_from_template_default(true);
+        let mut default_value = crate::ttype::get_mixed();
+        default_value.set_from_template_default(true);
+        input.type_parameters = Some(vec![default_key, default_value]);
+
+        let receiver = TNamedObject::new_with_type_parameters(
+            ascii_lowercase_word(b"collection"),
+            Some(vec![crate::ttype::get_int(), crate::ttype::get_string()]),
+        );
+        let options = options_with_static_object(TObject::Named(receiver));
+        let mut actual = TUnion::from_atomic(TAtomic::Object(TObject::Named(input)));
+        expand_union(&codebase, &mut actual, &options);
+
+        let TAtomic::Object(TObject::Named(actual)) = &actual.types[0] else {
+            panic!("expected a named object");
+        };
+        let parameters = actual.type_parameters.as_ref().expect("expected type parameters");
+        assert_eq!(parameters, &[crate::ttype::get_int(), crate::ttype::get_string()]);
+    }
+
+    #[test]
+    fn test_expand_static_with_enum_type() {
+        let code = "<?php enum Status { case Active; case Inactive; }";
+        let codebase = create_test_codebase(code);
+
+        let input = make_static_object();
+        let static_enum = TObject::Enum(TEnum::new(ascii_lowercase_word(b"status")));
+        let options = options_with_static_object(static_enum);
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| matches!(t, TAtomic::Object(TObject::Enum(_)))));
+    }
+
+    #[test]
+    fn test_expand_parent_to_parent_class() {
+        let code = "<?php
+            class BaseClass {}
+            class ChildClass extends BaseClass {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let input = make_parent_object();
+        let options = options_with_self("ChildClass");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t {
+                named.name == ascii_lowercase_word(b"baseclass")
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn test_expand_parent_without_parent_class() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = make_parent_object();
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t { named.name == word("parent") } else { false }
+        }));
+    }
+
+    #[test]
+    fn test_expand_this_variable() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_this(word("$this")))));
+        let options = options_with_static("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t {
+                named.name == ascii_lowercase_word(b"foo")
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn test_expand_this_with_final_function() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = make_static_object();
+        let options = TypeExpansionOptions {
+            self_class: Some(ascii_lowercase_word(b"foo")),
+            static_class_type: StaticClassType::Name(ascii_lowercase_word(b"foo")),
+            function_is_final: true,
+            ..Default::default()
+        };
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t {
+                named.name == ascii_lowercase_word(b"foo") && !named.is_this
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn test_expand_static_to_generic_receiver() {
+        let codebase = create_test_codebase("<?php class Base {}");
+        let base = ascii_lowercase_word(b"base");
+        let parameter = TGenericParameter::new(
+            word("T"),
+            Arc::new(TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(base))))),
+            GenericParent::ClassLike(word("Consumer")),
+        );
+        let mut actual = TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_static(base))));
+
+        expand_union(
+            &codebase,
+            &mut actual,
+            &TypeExpansionOptions {
+                self_class: Some(base),
+                static_class_type: StaticClassType::Generic(parameter.clone()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(actual, TUnion::from_atomic(TAtomic::GenericParameter(parameter)));
+    }
+
+    #[test]
+    fn test_expand_object_with_type_parameters() {
+        let code = "<?php class Container {}";
+        let codebase = create_test_codebase(code);
+
+        let named =
+            TNamedObject::new_with_type_parameters(ascii_lowercase_word(b"container"), Some(vec![make_self_object()]));
+        let input = TUnion::from_atomic(TAtomic::Object(TObject::Named(named)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Object(TObject::Named(named)) = &actual.types[0]
+            && let Some(params) = &named.type_parameters
+        {
+            assert!(params[0].types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_object_marks_omitted_type_params_as_unspecified() {
+        let code = "<?php
+            /** @template T */
+            class Container {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let named = TNamedObject::new(ascii_lowercase_word(b"container"));
+        let input = TUnion::from_atomic(TAtomic::Object(TObject::Named(named)));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        let TAtomic::Object(TObject::Named(named)) = &actual.types[0] else {
+            panic!("Expected a named object");
+        };
+        let parameter = &named.type_parameters.as_ref().expect("Expected a filled type parameter")[0];
+
+        assert!(parameter.is_mixed());
+        assert!(parameter.from_unspecified_template());
+        assert!(!parameter.from_template_default());
+    }
+
+    #[test]
+    fn test_expand_object_keeps_declared_template_defaults_concrete() {
+        let code = "<?php
+            /** @template T = string */
+            class Container {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let named = TNamedObject::new(ascii_lowercase_word(b"container"));
+        let input = TUnion::from_atomic(TAtomic::Object(TObject::Named(named)));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        let TAtomic::Object(TObject::Named(named)) = &actual.types[0] else {
+            panic!("Expected a named object");
+        };
+        let parameter = &named.type_parameters.as_ref().expect("Expected a filled type parameter")[0];
+
+        assert!(parameter.is_string());
+        assert!(parameter.from_template_default());
+        assert!(!parameter.from_unspecified_template());
+    }
+
+    #[test]
+    fn test_expand_object_intersection_from_static() {
+        let code = "<?php
+            interface Stringable {}
+            class Foo implements Stringable {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let input = make_static_object();
+
+        let mut static_named = TNamedObject::new(ascii_lowercase_word(b"foo"));
+        static_named.intersection_types =
+            Some(vec![TAtomic::Object(TObject::Named(TNamedObject::new(ascii_lowercase_word(b"stringable"))))]);
+        let static_obj = TObject::Named(static_named);
+        let options = options_with_static_object(static_obj);
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Object(TObject::Named(named)) = &actual.types[0] {
+            assert!(named.intersection_types.is_some());
+        }
+    }
+
+    #[test]
+    fn test_expand_self_without_self_class_option() {
+        let codebase = CodebaseMetadata::new();
+
+        let input = make_self_object();
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t { named.name == word("self") } else { false }
+        }));
+    }
+
+    #[test]
+    fn test_expand_callable_return_type() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let sig = TCallableSignature::new(false, false).with_return_type(Some(Arc::new(make_self_object())));
+        let input = TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(sig)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Callable(TCallable::Signature(sig)) = &actual.types[0]
+            && let Some(ret) = sig.get_return_type()
+        {
+            assert!(ret.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_callable_parameter_types() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let param = TCallableParameter::new(Some(Arc::new(make_self_object())), false, false, false);
+        let sig = TCallableSignature::new(false, false).with_parameters(vec![param]);
+        let input = TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(sig)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Callable(TCallable::Signature(sig)) = &actual.types[0]
+            && let Some(param) = sig.get_parameters().first()
+            && let Some(param_type) = param.get_type_signature()
+        {
+            assert!(param_type.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_callable_alias_to_function() {
+        let code = "<?php
+            function myFunc(): int { return 1; }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let alias = TCallable::Alias(FunctionLikeIdentifier::Function(ascii_lowercase_word(b"myfunc")));
+        let input = TUnion::from_atomic(TAtomic::Callable(alias));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(|t| matches!(t, TAtomic::Callable(TCallable::Signature(_)))));
+    }
+
+    #[test]
+    fn test_expand_callable_alias_to_method() {
+        let code = "<?php
+            class Foo {
+                public function bar(): int { return 1; }
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let alias = TCallable::Alias(FunctionLikeIdentifier::Method(
+            ascii_lowercase_word(b"foo"),
+            ascii_lowercase_word(b"bar"),
+        ));
+        let input = TUnion::from_atomic(TAtomic::Callable(alias));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(|t| matches!(t, TAtomic::Callable(TCallable::Signature(_)))));
+    }
+
+    #[test]
+    fn test_expand_callable_alias_unknown() {
+        let codebase = CodebaseMetadata::new();
+
+        let alias = TCallable::Alias(FunctionLikeIdentifier::Function(word("nonexistent")));
+        let input = TUnion::from_atomic(TAtomic::Callable(alias));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(|t| matches!(t, TAtomic::Callable(TCallable::Alias(_)))));
+    }
+
+    #[test]
+    fn test_expand_closure_signature() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let sig = TCallableSignature::new(false, true).with_return_type(Some(Arc::new(make_self_object())));
+        let input = TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(sig)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Callable(TCallable::Signature(sig)) = &actual.types[0]
+            && let Some(ret) = sig.get_return_type()
+        {
+            assert!(ret.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_generic_parameter_constraint() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let generic = TGenericParameter::new(
+            word("T"),
+            Arc::new(make_self_object()),
+            GenericParent::ClassLike(ascii_lowercase_word(b"foo")),
+        );
+        let input = TUnion::from_atomic(TAtomic::GenericParameter(generic));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::GenericParameter(param) = &actual.types[0] {
+            assert!(param.constraint.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_nested_generic_constraint() {
+        let code = "<?php class Foo {} class Bar {}";
+        let codebase = create_test_codebase(code);
+
+        let container =
+            TNamedObject::new_with_type_parameters(ascii_lowercase_word(b"container"), Some(vec![make_self_object()]));
+        let constraint = TUnion::from_atomic(TAtomic::Object(TObject::Named(container)));
+
+        let generic = TGenericParameter::new(
+            word("T"),
+            Arc::new(constraint),
+            GenericParent::ClassLike(ascii_lowercase_word(b"bar")),
+        );
+        let input = TUnion::from_atomic(TAtomic::GenericParameter(generic));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::GenericParameter(param) = &actual.types[0]
+            && let TAtomic::Object(TObject::Named(named)) = &param.constraint.types[0]
+            && let Some(params) = &named.type_parameters
+        {
+            assert!(params[0].types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_generic_with_intersection() {
+        let code = "<?php
+            interface Stringable {}
+            class Foo {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let mut generic = TGenericParameter::new(
+            word("T"),
+            Arc::new(make_self_object()),
+            GenericParent::ClassLike(ascii_lowercase_word(b"foo")),
+        );
+        generic.intersection_types =
+            Some(vec![TAtomic::Object(TObject::Named(TNamedObject::new(ascii_lowercase_word(b"stringable"))))]);
+        let input = TUnion::from_atomic(TAtomic::GenericParameter(generic));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::GenericParameter(param) = &actual.types[0] {
+            assert!(param.intersection_types.is_some());
+            assert!(param.constraint.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_class_string_of_self() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let constraint = Arc::new(TAtomic::Object(TObject::Named(TNamedObject::new(word("self")))));
+        let class_string = TClassLikeString::OfType { kind: TClassLikeStringKind::Class, constraint };
+        let input = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_string)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) = &actual.types[0]
+            && let TAtomic::Object(TObject::Named(named)) = constraint.as_ref()
+        {
+            assert_eq!(named.name, ascii_lowercase_word(b"foo"));
+        }
+    }
+
+    #[test]
+    fn test_expand_class_string_of_static() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let constraint = Arc::new(TAtomic::Object(TObject::Named(TNamedObject::new(word("static")))));
+        let class_string = TClassLikeString::OfType { kind: TClassLikeStringKind::Class, constraint };
+        let input = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_string)));
+
+        let options = options_with_static("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) = &actual.types[0]
+            && let TAtomic::Object(TObject::Named(named)) = constraint.as_ref()
+        {
+            assert_eq!(named.name, ascii_lowercase_word(b"foo"));
+        }
+    }
+
+    #[test]
+    fn test_expand_interface_string_of_type() {
+        let code = "<?php interface MyInterface {}";
+        let codebase = create_test_codebase(code);
+
+        let constraint = Arc::new(TAtomic::Object(TObject::Named(TNamedObject::new(word("self")))));
+        let class_string = TClassLikeString::OfType { kind: TClassLikeStringKind::Interface, constraint };
+        let input = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(class_string)));
+
+        let options = options_with_self("MyInterface");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { kind, constraint })) =
+            &actual.types[0]
+        {
+            assert!(matches!(kind, TClassLikeStringKind::Interface));
+            if let TAtomic::Object(TObject::Named(named)) = constraint.as_ref() {
+                assert_eq!(named.name, ascii_lowercase_word(b"myinterface"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_expand_member_reference_wildcard_constants() {
+        let code = "<?php
+            class Foo {
+                public const A = 1;
+                public const B = 2;
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let reference = TReference::new_member(ascii_lowercase_word(b"foo"), TReferenceMemberSelector::Wildcard);
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_member_reference_wildcard_enum_cases() {
+        let code = "<?php
+            enum Status {
+                case Active;
+                case Inactive;
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let reference = TReference::new_member(ascii_lowercase_word(b"status"), TReferenceMemberSelector::Wildcard);
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert_eq!(actual.types.len(), 1);
+        assert!(matches!(
+            &actual.types[0],
+            TAtomic::Object(TObject::Enum(TEnum { name, case: None })) if name.as_bytes().eq_ignore_ascii_case(b"Status")
+        ));
+    }
+
+    #[test]
+    fn test_expand_member_reference_wildcard_enum_cases_and_constants() {
+        let code = "<?php
+            enum Status {
+                case Active;
+                case Inactive;
+                public const VALUE = 1;
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let reference = TReference::new_member(ascii_lowercase_word(b"status"), TReferenceMemberSelector::Wildcard);
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert_eq!(actual.types.len(), 2);
+        assert!(actual.types.iter().any(|t| matches!(
+            t,
+            TAtomic::Object(TObject::Enum(TEnum { name, case: None })) if name.as_bytes().eq_ignore_ascii_case(b"Status")
+        )));
+        assert!(actual.types.iter().any(|t| t.get_literal_int_value() == Some(1)));
+    }
+
+    #[test]
+    fn test_expand_member_reference_starts_with() {
+        let code = "<?php
+            class Foo {
+                public const STATUS_ACTIVE = 1;
+                public const STATUS_INACTIVE = 2;
+                public const OTHER = 3;
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let reference =
+            TReference::new_member(ascii_lowercase_word(b"foo"), TReferenceMemberSelector::StartsWith(word("STATUS_")));
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_member_reference_ends_with() {
+        let code = "<?php
+            class Foo {
+                public const READ_ERROR = 1;
+                public const WRITE_ERROR = 2;
+                public const SUCCESS = 0;
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let reference =
+            TReference::new_member(ascii_lowercase_word(b"foo"), TReferenceMemberSelector::EndsWith(word("_ERROR")));
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_member_reference_identifier_constant() {
+        let code = "<?php
+            class Foo {
+                public const BAR = 42;
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let reference =
+            TReference::new_member(ascii_lowercase_word(b"foo"), TReferenceMemberSelector::Identifier(word("BAR")));
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert_eq!(actual.types.len(), 1);
+    }
+
+    #[test]
+    fn test_expand_member_reference_identifier_enum_case() {
+        let code = "<?php
+            enum Status {
+                case Active;
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let reference = TReference::new_member(
+            ascii_lowercase_word(b"status"),
+            TReferenceMemberSelector::Identifier(word("Active")),
+        );
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert_eq!(actual.types.len(), 1);
+        assert!(matches!(&actual.types[0], TAtomic::Object(TObject::Enum(_))));
+    }
+
+    #[test]
+    fn test_expand_member_reference_unknown_class() {
+        let codebase = CodebaseMetadata::new();
+
+        let reference = TReference::new_member(word("NonExistent"), TReferenceMemberSelector::Identifier(word("FOO")));
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(|t| matches!(t, TAtomic::Mixed(_))));
+    }
+
+    #[test]
+    fn test_expand_member_reference_unknown_member() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let reference = TReference::new_member(
+            ascii_lowercase_word(b"foo"),
+            TReferenceMemberSelector::Identifier(word("NONEXISTENT")),
+        );
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(|t| matches!(t, TAtomic::Mixed(_))));
+    }
+
+    #[test]
+    fn test_expand_member_reference_constant_with_inferred_type() {
+        let code = r#"<?php
+            class Foo {
+                public const VALUE = "hello";
+            }
+        "#;
+        let codebase = create_test_codebase(code);
+
+        let reference =
+            TReference::new_member(ascii_lowercase_word(b"foo"), TReferenceMemberSelector::Identifier(word("VALUE")));
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert_eq!(actual.types.len(), 1);
+    }
+
+    #[test]
+    fn test_expand_member_reference_constant_with_type_metadata() {
+        let code = "<?php
+            class Foo {
+                /** @var int */
+                public const VALUE = 42;
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let reference =
+            TReference::new_member(ascii_lowercase_word(b"foo"), TReferenceMemberSelector::Identifier(word("VALUE")));
+        let input = TUnion::from_atomic(TAtomic::Reference(reference));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert_eq!(actual.types.len(), 1);
+    }
+
+    #[test]
+    fn test_expand_conditional_both_branches() {
+        let code = "<?php class Foo {} class Bar {}";
+        let codebase = create_test_codebase(code);
+
+        let conditional = TConditional::new(
+            Arc::new(get_mixed()),
+            Arc::new(get_string()),
+            Arc::new(make_self_object()),
+            Arc::new(make_self_object()),
+            false,
+        );
+        let input = TUnion::from_atomic(TAtomic::Conditional(conditional));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t {
+                named.name == ascii_lowercase_word(b"foo")
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn test_expand_conditional_with_self_in_then() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let conditional = TConditional::new(
+            Arc::new(get_mixed()),
+            Arc::new(get_string()),
+            Arc::new(make_self_object()),
+            Arc::new(get_int()),
+            false,
+        );
+        let input = TUnion::from_atomic(TAtomic::Conditional(conditional));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_conditional_with_self_in_otherwise() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let conditional = TConditional::new(
+            Arc::new(get_mixed()),
+            Arc::new(get_string()),
+            Arc::new(get_int()),
+            Arc::new(make_self_object()),
+            false,
+        );
+        let input = TUnion::from_atomic(TAtomic::Conditional(conditional));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_simple_alias() {
+        let code = "<?php
+            class Foo {
+                /** @phpstan-type MyInt = int */
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let alias = TAlias::new(ascii_lowercase_word(b"foo"), word("MyInt"));
+        let input = TUnion::from_atomic(TAtomic::Alias(alias));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_nested_alias() {
+        let code = "<?php
+            class Foo {
+                /** @phpstan-type Inner = int */
+                /** @phpstan-type Outer = Inner */
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let alias = TAlias::new(ascii_lowercase_word(b"foo"), word("Outer"));
+        let input = TUnion::from_atomic(TAtomic::Alias(alias));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_alias_cycle_detection() {
+        let code = "<?php
+            /** @phpstan-type SelfRef = int|array<int, SelfRef> */
+            class Foo {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let alias = TAlias::new(ascii_lowercase_word(b"foo"), word("SelfRef"));
+        let input = TUnion::from_atomic(TAtomic::Alias(alias));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_alias_unknown() {
+        let codebase = CodebaseMetadata::new();
+
+        let alias = TAlias::new(word("NonExistent"), word("Unknown"));
+        let input = TUnion::from_atomic(TAtomic::Alias(alias));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(|t| matches!(t, TAtomic::Alias(_))));
+    }
+
+    #[test]
+    fn test_expand_alias_direct_self_reference() {
+        let code = "<?php
+            /** @psalm-type SelfAlias = SelfAlias */
+            class Foo {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let alias = TAlias::new(ascii_lowercase_word(b"foo"), word("SelfAlias"));
+        let input = TUnion::from_atomic(TAtomic::Alias(alias));
+
+        let options = TypeExpansionOptions::default();
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_alias_with_self_inside() {
+        let code = "<?php
+            class Foo {
+                /** @phpstan-type MySelf = self */
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let alias = TAlias::new(ascii_lowercase_word(b"foo"), word("MySelf"));
+        let input = TUnion::from_atomic(TAtomic::Alias(alias));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_key_of_array() {
+        let codebase = CodebaseMetadata::new();
+
+        let mut keyed = TKeyedArray::new();
+        keyed.parameters = Some((Arc::new(get_string()), Arc::new(get_int())));
+        let array_type = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+
+        let key_of = TKeyOf::new(Arc::new(array_type));
+        let input = TUnion::from_atomic(TAtomic::Derived(TDerived::KeyOf(key_of)));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(super::super::atomic::TAtomic::is_string));
+    }
+
+    #[test]
+    fn test_expand_key_of_with_self() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let mut keyed = TKeyedArray::new();
+        keyed.parameters = Some((Arc::new(make_self_object()), Arc::new(get_int())));
+        let array_type = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+
+        let key_of = TKeyOf::new(Arc::new(array_type));
+        let input = TUnion::from_atomic(TAtomic::Derived(TDerived::KeyOf(key_of)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_value_of_array() {
+        let codebase = CodebaseMetadata::new();
+
+        let mut keyed = TKeyedArray::new();
+        keyed.parameters = Some((Arc::new(get_string()), Arc::new(get_int())));
+        let array_type = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+
+        let value_of = TValueOf::new(Arc::new(array_type));
+        let input = TUnion::from_atomic(TAtomic::Derived(TDerived::ValueOf(value_of)));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(actual.types.iter().any(super::super::atomic::TAtomic::is_int));
+    }
+
+    #[test]
+    fn test_expand_value_of_enum() {
+        let code = "<?php
+            enum Status: string {
+                case Active = 'active';
+                case Inactive = 'inactive';
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let enum_type =
+            TUnion::from_atomic(TAtomic::Object(TObject::Enum(TEnum::new(ascii_lowercase_word(b"status")))));
+
+        let value_of = TValueOf::new(Arc::new(enum_type));
+        let input = TUnion::from_atomic(TAtomic::Derived(TDerived::ValueOf(value_of)));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_index_access() {
+        let codebase = CodebaseMetadata::new();
+
+        use crate::ttype::atomic::array::key::ArrayKey;
+        use std::collections::BTreeMap;
+
+        let mut keyed = TKeyedArray::new();
+        let mut known_items = BTreeMap::new();
+        known_items.insert(ArrayKey::String(word("key")), (false, get_int()));
+        keyed.known_items = Some(known_items);
+        let array_type = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+
+        use crate::ttype::get_literal_string;
+        let index_type = get_literal_string(word("key"));
+
+        let index_access = TIndexAccess::new(array_type, index_type);
+        let input = TUnion::from_atomic(TAtomic::Derived(TDerived::IndexAccess(index_access)));
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &TypeExpansionOptions::default());
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_index_access_with_self() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        use crate::ttype::atomic::array::key::ArrayKey;
+        use std::collections::BTreeMap;
+
+        let mut keyed = TKeyedArray::new();
+        let mut known_items = BTreeMap::new();
+        known_items.insert(ArrayKey::String(word("key")), (false, make_self_object()));
+        keyed.known_items = Some(known_items);
+        let array_type = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+
+        use crate::ttype::get_literal_string;
+        let index_type = get_literal_string(word("key"));
+
+        let index_access = TIndexAccess::new(array_type, index_type);
+        let input = TUnion::from_atomic(TAtomic::Derived(TDerived::IndexAccess(index_access)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(!actual.types.is_empty());
+    }
+
+    #[test]
+    fn test_expand_iterable_key_type() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let iterable = TIterable::new(Arc::new(make_self_object()), Arc::new(get_int()));
+        let input = TUnion::from_atomic(TAtomic::Iterable(iterable));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Iterable(iter) = &actual.types[0] {
+            assert!(iter.get_key_type().types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_iterable_value_type() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let iterable = TIterable::new(Arc::new(get_int()), Arc::new(make_self_object()));
+        let input = TUnion::from_atomic(TAtomic::Iterable(iterable));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Iterable(iter) = &actual.types[0] {
+            assert!(iter.get_value_type().types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_get_signature_of_function() {
+        let code = r#"<?php
+            function myFunc(int $a): string { return ""; }
+        "#;
+        let codebase = create_test_codebase(code);
+
+        let id = FunctionLikeIdentifier::Function(ascii_lowercase_word(b"myfunc"));
+
+        let sig = get_signature_of_function_like_identifier(&id, &codebase);
+        assert!(sig.is_some());
+
+        let sig = sig.unwrap();
+        assert_eq!(sig.get_parameters().len(), 1);
+        assert!(sig.get_return_type().is_some());
+    }
+
+    #[test]
+    fn test_get_signature_of_method() {
+        let code = "<?php
+            class Foo {
+                public function bar(string $s): int { return 0; }
+            }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let id = FunctionLikeIdentifier::Method(ascii_lowercase_word(b"foo"), ascii_lowercase_word(b"bar"));
+
+        let sig = get_signature_of_function_like_identifier(&id, &codebase);
+        assert!(sig.is_some());
+
+        let sig = sig.unwrap();
+        assert_eq!(sig.get_parameters().len(), 1);
+    }
+
+    #[test]
+    fn test_get_signature_of_closure() {
+        let codebase = CodebaseMetadata::new();
+
+        let id = FunctionLikeIdentifier::Closure(word(b"{closure:test.php:1:1}"));
+        let sig = get_signature_of_function_like_identifier(&id, &codebase);
+
+        assert!(sig.is_none());
+    }
+
+    #[test]
+    fn test_get_atomic_of_function() {
+        let code = "<?php
+            function myFunc(): void {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let id = FunctionLikeIdentifier::Function(ascii_lowercase_word(b"myfunc"));
+
+        let atomic = get_atomic_of_function_like_identifier(&id, &codebase);
+        assert!(atomic.is_some());
+        assert!(matches!(atomic.unwrap(), TAtomic::Callable(TCallable::Signature(_))));
+    }
+
+    #[test]
+    fn test_get_signature_with_parameters() {
+        let code = "<?php
+            function multiParam(int $a, string $b, ?float $c = null): bool { return true; }
+        ";
+        let codebase = create_test_codebase(code);
+
+        let id = FunctionLikeIdentifier::Function(ascii_lowercase_word(b"multiparam"));
+
+        let sig = get_signature_of_function_like_identifier(&id, &codebase);
+        assert!(sig.is_some());
+
+        let sig = sig.unwrap();
+        assert_eq!(sig.get_parameters().len(), 3);
+
+        let third_param = &sig.get_parameters()[2];
+        assert!(third_param.has_default());
+    }
+
+    #[test]
+    fn test_expand_preserves_by_reference_flag() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let mut input = make_self_object();
+        input.flags.insert(UnionFlags::BY_REFERENCE);
+
+        let options = options_with_self("Foo");
+        let mut actual = input.clone();
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.flags.contains(UnionFlags::BY_REFERENCE));
+    }
+
+    #[test]
+    fn test_expand_preserves_possibly_undefined_flag() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let mut input = make_self_object();
+        input.flags.insert(UnionFlags::POSSIBLY_UNDEFINED);
+
+        let options = options_with_self("Foo");
+        let mut actual = input.clone();
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.flags.contains(UnionFlags::POSSIBLY_UNDEFINED));
+    }
+
+    #[test]
+    fn test_expand_multiple_self_in_union() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = TUnion::from_vec(vec![
+            TAtomic::Object(TObject::Named(TNamedObject::new(word("self")))),
+            TAtomic::Object(TObject::Named(TNamedObject::new(word("self")))),
+        ]);
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.len() <= 2);
+    }
+
+    #[test]
+    fn test_expand_deeply_nested_types() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let inner = TList::new(Arc::new(make_self_object()));
+        let middle = TList::new(Arc::new(TUnion::from_atomic(TAtomic::Array(TArray::List(inner)))));
+        let outer = TList::new(Arc::new(TUnion::from_atomic(TAtomic::Array(TArray::List(middle)))));
+        let input = TUnion::from_atomic(TAtomic::Array(TArray::List(outer)));
+
+        let options = options_with_self("Foo");
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Array(TArray::List(outer)) = &actual.types[0]
+            && let TAtomic::Array(TArray::List(middle)) = &outer.element_type.types[0]
+            && let TAtomic::Array(TArray::List(inner)) = &middle.element_type.types[0]
+        {
+            assert!(inner.element_type.types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+
+    #[test]
+    fn test_expand_with_all_options_disabled() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = make_self_object();
+        let options = TypeExpansionOptions {
+            self_class: None,
+            static_class_type: StaticClassType::None,
+            function_is_final: false,
+            allow_mixin_static_rebind: false,
+        };
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        assert!(actual.types.iter().any(|t| {
+            if let TAtomic::Object(TObject::Named(named)) = t { named.name == word("self") } else { false }
+        }));
+    }
+
+    #[test]
+    fn test_expand_already_expanded_type() {
+        let code = "<?php class Foo {}";
+        let codebase = create_test_codebase(code);
+
+        let input = make_named_object("Foo");
+        let options = options_with_self("Foo");
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        let mut actual2 = actual.clone();
+        expand_union(&codebase, &mut actual2, &options);
+
+        assert_eq!(actual.types.as_ref(), actual2.types.as_ref());
+    }
+
+    #[test]
+    fn test_expand_complex_generic_class() {
+        let code = "<?php
+            /**
+             * @template T
+             * @template U
+             */
+            class Container {}
+        ";
+        let codebase = create_test_codebase(code);
+
+        let named = TNamedObject::new_with_type_parameters(
+            ascii_lowercase_word(b"container"),
+            Some(vec![make_self_object(), make_static_object()]),
+        );
+        let input = TUnion::from_atomic(TAtomic::Object(TObject::Named(named)));
+
+        let options = TypeExpansionOptions {
+            self_class: Some(ascii_lowercase_word(b"foo")),
+            static_class_type: StaticClassType::Name(ascii_lowercase_word(b"bar")),
+            ..Default::default()
+        };
+
+        let mut actual = input;
+        expand_union(&codebase, &mut actual, &options);
+
+        if let TAtomic::Object(TObject::Named(named)) = &actual.types[0]
+            && let Some(params) = &named.type_parameters
+        {
+            assert!(params[0].types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"foo")
+                } else {
+                    false
+                }
+            }));
+            assert!(params[1].types.iter().any(|t| {
+                if let TAtomic::Object(TObject::Named(named)) = t {
+                    named.name == ascii_lowercase_word(b"bar")
+                } else {
+                    false
+                }
+            }));
+        }
+    }
+}

@@ -1,0 +1,41 @@
+[package]
+name = "mago-sharp-bridge"
+description = "Lowers one PHP# file into PHP's syntax tree, as a flat C-ABI node array for the php-sharp engine."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+links = "sharp_bridge"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mago-allocator = { workspace = true }
+mago-analyzer = { workspace = true }
+mago-build-id = { workspace = true }
+mago-codex = { workspace = true }
+mago-database = { workspace = true }
+mago-names = { workspace = true }
+mago-php-version = { workspace = true }
+mago-reporting = { workspace = true }
+mago-span = { workspace = true }
+mago-syntax = { workspace = true }
+mago-syntax-core = { workspace = true }
+mago-word = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+foldhash = { workspace = true }
+indoc = { workspace = true }
+mago-prelude = { workspace = true, features = ["build"] }
+mago-semantics = { workspace = true }
+stacker = { workspace = true }
+tempfile = { workspace = true }
+
+[build-dependencies]
+cbindgen = { workspace = true }

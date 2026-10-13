@@ -1,0 +1,38 @@
+use crate::T;
+use crate::cst::cst::Global;
+use crate::cst::sequence::TokenSeparatedSequence;
+use crate::error::ParseError;
+use crate::parser::Parser;
+use mago_allocator::prelude::*;
+
+impl<'arena, A> Parser<'_, 'arena, A>
+where
+    A: Arena,
+{
+    pub(crate) fn parse_global(&mut self) -> Result<Global<'arena>, ParseError> {
+        Ok(Global {
+            global: self.expect_keyword(T!["global"])?,
+            variables: {
+                let mut variables = self.new_vec();
+                let mut commas = self.new_vec();
+
+                loop {
+                    if matches!(self.stream.peek_kind(0)?, Some(T!["?>" | ";"])) {
+                        break;
+                    }
+
+                    variables.push(self.parse_variable()?);
+
+                    if let Some(T![","]) = self.stream.peek_kind(0)? {
+                        commas.push(self.stream.consume()?);
+                    } else {
+                        break;
+                    }
+                }
+
+                TokenSeparatedSequence::new(variables, commas)
+            },
+            terminator: self.parse_terminator()?,
+        })
+    }
+}

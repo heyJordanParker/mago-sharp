@@ -1,0 +1,102 @@
+use crate::FingerprintOptions;
+use crate::Fingerprintable;
+use mago_names::ResolvedNames;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Parenthesized;
+use mago_syntax_core::stack::ensure_sufficient_stack;
+
+impl Fingerprintable for Expression<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        ensure_sufficient_stack(|| match self {
+            Expression::Binary(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::UnaryPrefix(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::UnaryPostfix(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Parenthesized(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Literal(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::CompositeString(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Assignment(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Conditional(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Array(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::LegacyArray(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::List(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::ArrayAccess(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::ArrayAppend(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::AnonymousClass(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Closure(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::ArrowFunction(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Variable(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::ConstantAccess(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Identifier(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Match(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Yield(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Construct(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Throw(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Clone(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Call(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Access(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::PartialApplication(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Parent(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Static(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Self_(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Instantiation(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::MagicConstant(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Pipe(node) => node.fingerprint_with_hasher(hasher, resolved_names, options),
+            Expression::Error(_) => {
+                hasher.write(b"__error__");
+            }
+            _ => {
+                // Defensive fallback: an unhandled variant still produces a stable hash so the
+                // fingerprint stays deterministic if the CST gains a new shape we haven't covered.
+                hasher.write(b"__unhandled_expression__");
+            }
+        });
+    }
+}
+
+impl Fingerprintable for Parenthesized<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tests::fingerprint_code;
+
+    #[test]
+    fn test_parentheses_do_not_affect_fingerprint() {
+        let expr1 = fingerprint_code("<?php 1 + 2;");
+        let expr2 = fingerprint_code("<?php (1 + 2);");
+        let expr3 = fingerprint_code("<?php ((1 + 2));");
+
+        assert_eq!(expr1, expr2);
+        assert_eq!(expr1, expr3);
+    }
+
+    #[test]
+    fn test_expression_delegation() {
+        let lit = fingerprint_code("<?php 42;");
+        let var = fingerprint_code("<?php $x;");
+        let bin = fingerprint_code("<?php 1 + 2;");
+
+        assert_ne!(lit, var);
+        assert_ne!(lit, bin);
+        assert_ne!(var, bin);
+    }
+}

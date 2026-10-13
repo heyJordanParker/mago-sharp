@@ -1,0 +1,593 @@
+use indoc::indoc;
+use mago_allocator::Arena;
+use schemars::JsonSchema;
+
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::Level;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+
+use crate::category::Category;
+use crate::context::LintContext;
+use crate::requirements::RuleRequirements;
+use crate::rule::Config;
+use crate::rule::LintRule;
+use crate::rule::utils::variable_usage;
+use crate::rule::utils::variable_usage::DeadStoreRecorder;
+use crate::rule_meta::RuleMeta;
+use crate::settings::RuleSettings;
+
+#[derive(Debug, Clone)]
+pub struct NoDeadStoreRule {
+    meta: &'static RuleMeta,
+    cfg: NoDeadStoreConfig,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct NoDeadStoreConfig {
+    pub level: Level,
+}
+
+impl Default for NoDeadStoreConfig {
+    fn default() -> Self {
+        Self { level: Level::Warning }
+    }
+}
+
+impl Config for NoDeadStoreConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn level(&self) -> Level {
+        self.level
+    }
+}
+
+impl LintRule for NoDeadStoreRule {
+    type Config = NoDeadStoreConfig;
+
+    fn meta() -> &'static RuleMeta {
+        const META: RuleMeta = RuleMeta {
+            name: "No Dead Store",
+            code: "no-dead-store",
+            description: indoc! {"
+                Flags assignments to a variable whose value is overwritten by a later
+                assignment without being read in between. The earlier assignment is dead;
+                its value never reaches anything observable.
+
+                Detection is limited to linear (non-branching) flow. Writes inside conditional
+                branches (if/else, loops, match arms, try paths, switch cases) don't pair up
+                with writes in sibling branches, so this rule produces no false positives for
+                code like `if ($cond) { $x = 1; } else { $x = 2; } return $x;`.
+
+                Variables whose name starts with an underscore (`$_`, `$_foo`) are ignored.
+                A `global` or `static` declaration counts as an overwrite, so a plain
+                assignment whose value is discarded by a following `global`/`static` of the
+                same name is reported; assignments to the bound variable afterwards are not.
+
+                The rule analyses one function-like scope at a time. It bails out of any scope
+                that uses variable variables (`$$x`, `${expr}`) or calls `extract()`.
+            "},
+            good_example: indoc! {r#"
+                <?php
+
+                function f() {
+                    $x = compute();
+                    return $x;
+                }
+            "#},
+            bad_example: indoc! {r#"
+                <?php
+
+                function f() {
+                    $x = 1; // dead - overwritten before being read
+                    $x = compute();
+                    return $x;
+                }
+            "#},
+            category: Category::Correctness,
+            requirements: RuleRequirements::None,
+        };
+
+        &META
+    }
+
+    fn targets() -> &'static [NodeKind] {
+        const TARGETS: &[NodeKind] = &[NodeKind::Function, NodeKind::Method, NodeKind::Closure];
+
+        TARGETS
+    }
+
+    fn build(settings: &RuleSettings<Self::Config>) -> Self {
+        Self { meta: Self::meta(), cfg: settings.config }
+    }
+
+    fn check<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, node: Node<'_, 'arena>)
+    where
+        A: Arena,
+    {
+        let Some(parts) = variable_usage::function_like_parts(node) else {
+            return;
+        };
+
+        let usage: DeadStoreRecorder<'_> =
+            variable_usage::analyze(parts.parameter_list, parts.body, parts.use_clause, parts.binds_this);
+        if usage.bailed {
+            return;
+        }
+
+        for (name, info) in &usage.info {
+            if variable_usage::is_silenced_name(name) {
+                continue;
+            }
+
+            for span in &info.dead_stores {
+                let name_display = mago_bytes::BytesDisplay(name);
+                ctx.collector.report(
+                    Issue::new(
+                        self.cfg.level(),
+                        format!("Variable `{name_display}` is overwritten before its value is read."),
+                    )
+                    .with_code(self.meta.code)
+                    .with_annotation(
+                        Annotation::primary(*span).with_message(format!(
+                            "`{name_display}` is assigned here but overwritten without being read"
+                        )),
+                    )
+                    .with_help("Remove this assignment, or use the value before the next assignment."),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use super::NoDeadStoreRule;
+    use crate::test_lint_failure;
+    use crate::test_lint_success;
+
+    test_lint_failure! {
+        name = simple_dead_store,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                $x = 1;
+                $x = 2;
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_failure! {
+        name = three_assignments_first_two_dead,
+        rule = NoDeadStoreRule,
+        count = 2,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                $x = 1;
+                $x = 2;
+                $x = 3;
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = compound_assignment_uses_previous_value,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(int $x) {
+                $sum = $x;
+                $sum += 1;
+                return $sum;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = if_else_branches_do_not_pair,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(bool $cond) {
+                if ($cond) {
+                    $msg = 'yes';
+                } else {
+                    $msg = 'no';
+                }
+                return $msg;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = no_dead_store_when_value_is_used,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                $x = 1;
+                echo $x;
+                $x = 2;
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = single_unused_assignment_is_not_a_dead_store,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                $x = 1;
+                return;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = underscore_prefix_silenced,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                $_ = 1;
+                $_ = 2;
+                return;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = extract_bails_function,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(array $data) {
+                $local = 1;
+                $local = 2;
+                extract($data);
+                return $local;
+            }
+        "#}
+    }
+
+    test_lint_failure! {
+        name = dead_store_inside_branch,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(bool $cond) {
+                if ($cond) {
+                    $x = 1;
+                    $x = 2;
+                    return $x;
+                }
+                return null;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = foreach_target_does_not_dead_store_pre_loop,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function some(mixed $_): void {}
+
+            /** @param array<string|null> $a */
+            function t(array $a): void {
+                $child = 0;
+                foreach ($a as $child) {
+                    some($child);
+                }
+                some($child);
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = foreach_key_value_target_does_not_dead_store_pre_loop,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function some(mixed $_): void {}
+
+            function t(array $a): void {
+                $k = 'pre';
+                $v = 'pre';
+                foreach ($a as $k => $v) {
+                    some($k);
+                    some($v);
+                }
+                some($k);
+                some($v);
+            }
+        "#}
+    }
+
+    test_lint_failure! {
+        name = store_clobbered_by_global,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                $v = 42;
+                global $v;
+                $v = compute();
+                return $v;
+            }
+        "#}
+    }
+
+    test_lint_failure! {
+        name = store_clobbered_by_static,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                $v = 42;
+                static $v;
+                $v = compute();
+                return $v;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = global_then_store_is_not_dead,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                global $registry;
+                $registry = 1;
+                $registry = 2;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = read_before_global_is_not_dead,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f() {
+                $v = 42;
+                echo $v;
+                global $v;
+                $v = 1;
+                return $v;
+            }
+        "#}
+    }
+
+    test_lint_failure! {
+        name = conditional_write_does_not_hide_outer_dead_store,
+        rule = NoDeadStoreRule,
+        count = 2,
+        code = indoc! {r#"
+            <?php
+
+            function getint(): int
+            {
+                return mt_rand(0, max: 1);
+            }
+
+            function test(): int
+            {
+                $x = 42;
+                if (0 === getint()) {
+                    $x = getint();
+                }
+
+                $x = getint();
+                $x += getint();
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_failure! {
+        name = outer_store_dead_across_conditional_overwrite,
+        rule = NoDeadStoreRule,
+        count = 2,
+        code = indoc! {r#"
+            <?php
+
+            function f(bool $cond): int {
+                $x = 1;
+                if ($cond) {
+                    $x = 2;
+                }
+                $x = 3;
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = outer_store_read_inside_branch_is_not_dead,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(bool $cond): int {
+                $x = 1;
+                if ($cond) {
+                    echo $x;
+                }
+                $x = 3;
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = conditional_only_store_read_after_branch,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(bool $cond): int {
+                $x = 1;
+                if ($cond) {
+                    $x = 2;
+                }
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = write_before_break_is_not_dead,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function test(): bool
+            {
+                $good = 0;
+                while ($val = mt_rand(0, max: 10)) {
+                    if ($good > 0) {
+                        echo 'not unique';
+                        $good = -1;
+                        break;
+                    }
+                    $good = $val;
+                }
+                return $good > 0;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = write_before_continue_is_not_dead,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function test(): bool
+            {
+                $result = 0;
+                while (foo()) {
+                    if ($result > 0) {
+                        $result = -1;
+                        continue;
+                    }
+                    $result = 42;
+                }
+                return $result > 0;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = write_before_return_is_not_dead,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(bool $cond): int {
+                if ($cond) {
+                    $x = 1;
+                    return $x;
+                }
+                $x = 2;
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = write_before_throw_is_not_dead,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(bool $cond): void {
+                if ($cond) {
+                    $x = 1;
+                    throw new \RuntimeException();
+                }
+                $x = 2;
+                echo $x;
+            }
+        "#}
+    }
+
+    test_lint_failure! {
+        name = write_before_break_is_dead_when_overwritten_in_next_iteration,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function f(): int {
+                $x = 0;
+                while (foo()) {
+                    $x = 1;
+                    $x = 2;
+                    break;
+                }
+                return $x;
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = loop_body_write_not_flagged_outside_loop,
+        rule = NoDeadStoreRule,
+        code = indoc! {r#"
+            <?php
+
+            function test(): void
+            {
+                $str = '...';
+                $flag = 0;
+                foreach (['name', 'description'] as $k) {
+                    if ($flag++) {
+                        $str .= ', ';
+                    }
+                    $str .= $k;
+                }
+
+                echo $str;
+
+                $str = '...';
+                $flag = 0;
+                foreach (['name', 'description'] as $k) {
+                    if ($flag++) {
+                        $str .= ', ';
+                    }
+                    $str .= $k;
+                }
+            }
+        "#}
+    }
+}

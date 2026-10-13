@@ -1,0 +1,164 @@
+use mago_word::Word;
+
+use crate::identifier::function_like::FunctionLikeIdentifier;
+use crate::metadata::class_like::ClassLikeMetadata;
+use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::metadata::property_hook::PropertyHookMetadata;
+use crate::reference::ReferenceOrigin;
+use crate::reference::ReferenceSource;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::field_scoped_visibility_modifiers)]
+pub struct ScopeContext<'ctx> {
+    reference_origin: ReferenceOrigin,
+    pub(crate) function_like: Option<&'ctx FunctionLikeMetadata>,
+    pub(crate) class_like: Option<&'ctx ClassLikeMetadata>,
+    pub(crate) property_hook: Option<(Word, &'ctx PropertyHookMetadata)>,
+    pub(crate) is_static: bool,
+}
+
+impl<'ctx> ScopeContext<'ctx> {
+    /// Creates a new `ScopeContext` with the origin used for references recorded in this scope.
+    #[inline]
+    #[must_use]
+    pub const fn new(reference_origin: ReferenceOrigin) -> Self {
+        Self { reference_origin, function_like: None, class_like: None, property_hook: None, is_static: true }
+    }
+
+    /// Returns the symbol or file from which references in this scope originate.
+    #[inline]
+    #[must_use]
+    pub const fn get_reference_origin(&self) -> ReferenceOrigin {
+        self.reference_origin
+    }
+
+    /// Returns whether the current scope is a global scope.
+    #[inline]
+    #[must_use]
+    pub const fn is_global(&self) -> bool {
+        self.function_like.is_none() && self.class_like.is_none()
+    }
+
+    /// Returns whether the current scope is pure.
+    #[inline]
+    #[must_use]
+    pub const fn is_pure(&self) -> bool {
+        if let Some(function_like) = self.function_like
+            && function_like.flags.is_pure()
+        {
+            return true;
+        }
+
+        false
+    }
+
+    /// Returns the calling class-like context, if available.
+    #[inline]
+    #[must_use]
+    pub fn get_class_like(&self) -> Option<&'ctx ClassLikeMetadata> {
+        self.class_like
+    }
+
+    /// Returns the calling class FQCN, if inside a class scope.
+    #[inline]
+    #[must_use]
+    pub fn get_class_like_name(&self) -> Option<Word> {
+        self.class_like.map(|class| class.name)
+    }
+
+    /// Returns the calling function-like context, if available.
+    #[inline]
+    #[must_use]
+    pub fn get_function_like(&self) -> Option<&'ctx FunctionLikeMetadata> {
+        self.function_like
+    }
+
+    /// Returns the identifier of the calling function/method, if available.
+    #[inline]
+    #[must_use]
+    pub fn get_function_like_identifier(&self) -> Option<FunctionLikeIdentifier> {
+        let function_like = self.function_like?;
+        let function_name = function_like.name;
+
+        if function_like.get_kind().is_method() {
+            if let Some(class_like) = self.class_like {
+                return Some(FunctionLikeIdentifier::Method(class_like.name, function_name));
+            }
+
+            return Some(FunctionLikeIdentifier::Function(function_name));
+        }
+
+        let kind = function_like.get_kind();
+        if kind.is_closure() || kind.is_arrow_function() {
+            return Some(FunctionLikeIdentifier::Closure(function_name));
+        }
+
+        Some(FunctionLikeIdentifier::Function(function_name))
+    }
+
+    /// Checks if the calling class scope is marked as `final`.
+    #[inline]
+    #[must_use]
+    pub const fn is_class_like_final(&self) -> bool {
+        match self.class_like {
+            Some(class) => class.flags.is_final(),
+            None => false,
+        }
+    }
+
+    /// Checks if the calling scope is static.
+    #[inline]
+    #[must_use]
+    pub const fn is_static(&self) -> bool {
+        self.is_static
+    }
+
+    /// Sets the function-like metadata for the current scope.
+    #[inline]
+    pub fn set_function_like(&mut self, function_like: Option<&'ctx FunctionLikeMetadata>) {
+        self.function_like = function_like;
+    }
+
+    /// Sets the class-like metadata for the current scope.
+    #[inline]
+    pub fn set_class_like(&mut self, class_like: Option<&'ctx ClassLikeMetadata>) {
+        self.class_like = class_like;
+    }
+
+    /// Sets the static flag for the current scope.
+    #[inline]
+    pub fn set_static(&mut self, is_static: bool) {
+        self.is_static = is_static;
+    }
+
+    /// Returns the property hook context, if available.
+    ///
+    /// Returns a tuple of (`property_name`, `hook_metadata`) when analyzing a property hook body.
+    #[inline]
+    #[must_use]
+    pub fn get_property_hook(&self) -> Option<(Word, &'ctx PropertyHookMetadata)> {
+        self.property_hook
+    }
+
+    /// Sets the property hook context for the current scope.
+    ///
+    /// Used when analyzing property hook bodies to enable proper return type validation.
+    #[inline]
+    pub fn set_property_hook(&mut self, property_hook: Option<(Word, &'ctx PropertyHookMetadata)>) {
+        self.property_hook = property_hook;
+    }
+
+    /// Determines the `ReferenceSource` (symbol or member) based on the current function context.
+    /// Used to identify the origin of a code reference for dependency tracking.
+    #[inline]
+    #[must_use]
+    pub fn get_reference_source(&self) -> Option<ReferenceSource> {
+        match self.reference_origin {
+            ReferenceOrigin::Symbol((symbol, member)) if member.is_empty() => {
+                Some(ReferenceSource::Symbol(false, symbol))
+            }
+            ReferenceOrigin::Symbol((symbol, member)) => Some(ReferenceSource::ClassLikeMember(false, symbol, member)),
+            ReferenceOrigin::File(file) => Some(ReferenceSource::File(false, file)),
+        }
+    }
+}

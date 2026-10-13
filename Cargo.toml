@@ -1,0 +1,357 @@
+[package]
+name = "mago"
+version = "0.3.1"
+edition = "2024"
+authors = ["Seifeddine Gmati <azjezz@carthage.software>"]
+license = "MIT OR Apache-2.0"
+description = "PHP#'s checker and toolchain: checks PHP and PHP# code, compiles PHP#, and lints and formats PHP."
+homepage = "https://github.com/heyJordanParker/mago-sharp"
+repository = "https://github.com/heyJordanParker/mago-sharp"
+rust-version = "1.97.0"
+exclude = ["composer", "scripts"]
+
+[workspace]
+package.edition = "2024"
+package.authors = ["Seifeddine Gmati <azjezz@carthage.software>"]
+package.license = "MIT OR Apache-2.0"
+package.version = "0.3.1"
+package.homepage = "https://github.com/heyJordanParker/mago-sharp"
+package.repository = "https://github.com/heyJordanParker/mago-sharp"
+package.rust-version = "1.97.0"
+members = ["crates/*", "docs"]
+exclude = ["crates/syntax/fuzz", "crates/twig-syntax/fuzz"]
+
+[workspace.lints.rust]
+unknown_lints = "allow"
+
+[workspace.lints.clippy]
+large_enum_variant = { level = "deny" }
+print_stdout = { level = "deny" }
+print_stderr = { level = "deny" }
+dbg_macro = { level = "deny" }
+let_underscore_lock = { level = "deny" }
+pedantic = { level = "deny", priority = -1 }
+restriction = { level = "deny", priority = -2 }
+perf = { level = "deny", priority = -3 }
+nursery = { level = "deny", priority = -4 }
+min_ident_chars = "allow"
+implicit_return = "allow"
+single_call_fn = "allow"
+arbitrary_source_item_ordering = "allow"
+definition_in_module_root = "allow"
+rest_pattern_accessible_field = "allow"
+pub_with_shorthand = "allow"
+question_mark_used = "allow"
+wildcard_enum_match_arm = "allow"
+default_numeric_fallback = "allow"
+iter_over_hash_type = "allow"
+unseparated_literal_suffix = "allow"
+as_conversions = "allow"
+non_ascii_literal = "allow"
+blanket_clippy_restriction_lints = "allow"
+mod_module_files = "allow"
+exhaustive_structs = "allow"
+allow_attributes_without_reason = "allow"
+let_underscore_untyped = "allow"
+multiple_inherent_impl = "allow"
+pattern_type_mismatch = "allow"
+single_option_map = "allow"
+indexing_slicing = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+many_single_char_names = "allow"
+items_after_statements = "allow"
+single_char_pattern = "allow"
+single_match_else = "allow"
+if_then_some_else_none = "allow"
+if_not_else = "allow"
+unused_trait_names = "allow"
+ref_as_ptr = "allow"
+useless_let_if_seq = "allow"
+struct_excessive_bools = "allow"
+unneeded_field_pattern = "allow"
+stable_sort_primitive = "allow"
+zero_sized_map_values = "allow"
+unnecessary_trailing_comma = "allow"
+option_option = "allow"
+float_cmp = "allow"
+needless_pass_by_value = "allow"
+return_and_then = "allow"
+option_if_let_else = "allow"
+match_same_arms = "allow"
+module_name_repetitions = "allow"
+unnested_or_patterns = "allow"
+cognitive_complexity = "allow"
+too_many_lines = "allow"
+too_many_arguments = "allow"
+single_match = "allow"
+unnecessary_wraps = "allow"
+manual_assert = "allow"
+redundant_pub_crate = "allow"
+collapsible_else_if = "allow"
+collapsible_if = "allow"
+manual_unwrap_or_default = "allow"
+self_named_module_files = "allow"
+needless_raw_string_hashes = "allow"
+allow_attributes = "allow"
+use_self = "allow"
+inline_always = "allow"
+uninlined_format_args = "allow"
+string_slice = "allow"
+branches_sharing_code = "allow"
+same_name_method = "allow"
+non_send_fields_in_send_ty = "allow"
+missing_trait_methods = "allow"
+missing_docs_in_private_items = "allow"
+absolute_paths = "allow"
+arithmetic_side_effects = "allow"
+str_to_string = "allow"
+shadow_reuse = "allow"
+shadow_unrelated = "allow"
+std_instead_of_core = "allow"
+std_instead_of_alloc = "allow"
+let_underscore_must_use = "allow"
+must_use_without_reason = "allow"
+missing_const_for_fn = "allow"
+doc_markdown = "allow"
+doc_paragraphs_missing_punctuation = "allow"
+doc_link_with_quotes = "allow"
+tests_outside_test_module = "allow"
+redundant_test_prefix = "allow"
+redundant_closure_for_method_calls = "allow"
+renamed_function_params = "allow"
+literal_string_with_formatting_args = "allow"
+explicit_iter_loop = "allow"
+map_unwrap_or = "allow"
+map_err_ignore = "allow"
+useless_attribute = "allow"
+significant_drop_tightening = "allow"
+trivially_copy_pass_by_ref = "allow"
+semicolon_if_nothing_returned = "allow"
+unused_self = "allow"
+panic = "allow"
+integer_division_remainder_used = "allow"
+integer_division = "allow"
+implicit_clone = "allow"
+manual_string_new = "allow"
+impl_trait_in_params = "allow"
+unchecked_time_subtraction = "allow"
+or_fun_call = "allow"
+ignored_unit_patterns = "allow"
+mem_forget = "allow"
+missing_inline_in_public_items = "allow"
+semicolon_outside_block = "allow"
+field_scoped_visibility_modifiers = "allow"
+unreachable = "allow"
+shadow_same = "allow"
+comparison_chain = "allow"
+fn_params_excessive_bools = "allow"
+pub_use = "allow"
+match_wildcard_for_single_variants = "allow"
+partial_pub_fields = "allow"
+else_if_without_else = "allow"
+exhaustive_enums = "allow"
+semicolon_inside_block = "allow"
+inline_modules = "allow"
+
+[workspace.dependencies]
+mago-syntax-core = { path = "crates/syntax-core", version = "0.3.1" }
+mago-syntax = { path = "crates/syntax", version = "0.3.1" }
+mago-phpdoc-syntax = { path = "crates/phpdoc-syntax", version = "0.3.1" }
+mago-twig-syntax = { path = "crates/twig-syntax", version = "0.3.1" }
+mago-casing = { path = "crates/casing", version = "0.3.1" }
+mago-composer = { path = "crates/composer", version = "0.3.1" }
+mago-text-edit = { path = "crates/text-edit", version = "0.3.1" }
+mago-formatter = { path = "crates/formatter", version = "0.3.1" }
+mago-fingerprint = { path = "crates/fingerprint", version = "0.3.1" }
+mago-flags = { path = "crates/flags", version = "0.3.1" }
+mago-hir = { path = "crates/hir", version = "0.3.1" }
+mago-word = { path = "crates/word", version = "0.3.1" }
+mago-bytes = { path = "crates/bytes", version = "0.3.1" }
+mago-linter = { path = "crates/linter", version = "0.3.1" }
+mago-names = { path = "crates/names", version = "0.3.1" }
+mago-reporting = { path = "crates/reporting", version = "0.3.1", default-features = false }
+mago-span = { path = "crates/span", version = "0.3.1" }
+mago-wasm = { path = "crates/wasm", version = "0.3.1" }
+mago-php-version = { path = "crates/php-version", version = "0.3.1" }
+mago-analyzer = { path = "crates/analyzer", version = "0.3.1" }
+mago-algebra = { path = "crates/algebra", version = "0.3.1" }
+mago-allocator = { path = "crates/allocator", version = "0.3.1" }
+mago-codex = { path = "crates/codex", version = "0.3.1" }
+mago-prelude = { path = "crates/prelude", version = "0.3.1" }
+mago-semantics = { path = "crates/semantics", version = "0.3.1" }
+mago-collector = { path = "crates/collector", version = "0.3.1" }
+mago-database = { path = "crates/database", version = "0.3.1", default-features = false }
+mago-guard = { path = "crates/guard", version = "0.3.1" }
+mago-orchestrator = { path = "crates/orchestrator", version = "0.3.1" }
+mago-server = { path = "crates/server", version = "0.3.1" }
+mago-extension = { path = "crates/extension", version = "0.3.1" }
+mago-sharp-bridge = { path = "crates/sharp-bridge", version = "0.3.1" }
+mago-sharp-lean = { path = "crates/sharp-lean", version = "0.3.1" }
+mago-build-id = { path = "crates/build-id", version = "0.3.1" }
+tracing = { version = "0.1.40" }
+foldhash = "0.2"
+serde_json = { version = "1.0.138" }
+serde = { version = "1.0", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
+ordered-float = { version = "5.0", default-features = false }
+pretty_assertions = { version = "1.4.1" }
+codespan-reporting = { version = "0.13.1", features = ["serde", "serialization"] }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+allocator-api2 = "0.2"
+blink-alloc = "0.3"
+hashbrown = "0.17.1"
+serde_norway = "0.9.42"
+toml = "1.0.3"
+regex = "1.11.0"
+indicatif = { version = "0.18.0" }
+paste = "1.0.15"
+criterion = { package = "codspeed-criterion-compat", version = "4.5.0" }
+clap = { version = "4.5.20", features = ["cargo", "derive", "unicode", "wrap_help"] }
+clap_complete = "4.5.59"
+termtree = "1.0.0"
+wasm-bindgen = "0.2.97"
+serde-wasm-bindgen = "0.6"
+diffy = "0.4.0"
+libtest-mimic = "0.7"
+termcolor = "1.4.1"
+indoc = "2"
+proptest = "1.5"
+ureq = { version = "3", features = ["rustls", "json"] }
+self-replace = "1"
+semver = "1"
+tar = "0.4"
+flate2 = "1"
+zip = { version = "6", default-features = false, features = ["deflate"] }
+tempfile = "3.15.0"
+colored = "3.0.0"
+blake3 = "1.8.1"
+memchr = "2.7.4"
+stacker = "0.1.25"
+dialoguer = "0.12.0"
+unicode-width = { version = "0.2.0", default-features = false }
+itertools = "0.14.0"
+indexmap = { version = "2.8.0", features = ["serde"] }
+rand = "0.9.0"
+ariadne = "0.6.0"
+glob = "0.3.2"
+walkdir = "2"
+globset = "0.4"
+rayon = "1.10.0"
+dhat = "0.3"
+rust-embed = { version = "8.7.2", features = ["interpolate-folder-path", "include-exclude"] }
+bincode = { version = "2.0.1", features = ["serde"] }
+libc = "0.2.175"
+ryu = "1.0"
+itoa = "1.0"
+notify = "8.2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+serde-sarif = "0.8"
+schemars = { version = "1.1", features = ["preserve_order"] }
+anyhow = "1"
+pulldown-cmark = "0.13"
+tera = "1.20"
+temp-env = "0.3.6"
+cbindgen = { version = "0.29.4", default-features = false }
+
+[dependencies]
+mago-allocator = { workspace = true }
+mago-word = { workspace = true }
+mago-bytes = { workspace = true }
+mago-syntax = { workspace = true, features = ["serde"] }
+mago-syntax-core = { workspace = true }
+mago-reporting = { workspace = true, features = ["renderers"] }
+mago-database = { workspace = true, features = ["loader", "watcher"] }
+mago-linter = { workspace = true, features = ["serde"] }
+mago-names = { workspace = true }
+mago-formatter = { workspace = true, features = ["serde"] }
+mago-text-edit = { workspace = true }
+mago-php-version = { workspace = true }
+mago-composer = { workspace = true }
+mago-prelude = { workspace = true, features = ["serde"] }
+mago-analyzer = { workspace = true }
+mago-algebra = { workspace = true }
+mago-codex = { workspace = true }
+mago-guard = { workspace = true, features = ["serde"] }
+mago-orchestrator = { workspace = true }
+mago-server = { workspace = true }
+mago-sharp-bridge = { workspace = true }
+mago-sharp-lean = { workspace = true }
+mago-extension = { workspace = true }
+serde = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+termtree = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+ureq = { workspace = true }
+self-replace = { workspace = true }
+semver = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+zip = { workspace = true }
+tracing = { workspace = true }
+serde_norway = { workspace = true }
+toml = { workspace = true }
+diffy = { workspace = true }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+indicatif = { workspace = true }
+colored = { workspace = true }
+dialoguer = { workspace = true }
+rayon = { workspace = true }
+indoc = { workspace = true }
+unicode-width = { workspace = true }
+notify = { workspace = true }
+dhat = { workspace = true, optional = true }
+schemars = { workspace = true }
+
+[[test]]
+name = "suite"
+harness = false
+
+[dev-dependencies]
+libtest-mimic = { workspace = true }
+serde = { workspace = true }
+temp-env = { workspace = true }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+mago-prelude = { workspace = true, features = ["build"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_env = "musl", target_env = "gnu"))'.dependencies]
+mimalloc = { version = "0.1.47" }
+
+# TODO(azjezz): replace with https://dev-doc.rust-lang.org/beta/unstable-book/language-features/unix-sigpipe.html once stable.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[features]
+dhat-heap = ["dhat"]
+
+[profile.release]
+opt-level = 3
+debug = false
+strip = 'symbols'
+debug-assertions = false
+overflow-checks = false
+lto = 'fat'
+panic = 'abort'
+incremental = false
+codegen-units = 1
+rpath = true
+
+[profile.memory-debug]
+inherits = 'release'
+debug = true
+strip = 'none'
+
+[profile.dev]
+debug = 'line-tables-only'
+opt-level = 0
+lto = 'off'
+panic = 'unwind'

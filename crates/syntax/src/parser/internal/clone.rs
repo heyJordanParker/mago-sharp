@@ -1,0 +1,123 @@
+use crate::T;
+use crate::cst::cst::Call;
+use crate::cst::cst::Clone;
+use crate::cst::cst::Expression;
+use crate::cst::cst::FunctionCall;
+use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::Identifier;
+use crate::cst::cst::LocalIdentifier;
+use crate::cst::cst::Parenthesized;
+use crate::cst::cst::PartialApplication;
+use crate::cst::cst::PartialArgument;
+use crate::cst::cst::PartialArgumentList;
+use crate::cst::sequence::TokenSeparatedSequence;
+use crate::error::ParseError;
+use crate::parser::Parser;
+use crate::token::Precedence;
+use crate::token::TokenKind;
+use mago_allocator::prelude::*;
+
+impl<'arena, A> Parser<'_, 'arena, A>
+where
+    A: Arena,
+{
+    /// Parses a `clone` expression, handling the syntactic ambiguity introduced in PHP 8.5.
+    ///
+    /// PHP 8.5 allows `clone` to be used like a function (e.g., `clone($foo, $bar)`). This
+    /// creates an ambiguity with the older syntax `clone ($foo)`, which should be parsed as
+    /// a `clone` expression operating on a parenthesized expression, not a function call.
+    ///
+    /// This function resolves the ambiguity by looking ahead after the first argument. If the
+    /// next token is not a comma and the argument is a simple positional one, it assumes
+    /// the legacy `clone (expr)` structure. Otherwise, it parses the expression as a
+    /// standard function call.
+    pub(crate) fn parse_ambiguous_clone_expression(&mut self) -> Result<Expression<'arena>, ParseError> {
+        let clone = self.expect_keyword(T!["clone"])?;
+        let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+        if next.kind != TokenKind::LeftParenthesis {
+            return Ok(Expression::Clone(Clone {
+                clone,
+                object: self.arena.alloc(self.parse_expression_with_precedence(Precedence::Clone)?),
+            }));
+        }
+
+        let left_parenthesis = self.stream.eat_span(T!["("])?;
+
+        let mut arguments = self.new_vec();
+        let mut commas = self.new_vec();
+        loop {
+            let next = self.stream.lookahead(0)?;
+            if matches!(next.map(|t| t.kind), Some(T![")"])) {
+                break;
+            }
+
+            arguments.push(self.parse_partial_argument()?);
+
+            if let Some(T![","]) = self.stream.peek_kind(0)? {
+                commas.push(self.stream.consume()?);
+            } else {
+                break;
+            }
+        }
+
+        let partial_args = PartialArgumentList {
+            left_parenthesis,
+            arguments: TokenSeparatedSequence::new(arguments, commas),
+            right_parenthesis: self.stream.eat_span(T![")"])?,
+        };
+
+        if partial_args.has_placeholders() {
+            return Ok(Expression::PartialApplication(PartialApplication::Function(FunctionPartialApplication {
+                function: self.arena.alloc(Expression::Identifier(Identifier::Local(LocalIdentifier {
+                    span: clone.span,
+                    value: clone.value,
+                }))),
+                argument_list: partial_args,
+            })));
+        }
+
+        // Empty arguments case: clone() with no args is a function call
+        let is_function_call = partial_args.arguments.is_empty()
+            || partial_args.arguments.len() > 1
+            || matches!(
+                partial_args.arguments.first(),
+                Some(PartialArgument::Positional(arg)) if arg.ellipsis.is_some()
+            );
+
+        if is_function_call {
+            return Ok(Expression::Call(Call::Function(FunctionCall {
+                function: self.arena.alloc(Expression::Identifier(Identifier::Local(LocalIdentifier {
+                    span: clone.span,
+                    value: clone.value,
+                }))),
+                argument_list: partial_args.into_argument_list(self.arena),
+            })));
+        }
+
+        // At this point we know there's exactly one argument without ellipsis
+        let cloned_expression = match partial_args.arguments.into_iter().next() {
+            Some(PartialArgument::Positional(arg)) => arg.value,
+            Some(PartialArgument::Named(arg)) => arg.value,
+            // The branches above are guaranteed by the `is_function_call` and `has_placeholders`
+            // checks earlier in this function; if we ever land here it's a parser bug, so we
+            // surface a generic unexpected-token error rather than panicking.
+            None
+            | Some(
+                PartialArgument::Placeholder(_)
+                | PartialArgument::NamedPlaceholder(_)
+                | PartialArgument::VariadicPlaceholder(_),
+            ) => return Err(self.stream.unexpected(None, &[])),
+        };
+
+        let parenthesized = self.arena.alloc(Expression::Parenthesized(Parenthesized {
+            left_parenthesis: partial_args.left_parenthesis,
+            expression: self.arena.alloc(cloned_expression),
+            right_parenthesis: partial_args.right_parenthesis,
+        }));
+
+        Ok(Expression::Clone(Clone {
+            clone,
+            object: self.parse_expression_continuation(parenthesized, Precedence::Clone)?,
+        }))
+    }
+}

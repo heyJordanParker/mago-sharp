@@ -1,0 +1,390 @@
++++
+title = "Configuration"
+description = "How Mago discovers configuration files, what every option in mago.toml does, and how to share configuration across projects."
+nav_order = 40
+nav_section = "Guide"
++++
+# Configuration
+
+Mago reads its configuration from a single file, typically `mago.toml` in your project root. Run `mago init` to scaffold one, or write it by hand.
+
+This page covers configuration discovery, the `extends` directive, the global options, and the `[source]` and `[parser]` sections. Tool-specific options are documented under each tool's reference page.
+
+## Discovery
+
+When you do not pass `--config`, Mago looks for a config file in this order:
+
+1. The workspace directory (the current working directory, or the path given by `--workspace`).
+2. `$XDG_CONFIG_HOME` if set, for example `$XDG_CONFIG_HOME/mago.toml`.
+3. `$HOME/.config`, for example `~/.config/mago.toml`.
+4. `$HOME`, for example `~/mago.toml`.
+
+In each location it looks for `mago.{toml,yaml,yml,json}` first, then `mago.dist.{toml,yaml,yml,json}`. Format precedence within a single directory is `toml > yaml > yml > json`. The first file found wins, which lets you keep a global config in `~/.config/mago.toml` for projects that have no local one.
+
+## Editor schema
+
+Mago describes the full configuration tree as a JSON schema. Editors that understand the schema give you autocomplete, hover documentation, and inline validation for `mago.{toml,yaml,yml,json}`.
+
+When you install Mago through Composer (`heyjordanparker/mago-sharp`), a version-matched schema is written to `vendor/heyjordanparker/mago-sharp/schema.json` the first time you run `mago`. Reference it with a relative path so it always tracks the installed version. `mago init` writes this reference when that file exists.
+
+How you reference it depends on the format:
+
+```toml
+#:schema vendor/heyjordanparker/mago-sharp/schema.json
+version = "0.3"
+php-version = "8.3"
+```
+
+```yaml
+# yaml-language-server: $schema=vendor/heyjordanparker/mago-sharp/schema.json
+version: "0.3"
+php-version: "8.3"
+```
+
+```json
+{
+  "$schema": "vendor/heyjordanparker/mago-sharp/schema.json",
+  "version": "0.3",
+  "php-version": "8.3"
+}
+```
+
+For TOML the comment is read by the [Taplo](https://taplo.tamasfe.dev/) language server, which powers the "Even Better TOML" VS Code extension and the JetBrains TOML support. For YAML the comment is read by the [Red Hat YAML language server](https://github.com/redhat-developer/yaml-language-server). For JSON every modern editor reads `$schema` natively. Mago itself ignores the `$schema` key and the magic comments — they exist purely for editor tooling.
+
+Without Composer, `mago config --schema` prints the schema of the installed binary to stdout. Save it next to your config, reference that file instead, and regenerate it after each upgrade so the schema and your binary stay in sync:
+
+```sh
+mago config --schema > mago.schema.json
+```
+
+## Sharing configuration with `extends`
+
+The `extends` directive lets one config layer on top of others without copy-pasting. Useful when several projects share a base standard.
+
+```toml
+# Single parent
+extends = "vendor/some-org/mago-config/mago.toml"
+
+# Or a list, applied left-to-right; each later layer overrides earlier ones
+extends = [
+  "vendor/some-org/mago-config",     # directory: mago.{toml,yaml,yml,json} inside
+  "configs/strict.json",              # mixing formats is fine
+  "../shared/team-defaults.toml",
+]
+
+# This file's own keys override anything from the layers above
+php-version = "8.3"
+```
+
+### Resolution
+
+Absolute paths are used as-is. Relative paths resolve against the directory of the file declaring `extends`, not against the current working directory. So `mago --config some/dir/config.toml` with `extends = "base.toml"` looks for `some/dir/base.toml`.
+
+File entries must exist and use a recognised extension (`.toml`, `.yaml`, `.yml`, `.json`). Directory entries are scanned for `mago.{toml,yaml,yml,json}` in that precedence; a directory with no recognised file is skipped with a warning rather than failing the build.
+
+### Effective precedence
+
+Layers are merged later-wins, deepest-first:
+
+1. Built-in defaults.
+2. Each `extends` layer, recursively. A parent's own `extends` resolves before its keys apply.
+3. The owning file's keys.
+4. `MAGO_*` environment variables for the [supported scalars](/guide/environment-variables/).
+5. CLI flags such as `--php-version`, `--threads`.
+
+### Merge semantics
+
+Per top-level key:
+
+- Tables and objects are deep-merged. A child can override a single key inside a nested table without redefining the whole table.
+- Arrays such as `source.excludes` and per-rule `exclude` lists are concatenated, parent first. If a base config excludes `vendor/`, you keep that exclude and add your own.
+- `extension-hosts.<name>.command` is the exception: it is an argv, where each element's meaning comes from its position, so a layer that redeclares it **replaces** it. Concatenating two commands would start the parent's program with the child's path as a stray argument. Every other key inside the host table still merges normally, so a layer can change `workers` or `enabled` and keep the inherited command.
+- Scalars (strings, numbers, booleans) are overwritten by the child.
+
+```toml
+# base.toml
+threads = 4
+[source]
+excludes = ["vendor", "node_modules"]
+```
+
+```toml
+# project mago.toml
+extends = "base.toml"
+threads = 8
+[source]
+excludes = ["build"]   # appended -> ["vendor", "node_modules", "build"]
+```
+
+`extends` is part of the published JSON schema, so a file using it still validates against `vendor/heyjordanparker/mago-sharp/schema.json`.
+
+Cycles are detected via canonical-path tracking and surface a clear error rather than recursing forever. Diamond inheritance (A extends B and C, both extend D) processes D once and is fine. Layers can mix formats freely; each is parsed by its own driver and merged at a generic value level before the final document is validated against the schema.
+
+## Global options
+
+These keys live at the root of `mago.toml`.
+
+```toml
+version = "0.3"
+php-version = "8.2"
+threads = 8
+stack-size = 8388608     # 8 MiB
+editor-url = "phpstorm://open?file=%file%&line=%line%&column=%column%"
+```
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `version` | string | none | Pins the Mago version this project is tested against. Accepts a major (`"0"`), minor (`"0.3"`), or exact (`"0.3.1"`) pin. See [version pinning](#version-pinning). |
+| `php-version` | string | latest stable | The PHP version Mago should target for parsing and analysis. `mago init` autodetects this from `composer.json` when possible. |
+| `allow-unsupported-php-version` | boolean | `false` | Allow Mago to run on a PHP version it does not officially support. Not recommended. |
+| `no-version-check` | boolean | `false` | Silences the warning emitted when the installed binary drifts from the pinned version. Major-version drift is always fatal. |
+| `threads` | integer | logical CPUs | Number of threads for parallel work. |
+| `stack-size` | integer | 2 MiB | Per-thread stack size in bytes. Minimum 2 MiB, maximum 8 MiB. |
+| `editor-url` | string | none | URL template for clickable file paths in terminal output. See [editor integration](#editor-integration). |
+
+### Version pinning
+
+Pinning the version surfaces drift between the installed binary and the project's expectations early, instead of silently producing different output.
+
+Three pin levels:
+
+- **Major pin** (`version = "0"`): any `0.x.y` satisfies the pin. A bump to `1.x` is a hard error because a new major may ship with incompatible defaults, schema changes, or rule behaviour. From 1.0 on, this is the default `mago init` writes.
+- **Minor pin** (`version = "0.3"`): any `0.3.y` satisfies the pin. Drift to a different minor warns; drift across majors is still fatal. Before 1.0 a new minor release may break the configuration, as in Cargo's caret rule, so this is the default `mago init` writes.
+- **Exact pin** (`version = "0.3.1"`): any drift warns; drift across majors is still fatal.
+
+The warning can be silenced with `--no-version-check`, the `MAGO_NO_VERSION_CHECK` environment variable, or `no-version-check = true` in the config. None of those affect major-version drift, which is the entire point of pinning.
+
+To sync the installed binary to the project's pin:
+
+```sh
+mago self-update --to-project-version
+```
+
+For exact pins, this resolves directly to that release tag. For major or minor pins, Mago scans recent GitHub releases and installs the highest one that satisfies the pin. So `version = "0"` with 1.0 already shipped still installs the latest 0.x release without dragging you forward.
+
+`version` is currently optional. A future Mago release may start warning when it is missing, to prepare projects for the eventual 2.0 upgrade.
+
+## `[source]`
+
+The `[source]` section controls how Mago discovers and processes files.
+
+### Four categories of paths
+
+Mago distinguishes between your code, third-party code, patches to third-party code, and code to ignore entirely:
+
+- **`paths`** are your source files. Mago analyses, lints, and formats them.
+- **`includes`** are dependencies (typically `vendor`). Mago parses them so it can resolve symbols and types, but never analyses, lints, or rewrites them.
+- **`patches`** are PHP files that override type information for vendored or built-in code. Mago honours their type declarations and PHPDoc — which take precedence over `includes` and built-ins — but never analyses, lints, or formats them. See [Patching vendor types](#patching-vendor-types) for what a patch may change.
+- **`excludes`** are paths or globs Mago ignores entirely. They apply to every tool.
+
+If a file matches both `paths` and `includes`, the more specific pattern wins. Exact file paths are most specific, then deeper directory paths, then shallow ones, then glob patterns. When patterns are equally specific, `includes` wins, which lets you explicitly mark a path as a dependency.
+
+```toml
+[source]
+paths     = ["src", "tests"]
+patches   = ["patches"]
+includes  = ["vendor"]
+excludes  = ["cache/**", "build/**", "var/**"]
+extensions = ["php", "sharp"]
+```
+
+Glob patterns work in all four lists:
+
+```toml
+[source]
+paths    = ["src/**/*.php"]
+patches  = ["patches/**/*.php"]
+includes = ["vendor/symfony/**/*.php"]   # only Symfony from vendor
+excludes = [
+  "**/*_generated.php",
+  "**/tests/**",
+  "src/Legacy/**",
+]
+```
+
+### Reference
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `paths` | string list | `[]` | Directories or globs for your source code. If empty, the entire workspace is scanned. |
+| `includes` | string list | `[]` | Directories or globs for third-party code Mago should parse but not modify. |
+| `patches` | string list | `[]` | Directories or globs for type patches. Their PHPDoc and type declarations override those from `includes` and built-ins. Not analysed, linted, or formatted. |
+| `excludes` | string list | `[]` | Globs or paths excluded from every tool. |
+| `extensions` | string list | `["php", "sharp"]` | File extensions of the PHP and PHP# files Mago reads. |
+
+`mago lint`, `mago fmt` and `mago guard` do not read PHP# files yet: they skip every `.sharp` file they find and refuse one named on the command line.
+
+### Patching vendor types
+
+A patch is a plain PHP file that redeclares a vendored or built-in symbol by its fully-qualified name. Mago reads only the type information from it; the body is ignored. A patch **refines** an existing symbol — it never replaces it, and it can never make a symbol exist that the vendor code does not already declare.
+
+At most one patch may target a given symbol. If two patches target the same symbol, Mago reports a diagnostic on the conflicting patches rather than silently picking one — merge them into a single patch or remove all but one.
+
+**What a patch may refine**
+
+- Method signatures: parameter types, return type, `@throws`, `@template`, and `@psalm-assert`-style assertions. Each field is applied only when the patch specifies it, so a sparsely-typed patch never erases richer information already known.
+- Property and constant types.
+- Class-level `@template` declarations (existing ones are refined by name, new ones are appended) and type aliases.
+- Magic members: `@method`, `@property`, `@property-read`, and `@property-write` annotations may be added even when no such member exists on the original, because they are pure type annotations for `__call`/`__get`/`__set`.
+
+**What a patch may not change**
+
+Each of these is reported as a diagnostic on the patch file:
+
+- **New members.** A method, property, or constant that does not exist on the symbol or any of its ancestors cannot be introduced (use the magic-member annotations above instead). A method *inherited* from an ancestor may be overridden.
+- **Kind.** The patch must declare the same kind (class, interface, enum, …) as the original; a mismatch rejects the whole patch.
+- **Hierarchy.** `extends`, `implements`, `@require-extends`, and `@require-implements` need not be restated, but if restated must match the original exactly; a mismatch rejects the whole patch.
+- **Trait usage.** `use` trait statements are never valid in a patch.
+- **`readonly class` modifier** and **enum cases** are structural and cannot be changed.
+- **Member modifiers.** Visibility, `static`, property hooks, and removing `final` must match the original (adding `final` is allowed). On a mismatch the modifier change is ignored, but the refined types are still applied. `abstract` is not enforced: a method patch may end in `;` (the natural signature-only form) or in a `{}` body regardless of the original, and the difference is silently ignored.
+- **Parameter count and names.** A method or function patch must declare the same parameters, in the same order, with the same names — types are mapped by position, so any divergence rejects the whole patch.
+
+### Glob settings
+
+`[source.glob]` tunes how globs match.
+
+```toml
+[source.glob]
+literal-separator = true     # `*` does not match `/`; use `**` for recursion
+case-insensitive  = false
+backslash-escape  = true     # `\` escapes special characters
+empty-alternates  = false    # `{,a}` matches "" and "a" when true
+```
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `case-insensitive` | bool | `false` | Match patterns case-insensitively. |
+| `literal-separator` | bool | `false` | When `true`, `*` does not match path separators. Use `**` for recursive matching. |
+| `backslash-escape` | bool | `true` (false on Windows) | Whether `\` escapes special characters. |
+| `empty-alternates` | bool | `false` | Whether empty alternates are allowed. |
+
+> Projects scaffolded by `mago init` set `literal-separator = true`. It makes `*` behave the way most users expect, matching one directory level the same way `.gitignore` does.
+
+### Tool-specific excludes
+
+Each tool has its own optional `excludes`. They are additive: a file is excluded if it matches the global list or the tool-specific list.
+
+```toml
+[source]
+paths    = ["src", "tests"]
+excludes = ["cache/**"]            # all tools
+
+[analyzer]
+excludes = ["tests/**/*.php"]      # only the analyzer
+
+[formatter]
+excludes = ["src/**/AutoGenerated/**/*.php"]
+
+[linter]
+excludes = ["database/migrations/**"]
+```
+
+The linter also supports per-rule path exclusions, useful when you want one rule to skip a path while everything else still applies. The full reference is on the [linter configuration page](/tools/linter/configuration-reference/#per-rule-excludes).
+
+```toml
+[linter.rules]
+prefer-static-closure = { exclude = ["tests/"] }
+no-global             = { exclude = ["**/*Test.php"] }
+```
+
+> Use `mago list-files` to verify which files Mago will process. `mago list-files --command formatter` shows what the formatter will touch, `--command analyzer` shows the analyzer's view, and so on. This helps verify your `paths`, `includes`, `patches`, and `excludes` configuration is working as expected.
+
+## `[parser]`
+
+```toml
+[parser]
+enable-short-tags = false
+```
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enable-short-tags` | boolean | `true` | Whether to recognise the short open tag `<?` in addition to `<?php` and `<?=`. Equivalent to PHP's `short_open_tag` ini directive. |
+
+Disable short open tags when your `.php` files contain literal `<?xml` declarations or template fragments that are not actually PHP. With `enable-short-tags = false`, sequences like `<?xml version="1.0"?>` are treated as inline text rather than parse errors. The trade-off: any code that relies on `<?` as a PHP open tag will no longer be recognised.
+
+## Editor integration
+
+Mago can render file paths in diagnostic output as [OSC 8 hyperlinks](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda). Click the path in your terminal and your editor opens the file at the right line and column. Supported terminals include iTerm2, WezTerm, Kitty, Windows Terminal, Ghostty, and a handful of others.
+
+Mago auto-detects the running editor when possible. On macOS it reads `__CFBundleIdentifier`; elsewhere it checks `TERM_PROGRAM`. The following are recognised out of the box:
+
+- PhpStorm, IntelliJ IDEA, WebStorm
+- VS Code, VS Code Insiders
+- Zed
+- Sublime Text
+
+If auto-detection misses, configure the URL explicitly. Precedence runs first-match-wins:
+
+1. `MAGO_EDITOR_URL` environment variable.
+2. `editor-url` in `mago.toml`.
+3. Auto-detection.
+
+```sh
+export MAGO_EDITOR_URL="vscode://file/%file%:%line%:%column%"
+```
+
+```toml
+editor-url = "phpstorm://open?file=%file%&line=%line%&column=%column%"
+```
+
+| Placeholder | Meaning |
+| :--- | :--- |
+| `%file%` | Absolute path to the file. |
+| `%rel_file%` | File path relative to the workspace. |
+| `%line%` | Line number, 1-based. |
+| `%column%` | Column number, 1-based. |
+
+Use `%rel_file%` when the editor resolves file paths relative to the open workspace:
+
+```sh
+export MAGO_EDITOR_URL="vscode://file/%rel_file%:%line%:%column%"
+```
+
+Common templates:
+
+| Editor | Template |
+| :--- | :--- |
+| VS Code | `vscode://file/%file%:%line%:%column%` |
+| VS Code Insiders | `vscode-insiders://file/%file%:%line%:%column%` |
+| Cursor | `cursor://file/%file%:%line%:%column%` |
+| Windsurf | `windsurf://file/%file%:%line%:%column%` |
+| PhpStorm / IntelliJ | `phpstorm://open?file=%file%&line=%line%&column=%column%` |
+| Zed | `zed://file/%file%:%line%:%column%` |
+| Sublime Text | `subl://open?url=file://%file%&line=%line%&column=%column%` |
+| Emacs | `emacs://open?url=file://%file%&line=%line%&column=%column%` |
+| Atom | `atom://core/open/file?filename=%file%&line=%line%&column=%column%` |
+
+> Hyperlinks render only when output is a terminal with colours enabled. They are automatically suppressed when output is piped or `--colors=never` is set, so they do not interfere with scripts or CI.
+
+The hyperlinks appear in the `rich` (default), `medium`, `short`, and `emacs` reporting formats. Machine-readable formats (`json`, `github`, `gitlab`, `checkstyle`, `sarif`) are unaffected.
+
+## Tool-specific configuration
+
+Each tool has its own reference page covering its options:
+
+- [Linter](/tools/linter/configuration-reference/)
+- [Formatter](/tools/formatter/configuration-reference/)
+- [Analyzer](/tools/analyzer/configuration-reference/)
+- [Guard](/tools/guard/configuration-reference/)
+
+## Inspecting the merged configuration
+
+`mago config` prints the configuration Mago is actually using, after merging defaults, every `extends` layer, environment variables, and CLI flags. Useful when something is not behaving as expected.
+
+```sh
+mago config                       # full config as pretty-printed JSON
+mago config --show linter         # only the [linter] section
+mago config --show formatter
+mago config --default             # the built-in defaults
+mago config --schema              # JSON Schema for the whole config
+mago config --schema --show linter
+```
+
+| Flag | Description |
+| :--- | :--- |
+| `--show <SECTION>` | Print only one section. Values: `source`, `parser`, `linter`, `formatter`, `analyzer`, `guard`. |
+| `--default` | Print built-in defaults instead of the merged result. |
+| `--schema` | Print JSON Schema, useful for IDE integration or external tooling. |
+| `-h`, `--help` | Print help and exit. |
+
+Global flags must come before `config`. See the [CLI overview](/fundamentals/command-line-interface/) for the full list.

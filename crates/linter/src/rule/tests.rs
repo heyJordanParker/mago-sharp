@@ -1,0 +1,398 @@
+//! Test infrastructure for lint rules.
+
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use mago_allocator::prelude::*;
+use mago_database::file::File;
+use mago_names::resolver::NameResolver;
+use mago_syntax::parser::parse_file;
+
+use crate::Linter;
+use crate::registry::RuleRegistry;
+use crate::rule::LintRule;
+use crate::settings::Settings;
+
+pub(super) fn collect_issues<R, F>(
+    code: &str,
+    filename: Option<&'static str>,
+    settings_fn: Option<F>,
+) -> mago_reporting::IssueCollection
+where
+    F: FnOnce(&mut Settings),
+    R: LintRule,
+{
+    let arena = LocalArena::new();
+    let file =
+        File::ephemeral(Cow::Borrowed(filename.unwrap_or("test.php").as_bytes()), Cow::Owned(code.as_bytes().to_vec()));
+
+    let program = parse_file(&arena, &file);
+    if program.has_errors() {
+        panic!("Failed to parse code for lint test, errors: {:?}", program.errors);
+    }
+
+    let resolver = NameResolver::new(&arena);
+    let resolved_names = resolver.resolve(program);
+
+    let mut settings = Settings::default();
+    if let Some(f) = settings_fn {
+        f(&mut settings);
+    }
+
+    let rule_code = R::meta().code;
+    let registry = RuleRegistry::build(&settings, Some(&[rule_code.to_string()]), true);
+
+    assert!(!registry.rules().is_empty(), "No rules loaded for code '{rule_code}'");
+
+    let linter = Linter::from_registry(&arena, Arc::new(registry), settings.php_version);
+    linter.lint(&file, program, &resolved_names)
+}
+
+/// Runs a lint test for a specific rule type.
+///
+/// This is the core testing function that all test macros use.
+///
+/// # Arguments
+///
+/// * `code` - The PHP code to lint
+/// * `filename` - Optional custom file name (defaults to "test.php")
+/// * `expected_count` - Expected number of issues:
+///   - `Some(0)` - Success test: code should produce no issues
+///   - `Some(n)` - Exact count test: code should produce exactly n issues
+///   - `None` - Failure test: code should produce at least one issue
+/// * `settings_fn` - Optional closure to customize settings before running the test
+///
+/// # Panics
+///
+/// Panics if:
+/// - The code fails to parse
+/// - The actual issue count doesn't match the expected count
+pub fn run_lint_test<R, F>(
+    code: &str,
+    filename: Option<&'static str>,
+    expected_count: Option<usize>,
+    settings_fn: Option<F>,
+) where
+    F: FnOnce(&mut Settings),
+    R: LintRule,
+{
+    let issues = collect_issues::<R, F>(code, filename, settings_fn);
+    let rule_code = R::meta().code;
+
+    match expected_count {
+        Some(0) => {
+            // Success test - should have no issues
+            assert!(
+                issues.is_empty(),
+                "Test failed for rule '{}': Expected code to NOT produce lint issues, but found {} issue(s):\n{:#?}",
+                rule_code,
+                issues.len(),
+                issues
+            );
+        }
+        Some(n) => {
+            // Exact count test
+            assert!(
+                issues.len() == n,
+                "Test failed for rule '{}': Expected {} issue(s), but found {} issue(s):\n{:#?}",
+                rule_code,
+                n,
+                issues.len(),
+                issues
+            );
+        }
+        None => {
+            // Failure test - should have at least one issue
+            assert!(
+                !issues.is_empty(),
+                "Test failed for rule '{rule_code}': Expected code to produce lint issues, but none were found."
+            );
+        }
+    }
+}
+
+/// Runs a lint fix test for a specific rule type.
+///
+/// Lints the given code, collects all text edits from the resulting issues,
+/// applies them, and asserts the result matches `expected_fixed`.
+///
+/// # Panics
+///
+/// Panics if:
+/// - The code fails to parse
+/// - No issues are produced
+/// - No edits are attached to any issue
+/// - The fixed output doesn't match `expected_fixed`
+pub fn run_lint_fix_test<R, F>(code: &str, filename: Option<&'static str>, expected_fixed: &str, settings_fn: Option<F>)
+where
+    F: FnOnce(&mut Settings),
+    R: LintRule,
+{
+    use mago_text_edit::TextEditor;
+
+    let mut issues = collect_issues::<R, F>(code, filename, settings_fn);
+    let rule_code = R::meta().code;
+
+    assert!(
+        !issues.is_empty(),
+        "Test failed for rule '{rule_code}': Expected code to produce lint issues, but none were found."
+    );
+
+    let mut editor = TextEditor::new(code.as_bytes());
+    let mut has_edits = false;
+    for (_, edits) in issues.take_edits() {
+        for edit in edits {
+            has_edits = true;
+            editor.apply(edit, None::<fn(&[u8]) -> bool>);
+        }
+    }
+
+    assert!(has_edits, "Test failed for rule '{rule_code}': Issues were produced but none had auto-fix edits.");
+
+    let fixed_bytes = editor.finish();
+    let fixed = String::from_utf8_lossy(&fixed_bytes);
+    assert_eq!(
+        fixed, expected_fixed,
+        "Test failed for rule '{rule_code}': Fixed output doesn't match expected.\n\nGot:\n{fixed}\n\nExpected:\n{expected_fixed}"
+    );
+}
+
+/// Test macro for code that should NOT produce lint issues.
+///
+/// # Examples
+///
+/// Basic usage:
+/// ```ignore
+/// test_lint_success! {
+///     name = json_decode_is_safe,
+///     rule = NoEvalRule,
+///     code = indoc! {r#"
+///         <?php
+///         $result = json_decode($data);
+///     "#}
+/// }
+/// ```
+///
+/// With custom settings:
+/// ```ignore
+/// test_lint_success! {
+///     name = wp_debug_is_fine,
+///     rule = NoIniSetRule,
+///     settings = |s| s.rules.no_ini_set.level = Level::Warning,
+///     code = indoc! {r#"
+///         <?php
+///         define('WP_DEBUG', true);
+///     "#}
+/// }
+/// ```
+#[macro_export]
+macro_rules! test_lint_success {
+    {
+        name = $test_name:ident,
+        rule = $rule:ty,
+        $(filename = $filename:expr,)?
+        settings = $settings:expr,
+        code = $code:expr $(,)?
+    } => {
+        #[test]
+        fn $test_name() {
+            $crate::rule::tests::run_lint_test::<$rule, _>(
+                $code,
+                None $(.or(Some($filename)))?,
+                Some(0),
+                Some($settings),
+            );
+        }
+    };
+    {
+        name = $test_name:ident,
+        rule = $rule:ty,
+        $(filename = $filename:expr,)?
+        code = $code:expr $(,)?
+    } => {
+        #[test]
+        fn $test_name() {
+            $crate::rule::tests::run_lint_test::<$rule, fn(&mut $crate::settings::Settings)>(
+                $code,
+                None $(.or(Some($filename)))?,
+                Some(0),
+                None,
+            );
+        }
+    };
+}
+
+/// Test macro for code that SHOULD produce lint issues.
+///
+/// # Examples
+///
+/// Basic usage - just check that code fails:
+/// ```ignore
+/// test_lint_failure! {
+///     name = eval_is_forbidden,
+///     rule = NoEvalRule,
+///     code = indoc! {r#"
+///         <?php
+///         eval($code);
+///     "#}
+/// }
+/// ```
+///
+/// With specific issue count:
+/// ```ignore
+/// test_lint_failure! {
+///     name = multiple_evals_detected,
+///     rule = NoEvalRule,
+///     count = 3,
+///     code = indoc! {r#"
+///         <?php
+///         eval($a);
+///         eval($b);
+///         eval($c);
+///     "#}
+/// }
+/// ```
+///
+/// With custom settings:
+/// ```ignore
+/// test_lint_failure! {
+///     name = eval_with_custom_level,
+///     rule = NoEvalRule,
+///     settings = |s| s.rules.no_eval.level = Level::Warning,
+///     code = indoc! {r#"
+///         <?php
+///         eval($code);
+///     "#}
+/// }
+/// ```
+///
+/// With both count and settings:
+/// ```ignore
+/// test_lint_failure! {
+///     name = multiple_evals_with_custom_settings,
+///     rule = NoEvalRule,
+///     count = 2,
+///     settings = |s| s.rules.no_eval.level = Level::Warning,
+///     code = indoc! {r#"
+///         <?php
+///         eval($a);
+///         eval($b);
+///     "#}
+/// }
+/// ```
+#[macro_export]
+macro_rules! test_lint_failure {
+    {
+        name = $test_name:ident,
+        rule = $rule:ty,
+        $(filename = $filename:expr,)?
+        $(count = $count:expr,)?
+        settings = $settings:expr,
+        code = $code:expr $(,)?
+    } => {
+        #[test]
+        fn $test_name() {
+            $crate::rule::tests::run_lint_test::<$rule, _>(
+                $code,
+                None $(.or(Some($filename)))?,
+                None $(.or(Some($count)))?,
+                Some($settings),
+            );
+        }
+    };
+    {
+        name = $test_name:ident,
+        rule = $rule:ty,
+        $(filename = $filename:expr,)?
+        $(count = $count:expr,)?
+        code = $code:expr $(,)?
+    } => {
+        #[test]
+        fn $test_name() {
+            $crate::rule::tests::run_lint_test::<$rule, fn(&mut $crate::settings::Settings)>(
+                $code,
+                None $(.or(Some($filename)))?,
+                None $(.or(Some($count)))?,
+                None,
+            );
+        }
+    };
+}
+
+/// Test macro for verifying auto-fix behavior of lint rules.
+///
+/// Lints the given `code`, applies all auto-fix edits from the resulting issues,
+/// and asserts the output matches `fixed`.
+///
+/// # Examples
+///
+/// Basic usage:
+/// ```ignore
+/// test_lint_fix! {
+///     name = alias_is_fixed,
+///     rule = NoAliasFunctionRule,
+///     code = indoc! {r#"
+///         <?php
+///         $x = join(",", $arr);
+///     "#},
+///     fixed = indoc! {r#"
+///         <?php
+///         $x = implode(",", $arr);
+///     "#}
+/// }
+/// ```
+///
+/// With custom settings:
+/// ```ignore
+/// test_lint_fix! {
+///     name = alias_fixed_with_settings,
+///     rule = NoAliasFunctionRule,
+///     settings = |s| s.rules.no_alias_function.level = Level::Warning,
+///     code = indoc! {r#"
+///         <?php
+///         $x = join(",", $arr);
+///     "#},
+///     fixed = indoc! {r#"
+///         <?php
+///         $x = implode(",", $arr);
+///     "#}
+/// }
+/// ```
+#[macro_export]
+macro_rules! test_lint_fix {
+    {
+        name = $test_name:ident,
+        rule = $rule:ty,
+        $(filename = $filename:expr,)?
+        settings = $settings:expr,
+        code = $code:expr,
+        fixed = $fixed:expr $(,)?
+    } => {
+        #[test]
+        fn $test_name() {
+            $crate::rule::tests::run_lint_fix_test::<$rule, _>(
+                $code,
+                None $(.or(Some($filename)))?,
+                $fixed,
+                Some($settings),
+            );
+        }
+    };
+    {
+        name = $test_name:ident,
+        rule = $rule:ty,
+        $(filename = $filename:expr,)?
+        code = $code:expr,
+        fixed = $fixed:expr $(,)?
+    } => {
+        #[test]
+        fn $test_name() {
+            $crate::rule::tests::run_lint_fix_test::<$rule, fn(&mut $crate::settings::Settings)>(
+                $code,
+                None $(.or(Some($filename)))?,
+                $fixed,
+                None,
+            );
+        }
+    };
+}

@@ -1,0 +1,551 @@
+use std::fmt;
+
+use foldhash::HashMap;
+use schemars::JsonSchema;
+#[cfg(feature = "serde")]
+use serde::de;
+#[cfg(feature = "serde")]
+use serde::de::Deserializer;
+#[cfg(feature = "serde")]
+use serde::de::MapAccess;
+#[cfg(feature = "serde")]
+use serde::de::Visitor;
+#[cfg(feature = "serde")]
+use serde::ser::SerializeStruct;
+#[cfg(feature = "serde")]
+use serde::ser::Serializer;
+
+#[cfg(feature = "serde")]
+use serde::Deserialize;
+
+use crate::path::NamespacePath;
+use crate::path::Path;
+use crate::path::SymbolSelector;
+#[cfg(feature = "serde")]
+use crate::path::is_valid_identifier_part;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct Settings {
+    pub mode: GuardMode,
+    pub perimeter: PerimeterSettings,
+    pub structural: StructuralSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct PerimeterSettings {
+    pub layers: HashMap<String, Vec<Path>>,
+    pub layering: Vec<NamespacePath>,
+    pub rules: Vec<PerimeterRule>,
+    /// Target-oriented dependency restrictions applied before ordinary perimeter rules.
+    pub restrictions: Vec<DependencyRestriction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
+pub struct PerimeterRule {
+    pub namespace: NamespacePath,
+    pub permit: Vec<PermittedDependency>,
+}
+
+/// Restricts where a dependency may or may not be used.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case", deny_unknown_fields))]
+pub struct DependencyRestriction {
+    /// The symbol, namespace, or pattern being restricted.
+    pub dependency: SymbolSelector,
+    /// Source namespace patterns from which the dependency may be used.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub allow_from: Vec<String>,
+    /// Source namespace patterns from which the dependency may not be used.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub deny_from: Vec<String>,
+    /// Optional dependency kinds to which this restriction applies. An empty list means all kinds.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub kinds: Vec<PermittedDependencyKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
+#[schemars(untagged)]
+pub enum PermittedDependency {
+    Dependency(Path),
+    DependencyOfKind { path: Path, kinds: Vec<PermittedDependencyKind> },
+}
+
+/// Represents the specific types of symbols allowed from a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+pub enum PermittedDependencyKind {
+    ClassLike,
+    Function,
+    Constant,
+    Attribute,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct StructuralSettings {
+    /// A list of structural rules to enforce across the codebase.
+    pub rules: Vec<StructuralRule>,
+}
+
+/// Represents a single structural enforcement rule from `[[guard.structural.rules]]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct StructuralRule {
+    /// The namespace pattern this rule applies to.
+    pub on: String,
+    /// An optional exclusion pattern; if the namespace matches this, the rule is skipped.
+    pub not_on: Option<String>,
+    /// The kind of symbol this policy applies to (e.g., "class").
+    pub target: Option<StructuralSymbolKind>,
+    /// Restricts the namespace to only contain the specified symbol kinds.
+    pub must_be: Option<Vec<StructuralSymbolKind>>,
+    /// Optional naming pattern the symbol's name must match.
+    pub must_be_named: Option<String>,
+    /// If true, the symbol must be declared `final`.
+    pub must_be_final: Option<bool>,
+    /// If true, the symbol must be declared `abstract`.
+    pub must_be_abstract: Option<bool>,
+    /// If true, the symbol must be declared `readonly`.
+    pub must_be_readonly: Option<bool>,
+    /// Structural implementation constraints.
+    pub must_implement: Option<StructuralInheritanceConstraint>,
+    /// Structural extension constraints.
+    pub must_extend: Option<StructuralInheritanceConstraint>,
+    /// Structural trait usage constraints.
+    pub must_use_trait: Option<StructuralInheritanceConstraint>,
+    /// Structural attribute usage constraints.
+    pub must_use_attribute: Option<StructuralInheritanceConstraint>,
+    /// The public methods that matched classes may declare. Private and protected methods are unrestricted.
+    pub only_public_methods: Option<Vec<String>>,
+    /// A human-readable reason for this rule.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+pub enum StructuralSymbolKind {
+    ClassLike,
+    Class,
+    Interface,
+    Trait,
+    Enum,
+    Constant,
+    Function,
+}
+
+/// Represents a logical constraint for `implement`, `extend`, or `use_traits`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
+#[schemars(untagged)]
+pub enum StructuralInheritanceConstraint {
+    /// An OR of ANDs, e.g., `[["A", "B"], ["C"]]`
+    AnyOfAllOf(Vec<Vec<String>>),
+    /// An AND group, e.g., `["A", "B"]`
+    AllOf(Vec<String>),
+    /// A single required item, e.g., `"A"`
+    Single(String),
+    /// `None` indicates the rule requires no constraints.
+    Nothing,
+}
+
+impl PermittedDependencyKind {
+    /// Returns the string representation of the symbol type.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            PermittedDependencyKind::ClassLike => "class-like",
+            PermittedDependencyKind::Function => "function",
+            PermittedDependencyKind::Constant => "constant",
+            PermittedDependencyKind::Attribute => "attribute",
+        }
+    }
+}
+
+impl StructuralSymbolKind {
+    #[must_use]
+    pub const fn is_constant(&self) -> bool {
+        matches!(self, StructuralSymbolKind::Constant)
+    }
+
+    /// Returns the string representation of the symbol kind.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            StructuralSymbolKind::ClassLike => "class-like",
+            StructuralSymbolKind::Class => "class",
+            StructuralSymbolKind::Interface => "interface",
+            StructuralSymbolKind::Trait => "trait",
+            StructuralSymbolKind::Enum => "enum",
+            StructuralSymbolKind::Constant => "constant",
+            StructuralSymbolKind::Function => "function",
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for PermittedDependency {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct AllowedPathVisitor;
+
+        impl<'de> Visitor<'de> for AllowedPathVisitor {
+            type Value = PermittedDependency;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a path string or a detailed object with path and types")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let path = Path::deserialize(de::value::StrDeserializer::new(value))?;
+                Ok(PermittedDependency::Dependency(path))
+            }
+
+            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                #[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+                struct DetailedHelper {
+                    path: Path,
+                    kinds: Vec<PermittedDependencyKind>,
+                }
+
+                let helper: DetailedHelper = Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))?;
+
+                Ok(PermittedDependency::DependencyOfKind { path: helper.path, kinds: helper.kinds })
+            }
+        }
+
+        deserializer.deserialize_any(AllowedPathVisitor)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for StructuralInheritanceConstraint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Helper enum to let serde handle the shape detection (string vs array vs array of arrays).
+        #[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+        #[cfg_attr(feature = "serde", serde(untagged))]
+        enum Untagged {
+            AnyOfAllOf(Vec<Vec<String>>),
+            AllOf(Vec<String>),
+            Single(String),
+        }
+
+        match Untagged::deserialize(deserializer)? {
+            Untagged::Single(s) => {
+                if s.eq_ignore_ascii_case("@nothing") {
+                    Ok(Self::Nothing)
+                } else if s.split('\\').all(is_valid_identifier_part) {
+                    Ok(Self::Single(s))
+                } else {
+                    Err(de::Error::custom(format!("Expected a valid fully qualified name or '@nothing', found '{s}'")))
+                }
+            }
+            Untagged::AllOf(items) => {
+                for item in &items {
+                    if !item.split('\\').all(is_valid_identifier_part) {
+                        return Err(de::Error::custom(format!("'{item}' is not a valid fully qualified name")));
+                    }
+                }
+
+                Ok(Self::AllOf(items))
+            }
+            Untagged::AnyOfAllOf(groups) => {
+                for group in &groups {
+                    for item in group {
+                        if !item.split('\\').all(is_valid_identifier_part) {
+                            return Err(de::Error::custom(format!("'{item}' is not a valid fully qualified name")));
+                        }
+                    }
+                }
+
+                Ok(Self::AnyOfAllOf(groups))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for PermittedDependency {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            PermittedDependency::Dependency(path) => path.serialize(serializer),
+            PermittedDependency::DependencyOfKind { path, kinds } => {
+                let mut state = serializer.serialize_struct("DependencyOfKind", 2)?;
+                state.serialize_field("path", path)?;
+                state.serialize_field("kinds", kinds)?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl fmt::Display for PermittedDependencyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl fmt::Display for StructuralInheritanceConstraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // "nothing"
+            Self::Nothing => write!(f, "<nothing>"),
+            // "`SomeInterface`"
+            Self::Single(item) => write!(f, "`{item}`"),
+            // "`InterfaceA` and `InterfaceB`"
+            Self::AllOf(items) => {
+                let formatted = items.iter().map(|item| format!("`{item}`")).collect::<Vec<_>>().join(" and ");
+                write!(f, "{formatted}")
+            }
+            // "(`InterfaceA` and `InterfaceB`) or `InterfaceC`"
+            Self::AnyOfAllOf(groups) => {
+                let formatted = groups
+                    .iter()
+                    .map(|group| {
+                        let inner = group.iter().map(|item| format!("`{item}`")).collect::<Vec<_>>().join(" and ");
+                        if group.len() > 1 { format!("({inner})") } else { inner }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                write!(f, "{formatted}")
+            }
+        }
+    }
+}
+
+impl fmt::Display for StructuralSymbolKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl PerimeterSettings {
+    /// Returns true if there are no perimeter rules, restrictions, or layering configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty() && self.restrictions.is_empty() && self.layering.is_empty()
+    }
+}
+
+impl StructuralSettings {
+    /// Returns true if there are no structural rules configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+}
+
+impl Settings {
+    /// Returns true if perimeter guard has configuration.
+    #[must_use]
+    pub fn has_perimeter_config(&self) -> bool {
+        !self.perimeter.is_empty()
+    }
+
+    /// Returns true if structural guard has configuration.
+    #[must_use]
+    pub fn has_structural_config(&self) -> bool {
+        !self.structural.is_empty()
+    }
+
+    /// Returns whether structural guard should run.
+    ///
+    /// - `None` - mode does not allow structural guard
+    /// - `Some(true)` - should run, configuration exists
+    /// - `Some(false)` - should run but no configuration
+    #[must_use]
+    pub fn should_run_structural(&self) -> Option<bool> {
+        if !self.mode.includes_structural() {
+            return None;
+        }
+
+        Some(self.has_structural_config())
+    }
+
+    /// Returns whether perimeter guard should run.
+    ///
+    /// - `None` - mode does not allow perimeter guard
+    /// - `Some(true)` - should run, configuration exists
+    /// - `Some(false)` - should run but no configuration
+    #[must_use]
+    pub fn should_run_perimeter(&self) -> Option<bool> {
+        if !self.mode.includes_perimeter() {
+            return None;
+        }
+
+        Some(self.has_perimeter_config())
+    }
+}
+
+/// Specifies which guard modes to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+pub enum GuardMode {
+    /// Run both structural and perimeter guards (default)
+    #[default]
+    Default,
+    /// Run only structural guard
+    Structural,
+    /// Run only perimeter guard
+    Perimeter,
+}
+
+impl GuardMode {
+    /// Returns true if the mode includes structural guard.
+    #[must_use]
+    pub const fn includes_structural(&self) -> bool {
+        matches!(self, GuardMode::Default | GuardMode::Structural)
+    }
+
+    /// Returns true if the mode includes perimeter guard.
+    #[must_use]
+    pub const fn includes_perimeter(&self) -> bool {
+        matches!(self, GuardMode::Default | GuardMode::Perimeter)
+    }
+
+    /// Returns the string representation of the guard mode.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            GuardMode::Default => "default",
+            GuardMode::Structural => "structural",
+            GuardMode::Perimeter => "perimeter",
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_structural_inheritance_constraint_display() {
+        let single = StructuralInheritanceConstraint::Single("SomeInterface".to_string());
+        assert_eq!(single.to_string(), "`SomeInterface`");
+
+        let all_of = StructuralInheritanceConstraint::AllOf(vec!["InterfaceA".to_string(), "InterfaceB".to_string()]);
+        assert_eq!(all_of.to_string(), "`InterfaceA` and `InterfaceB`");
+
+        let any_of_all_of = StructuralInheritanceConstraint::AnyOfAllOf(vec![
+            vec!["InterfaceA".to_string(), "InterfaceB".to_string()],
+            vec!["InterfaceC".to_string()],
+        ]);
+        assert_eq!(any_of_all_of.to_string(), "(`InterfaceA` and `InterfaceB`) or `InterfaceC`");
+
+        let none = StructuralInheritanceConstraint::Nothing;
+        assert_eq!(none.to_string(), "<nothing>");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn deserializes_dependency_restrictions_and_public_method_allowlists() {
+        let toml = r#"
+            [[perimeter.restrictions]]
+            dependency = "App\\Http\\Controllers\\Controller"
+            allow-from = ["App\\Http\\Controllers\\"]
+            kinds = ["class-like"]
+
+            [[structural.rules]]
+            on = "App\\Http\\Controllers\\**"
+            target = "class"
+            only-public-methods = ["__construct", "__invoke"]
+        "#;
+
+        let settings: Settings = toml::from_str(toml).unwrap();
+        let restriction = &settings.perimeter.restrictions[0];
+        assert_eq!(restriction.dependency, SymbolSelector::Symbol("App\\Http\\Controllers\\Controller".to_string()));
+        assert_eq!(restriction.allow_from, ["App\\Http\\Controllers\\"]);
+        assert_eq!(restriction.kinds, [PermittedDependencyKind::ClassLike]);
+        assert_eq!(
+            settings.structural.rules[0].only_public_methods,
+            Some(vec!["__construct".to_string(), "__invoke".to_string()])
+        );
+    }
+
+    #[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+    struct Wrapper {
+        constraint: StructuralInheritanceConstraint,
+    }
+
+    #[test]
+    fn it_deserializes_none_keyword() {
+        let toml = r#"constraint = "@nothing""#;
+        let wrapped: Wrapper = toml::from_str(toml).unwrap();
+        assert_eq!(wrapped.constraint, StructuralInheritanceConstraint::Nothing);
+    }
+
+    #[test]
+    fn it_deserializes_valid_single_string() {
+        let toml = r#"constraint = "App\\Domain\\MyInterface""#;
+        let wrapped: Wrapper = toml::from_str(toml).unwrap();
+        assert_eq!(wrapped.constraint, StructuralInheritanceConstraint::Single("App\\Domain\\MyInterface".to_string()));
+    }
+
+    #[test]
+    fn it_deserializes_valid_array_of_strings() {
+        let toml = r#"constraint = ["App\\InterfaceA", "App\\InterfaceB"]"#;
+        let wrapped: Wrapper = toml::from_str(toml).unwrap();
+        assert_eq!(
+            wrapped.constraint,
+            StructuralInheritanceConstraint::AllOf(vec!["App\\InterfaceA".to_string(), "App\\InterfaceB".to_string()])
+        );
+    }
+
+    #[test]
+    fn it_deserializes_valid_array_of_arrays() {
+        let toml = r#"constraint = [["App\\A", "App\\B"], ["App\\C"]]"#;
+        let wrapped: Wrapper = toml::from_str(toml).unwrap();
+        assert_eq!(
+            wrapped.constraint,
+            StructuralInheritanceConstraint::AnyOfAllOf(vec![
+                vec!["App\\A".to_string(), "App\\B".to_string()],
+                vec!["App\\C".to_string()]
+            ])
+        );
+    }
+
+    #[test]
+    fn it_fails_on_invalid_identifier_in_single_string() {
+        let toml = r#"constraint = "Invalid-Interface""#;
+        assert!(toml::from_str::<Wrapper>(toml).is_err());
+    }
+
+    #[test]
+    fn it_fails_on_invalid_identifier_in_array() {
+        let toml = r#"constraint = ["App\\InterfaceA", "Invalid-Interface"]"#;
+        assert!(toml::from_str::<Wrapper>(toml).is_err());
+    }
+
+    #[test]
+    fn it_fails_on_invalid_identifier_in_nested_array() {
+        let toml = r#"constraint = [["App\\A", "Invalid-B"], ["App\\C"]]"#;
+        assert!(toml::from_str::<Wrapper>(toml).is_err());
+    }
+}

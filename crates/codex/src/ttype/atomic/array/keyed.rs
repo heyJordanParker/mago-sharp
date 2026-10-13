@@ -1,0 +1,355 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use mago_word::Word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::atomic::array::key::ArrayKey;
+use crate::ttype::union::TUnion;
+
+/// Metadata for a PHP array analyzed as a keyed array (map/dictionary-like).
+///
+/// Corresponds to `array<TKey, TValue>` or `array{'key': TVal, 1: TVal2 ...}` shape.
+#[allow(clippy::derived_hash_with_manual_eq)]
+#[derive(Debug, Clone, Eq, Hash, PartialOrd, Ord, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TKeyedArray {
+    /// Specific types known for certain keys (`ArrayKey`). The bool indicates if the element is optional.
+    pub known_items: Option<BTreeMap<ArrayKey, (bool, TUnion)>>,
+    /// The general key and value types (`TKey`, `TValue` in `array<TKey, TValue>`).
+    /// `None` if only `known_items` are present or types are unknown/mixed.
+    pub parameters: Option<(Arc<TUnion>, Arc<TUnion>)>,
+    /// Flag indicating if the array is known to contain at least one element.
+    pub non_empty: bool,
+    /// Flag indicating if the array is known not to be a list.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub known_non_list: bool,
+}
+
+impl PartialEq for TKeyedArray {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        if std::ptr::eq(self, other) {
+            return true;
+        }
+
+        if self.non_empty != other.non_empty || self.known_non_list != other.known_non_list {
+            return false;
+        }
+
+        if !params_eq(self.parameters.as_ref(), other.parameters.as_ref()) {
+            return false;
+        }
+
+        self.known_items == other.known_items
+    }
+}
+
+#[inline]
+fn params_eq(a: Option<&(Arc<TUnion>, Arc<TUnion>)>, b: Option<&(Arc<TUnion>, Arc<TUnion>)>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some((ak, av)), Some((bk, bv))) => {
+            (Arc::ptr_eq(ak, bk) || **ak == **bk) && (Arc::ptr_eq(av, bv) || **av == **bv)
+        }
+        _ => false,
+    }
+}
+
+impl TKeyedArray {
+    /// Creates new metadata for a keyed array, initially with no known items or generic parameters.
+    /// Non-empty is false by default.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates new metadata for a keyed array with specified generic key and value types.
+    #[inline]
+    #[must_use]
+    pub fn new_with_parameters(key_type: Arc<TUnion>, value_type: Arc<TUnion>) -> Self {
+        Self { known_items: None, parameters: Some((key_type, value_type)), non_empty: false, known_non_list: false }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn with_known_items(self, known_items: BTreeMap<ArrayKey, (bool, TUnion)>) -> Self {
+        Self { known_items: Some(known_items), ..self }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn with_parameters(self, key_type: Arc<TUnion>, value_type: Arc<TUnion>) -> Self {
+        Self { parameters: Some((key_type, value_type)), ..self }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn with_non_empty(self, non_empty: bool) -> Self {
+        Self { non_empty, ..self }
+    }
+
+    /// Returns a reference to the map of known item types by key, if any.
+    #[inline]
+    #[must_use]
+    pub fn get_known_items(&self) -> Option<&BTreeMap<ArrayKey, (bool, TUnion)>> {
+        self.known_items.as_ref()
+    }
+
+    /// Returns the generic key and value types (`(&TKey, &TValue)`), if specified.
+    #[inline]
+    #[must_use]
+    pub fn get_generic_parameters(&self) -> Option<(&TUnion, &TUnion)> {
+        self.parameters.as_ref().map(|(k, v)| (&**k, &**v))
+    }
+
+    /// Return a reference to the generic key type, if specified.
+    #[inline]
+    #[must_use]
+    pub fn get_key_type(&self) -> Option<&TUnion> {
+        self.parameters.as_ref().map(|(k, _)| &**k)
+    }
+
+    /// Return a reference to the generic value type, if specified.
+    #[inline]
+    #[must_use]
+    pub fn get_value_type(&self) -> Option<&TUnion> {
+        self.parameters.as_ref().map(|(_, v)| &**v)
+    }
+
+    /// Checks if the array is known to be non-empty.
+    #[inline]
+    #[must_use]
+    pub const fn is_non_empty(&self) -> bool {
+        self.non_empty
+    }
+
+    /// Checks if there are any known specific item types defined.
+    #[inline]
+    #[must_use]
+    pub fn has_known_items(&self) -> bool {
+        self.known_items.as_ref().is_some_and(|elements| !elements.is_empty())
+    }
+
+    /// Returns a new `TKeyedArray` with the specified non-empty flag.
+    #[inline]
+    #[must_use]
+    pub fn as_non_empty_array(&self, non_empty: bool) -> Self {
+        Self { non_empty, ..self.clone() }
+    }
+
+    /// Returns `true` if this array is known to have exclusively string keys.
+    ///
+    /// Checks both generic parameters and known items. Returns `false` for
+    /// arrays with no key information at all (empty untyped arrays).
+    #[must_use]
+    pub fn has_exclusively_string_keys(&self) -> bool {
+        let has_key_info = self.parameters.is_some() || self.known_items.as_ref().is_some_and(|i| !i.is_empty());
+
+        has_key_info
+            && self.parameters.as_ref().is_none_or(|(k, _)| k.is_any_string())
+            && self.known_items.as_ref().is_none_or(|i| i.keys().all(|k| matches!(k, ArrayKey::String(_))))
+    }
+}
+
+impl TType for TKeyedArray {
+    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        let mut children = vec![];
+        if let Some(known_items) = self.known_items.as_ref() {
+            for (_, item_type) in known_items.values() {
+                children.push(TypeRef::Union(item_type));
+            }
+        }
+
+        if let Some(parameters) = self.get_generic_parameters() {
+            children.push(TypeRef::Union(parameters.0));
+            children.push(TypeRef::Union(parameters.1));
+        }
+
+        children
+    }
+
+    fn needs_population(&self) -> bool {
+        if let Some(known_items) = &self.known_items
+            && known_items.iter().any(|(_, (_, item_type))| item_type.needs_population())
+        {
+            return true;
+        }
+
+        if let Some(parameters) = &self.parameters {
+            return parameters.0.needs_population() || parameters.1.needs_population();
+        }
+
+        false
+    }
+
+    fn is_expandable(&self) -> bool {
+        if let Some(known_items) = &self.known_items
+            && known_items.iter().any(|(key, (_, item_type))| {
+                if let ArrayKey::ClassLikeConstant { .. } = key {
+                    return true;
+                }
+
+                item_type.is_expandable()
+            })
+        {
+            return true;
+        }
+
+        if let Some(parameters) = &self.parameters {
+            return parameters.0.is_expandable() || parameters.1.is_expandable();
+        }
+
+        false
+    }
+
+    fn is_complex(&self) -> bool {
+        if let Some(known_items) = &self.known_items
+            && !known_items.is_empty()
+        {
+            return true;
+        }
+
+        if let Some(parameters) = &self.parameters {
+            return parameters.0.is_complex() || parameters.1.is_complex();
+        }
+
+        false
+    }
+
+    fn get_id(&self) -> Word {
+        if let Some(items) = &self.known_items {
+            let mut buf: Vec<u8> = Vec::new();
+            buf.extend_from_slice(b"array{");
+            let mut first = true;
+            for (key, (indefinite, item_type)) in items {
+                if first {
+                    first = false;
+                } else {
+                    buf.extend_from_slice(b", ");
+                }
+
+                buf.extend_from_slice(key.id_word().as_bytes());
+                if *indefinite {
+                    buf.extend_from_slice(b"?");
+                }
+
+                buf.extend_from_slice(b": ");
+                buf.extend_from_slice(item_type.get_id().as_bytes());
+            }
+
+            if let Some((key_type, value_type)) = &self.parameters {
+                if !first {
+                    buf.extend_from_slice(b", ");
+                }
+
+                buf.extend_from_slice(b"...");
+                if !key_type.is_array_key() || !value_type.is_mixed() {
+                    buf.extend_from_slice(b"<");
+                    buf.extend_from_slice(key_type.get_id().as_bytes());
+                    buf.extend_from_slice(b", ");
+                    buf.extend_from_slice(value_type.get_id().as_bytes());
+                    buf.extend_from_slice(b">");
+                }
+            }
+
+            buf.extend_from_slice(b"}");
+
+            word(&buf)
+        } else if let Some((key_type, value_type)) = &self.parameters {
+            concat_word!(
+                if self.is_non_empty() { b"non-empty-array".as_slice() } else { b"array".as_slice() },
+                b"<",
+                key_type.get_id(),
+                b", ",
+                value_type.get_id(),
+                b">",
+            )
+        } else {
+            word(b"array{}")
+        }
+    }
+
+    fn get_pretty_id_with_indent(&self, indent: usize) -> Word {
+        if let Some(items) = &self.known_items {
+            if items.is_empty() && self.parameters.is_none() {
+                return word(b"array{}");
+            }
+
+            let mut buf: Vec<u8> = Vec::new();
+            buf.extend_from_slice(b"array{\n");
+            let item_indent = indent + 2;
+
+            for (key, (indefinite, item_type)) in items {
+                buf.resize(buf.len() + item_indent, b' ');
+                buf.extend_from_slice(key.id_word().as_bytes());
+                if *indefinite {
+                    buf.push(b'?');
+                }
+                buf.extend_from_slice(b": ");
+                buf.extend_from_slice(item_type.get_pretty_id_with_indent(item_indent).as_bytes());
+                buf.extend_from_slice(b",\n");
+            }
+
+            if let Some((key_type, value_type)) = &self.parameters {
+                buf.resize(buf.len() + item_indent, b' ');
+                buf.extend_from_slice(b"...");
+                if !key_type.is_array_key() || !value_type.is_mixed() {
+                    if key_type.is_complex() || value_type.is_complex() {
+                        buf.extend_from_slice(b"<\n");
+                        buf.resize(buf.len() + item_indent + 2, b' ');
+                        buf.extend_from_slice(key_type.get_pretty_id_with_indent(item_indent + 2).as_bytes());
+                        buf.extend_from_slice(b",\n");
+                        buf.resize(buf.len() + item_indent + 2, b' ');
+                        buf.extend_from_slice(value_type.get_pretty_id_with_indent(item_indent + 2).as_bytes());
+                        buf.extend_from_slice(b",\n");
+                        buf.resize(buf.len() + item_indent, b' ');
+                        buf.push(b'>');
+                    } else {
+                        buf.push(b'<');
+                        buf.extend_from_slice(key_type.get_pretty_id_with_indent(item_indent).as_bytes());
+                        buf.extend_from_slice(b", ");
+                        buf.extend_from_slice(value_type.get_pretty_id_with_indent(item_indent).as_bytes());
+                        buf.push(b'>');
+                    }
+                }
+                buf.extend_from_slice(b",\n");
+            }
+
+            buf.resize(buf.len() + indent, b' ');
+            buf.push(b'}');
+
+            word(&buf)
+        } else if let Some((key_type, value_type)) = &self.parameters {
+            if key_type.is_complex() || value_type.is_complex() {
+                let mut buf: Vec<u8> = Vec::new();
+                buf.extend_from_slice(if self.is_non_empty() { b"non-empty-array" } else { b"array" });
+                buf.extend_from_slice(b"<\n");
+                buf.resize(buf.len() + indent + 2, b' ');
+                buf.extend_from_slice(key_type.get_pretty_id_with_indent(indent + 2).as_bytes());
+                buf.extend_from_slice(b",\n");
+                buf.resize(buf.len() + indent + 2, b' ');
+                buf.extend_from_slice(value_type.get_pretty_id_with_indent(indent + 2).as_bytes());
+                buf.extend_from_slice(b",\n");
+                buf.resize(buf.len() + indent, b' ');
+                buf.push(b'>');
+                word(&buf)
+            } else {
+                concat_word!(
+                    if self.is_non_empty() { b"non-empty-array".as_slice() } else { b"array".as_slice() },
+                    b"<",
+                    key_type.get_pretty_id_with_indent(indent),
+                    b", ",
+                    value_type.get_pretty_id_with_indent(indent),
+                    b">",
+                )
+            }
+        } else {
+            word(b"array{}")
+        }
+    }
+}

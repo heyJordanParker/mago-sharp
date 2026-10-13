@@ -1,0 +1,40 @@
+[files]
+extend-exclude = [
+    ".git/",
+    "crates/formatter/tests/",
+    "crates/codex/tests/",
+    "crates/analyzer/tests/cases/",
+    "crates/twig-syntax/tests/fixtures/",
+    "crates/twig-syntax/fuzz/seeds/",
+    "crates/prelude/assets/extensions",
+    "docs/",
+]
+ignore-hidden = false
+
+[default]
+extend-ignore-re = [
+    # Typo in cruet
+    "has_seperator: false",
+    '"k" \. "nown"',
+    '"abd00?"\.to_string',
+    "<<<FOF",
+    "FOF;",
+    '"nd",',
+    'GTI',
+    'ND'
+]
+
+[default.extend-words]
+"trivias" = "trivias"
+"invokable" = "invokable"
+"encrypter" = "encrypter"
+"consts" = "consts"
+"writeable" = "writeable"
+"caf" = "caf"
+
+[default.extend-identifiers]
+# Lean's name for the constant that holds a theorem.
+"thmInfo" = "thmInfo"
+
+[type.rust.extend-identifiers]
+"thr" = "thr"

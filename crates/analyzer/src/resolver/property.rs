@@ -1,0 +1,1927 @@
+use foldhash::HashMap;
+use indexmap::IndexMap;
+use mago_allocator::Arena;
+use mago_bytes::trim_start_byte;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::property::PropertyMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
+use mago_codex::misc::GenericParent;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::expander;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::inferred_type_replacer;
+use mago_codex::ttype::union::TUnion;
+use mago_names::ResolvedNames;
+use mago_names::display_sharp_member;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
+use mago_text_edit::TextEdit;
+use mago_word::Word;
+use mago_word::ascii_lowercase_word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
+use crate::external::PropertyAccessKind;
+use crate::resolver::class_name::report_non_existent_class_like;
+use crate::resolver::method::run_forwarded_methods;
+use crate::resolver::selector::resolve_member_selector;
+use crate::utils::expression::analyze_member_object;
+use crate::utils::expression::is_this;
+use crate::utils::names::display_atomic;
+use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_member;
+use crate::utils::names::display_type;
+use crate::utils::template::get_template_types_for_class_member;
+use crate::visibility::check_method_visibility;
+use crate::visibility::check_resolved_property_read_visibility;
+use crate::visibility::check_resolved_property_write_visibility;
+use crate::visibility::effective_write_visibility;
+use crate::visibility::is_visible_from_scope;
+
+/// Represents a successfully resolved instance property.
+#[derive(Debug)]
+pub struct ResolvedProperty {
+    pub property_name: Word,
+    pub declaring_class_id: Option<Word>,
+    pub property_span: Option<Span>,
+    pub property_type: TUnion,
+    pub is_magic: bool,
+    /// When resolved for assignment and writes diverge from reads, the type a read produces
+    /// regardless of the written value: the `@property-read` type of a magic property (reads go
+    /// through `__get`) or the declared type of a hook property with a `set` parameter (reads go
+    /// through `get`). `property_type` here is the (possibly wider) write type — the `@property-write`
+    /// type or the `set` parameter type — so a written value that is not assignable to `read_type`
+    /// does not survive a read; memoization clamps to `read_type` in that case. `None` for reads
+    /// and for real/dynamic properties, whose writes round-trip (`property_type` is the read type).
+    pub read_type: Option<TUnion>,
+}
+
+/// Holds the results of a property resolution attempt.
+#[derive(Debug, Default)]
+pub struct PropertyResolutionResult {
+    pub properties: Vec<ResolvedProperty>,
+    pub has_ambiguous_path: bool,
+    pub has_error_path: bool,
+    pub has_invalid_path: bool,
+    pub encountered_null: bool,
+    pub encountered_mixed: bool,
+    pub has_possibly_defined_property: bool,
+    /// True when a successfully written extension property cannot subsequently be read.
+    pub has_unreadable_property: bool,
+    /// True if all resolved properties are non-nullable.
+    /// When combined with `encountered_null` and nullsafe access, indicates
+    /// the null in the result type came ONLY from nullsafe short-circuit.
+    pub all_properties_non_nullable: bool,
+}
+
+/// Resolves all possible instance properties from an object expression and a member selector.
+pub fn resolve_instance_properties<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    object_expression: &'ast Expression<'arena>,
+    property_selector: &'ast ClassLikeMemberSelector<'arena>,
+    operator_span: Span,
+    is_null_safe: bool,
+    for_assignment: bool,
+) -> Result<PropertyResolutionResult, AnalysisError>
+where
+    A: Arena,
+{
+    let mut result = PropertyResolutionResult::default();
+
+    analyze_member_object(context, block_context, artifacts, object_expression, is_null_safe)?;
+
+    let selectors = resolve_member_selector(context, block_context, artifacts, property_selector, true)?;
+
+    let Some(object_type) = artifacts.get_rc_expression_type(object_expression).cloned() else {
+        return Ok(result);
+    };
+
+    let is_all_null = object_type.is_null() || object_type.is_void();
+
+    if is_null_safe && !for_assignment {
+        check_redundant_nullsafe(context, operator_span, object_expression, &object_type);
+    }
+
+    let mut property_names = Vec::new();
+    for selector in selectors {
+        if selector.is_dynamic() {
+            result.has_ambiguous_path = true;
+        }
+
+        if let Some(name) = selector.name() {
+            property_names.push(concat_word!("$", &name));
+        } else {
+            result.has_invalid_path = true;
+        }
+    }
+
+    let mut object_atomics = object_type.types.iter().collect::<Vec<_>>();
+    while let Some(object_atomic) = object_atomics.pop() {
+        if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
+            object_atomics.extend(constraint.types.iter());
+
+            continue;
+        }
+
+        if matches!(object_atomic, TAtomic::Error) {
+            continue;
+        }
+
+        if object_atomic.is_null() || object_atomic.is_void() {
+            result.encountered_null = true;
+
+            if !is_null_safe && !object_type.has_nullsafe_null() {
+                report_access_on_null(
+                    context,
+                    block_context,
+                    object_expression.span(),
+                    operator_span,
+                    is_all_null,
+                    object_atomic.is_void(),
+                );
+            }
+
+            continue;
+        }
+
+        let closure_object;
+        let object = match object_atomic {
+            TAtomic::Object(object) => object,
+            TAtomic::Callable(callable) if callable.is_closure() => {
+                closure_object = TObject::new_named(word("Closure"));
+                &closure_object
+            }
+            _ => {
+                result.has_invalid_path = true;
+                if object_type.is_mixed() {
+                    result.encountered_mixed = true;
+                }
+
+                if !block_context.flags.inside_isset() || !object_atomic.is_mixed() {
+                    report_access_on_non_object(context, object_atomic, property_selector, object_expression.span());
+                }
+
+                continue;
+            }
+        };
+
+        let classname = match object {
+            TObject::Any => {
+                result.has_ambiguous_path = true;
+
+                if !block_context.flags.inside_isset() {
+                    let object_type = display_atomic(context, object_atomic);
+                    report_ambiguous_access(context, property_selector, object_expression.span(), &object_type);
+                }
+
+                continue;
+            }
+            TObject::HasMethod(has_method) => {
+                let all_properties_match = property_names.iter().all(|prop_name| {
+                    let prop_name_without_dollar = word(trim_start_byte(prop_name.as_bytes(), b'$'));
+                    type_has_property_assertion(has_method.intersection_types.as_deref(), prop_name_without_dollar)
+                });
+
+                if all_properties_match {
+                    for prop_name in &property_names {
+                        result.properties.push(ResolvedProperty {
+                            property_span: None,
+                            property_name: *prop_name,
+                            declaring_class_id: None,
+                            property_type: get_mixed(),
+                            is_magic: false,
+                            read_type: None,
+                        });
+                    }
+                } else {
+                    result.has_ambiguous_path = true;
+                    if !block_context.flags.inside_isset() {
+                        let object_type = display_type(context, &object_type);
+                        report_ambiguous_access(context, property_selector, object_expression.span(), &object_type);
+                    }
+                }
+
+                continue;
+            }
+            TObject::HasProperty(has_property) => {
+                let all_properties_match = property_names.iter().all(|prop_name| {
+                    let prop_name_without_dollar = word(trim_start_byte(prop_name.as_bytes(), b'$'));
+                    has_property.has_property(prop_name_without_dollar)
+                        || type_has_property_assertion(
+                            has_property.intersection_types.as_deref(),
+                            prop_name_without_dollar,
+                        )
+                });
+
+                if all_properties_match {
+                    for prop_name in &property_names {
+                        result.properties.push(ResolvedProperty {
+                            property_span: None,
+                            property_name: *prop_name,
+                            declaring_class_id: None,
+                            property_type: get_mixed(),
+                            is_magic: false,
+                            read_type: None,
+                        });
+                    }
+                } else {
+                    result.has_ambiguous_path = true;
+                    if !block_context.flags.inside_isset() {
+                        let object_type = display_type(context, &object_type);
+                        report_ambiguous_access(context, property_selector, object_expression.span(), &object_type);
+                    }
+                }
+
+                continue;
+            }
+            TObject::WithProperties(object) => {
+                for prop_name in &property_names {
+                    let key = word(trim_start_byte(prop_name.as_bytes(), b'$'));
+                    let Some((_, value)) = object.known_properties.get_key_value(&key) else {
+                        if object.sealed {
+                            result.has_invalid_path = true;
+
+                            report_non_existent_property(
+                                context,
+                                object_type.get_id(),
+                                *prop_name,
+                                property_selector.span(),
+                                object_expression.span(),
+                                true,
+                            );
+
+                            continue;
+                        }
+
+                        result.has_ambiguous_path = true;
+
+                        if !block_context.flags.inside_isset() {
+                            let object_type = display_type(context, &object_type);
+                            report_ambiguous_access(context, property_selector, object_expression.span(), &object_type);
+                        }
+
+                        continue;
+                    };
+
+                    let is_optional = value.0;
+                    let mut property_type = value.1.clone();
+
+                    if is_optional {
+                        if !block_context.flags.inside_isset() {
+                            report_possibly_non_existent_property(
+                                context,
+                                &object_type,
+                                *prop_name,
+                                property_selector.span(),
+                                object_expression.span(),
+                            );
+                        }
+
+                        property_type = property_type.as_nullable();
+                    }
+
+                    let resolved_property = ResolvedProperty {
+                        property_span: None,
+                        property_name: *prop_name,
+                        declaring_class_id: None,
+                        property_type,
+                        is_magic: false,
+                        read_type: None,
+                    };
+
+                    result.properties.push(resolved_property);
+                }
+
+                continue;
+            }
+            TObject::Named(named_object) => named_object.get_name(),
+            TObject::Enum(r#enum) => r#enum.get_name(),
+        };
+
+        let magic_method_name = if for_assignment { "__set" } else { "__get" };
+        let mut magic_method_identifier = MethodIdentifier::new(classname, word(magic_method_name));
+        magic_method_identifier = context.codebase.get_declaring_method_identifier(&magic_method_identifier);
+        let magic_method = context.codebase.get_method_by_id(&magic_method_identifier);
+
+        for prop_name in &property_names {
+            if let TObject::Enum(enum_type) = object
+                && let Some(resolved) = resolve_enum_builtin_property(context, enum_type, *prop_name)
+            {
+                result.properties.push(resolved);
+                continue;
+            }
+
+            let resolved_property = match resolve_external_property(
+                context,
+                classname,
+                *prop_name,
+                property_selector.span(),
+                object,
+                for_assignment,
+                &mut result,
+            )? {
+                Some(ExternalPropertyResolution::Resolved(property)) => Some(property),
+                Some(ExternalPropertyResolution::Invalid) => None,
+                None => find_property_in_class(
+                    context,
+                    block_context,
+                    artifacts,
+                    classname,
+                    *prop_name,
+                    property_selector,
+                    object_expression,
+                    object,
+                    operator_span,
+                    for_assignment,
+                    &mut result,
+                    magic_method.is_some(),
+                ),
+            };
+
+            let Some(resolved_property) = resolved_property else {
+                result.has_invalid_path = true;
+
+                continue;
+            };
+
+            if resolved_property.is_magic {
+                if magic_method.is_none() {
+                    report_magic_property_without_get_set_method(
+                        context,
+                        object_expression.span(),
+                        property_selector.span(),
+                        classname,
+                        *prop_name,
+                        for_assignment,
+                    );
+                }
+
+                artifacts
+                    .symbol_references
+                    .add_reference_for_method_call(&block_context.scope, &magic_method_identifier);
+            }
+
+            if let Some(declaring_class_id) = resolved_property.declaring_class_id {
+                if for_assignment {
+                    artifacts.symbol_references.add_reference_for_property_write(
+                        &block_context.scope,
+                        declaring_class_id,
+                        resolved_property.property_name,
+                    );
+                } else {
+                    artifacts.symbol_references.add_reference_for_property_read(
+                        &block_context.scope,
+                        declaring_class_id,
+                        resolved_property.property_name,
+                    );
+                }
+            }
+
+            result.properties.push(resolved_property);
+        }
+    }
+
+    result.all_properties_non_nullable =
+        !result.properties.is_empty() && result.properties.iter().all(|p| !p.property_type.is_nullable());
+
+    Ok(result)
+}
+
+enum ExternalPropertyResolution {
+    Resolved(ResolvedProperty),
+    Invalid,
+}
+
+fn resolve_external_property<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    property: Word,
+    span: Span,
+    object: &TObject,
+    for_assignment: bool,
+    result: &mut PropertyResolutionResult,
+) -> Result<Option<ExternalPropertyResolution>, AnalysisError>
+where
+    A: Arena,
+{
+    if context.external_analysis_session.is_none() || !context.plugin_registry.may_have_property_type_provider() {
+        return Ok(None);
+    }
+
+    let property_without_dollar = trim_start_byte(property.as_bytes(), b'$');
+    let receiver_type = TUnion::from_atomic(TAtomic::Object(object.clone()));
+    let Some(effective) = context.plugin_registry.get_property_type(
+        context.codebase,
+        class.as_bytes(),
+        property_without_dollar,
+        if for_assignment { PropertyAccessKind::Write } else { PropertyAccessKind::Read },
+        &receiver_type,
+        span,
+        context.external_analysis_session,
+    ) else {
+        return Ok(None);
+    };
+
+    if for_assignment {
+        let Some(write_type) = effective.write_type else {
+            report_external_invalid_property_access(context, class, property, span, true);
+            result.has_error_path = true;
+            return Ok(Some(ExternalPropertyResolution::Invalid));
+        };
+
+        result.has_unreadable_property |= effective.read_type.is_none();
+        return Ok(Some(ExternalPropertyResolution::Resolved(ResolvedProperty {
+            property_name: property,
+            declaring_class_id: None,
+            property_span: None,
+            property_type: write_type,
+            is_magic: true,
+            read_type: effective.read_type,
+        })));
+    }
+
+    let Some(read_type) = effective.read_type else {
+        report_external_invalid_property_access(context, class, property, span, false);
+        result.has_error_path = true;
+        return Ok(Some(ExternalPropertyResolution::Invalid));
+    };
+
+    Ok(Some(ExternalPropertyResolution::Resolved(ResolvedProperty {
+        property_name: property,
+        declaring_class_id: None,
+        property_span: None,
+        property_type: read_type,
+        is_magic: true,
+        read_type: None,
+    })))
+}
+
+fn report_external_invalid_property_access<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    property: Word,
+    span: Span,
+    for_assignment: bool,
+) where
+    A: Arena,
+{
+    let class = context.codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+    let property = display_member(context, class, property);
+    let (code, action, direction) = if for_assignment {
+        (IssueCode::InvalidPropertyWrite, "write to", "read-only")
+    } else {
+        (IssueCode::InvalidPropertyRead, "read from", "write-only")
+    };
+    context.collector.report_with_code(
+        code,
+        Issue::error(format!("Cannot {action} extension-provided {direction} property `{property}`."))
+            .with_annotation(Annotation::primary(span).with_message(format!("This property is {direction}"))),
+    );
+}
+
+/// Resolves built-in enum properties (`name` and `value`) with literal types.
+///
+/// For a specific enum case like `Foo::Bar`, returns the literal type:
+/// - `name` returns `string('Bar')`
+/// - `value` returns `string('bar')` or `int(123)` for backed enums
+///
+/// For a general enum type like `Color $c`, returns a union of all case literals:
+/// - `name` returns `'Red'|'Green'|'Blue'`
+/// - `value` returns `'red'|'green'|'blue'`
+fn resolve_enum_builtin_property<A>(
+    context: &Context<'_, '_, A>,
+    enum_type: &TEnum,
+    prop_name: Word,
+) -> Option<ResolvedProperty>
+where
+    A: Arena,
+{
+    let prop_str = trim_start_byte(prop_name.as_bytes(), b'$');
+    if prop_str != b"name" && prop_str != b"value" {
+        return None;
+    }
+
+    let class_metadata = context.codebase.get_class_like(enum_type.name.as_bytes())?;
+
+    // Determine which cases to process: Either it's a specific case, or all cases
+    let cases: Vec<_> = if let Some(case_name) = enum_type.case {
+        class_metadata.enum_cases.get(&case_name).into_iter().collect()
+    } else {
+        class_metadata.enum_cases.values().collect()
+    };
+
+    if prop_str == b"name" {
+        let name_types: Vec<TAtomic> =
+            cases.iter().map(|case| TAtomic::Scalar(TScalar::literal_string(case.name))).collect();
+
+        if name_types.is_empty() {
+            return None;
+        }
+
+        Some(ResolvedProperty {
+            property_span: None,
+            property_name: prop_name,
+            declaring_class_id: Some(word(b"UnitEnum")),
+            property_type: TUnion::from_vec(name_types),
+            is_magic: false,
+            read_type: None,
+        })
+    } else if prop_str == b"value" {
+        let value_types: Vec<TAtomic> = cases.iter().filter_map(|case| case.value_type.clone()).collect();
+
+        if value_types.is_empty() {
+            // Unit enum - value property doesn't exist, fall through to normal resolution
+            // which will report an appropriate error
+            return None;
+        }
+
+        Some(ResolvedProperty {
+            property_span: None,
+            property_name: prop_name,
+            declaring_class_id: Some(word(b"BackedEnum")),
+            property_type: TUnion::from_vec(value_types),
+            is_magic: false,
+            read_type: None,
+        })
+    } else {
+        None
+    }
+}
+
+/// Checks if this is a backing store access: `$this->prop` inside a hook for that property.
+fn is_backing_store_access(
+    object_expr: &Expression,
+    prop_name: Word,
+    block_context: &BlockContext,
+    resolved_names: &ResolvedNames<'_>,
+) -> bool {
+    is_this(object_expr, resolved_names)
+        && block_context.scope.get_property_hook().is_some_and(|(hook_prop_name, _)| hook_prop_name == prop_name)
+}
+
+/// How a declared property resolved at a given call site: through its real declaration, or
+/// through a magic `@property`/`@property-read`/`@property-write` annotation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DeclaredPropertyKind<'ctx> {
+    /// A real declaration governs the access.  The annotation of the same name on the accessed
+    /// class, when one exists, may refine the declared type (see [`DeclaredProperty::declared_type`]).
+    Real { annotation: Option<&'ctx PropertyMetadata> },
+    /// A magic annotation governs the access, which goes through `__get`/`__set`.
+    Magic,
+}
+
+/// The declaration governing a property access, as resolved by [`resolve_declared_property`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DeclaredProperty<'ctx> {
+    /// The class holding the governing declaration: the real property's declaring class, or
+    /// the class whose docblock carries the `@property*` tag.
+    pub declaring_class: &'ctx ClassLikeMetadata,
+    pub property: &'ctx PropertyMetadata,
+    pub kind: DeclaredPropertyKind<'ctx>,
+}
+
+impl DeclaredProperty<'_> {
+    pub(crate) fn is_magic(&self) -> bool {
+        matches!(self.kind, DeclaredPropertyKind::Magic)
+    }
+
+    /// The type the governing declaration gives the property: for a real declaration whose
+    /// annotation narrows the declared type (a wide inherited `public $db` narrowed by
+    /// `@property` on a subclass), the annotation's type; otherwise the declared type, or
+    /// `mixed` when untyped.  A conflicting (non-narrowing) annotation type is ignored.
+    pub(crate) fn declared_type(&self, codebase: &CodebaseMetadata) -> TUnion {
+        self.declared_type_impl(codebase, false)
+    }
+
+    /// The type the governing declaration accepts when writing to the property: the distinct
+    /// `@property-write` type when the declaration splits read and write types, otherwise the
+    /// same type [`Self::declared_type`] returns.
+    pub(crate) fn declared_write_type(&self, codebase: &CodebaseMetadata) -> TUnion {
+        self.declared_type_impl(codebase, true)
+    }
+
+    /// [`Self::declared_write_type`] when `for_assignment`, otherwise [`Self::declared_type`].
+    pub(crate) fn declared_type_for(&self, codebase: &CodebaseMetadata, for_assignment: bool) -> TUnion {
+        self.declared_type_impl(codebase, for_assignment)
+    }
+
+    fn declared_type_impl(&self, codebase: &CodebaseMetadata, for_write: bool) -> TUnion {
+        fn annotation_type_metadata(annotation: &PropertyMetadata, for_write: bool) -> Option<&TypeMetadata> {
+            if for_write { annotation.get_write_type_metadata() } else { annotation.type_metadata.as_ref() }
+        }
+
+        if let DeclaredPropertyKind::Real { annotation: Some(annotation) } = self.kind
+            && let Some(annotation_type) = annotation_type_metadata(annotation, for_write).map(|tm| &tm.type_union)
+        {
+            let narrows = match self.property.type_metadata.as_ref().map(|tm| &tm.type_union) {
+                None => true,
+                Some(real_type) => {
+                    real_type.is_mixed()
+                        || union_comparator::is_contained_by(
+                            codebase,
+                            annotation_type,
+                            real_type,
+                            false,
+                            false,
+                            false,
+                            &mut ComparisonResult::default(),
+                        )
+                }
+            };
+
+            if narrows {
+                return annotation_type.clone();
+            }
+        }
+
+        annotation_type_metadata(self.property, for_write)
+            .or(self.property.type_declaration_metadata.as_ref())
+            .map(|tm| tm.type_union.clone())
+            .unwrap_or_else(get_mixed)
+    }
+}
+
+/// Resolves which declaration governs an access to `$obj->prop` (or `Class::$prop` with
+/// `instance_access` false) on `class_metadata` from `scope`, mirroring PHP's runtime rule for
+/// magic properties: a real property applies whenever the access can reach it — for instance
+/// access, when it is non-static and visible at the call site; static properties and
+/// annotations are irrelevant to static access.  Everywhere else `__get`/`__set` fire, so a
+/// magic `@property*` annotation (documenting exactly that interface) applies when present.  A
+/// real property that governs no access path still resolves as `Real` so the caller's
+/// visibility check reports the inaccessible access.  Returns `None` when the name has neither
+/// a real declaration nor an annotation.
+pub(crate) fn resolve_declared_property<'ctx>(
+    codebase: &'ctx CodebaseMetadata,
+    class_metadata: &'ctx ClassLikeMetadata,
+    prop_name: Word,
+    instance_access: bool,
+    scope: Option<Word>,
+) -> Option<DeclaredProperty<'ctx>> {
+    let annotation = if instance_access {
+        class_metadata.magic_property_ids.get(&prop_name).copied().and_then(|tag_class| {
+            let tag_metadata = if tag_class == class_metadata.name {
+                class_metadata
+            } else {
+                codebase.get_class_like(tag_class.as_bytes())?
+            };
+
+            Some((tag_metadata, tag_metadata.magic_properties.get(&prop_name)?))
+        })
+    } else {
+        None
+    };
+
+    let Some((declaring_metadata, real_property)) =
+        class_metadata.declaring_property_ids.get(&prop_name).copied().and_then(|declaring_class| {
+            let declaring_metadata = codebase.get_class_like(declaring_class.as_bytes())?;
+            let real_property = declaring_metadata.properties.get(&prop_name)?;
+
+            Some((declaring_metadata, real_property))
+        })
+    else {
+        return annotation.map(|(tag_metadata, annotation)| DeclaredProperty {
+            declaring_class: tag_metadata,
+            property: annotation,
+            kind: DeclaredPropertyKind::Magic,
+        });
+    };
+
+    // `->` never reaches a static property, whatever its visibility; otherwise the real
+    // property governs exactly where it is visible.  Visibility here means the main (get)
+    // visibility for writes as well: PHP calls `__set()` only for a property that is entirely
+    // inaccessible in the current scope — writing to one that is readable but not writable
+    // (asymmetric visibility, e.g. `public private(set)`) throws instead of falling through.
+    let real_property_reachable = || {
+        !real_property.flags.is_static()
+            && is_visible_from_scope(codebase, real_property.read_visibility, declaring_metadata.name.as_bytes(), scope)
+    };
+
+    if let Some((tag_metadata, annotation)) = annotation
+        && !real_property_reachable()
+    {
+        return Some(DeclaredProperty {
+            declaring_class: tag_metadata,
+            property: annotation,
+            kind: DeclaredPropertyKind::Magic,
+        });
+    }
+
+    Some(DeclaredProperty {
+        declaring_class: declaring_metadata,
+        property: real_property,
+        kind: DeclaredPropertyKind::Real { annotation: annotation.map(|(_, annotation)| annotation) },
+    })
+}
+
+/// Resolves external access to a property of `class_metadata` where the accessing scope is not
+/// a class scope but is certainly outside the class (mixins, intersection members,
+/// `array_column()`): a real property governs when it is publicly visible, a magic
+/// `@property*` annotation otherwise.  Returns `None` when neither reaches a declaration.
+fn get_resolved_declared_property(
+    codebase: &CodebaseMetadata,
+    resolution: &DeclaredProperty<'_>,
+    prop_name: Word,
+    for_assignment: bool,
+) -> ResolvedProperty {
+    let property_metadata = resolution.property;
+
+    ResolvedProperty {
+        property_span: property_metadata.name_span.or(property_metadata.span),
+        property_name: prop_name,
+        declaring_class_id: Some(resolution.declaring_class.name),
+        property_type: resolution.declared_type_for(codebase, for_assignment),
+        is_magic: resolution.is_magic(),
+        read_type: if for_assignment && resolution.is_magic() {
+            Some(resolution.declared_type(codebase))
+        } else {
+            None
+        },
+    }
+}
+
+pub(crate) fn resolve_property_for_external_access<'ctx>(
+    codebase: &'ctx CodebaseMetadata,
+    class_metadata: &'ctx ClassLikeMetadata,
+    prop_name: Word,
+) -> Option<DeclaredProperty<'ctx>> {
+    let resolution = resolve_declared_property(codebase, class_metadata, prop_name, true, None)?;
+
+    match resolution.kind {
+        DeclaredPropertyKind::Magic => Some(resolution),
+        DeclaredPropertyKind::Real { .. } if resolution.property.read_visibility.is_public() => Some(resolution),
+        DeclaredPropertyKind::Real { .. } => None,
+    }
+}
+
+/// Finds a property in a class, gets its type, and handles template localization.
+fn find_property_in_class<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    class_id: Word,
+    prop_name: Word,
+    selector: &'ast ClassLikeMemberSelector<'arena>,
+    object_expr: &'ast Expression<'arena>,
+    object: &TObject,
+    access_span: Span,
+    for_assignment: bool,
+    result: &mut PropertyResolutionResult,
+    has_magic_method: bool,
+) -> Option<ResolvedProperty>
+where
+    A: Arena,
+{
+    let Some(class_metadata) = context.codebase.get_class_like(class_id.as_bytes()) else {
+        report_non_existent_class_like(context, object_expr.span(), class_id);
+
+        return None;
+    };
+
+    let resolution = resolve_declared_property(
+        context.codebase,
+        class_metadata,
+        prop_name,
+        true, // `instance_access`
+        block_context.scope.get_class_like_name(),
+    );
+
+    let Some(resolution) = resolution else {
+        // A PHP# read of a declared method is its closure, ahead of anything the class serves through `__get`.
+        if !for_assignment
+            && let Some(method_type) = resolve_method_value(
+                context,
+                block_context,
+                artifacts,
+                class_id,
+                word(trim_start_byte(prop_name.as_bytes(), b'$')),
+                access_span,
+            )
+        {
+            return Some(ResolvedProperty {
+                property_span: None,
+                property_name: prop_name,
+                declaring_class_id: None,
+                property_type: method_type,
+                is_magic: false,
+                read_type: None,
+            });
+        }
+
+        for required_class in class_metadata.require_extends.iter().chain(class_metadata.require_implements.iter()) {
+            let Some(required_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+                continue;
+            };
+
+            // `$this` here is an instance of the required class-like, so the call-site rule
+            // applies there.  The required class also provides `__get`/`__set` at runtime,
+            // which cannot be checked from here — hence `is_magic: false`.
+            if let Some(required_resolution) = resolve_declared_property(
+                context.codebase,
+                required_metadata,
+                prop_name,
+                true, // `instance_access`
+                block_context.scope.get_class_like_name(),
+            ) {
+                let prop_meta = required_resolution.property;
+
+                return Some(ResolvedProperty {
+                    property_span: prop_meta.name_span.or(prop_meta.span),
+                    property_name: prop_name,
+                    declaring_class_id: Some(required_resolution.declaring_class.name),
+                    property_type: required_resolution.declared_type_for(context.codebase, for_assignment),
+                    is_magic: false,
+                    read_type: if for_assignment && required_resolution.is_magic() {
+                        Some(required_resolution.declared_type(context.codebase))
+                    } else {
+                        None
+                    },
+                });
+            }
+        }
+
+        // Check mixins.
+        if !class_metadata.mixins.is_empty() {
+            // Try to find property in mixin types
+            if let Some(resolved) = find_property_in_mixins(
+                context,
+                class_metadata,
+                object,
+                &class_metadata.mixins,
+                prop_name,
+                for_assignment,
+            ) {
+                // For an annotation-governed mixin property, the caller reports a missing
+                // `__get`/`__set` on the accessed class; the mixin-specific warnings below
+                // cover real mixin properties only.
+                if has_magic_method || resolved.is_magic {
+                    return Some(resolved);
+                }
+
+                let magic_method_name = if for_assignment { "__set" } else { "__get" };
+                if class_metadata.flags.is_final() {
+                    report_non_existent_mixin_property(
+                        context,
+                        object_expr.span(),
+                        selector.span(),
+                        class_id,
+                        prop_name,
+                        resolved.declaring_class_id.unwrap_or(class_id),
+                        magic_method_name,
+                    );
+                    result.has_invalid_path = true;
+                } else {
+                    report_possibly_non_existent_mixin_property(
+                        context,
+                        object_expr.span(),
+                        selector.span(),
+                        class_id,
+                        prop_name,
+                        resolved.declaring_class_id.unwrap_or(class_id),
+                        magic_method_name,
+                    );
+                }
+
+                return Some(resolved);
+            }
+        }
+
+        if let TObject::Named(named_object) = object
+            && let Some(resolved) =
+                find_property_in_intersection_types(context, named_object, prop_name, for_assignment)
+        {
+            return Some(resolved);
+        }
+
+        if has_magic_method
+            && !for_assignment
+            && let Some(forwarded) = context.plugin_registry.get_forwarded_call(
+                context.codebase,
+                context.source_file,
+                class_metadata.original_name.as_bytes(),
+                trim_start_byte(prop_name.as_bytes(), b'$'),
+                true,
+                &TUnion::from_atomic(TAtomic::Object(object.clone())),
+                context.external_analysis_session,
+            )
+            && let Some(property_type) = run_forwarded_methods(context, forwarded.receiver, &forwarded.methods)
+        {
+            return Some(ResolvedProperty {
+                property_span: None,
+                property_name: prop_name,
+                declaring_class_id: Some(class_id),
+                property_type,
+                is_magic: true,
+                read_type: None,
+            });
+        }
+
+        if has_magic_method {
+            report_non_documented_property(
+                context,
+                object_expr.span(),
+                selector.span(),
+                class_id,
+                prop_name,
+                for_assignment,
+            );
+
+            return Some(ResolvedProperty {
+                property_span: None,
+                property_name: prop_name,
+                declaring_class_id: Some(class_id),
+                property_type: get_mixed(),
+                is_magic: true,
+                // Undocumented access on a class with `__get`/`__set` (e.g. `stdClass` dynamic
+                // properties): the type is unknown, so the written value stays memoizable.
+                read_type: None,
+            });
+        }
+
+        let prop_name_without_dollar = word(trim_start_byte(prop_name.as_bytes(), b'$'));
+        if let TObject::Named(named_object) = object
+            && type_has_property_assertion(named_object.get_intersection_types(), prop_name_without_dollar)
+        {
+            record_asserted_descendant_property_references(
+                context,
+                block_context,
+                artifacts,
+                named_object,
+                prop_name,
+                for_assignment,
+            );
+
+            return Some(ResolvedProperty {
+                property_span: None,
+                property_name: prop_name,
+                declaring_class_id: None,
+                property_type: get_mixed(),
+                is_magic: false,
+                read_type: None,
+            });
+        }
+
+        if class_metadata.has_incomplete_hierarchy() {
+            result.has_ambiguous_path = true;
+            return None;
+        }
+
+        result.has_invalid_path = true;
+
+        if !class_metadata.flags.is_final() || class_metadata.kind.is_interface() || class_metadata.kind.is_trait() {
+            result.has_possibly_defined_property = true;
+        }
+
+        report_non_existent_property(context, class_id, prop_name, selector.span(), object_expr.span(), false);
+        return None;
+    };
+
+    let DeclaredProperty { declaring_class: declaring_class_metadata, property: property_metadata, .. } = resolution;
+    let declaring_class_id = declaring_class_metadata.name;
+
+    let property_display_name = display_member(context, declaring_class_metadata.original_name, prop_name);
+    crate::utils::availability::check_property_availability(
+        context,
+        property_metadata,
+        &property_display_name,
+        selector.span(),
+    );
+
+    // For assignment, use set hook parameter type when not accessing backing store directly
+    let mut used_set_hook_param = false;
+    let mut property_type = if for_assignment {
+        if let Some(set_hook) = property_metadata.hooks.get(&word(b"set"))
+            && let Some(param) = &set_hook.parameter
+            && let Some(param_type) = param.get_type_metadata()
+            && !is_backing_store_access(object_expr, prop_name, block_context, context.resolved_names)
+        {
+            used_set_hook_param = true;
+            param_type.type_union.clone()
+        } else {
+            resolution.declared_write_type(context.codebase)
+        }
+    } else {
+        resolution.declared_type(context.codebase)
+    };
+
+    // When writes diverge from reads — a magic property or a hook with a `set` parameter — the
+    // type a read produces regardless of the written value. It is resolved (below) alongside
+    // `property_type` so a generic or `self` read type is expanded and localized before it clamps
+    // the memoized write value in `property_assignment`.
+    let mut read_type = (for_assignment && (resolution.is_magic() || used_set_hook_param))
+        .then(|| resolution.declared_type(context.codebase));
+
+    let expand_and_localize = |ty: &mut TUnion| {
+        expander::expand_union(
+            context.codebase,
+            ty,
+            &TypeExpansionOptions {
+                self_class: Some(declaring_class_id),
+                static_class_type: StaticClassType::Object(object.clone()),
+                ..Default::default()
+            },
+        );
+
+        if !declaring_class_metadata.template_types.is_empty()
+            && let TObject::Named(named_object) = object
+        {
+            *ty = localize_property_type(
+                context,
+                ty,
+                named_object.get_type_parameters().unwrap_or_default(),
+                if class_id.as_bytes().eq_ignore_ascii_case(declaring_class_id.as_bytes()) {
+                    declaring_class_metadata
+                } else {
+                    context.codebase.get_class_like(class_id.as_bytes()).unwrap_or(declaring_class_metadata)
+                },
+                declaring_class_metadata,
+            );
+        }
+    };
+
+    expand_and_localize(&mut property_type);
+    if let Some(read_type) = read_type.as_mut() {
+        expand_and_localize(read_type);
+    }
+
+    if !for_assignment
+        && property_metadata.type_declaration_metadata.is_some()
+        && !property_metadata.flags.has_default()
+        && !property_metadata.flags.is_promoted_property()
+        && (!property_metadata.flags.is_virtual_property() || declaring_class_metadata.kind.is_interface())
+    {
+        property_type.set_possibly_undefined(true, None);
+    }
+
+    let is_visible = if for_assignment {
+        check_resolved_property_write_visibility(
+            context,
+            block_context,
+            &resolution,
+            access_span,
+            Some(selector.span()),
+        )
+    } else {
+        check_resolved_property_read_visibility(context, block_context, &resolution, access_span, Some(selector.span()))
+    };
+
+    if !is_visible {
+        result.has_error_path = true;
+
+        return None;
+    }
+
+    Some(ResolvedProperty {
+        property_span: property_metadata.name_span.or(property_metadata.span),
+        property_name: prop_name,
+        declaring_class_id: Some(declaring_class_id),
+        property_type,
+        is_magic: resolution.is_magic(),
+        read_type,
+    })
+}
+
+/// Records references to child properties that can satisfy a `property_exists()` assertion.
+fn record_asserted_descendant_property_references<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    object: &TNamedObject,
+    property_name: Word,
+    for_assignment: bool,
+) where
+    A: Arena,
+{
+    let property_name_without_dollar = word(trim_start_byte(property_name.as_bytes(), b'$'));
+    if !type_has_property_assertion(object.get_intersection_types(), property_name_without_dollar) {
+        return;
+    }
+
+    let mut declaring_classes = Vec::new();
+    for descendant in context.codebase.get_all_descendants(object.name.as_bytes()) {
+        let Some(declaring_class) =
+            context.codebase.get_declaring_property_class(descendant.as_bytes(), property_name.as_bytes())
+        else {
+            continue;
+        };
+
+        if declaring_classes.contains(&declaring_class) {
+            continue;
+        }
+
+        let Some(declaring_metadata) = context.codebase.get_class_like(declaring_class.as_bytes()) else {
+            continue;
+        };
+        let Some(property_metadata) = declaring_metadata.properties.get(&property_name) else {
+            continue;
+        };
+
+        if !is_asserted_descendant_property_accessible(
+            context,
+            block_context,
+            declaring_metadata,
+            property_metadata,
+            for_assignment,
+        ) {
+            continue;
+        }
+
+        declaring_classes.push(declaring_class);
+    }
+
+    for declaring_class in declaring_classes {
+        if for_assignment {
+            artifacts.symbol_references.add_reference_for_property_write(
+                &block_context.scope,
+                declaring_class,
+                property_name,
+            );
+        } else {
+            artifacts.symbol_references.add_reference_for_property_read(
+                &block_context.scope,
+                declaring_class,
+                property_name,
+            );
+        }
+    }
+}
+
+/// Checks whether an asserted child property can be reached by the current instance access.
+fn is_asserted_descendant_property_accessible<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    declaring_class: &ClassLikeMetadata,
+    property: &PropertyMetadata,
+    for_assignment: bool,
+) -> bool
+where
+    A: Arena,
+{
+    if property.flags.is_static() {
+        return false;
+    }
+
+    if for_assignment {
+        if property.flags.is_virtual_property()
+            && property.hooks.contains_key(&word(b"get"))
+            && !property.hooks.contains_key(&word(b"set"))
+        {
+            return false;
+        }
+
+        let visibility = effective_write_visibility(property, context.settings.version);
+
+        return is_visible_from_scope(
+            context.codebase,
+            visibility,
+            declaring_class.name.as_bytes(),
+            block_context.scope.get_class_like_name(),
+        );
+    }
+
+    if property.flags.is_virtual_property()
+        && property.hooks.contains_key(&word(b"set"))
+        && !property.hooks.contains_key(&word(b"get"))
+    {
+        return false;
+    }
+
+    is_visible_from_scope(
+        context.codebase,
+        property.read_visibility,
+        declaring_class.name.as_bytes(),
+        block_context.scope.get_class_like_name(),
+    )
+}
+
+pub fn localize_property_type<A>(
+    context: &Context<'_, '_, A>,
+    class_property_type: &TUnion,
+    object_type_parameters: &[TUnion],
+    property_class_metadata: &ClassLikeMetadata,
+    property_declaring_class_metadata: &ClassLikeMetadata,
+) -> TUnion
+where
+    A: Arena,
+{
+    let mut template_types = get_template_types_for_class_member(
+        context,
+        Some(property_declaring_class_metadata),
+        Some(property_declaring_class_metadata.name),
+        Some(property_class_metadata),
+        &property_class_metadata.template_types,
+        &IndexMap::default(),
+    );
+
+    update_template_types(
+        context,
+        &mut template_types,
+        property_class_metadata,
+        object_type_parameters,
+        property_declaring_class_metadata,
+    );
+
+    inferred_type_replacer::replace(
+        class_property_type,
+        &TemplateResult::new(IndexMap::default(), template_types),
+        context.codebase,
+    )
+}
+
+fn update_template_types<A>(
+    context: &Context<'_, '_, A>,
+    template_types: &mut HashMap<Word, HashMap<GenericParent, TUnion>>,
+    property_class_metadata: &ClassLikeMetadata,
+    lhs_type_params: &[TUnion],
+    property_declaring_class_metadata: &ClassLikeMetadata,
+) where
+    A: Arena,
+{
+    if !template_types.is_empty() && !property_class_metadata.template_types.is_empty() {
+        for (param_offset, lhs_param_type) in lhs_type_params.iter().enumerate() {
+            let mut i = -1;
+
+            for (calling_param_name, _) in &property_class_metadata.template_types {
+                i += 1;
+
+                if i == (param_offset as i32) {
+                    template_types.entry(*calling_param_name).or_default().insert(
+                        GenericParent::ClassLike(property_class_metadata.name),
+                        {
+                            let mut lhs_param_type = lhs_param_type.clone();
+
+                            expander::expand_union(
+                                context.codebase,
+                                &mut lhs_param_type,
+                                &TypeExpansionOptions::default(),
+                            );
+
+                            lhs_param_type
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    for (type_name, v) in template_types.iter_mut() {
+        if let Some(mapped_type) = property_class_metadata
+            .template_extended_parameters
+            .get(&property_declaring_class_metadata.name)
+            .unwrap_or(&IndexMap::default())
+            .get(type_name)
+        {
+            for mapped_type_atomic in mapped_type.types.as_ref() {
+                if let TAtomic::GenericParameter(TGenericParameter { parameter_name, .. }) = &mapped_type_atomic {
+                    let position = property_class_metadata
+                        .template_types
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (k, _))| *k == parameter_name)
+                        .map(|(i, _)| i)
+                        .next();
+
+                    if let Some(position) = position
+                        && let Some(mapped_param) = lhs_type_params.get(position)
+                    {
+                        v.insert(
+                            GenericParent::ClassLike(property_declaring_class_metadata.name),
+                            mapped_param.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Reports an error for a property access on a `null` or `void` value.
+fn report_access_on_null<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    object_span: Span,
+    operator_span: Span,
+    is_always_null: bool,
+    from_void: bool,
+) where
+    A: Arena,
+{
+    match (from_void, is_always_null) {
+        (true, true) => {
+            context.collector.report_with_code(
+                IssueCode::NullPropertyAccess,
+                Issue::error("Attempting to access a property on an expression of type `void`.")
+                    .with_annotation(
+                        Annotation::primary(object_span)
+                            .with_message("This expression has type `void`, which is treated as `null` at runtime"),
+                    )
+                    .with_note("Expressions of type `void` do not produce a value. Accessing a property on this will always result in `null` and raise a warning.")
+                    .with_help("This access should be removed. Check the origin of this expression to understand why it results in `void`."),
+            );
+        }
+        (true, false) => {
+            context.collector.report_with_code(
+                IssueCode::PossiblyNullPropertyAccess,
+                Issue::error("Attempting to access a property on an expression that can be `void`.")
+                    .with_annotation(
+                        Annotation::primary(object_span).with_message("This expression's type includes `void`"),
+                    )
+                    .with_note("If this expression resolves to `void` at runtime, accessing a property will result in `null` and raise a warning.")
+                    .with_note("The `void` type often originates from a function or a method that does not return a value.")
+                    .with_help("You must guard this access. Check if the value is an object before accessing the property."),
+            );
+        }
+        (false, true) => {
+            context.collector.report_with_code(
+                IssueCode::NullPropertyAccess,
+                Issue::error("Attempting to access a property on an expression that is always `null`.")
+                    .with_annotation(
+                        Annotation::primary(object_span)
+                            .with_message("This expression is always `null` here"),
+                    )
+                    .with_note("In PHP, this will raise a warning and the expression will evaluate to `null`.")
+                    .with_help("This code path appears to be an error. You should either ensure this expression can be a valid object or remove the property access entirely."),
+            );
+        }
+        (false, false) => {
+            let (nullsafe, null_check) =
+                if context.dialect.is_sharp() { ("?.", "if (obj != null)") } else { ("?->", "if ($obj !== null)") };
+
+            if !block_context.flags.inside_isset() {
+                if block_context.flags.inside_assignment() {
+                    context.collector.report_with_code(
+                        IssueCode::PossiblyNullPropertyAccess,
+                        Issue::error("Attempting to access a property on a possibly `null` value.")
+                            .with_annotation(
+                                Annotation::primary(object_span)
+                                    .with_message("This expression can be `null` here"),
+                            )
+                            .with_note("If this expression is `null` at runtime, PHP will raise a warning and the property access will result in `null`.")
+                            .with_help(format!("Add a check to ensure the value is not `null` (e.g., `{null_check}`)."))
+                    );
+                } else {
+                    context.collector.report_with_code(
+                        IssueCode::PossiblyNullPropertyAccess,
+                        Issue::error("Attempting to access a property on a possibly `null` value.")
+                            .with_annotation(
+                                Annotation::primary(object_span)
+                                    .with_message("This expression can be `null` here"),
+                            )
+                            .with_note("If this expression is `null` at runtime, PHP will raise a warning and the property access will result in `null`.")
+                            .with_help(format!("Use the nullsafe operator (`{nullsafe}`) to safely access the property, or add a check to ensure the value is not `null` (e.g., `{null_check}`)."))
+                            .with_edit(operator_span.file_id, TextEdit::replace(operator_span, nullsafe)),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Reports a nullsafe operator on an object that is never `null`.
+pub(crate) fn check_redundant_nullsafe<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    operator_span: Span,
+    object_expr: &Expression<'arena>,
+    object_type: &TUnion,
+) where
+    A: Arena,
+{
+    let is_nullable = object_type.can_be_null() || object_type.possibly_undefined();
+    let is_all_null = object_type.is_null() || object_type.is_void();
+    if is_nullable || is_all_null || is_refused_type(object_type) {
+        return;
+    }
+
+    let (nullsafe, access) = if context.dialect.is_sharp() { ("?.", ".") } else { ("?->", "->") };
+
+    // A PHP# file that writes PHP's `?->` already has a parse error at the operator.
+    let written =
+        context.source_file.contents.get(operator_span.start_offset() as usize..operator_span.end_offset() as usize);
+    if written != Some(nullsafe.as_bytes()) {
+        return;
+    }
+
+    let object_type_str = display_type(context, object_type);
+
+    let issue = context.as_null_check_error(
+        Issue::help(format!("Redundant nullsafe operator (`{nullsafe}`) used on an expression that is never `null`."))
+            .with_annotation(
+                Annotation::primary(operator_span).with_message(format!("Nullsafe operator `{nullsafe}` is unnecessary here")),
+            )
+            .with_annotation(
+                Annotation::secondary(object_expr.span())
+                    .with_message(format!("This expression (type `{object_type_str}`) is never `null`")),
+            )
+            .with_note(format!("The nullsafe operator (`{nullsafe}`) short-circuits the access if the object is `null`. Since this expression is guaranteed not to be `null`, this check is unnecessary."))
+            .with_help(format!("Consider using the direct property access operator (`{access}`) for clarity.")),
+    );
+
+    context.collector.propose_with_code(IssueCode::RedundantNullsafeOperator, issue, |edits| {
+        edits.push(TextEdit::replace(operator_span.to_range(), access));
+    });
+}
+
+fn report_access_on_non_object<A>(
+    context: &mut Context<'_, '_, A>,
+    atomic_type: &TAtomic,
+    selector: &ClassLikeMemberSelector,
+    object_span: Span,
+) where
+    A: Arena,
+{
+    let type_str = display_atomic(context, atomic_type);
+    context.collector.report_with_code(
+        if atomic_type.is_mixed() { IssueCode::MixedPropertyAccess } else { IssueCode::InvalidPropertyAccess },
+        Issue::error(format!("Attempting to access a property on a non-object type (`{type_str}`)."))
+            .with_annotation(Annotation::primary(selector.span()).with_message("Cannot access property here"))
+            .with_annotation(
+                Annotation::secondary(object_span).with_message(format!("This expression has type `{type_str}`")),
+            ),
+    );
+}
+
+fn report_ambiguous_access<A>(
+    context: &mut Context<'_, '_, A>,
+    selector: &ClassLikeMemberSelector,
+    object_span: Span,
+    object_type: &str,
+) where
+    A: Arena,
+{
+    context.collector.report_with_code(
+        IssueCode::AmbiguousObjectPropertyAccess,
+        Issue::warning(format!("Cannot statically verify property access on a generic `{object_type}` type."))
+            .with_annotation(Annotation::primary(selector.span()).with_message("Accessing property here"))
+            .with_annotation(
+                Annotation::secondary(object_span).with_message(format!("This expression has type `{object_type}`")),
+            )
+            .with_help("Provide a more specific type hint for the object (e.g., `MyClass`) for robust analysis."),
+    );
+}
+
+fn report_possibly_non_existent_property<A>(
+    context: &mut Context<'_, '_, A>,
+    object_type: &TUnion,
+    prop_name: Word,
+    selector_span: Span,
+    object_span: Span,
+) where
+    A: Arena,
+{
+    let object_type = display_type(context, object_type);
+
+    context.collector.report_with_code(
+        IssueCode::PossiblyNonExistentProperty,
+        Issue::error(format!("Property `{prop_name}` might not exist on object `{object_type}`."))
+            .with_annotation(Annotation::primary(selector_span).with_message("Property might not exist here"))
+            .with_annotation(
+                Annotation::secondary(object_span).with_message(format!("On instance of `{object_type}`")),
+            )
+            .with_note(
+                "If this property does not exist at runtime, PHP will raise a warning and the expression will evaluate to `null`.",
+            )
+            .with_help(
+                "To avoid this, ensure the property is defined on the object or check for its existence before accessing it.",
+            ),
+    );
+}
+
+/// Spec section 14.3: a PHP# read `x.name` of a class with no property `name` gives its method `name` as a closure,
+/// as PHP's `$x->name(...)` does, and `Class.name` gives its static method, as `Class::name(...)` does. The engine
+/// runs both on the read's missing-member path. Reports a method the read cannot reach, as the call would. Returns
+/// the closure's type.
+pub(crate) fn resolve_method_value<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    class_id: Word,
+    method_name: Word,
+    access_span: Span,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !context.codebase.method_exists(class_id.as_bytes(), method_name.as_bytes()) {
+        return None;
+    }
+
+    let method = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(class_id, method_name));
+    let class_name = method.get_class_name();
+    if !check_method_visibility(
+        context,
+        block_context.scope.get_class_like_name(),
+        class_name.as_bytes(),
+        method.get_method_name().as_bytes(),
+        access_span,
+        None,
+    ) {
+        return Some(get_never());
+    }
+
+    artifacts.symbol_references.add_reference_to_class_member(
+        &block_context.scope,
+        (ascii_lowercase_word(class_name.as_bytes()), method.get_method_name()),
+        false,
+    );
+
+    // The signature's `source` names the class the value is read through, as a call of the method does, so an
+    // `extern` lookup starts there.
+    let mut signature = get_signature_of_function_like_identifier(
+        &FunctionLikeIdentifier::Method(class_id, method.get_method_name()),
+        context.codebase,
+    )?;
+    signature.is_closure = true;
+
+    Some(TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature))))
+}
+
+fn report_non_existent_property<A>(
+    context: &mut Context<'_, '_, A>,
+    classname: Word,
+    prop_name: Word,
+    selector_span: Span,
+    object_span: Span,
+    is_sealed_object: bool, // `true` if we are accessing undefined prop on `object{foo: string}` type, not an actual class
+) where
+    A: Arena,
+{
+    let class_kind_str = context.codebase.get_class_like(classname.as_bytes()).map_or("class", |m| m.kind.as_str());
+    let classname = display_class_like_name(context, classname);
+
+    // PHP# writes no sealed object type, so its message names the property of a class.
+    if context.dialect.is_sharp() {
+        let property = display_sharp_member(classname, prop_name);
+        let name = prop_name.as_str_lossy();
+        let name = name.trim_start_matches('$');
+
+        context.collector.report_with_code(
+            IssueCode::NonExistentProperty,
+            Issue::error(format!("Property `{property}` does not exist."))
+                .with_annotation(Annotation::primary(selector_span).with_message("Property not found here"))
+                .with_annotation(
+                    Annotation::secondary(object_span).with_message(format!("On instance of `{classname}`")),
+                )
+                .with_note(format!("The {class_kind_str} `{classname}` does not define the property `{name}`."))
+                .with_help("Define the property in the class or check for its existence before accessing it."),
+        );
+
+        return;
+    }
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentProperty,
+        Issue::error(if is_sealed_object {
+            format!("Property `{prop_name}` does not exist on sealed object type `{classname}`.")
+        } else {
+            format!("Property `{prop_name}` does not exist on {class_kind_str} `{classname}`.")
+        })
+        .with_annotation(Annotation::primary(selector_span).with_message("Property not found here"))
+        .with_annotation(Annotation::secondary(object_span).with_message(format!("On instance of `{classname}`")))
+        .with_note(if is_sealed_object {
+            format!("The type `{classname}` is a sealed object type and does not define the property `{prop_name}`.")
+        } else {
+            format!("The {class_kind_str} `{classname}` does not define the property `{prop_name}`.")
+        })
+        .with_help("Define the property in the class or check for its existence before accessing it."),
+    );
+}
+
+pub(super) fn report_non_documented_property<A>(
+    context: &mut Context<'_, '_, A>,
+    obj_span: Span,
+    selector_span: Span,
+    classname: Word,
+    property_name: Word,
+    for_assignment: bool,
+) where
+    A: Arena,
+{
+    if classname.as_bytes().eq_ignore_ascii_case(b"stdClass") {
+        // Special case: we don't report undocumented properties on stdClass
+        return;
+    }
+
+    let magic_method = if for_assignment { "__set" } else { "__get" };
+    let access_type = if for_assignment { "write to" } else { "read from" };
+    let classname = display_class_like_name(context, classname);
+
+    context.collector.report_with_code(
+        IssueCode::NonDocumentedProperty,
+        Issue::warning(format!("Ambiguous property access: {property_name} on class `{classname}`."))
+        .with_annotation(
+            Annotation::primary(selector_span).with_message("This property is not explicitly defined"),
+        )
+        .with_annotation(
+            Annotation::secondary(obj_span).with_message(format!("On an object of type `{classname}`")),
+        )
+        .with_note(
+            format!("While this {access_type} might be handled by `{magic_method}()`, Mago cannot determine its type without a corresponding `@property` docblock tag."),
+        )
+        .with_help(format!(
+            "To enable type checking, add a `@property`, `@property-read`, or `@property-write` tag to the docblock of the `{classname}` class. For example: `/** @property string {property_name} */`",
+        )),
+    );
+}
+
+/// Reports a warning when a property is found in a mixin but the target class lacks __get/__set.
+/// This is a warning because a subclass might implement __get/__set.
+fn report_possibly_non_existent_mixin_property<A>(
+    context: &mut Context<'_, '_, A>,
+    obj_span: Span,
+    selector_span: Span,
+    classname: Word,
+    prop_name: Word,
+    mixin_classname: Word,
+    magic_method_name: &str,
+) where
+    A: Arena,
+{
+    let mixin_classname = display_class_like_name(context, mixin_classname);
+    let classname = display_class_like_name(context, classname);
+    context.collector.report_with_code(
+        IssueCode::PossiblyNonExistentProperty,
+        Issue::warning(format!(
+            "Property `{prop_name}` might not exist on type `{classname}` at runtime."
+        ))
+        .with_annotation(
+            Annotation::primary(selector_span).with_message("Property might not exist"),
+        )
+        .with_annotation(
+            Annotation::secondary(obj_span).with_message(format!("On an instance of `{classname}`")),
+        )
+        .with_note(format!(
+            "The property `{prop_name}` is defined in mixin class `{mixin_classname}`, but `{classname}` does not have a `{magic_method_name}` method to forward the access."
+        ))
+        .with_note(
+            "A subclass of this class could implement the magic method to handle this, so the access might succeed at runtime."
+        )
+        .with_help(format!(
+            "Add a `{magic_method_name}` method to `{classname}`, or make `{classname}` final if this should be an error."
+        )),
+    );
+}
+
+fn report_non_existent_mixin_property<A>(
+    context: &mut Context<'_, '_, A>,
+    obj_span: Span,
+    selector_span: Span,
+    classname: Word,
+    prop_name: Word,
+    mixin_classname: Word,
+    magic_method_name: &str,
+) where
+    A: Arena,
+{
+    let mixin_classname = display_class_like_name(context, mixin_classname);
+    let classname = display_class_like_name(context, classname);
+    context.collector.report_with_code(
+        IssueCode::NonExistentProperty,
+        Issue::error(format!(
+            "Property `{prop_name}` does not exist on final type `{classname}`."
+        ))
+        .with_annotation(
+            Annotation::primary(selector_span).with_message("Property does not exist"),
+        )
+        .with_annotation(
+            Annotation::secondary(obj_span).with_message(format!("On an instance of final class `{classname}`")),
+        )
+        .with_note(format!(
+            "The property `{prop_name}` is defined in mixin class `{mixin_classname}`, but `{classname}` is final and does not have a `{magic_method_name}` method to forward the access."
+        ))
+        .with_help(format!(
+            "Add a `{magic_method_name}` method to `{classname}` to handle mixin property accesses."
+        )),
+    );
+}
+
+pub(super) fn report_magic_property_without_get_set_method<A>(
+    context: &mut Context<'_, '_, A>,
+    obj_span: Span,
+    selector_span: Span,
+    classname: Word,
+    property_name: Word,
+    for_assignment: bool,
+) where
+    A: Arena,
+{
+    let magic_method_name = if for_assignment { "__set" } else { "__get" };
+    let access_type = if for_assignment { "write to" } else { "read from" };
+    let classname = display_class_like_name(context, classname);
+
+    context.collector.report_with_code(
+        IssueCode::MissingMagicMethod,
+        Issue::error(format!(
+            "Access to documented magic property `{property_name}` on a class that cannot handle it.",
+        ))
+        .with_annotation(
+            Annotation::primary(selector_span)
+                .with_message("This magic property is documented but cannot be accessed"),
+        )
+        .with_annotation(
+            Annotation::secondary(obj_span).with_message(format!("Class `{classname}` is missing the `{magic_method_name}` method")),
+        )
+        .with_note(
+            format!("The class `{classname}` has a `@property` tag for `{property_name}` but is missing a `{magic_method_name}` method to handle the {access_type}. This will cause a fatal `Error` at runtime.")
+        )
+        .with_help(
+            format!("Add a `public function {magic_method_name}()` to the `{classname}` class to handle magic property access.")
+        ),
+    );
+}
+
+fn type_has_property_assertion(intersection_types: Option<&[TAtomic]>, property_name: Word) -> bool {
+    intersection_types.is_some_and(|types| {
+        types.iter().any(|atomic| match atomic {
+            TAtomic::Object(TObject::HasProperty(has_property)) => {
+                has_property.has_property(property_name)
+                    || type_has_property_assertion(has_property.intersection_types.as_deref(), property_name)
+            }
+            TAtomic::Object(TObject::HasMethod(has_method)) => {
+                type_has_property_assertion(has_method.intersection_types.as_deref(), property_name)
+            }
+            _ => false,
+        })
+    })
+}
+
+/// Searches for a property in mixin types.
+/// Returns Some(ResolvedProperty) if the property is found in a mixin, None otherwise.
+/// When the mixin type is a generic parameter (e.g., `@mixin T`), tries to resolve it
+/// using the outer_object's type_parameters.
+fn find_property_in_mixins<A>(
+    context: &Context<'_, '_, A>,
+    class_metadata: &ClassLikeMetadata,
+    outer_object: &TObject,
+    mixins: &[TypeMetadata],
+    prop_name: Word,
+    for_assignment: bool,
+) -> Option<ResolvedProperty>
+where
+    A: Arena,
+{
+    for mixin_type in mixins {
+        for mixin_atomic in mixin_type.type_union.types.as_ref() {
+            match mixin_atomic {
+                TAtomic::Object(TObject::Named(named)) => {
+                    if let Some(result) = find_property_in_single_mixin(context, named.name, prop_name, for_assignment)
+                    {
+                        return Some(result);
+                    }
+                }
+                TAtomic::Object(TObject::Enum(enum_type)) => {
+                    if let Some(result) =
+                        find_property_in_single_mixin(context, enum_type.name, prop_name, for_assignment)
+                    {
+                        return Some(result);
+                    }
+                }
+                TAtomic::GenericParameter(TGenericParameter {
+                    parameter_name, constraint, defining_entity, ..
+                }) => {
+                    let mut resolved = false;
+
+                    if let TObject::Named(named_object) = outer_object
+                        && let Some(type_params) = named_object.get_type_parameters()
+                        && let GenericParent::ClassLike(defining_class) = defining_entity
+                        && named_object.name.as_bytes().eq_ignore_ascii_case(defining_class.as_bytes())
+                        && let Some(index) = class_metadata.get_template_index_for_name(*parameter_name)
+                        && let Some(concrete_type) = type_params.get(index)
+                    {
+                        for atomic in concrete_type.types.as_ref() {
+                            let class_name = match atomic {
+                                TAtomic::Object(TObject::Named(named)) => named.name,
+                                TAtomic::Object(TObject::Enum(enum_type)) => enum_type.name,
+                                _ => continue,
+                            };
+
+                            if let Some(result) =
+                                find_property_in_single_mixin(context, class_name, prop_name, for_assignment)
+                            {
+                                return Some(result);
+                            }
+                            resolved = true;
+                        }
+                    }
+
+                    // Fallback to constraint if we couldn't resolve
+                    if !resolved {
+                        for constraint_atomic in constraint.types.as_ref() {
+                            let constraint_class_name = match constraint_atomic {
+                                TAtomic::Object(TObject::Named(named)) => named.name,
+                                TAtomic::Object(TObject::Enum(enum_type)) => enum_type.name,
+                                _ => continue,
+                            };
+
+                            if let Some(result) =
+                                find_property_in_single_mixin(context, constraint_class_name, prop_name, for_assignment)
+                            {
+                                return Some(result);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
+/// Searches for a property in a single mixin class.
+fn find_property_in_single_mixin<A>(
+    context: &Context<'_, '_, A>,
+    mixin_class_name: Word,
+    prop_name: Word,
+    for_assignment: bool,
+) -> Option<ResolvedProperty>
+where
+    A: Arena,
+{
+    let mixin_metadata = context.codebase.get_class_like(mixin_class_name.as_bytes())?;
+    // Mixin access is always external, so a non-public real property defers to a magic
+    // `@property*` annotation when the mixin class documents one.
+    let resolution = resolve_property_for_external_access(context.codebase, mixin_metadata, prop_name)?;
+
+    Some(get_resolved_declared_property(context.codebase, &resolution, prop_name, for_assignment))
+}
+
+/// Searches for a property in intersection types of a named object.
+/// For example, if the type is `Foo&Baz`, this will look for the property on `Baz`.
+fn find_property_in_intersection_types<A>(
+    context: &Context<'_, '_, A>,
+    named_object: &TNamedObject,
+    prop_name: Word,
+    for_assignment: bool,
+) -> Option<ResolvedProperty>
+where
+    A: Arena,
+{
+    let intersection_types = named_object.get_intersection_types()?;
+
+    for atomic in intersection_types {
+        match atomic {
+            TAtomic::Object(TObject::Named(TNamedObject { name, .. }) | TObject::Enum(TEnum { name, .. })) => {
+                let Some(class_metadata) = context.codebase.get_class_like(name.as_bytes()) else {
+                    continue;
+                };
+
+                // Intersection-member access is external, so a non-public real property defers
+                // to a magic `@property*` annotation when one is documented.
+                let Some(resolution) =
+                    resolve_property_for_external_access(context.codebase, class_metadata, prop_name)
+                else {
+                    continue;
+                };
+
+                return Some(get_resolved_declared_property(context.codebase, &resolution, prop_name, for_assignment));
+            }
+            TAtomic::Object(TObject::WithProperties(shaped)) => {
+                let key = mago_word::word(trim_start_byte(prop_name.as_bytes(), b'$'));
+
+                if let Some((_optional, property_type)) = shaped.known_properties.get(&key) {
+                    return Some(ResolvedProperty {
+                        property_span: None,
+                        property_name: prop_name,
+                        declaring_class_id: None,
+                        property_type: property_type.clone(),
+                        is_magic: false,
+                        read_type: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}

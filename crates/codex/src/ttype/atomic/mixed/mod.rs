@@ -1,0 +1,175 @@
+use mago_word::Word;
+use mago_word::word;
+
+use crate::ttype::TType;
+use crate::ttype::atomic::mixed::truthiness::TMixedTruthiness;
+
+pub mod truthiness;
+
+/// Represents the `mixed` type, potentially with constraints applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TMixed {
+    is_isset_from_loop: bool,
+    is_non_null: bool,
+    is_empty: bool,
+    truthiness: TMixedTruthiness,
+}
+
+impl TMixed {
+    /// Creates a `Mixed` type representing a `mixed` with no specific constraints known yet.
+    ///
+    /// Equivalent to `Mixed::default()`.
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            is_isset_from_loop: false,
+            is_non_null: false,
+            is_empty: false,
+            truthiness: TMixedTruthiness::Undetermined,
+        }
+    }
+
+    /// Creates a `Mixed` type marked as originating from `isset()` in a loop.
+    #[inline]
+    #[must_use]
+    pub const fn isset_from_loop() -> Self {
+        Self::new().with_is_isset_from_loop(true)
+    }
+
+    /// Creates a `Mixed` type constrained to be truthy. Automatically sets `is_non_null` to `true`.
+    #[inline]
+    #[must_use]
+    pub const fn truthy() -> Self {
+        Self::new().with_truthiness(TMixedTruthiness::Truthy)
+    }
+
+    /// Checks if this `mixed` type could be truthy or non-null.
+    #[inline]
+    #[must_use]
+    pub const fn could_be_truthy_or_non_null(&self) -> bool {
+        self.is_vanilla() || self.is_non_null()
+    }
+
+    /// Checks if this `mixed` originated from `isset()` in a loop.
+    #[inline]
+    #[must_use]
+    pub const fn is_isset_from_loop(&self) -> bool {
+        self.is_isset_from_loop
+    }
+
+    /// Checks if this `mixed` type is a vanilla `mixed` type.
+    #[inline]
+    #[must_use]
+    pub const fn is_vanilla(&self) -> bool {
+        !self.is_non_null && !self.is_empty && matches!(self.truthiness, TMixedTruthiness::Undetermined)
+    }
+
+    /// Checks if `null` is explicitly excluded from this `mixed` type.
+    #[inline]
+    #[must_use]
+    pub const fn is_non_null(&self) -> bool {
+        self.is_non_null
+    }
+
+    /// Checks whether this mixed type carries the internal empty-value constraint.
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.is_empty
+    }
+
+    /// Returns the known truthiness constraint for this `mixed` type.
+    #[inline]
+    #[must_use]
+    pub const fn get_truthiness(&self) -> TMixedTruthiness {
+        self.truthiness
+    }
+
+    /// Checks if the type is constrained to only truthy values.
+    #[inline]
+    #[must_use]
+    pub const fn is_truthy(&self) -> bool {
+        matches!(self.truthiness, TMixedTruthiness::Truthy)
+    }
+
+    /// Checks if the type is constrained to only falsy values.
+    #[inline]
+    #[must_use]
+    pub const fn is_falsy(&self) -> bool {
+        matches!(self.truthiness, TMixedTruthiness::Falsy)
+    }
+
+    /// Returns a new instance with the `is_isset_from_loop` flag set.
+    #[inline]
+    #[must_use]
+    pub const fn with_is_isset_from_loop(mut self, is_isset_from_loop: bool) -> Self {
+        self.is_isset_from_loop = is_isset_from_loop;
+        self
+    }
+
+    /// Returns a new instance with the `is_non_null` flag set and consistency ensured.
+    #[inline]
+    #[must_use]
+    pub const fn with_is_non_null(mut self, is_non_null: bool) -> Self {
+        self.is_non_null = is_non_null;
+        self
+    }
+
+    /// Returns a new instance with the `truthiness` value set. Ensures consistency with `is_non_null`.
+    #[inline]
+    #[must_use]
+    pub const fn with_truthiness(mut self, truthiness: TMixedTruthiness) -> Self {
+        self.truthiness = truthiness;
+        self.ensure_consistency();
+        self
+    }
+
+    #[must_use]
+    pub const fn as_empty(mut self) -> Self {
+        self.is_empty = true;
+        self.ensure_consistency();
+
+        self
+    }
+
+    /// Ensures consistency between `is_non_null` and `truthiness`.
+    #[inline]
+    const fn ensure_consistency(&mut self) {
+        if self.is_truthy() {
+            self.is_non_null = true;
+        }
+
+        if self.is_empty {
+            self.is_non_null = false;
+            self.truthiness = TMixedTruthiness::Falsy;
+        }
+    }
+}
+
+impl TType for TMixed {
+    fn get_id(&self) -> Word {
+        if self.is_empty {
+            word(match self.truthiness {
+                TMixedTruthiness::Truthy => "empty-truthy-mixed",
+                TMixedTruthiness::Falsy => "empty-falsy-mixed",
+                TMixedTruthiness::Undetermined if self.is_non_null => "empty-nonnull",
+                TMixedTruthiness::Undetermined => "empty-mixed",
+            })
+        } else {
+            word(match self.truthiness {
+                TMixedTruthiness::Truthy => "truthy-mixed",
+                TMixedTruthiness::Falsy => "falsy-mixed",
+                TMixedTruthiness::Undetermined if self.is_non_null => "nonnull",
+                TMixedTruthiness::Undetermined => "mixed",
+            })
+        }
+    }
+}
+
+impl Default for TMixed {
+    fn default() -> Self {
+        Self::new()
+    }
+}

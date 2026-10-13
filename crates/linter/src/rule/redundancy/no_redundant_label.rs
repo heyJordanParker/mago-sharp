@@ -1,0 +1,131 @@
+use indoc::indoc;
+use schemars::JsonSchema;
+
+use mago_allocator::Arena;
+use mago_allocator::vec::Vec;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::Level;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+
+use crate::category::Category;
+use crate::context::LintContext;
+use crate::requirements::RuleRequirements;
+use crate::rule::Config;
+use crate::rule::LintRule;
+use crate::rule_meta::RuleMeta;
+use crate::settings::RuleSettings;
+
+#[derive(Debug, Clone)]
+pub struct NoRedundantLabelRule {
+    meta: &'static RuleMeta,
+    cfg: NoRedundantLabelConfig,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct NoRedundantLabelConfig {
+    pub level: Level,
+}
+
+impl Default for NoRedundantLabelConfig {
+    fn default() -> Self {
+        Self { level: Level::Help }
+    }
+}
+
+impl Config for NoRedundantLabelConfig {
+    fn level(&self) -> Level {
+        self.level
+    }
+}
+
+impl LintRule for NoRedundantLabelRule {
+    type Config = NoRedundantLabelConfig;
+
+    fn meta() -> &'static RuleMeta {
+        const META: RuleMeta = RuleMeta {
+            name: "No Redundant Label",
+            code: "no-redundant-label",
+            description: indoc! {"
+                Detects redundant `goto` labels that are declared but not used.
+            "},
+            good_example: indoc! {r#"
+                <?php
+
+                goto end;
+                echo "Hello, world!";
+                end:
+            "#},
+            bad_example: indoc! {r#"
+                <?php
+
+                label:
+                echo "Hello, world!";
+            "#},
+            category: Category::Redundancy,
+
+            requirements: RuleRequirements::None,
+        };
+
+        &META
+    }
+
+    fn targets() -> &'static [NodeKind] {
+        const TARGETS: &[NodeKind] = &[NodeKind::Program];
+
+        TARGETS
+    }
+
+    fn build(settings: &RuleSettings<Self::Config>) -> Self {
+        Self { meta: Self::meta(), cfg: settings.config }
+    }
+
+    fn check<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, node: Node<'_, 'arena>)
+    where
+        A: Arena,
+    {
+        let Node::Program(_) = node else {
+            return;
+        };
+
+        let mut labels = Vec::new_in(ctx.arena);
+        let mut gotos = Vec::new_in(ctx.arena);
+        collect_labels_and_gotos(node, &mut labels, &mut gotos);
+
+        for (label_name, label_span) in labels {
+            if gotos.contains(&label_name) {
+                continue;
+            }
+
+            let label_display = mago_bytes::BytesDisplay(label_name);
+            let issue = Issue::new(self.cfg.level(), format!("Redundant goto label `{label_display}`."))
+                .with_code(self.meta.code)
+                .with_annotation(Annotation::primary(label_span).with_message("This label is declared but not used"))
+                .with_note(format!("Label `{label_display}` is declared but not used by any `goto` statement."))
+                .with_help("Remove the redundant label.");
+
+            ctx.collector.report(issue);
+        }
+    }
+}
+
+fn collect_labels_and_gotos<'arena, A>(
+    node: Node<'_, 'arena>,
+    labels: &mut Vec<'arena, (&'arena [u8], Span), A>,
+    gotos: &mut Vec<'arena, &'arena [u8], A>,
+) where
+    A: Arena,
+{
+    match node {
+        Node::Label(label) => labels.push((label.name.value, label.span())),
+        Node::Goto(goto) => gotos.push(goto.label.value),
+        _ => {}
+    }
+
+    node.visit_children(|child| collect_labels_and_gotos(child, labels, gotos));
+}

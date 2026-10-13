@@ -1,0 +1,33 @@
+[package]
+name = "mago-sharp-lean"
+description = "Translates the PHP# code each law reaches to Lean, and proves every law with Lean's kernel."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+foldhash = { workspace = true }
+mago-analyzer = { workspace = true }
+mago-build-id = { workspace = true }
+mago-codex = { workspace = true }
+mago-composer = { workspace = true }
+mago-database = { workspace = true }
+mago-extension = { workspace = true }
+mago-names = { workspace = true }
+mago-reporting = { workspace = true }
+mago-sharp-bridge = { workspace = true }
+mago-span = { workspace = true }
+mago-syntax = { workspace = true }
+mago-word = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }

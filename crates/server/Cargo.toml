@@ -1,0 +1,24 @@
+[package]
+name = "mago-server"
+description = "A transport-agnostic backend that keeps one workspace's analysis warm, driving it with no I/O of its own."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mago-analyzer = { workspace = true }
+mago-codex = { workspace = true }
+mago-database = { workspace = true, features = ["loader"] }
+mago-orchestrator = { workspace = true }
+mago-reporting = { workspace = true }
+mago-sharp-bridge = { workspace = true }
+mago-sharp-lean = { workspace = true }
+mago-syntax = { workspace = true }
+foldhash = { workspace = true }

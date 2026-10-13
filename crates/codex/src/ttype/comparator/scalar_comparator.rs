@@ -1,0 +1,230 @@
+use crate::metadata::CodebaseMetadata;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::scalar::TScalar;
+use crate::ttype::atomic::scalar::float::TFloat;
+use crate::ttype::atomic::scalar::string::TStringCasing;
+use crate::ttype::comparator::ComparisonResult;
+use crate::ttype::comparator::class_string_comparator;
+
+pub fn is_contained_by(
+    codebase: &CodebaseMetadata,
+    input_type_part: &TAtomic,
+    container_type_part: &TAtomic,
+    inside_assertion: bool,
+    atomic_comparison_result: &mut ComparisonResult,
+) -> bool {
+    match (container_type_part, input_type_part) {
+        (
+            TAtomic::Scalar(TScalar::Numeric),
+            TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_) | TScalar::Numeric),
+        ) => return true,
+        (TAtomic::Scalar(TScalar::Numeric), TAtomic::Scalar(TScalar::String(string))) if string.is_numeric => {
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::Generic), TAtomic::Scalar(_)) => return true,
+        (TAtomic::Scalar(TScalar::ArrayKey), TAtomic::Scalar(i)) if i.is_int() || i.is_any_string() => {
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::Integer(ci)), TAtomic::Scalar(TScalar::Integer(ii))) if ci.contains(*ii) => {
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::Float(TFloat::Float)), TAtomic::Scalar(TScalar::Integer(_))) if !inside_assertion => {
+            if atomic_comparison_result.sharp_rules {
+                atomic_comparison_result.int_for_float = true;
+
+                return false;
+            }
+
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::Float(container_float)), TAtomic::Scalar(TScalar::Float(input_float)))
+            if container_float.contains(*input_float) =>
+        {
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::String(c)), TAtomic::Scalar(TScalar::String(_) | TScalar::ClassLikeString(_)))
+            if c.is_boring() =>
+        {
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::Bool(c)), TAtomic::Scalar(TScalar::Bool(i))) if c.is_general() || c == i => {
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::String(c)), TAtomic::Scalar(TScalar::String(i))) => {
+            if c.is_callable {
+                let is_input_callable = i.is_callable || {
+                    if let Some(literal) = i.get_known_literal_value() {
+                        // if it contains `::` - thats enough, no need to check class/method further
+                        // unless we need to at some point..
+                        memchr::memmem::find(literal, b"::").is_some() || codebase.function_exists(literal)
+                    } else {
+                        false
+                    }
+                };
+
+                if !is_input_callable {
+                    return false;
+                }
+            }
+
+            if c.is_truthy() && !i.is_truthy() {
+                return false;
+            }
+
+            if c.is_known_numeric() && !i.is_known_numeric() {
+                return false;
+            }
+
+            if c.is_non_empty() && !i.is_non_empty() {
+                return false;
+            }
+
+            let casing_mismatch = match c.casing {
+                TStringCasing::Lowercase => !i.is_lowercase(),
+                TStringCasing::Uppercase => !i.is_uppercase(),
+                TStringCasing::Unspecified => false,
+            };
+
+            if !i.is_empty() && casing_mismatch {
+                return false;
+            }
+
+            if c.is_unspecified_literal() && !i.is_literal_origin() {
+                return false;
+            } else if let Some(v) = c.get_known_literal_value() {
+                if let Some(i) = i.get_known_literal_value() {
+                    if v != i {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::String(c)), TAtomic::Scalar(TScalar::ClassLikeString(i))) if c.is_callable => {
+            return i.literal_value().is_some_and(|value| {
+                codebase.function_exists(value.as_bytes())
+                    && match c.casing {
+                        TStringCasing::Lowercase => value.as_bytes().iter().all(|byte| !byte.is_ascii_uppercase()),
+                        TStringCasing::Uppercase => value.as_bytes().iter().all(|byte| !byte.is_ascii_lowercase()),
+                        TStringCasing::Unspecified => true,
+                    }
+            });
+        }
+        (TAtomic::Scalar(TScalar::String(c)), TAtomic::Scalar(TScalar::ClassLikeString(_)))
+            if !c.is_literal_origin() && !c.is_numeric =>
+        {
+            return true;
+        }
+        (TAtomic::Scalar(TScalar::ClassLikeString(container_class_string)), TAtomic::Scalar(input_scalar)) => {
+            return class_string_comparator::is_contained_by(
+                codebase,
+                input_scalar,
+                container_class_string,
+                inside_assertion,
+                atomic_comparison_result,
+            );
+        }
+        _ => {}
+    }
+
+    let input_coerces_to_container = (matches!(input_type_part, TAtomic::Scalar(TScalar::String(s)) if s.is_boring())
+        && container_type_part.is_string_subtype())
+        || (matches!(input_type_part, TAtomic::Scalar(TScalar::Bool(input)) if input.is_general())
+            && matches!(container_type_part, TAtomic::Scalar(TScalar::Bool(container)) if !container.is_general()))
+        || (matches!(input_type_part, TAtomic::Scalar(TScalar::ArrayKey))
+            && (container_type_part.is_int() || container_type_part.is_any_string()))
+        || (matches!(input_type_part, TAtomic::Scalar(TScalar::String(s)) if s.is_non_empty && !s.is_truthy)
+            && matches!(container_type_part, TAtomic::Scalar(TScalar::ClassLikeString(_))));
+
+    if input_coerces_to_container {
+        atomic_comparison_result.type_coerced = Some(true);
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use mago_word::word;
+
+    use crate::ttype::atomic::TAtomic;
+    use crate::ttype::atomic::scalar::TScalar;
+    use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
+    use crate::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
+    use crate::ttype::atomic::scalar::string::TString;
+    use crate::ttype::comparator::ComparisonResult;
+    use crate::ttype::comparator::tests::create_test_codebase;
+
+    use super::is_contained_by;
+
+    fn class_string_literal(name: &str) -> TAtomic {
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::literal(word(name))))
+    }
+
+    fn string_literal(value: &str) -> TAtomic {
+        TAtomic::Scalar(TScalar::String(TString::known_literal(word(value))))
+    }
+
+    #[test]
+    fn class_string_is_contained_by_string() {
+        let codebase = create_test_codebase("<?php");
+        let input = class_string_literal("Foo");
+        let container = TAtomic::Scalar(TScalar::String(TString::general()));
+        let mut result = ComparisonResult::new();
+
+        assert!(is_contained_by(&codebase, &input, &container, false, &mut result));
+    }
+
+    #[test]
+    fn class_string_is_contained_by_non_empty_string() {
+        let codebase = create_test_codebase("<?php");
+        let input = class_string_literal("Foo");
+        let container = TAtomic::Scalar(TScalar::String(TString::non_empty()));
+        let mut result = ComparisonResult::new();
+
+        assert!(is_contained_by(&codebase, &input, &container, false, &mut result));
+    }
+
+    #[test]
+    fn class_string_is_not_contained_by_literal_string() {
+        let codebase = create_test_codebase("<?php");
+        let input = class_string_literal("Foo");
+        let container = string_literal("bar");
+        let mut result = ComparisonResult::new();
+
+        assert!(!is_contained_by(&codebase, &input, &container, false, &mut result));
+    }
+
+    #[test]
+    fn class_string_any_is_not_contained_by_literal_string() {
+        let codebase = create_test_codebase("<?php");
+        let input = TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::any(TClassLikeStringKind::Class)));
+        let container = string_literal("bar");
+        let mut result = ComparisonResult::new();
+
+        assert!(!is_contained_by(&codebase, &input, &container, false, &mut result));
+    }
+
+    #[test]
+    fn class_string_is_not_contained_by_callable_string() {
+        let codebase = create_test_codebase("<?php class Foo {}");
+        let input = class_string_literal("Foo");
+        let container = TAtomic::Scalar(TScalar::String(TString::callable()));
+        let mut result = ComparisonResult::new();
+
+        assert!(!is_contained_by(&codebase, &input, &container, false, &mut result));
+    }
+
+    #[test]
+    fn class_string_is_contained_by_callable_string_when_same_named_function_exists() {
+        let codebase = create_test_codebase("<?php class Foo {} function Foo(): void {}");
+        let input = class_string_literal("Foo");
+        let container = TAtomic::Scalar(TScalar::String(TString::callable()));
+        let mut result = ComparisonResult::new();
+
+        assert!(is_contained_by(&codebase, &input, &container, false, &mut result));
+    }
+}

@@ -1,0 +1,296 @@
+use foldhash::HashMap;
+use foldhash::HashSet;
+
+use mago_database::file::FileId;
+use mago_word::empty_word;
+
+use crate::diff::CodebaseDiff;
+use crate::signature::DefSignatureNode;
+use crate::signature::FileSignature;
+
+/// Computes the difference between an old file signature and a new file signature.
+///
+/// This function uses the Myers diff algorithm to efficiently identify changes between
+/// two versions of a file's CST. Unlike Hakana which differentiates between signature
+/// and body changes, we use a single hash approach: any change triggers re-analysis.
+///
+/// # Arguments
+///
+/// * `file_id` - The identifier of the file being compared
+/// * `old_signature` - The previous file signature (None if this is a new file)
+/// * `new_signature` - The current file signature
+///
+/// # Returns
+///
+/// A `CodebaseDiff` containing:
+/// - `keep`: Symbols that are unchanged
+/// - `changed`: Symbols that are new, deleted, or modified
+#[must_use]
+pub fn compute_file_diff(
+    file_id: FileId,
+    old_signature: Option<&FileSignature>,
+    new_signature: Option<&FileSignature>,
+) -> CodebaseDiff {
+    match (old_signature, new_signature) {
+        (None, None) => CodebaseDiff::new(),
+        (Some(old_sig), None) => mark_all_as_changed(old_sig),
+        (None, Some(new_sig)) => mark_all_as_changed(new_sig),
+        (Some(old_sig), Some(new_sig)) => myers_diff(file_id, old_sig, new_sig),
+    }
+}
+
+/// Marks all symbols in a file signature as changed (used for new files).
+fn mark_all_as_changed(signature: &FileSignature) -> CodebaseDiff {
+    let mut changed = HashSet::default();
+
+    for node in &signature.ast_nodes {
+        // Add top-level symbol
+        changed.insert((node.name, empty_word()));
+
+        // Add all children (methods, properties, etc.)
+        for child in &node.children {
+            changed.insert((node.name, child.name));
+        }
+    }
+
+    CodebaseDiff::new().with_changed(changed)
+}
+
+/// Computes a detailed diff between two file signatures using Myers algorithm.
+///
+/// This function implements a two-level Myers diff:
+/// 1. Top-level diff: compares classes, functions, and constants
+/// 2. Member-level diff: compares methods, properties, and class constants within each class
+///
+/// Uses `signature_hash` (which excludes function/method bodies) for the keep/changed
+/// decision. This means body-only changes to a function or method do NOT mark it as
+/// "changed" in the diff, so they don't trigger cascade invalidation of dependents.
+/// The changed file itself is still re-analyzed because its content hash changed.
+///
+/// # Arguments
+///
+/// * `file_id` - File being compared
+/// * `old_signature` - Previous file signature
+/// * `new_signature` - Current file signature
+///
+/// # Returns
+///
+/// A `CodebaseDiff` with:
+/// - `keep`: Symbols whose signatures are unchanged
+/// - `changed`: Added, removed, or signature-modified symbols
+fn myers_diff(file_id: FileId, old_signature: &FileSignature, new_signature: &FileSignature) -> CodebaseDiff {
+    let mut keep = HashSet::default();
+    let mut changed = HashSet::default();
+
+    let Ok((trace, x, y)) = calculate_trace(&old_signature.ast_nodes, &new_signature.ast_nodes) else {
+        tracing::warn!("Myers diff algorithm failed to converge for file {file_id:?}, marking all symbols as changed");
+
+        return mark_all_as_changed(new_signature);
+    };
+
+    let diff = extract_diff(&trace, x, y, &old_signature.ast_nodes, &new_signature.ast_nodes);
+
+    for diff_elem in diff {
+        match diff_elem {
+            AstDiffElem::Keep(a, b) => {
+                let mut has_child_sig_change = false;
+
+                let Ok((class_trace, class_x, class_y)) = calculate_trace(&a.children, &b.children) else {
+                    changed.insert((a.name, empty_word()));
+                    for child in &a.children {
+                        changed.insert((a.name, child.name));
+                    }
+
+                    for child in &b.children {
+                        changed.insert((b.name, child.name));
+                    }
+
+                    continue;
+                };
+
+                let class_diff = extract_diff(&class_trace, class_x, class_y, &a.children, &b.children);
+
+                for class_diff_elem in class_diff {
+                    match class_diff_elem {
+                        AstDiffElem::Keep(a_child, b_child) => {
+                            // Use signature_hash for cascade decision: body-only changes
+                            // don't cascade to dependents, only signature changes do.
+                            if a_child.signature_hash == b_child.signature_hash {
+                                keep.insert((a.name, a_child.name));
+                            } else {
+                                has_child_sig_change = true;
+                                changed.insert((a.name, a_child.name));
+                            }
+                        }
+                        AstDiffElem::Remove(child_node) => {
+                            has_child_sig_change = true;
+                            changed.insert((a.name, child_node.name));
+                        }
+                        AstDiffElem::Add(child_node) => {
+                            has_child_sig_change = true;
+                            changed.insert((a.name, child_node.name));
+                        }
+                    }
+                }
+
+                if has_child_sig_change || a.signature_hash != b.signature_hash {
+                    changed.insert((a.name, empty_word()));
+                } else {
+                    keep.insert((a.name, empty_word()));
+                }
+            }
+            AstDiffElem::Remove(node) => {
+                changed.insert((node.name, empty_word()));
+
+                // Also mark all children as removed
+                for child in &node.children {
+                    changed.insert((node.name, child.name));
+                }
+            }
+            AstDiffElem::Add(node) => {
+                changed.insert((node.name, empty_word()));
+
+                // Also mark all children as added
+                for child in &node.children {
+                    changed.insert((node.name, child.name));
+                }
+            }
+        }
+    }
+
+    CodebaseDiff::new().with_keep(keep).with_changed(changed)
+}
+
+/// Type alias for the Myers diff trace structure.
+///
+/// - Vec<`HashMap`<isize, usize>>: The trace of the search path
+/// - usize: Final position in the old sequence
+/// - usize: Final position in the new sequence
+type DiffTrace = (Vec<HashMap<isize, usize>>, usize, usize);
+
+/// Implements the Myers diff algorithm.
+///
+/// Borrows from:
+/// - <https://github.com/nikic/PHP-Parser/blob/master/lib/PhpParser/Internal/Differ.php>
+/// - <https://github.com/slackhq/hakana/blob/35890f99ded7897e4203a896fd1636bda300bad6/src/orchestrator/ast_differ.rs#L151-L159>
+///
+/// Myers, Eugene W. "An O(ND) difference algorithm and its variations."
+/// Algorithmica 1.1 (1986): 251-266.
+///
+/// Returns a Result containing a tuple of (trace, x, y) where:
+/// - trace: A vector of hash maps representing the search path
+/// - x: Final position in the old sequence
+/// - y: Final position in the new sequence
+///
+/// Returns Err if the algorithm fails to converge (theoretically impossible but handled gracefully).
+fn calculate_trace(a_nodes: &[DefSignatureNode], b_nodes: &[DefSignatureNode]) -> Result<DiffTrace, &'static str> {
+    let n = a_nodes.len();
+    let m = b_nodes.len();
+    let max = n + m;
+    let mut v: HashMap<isize, usize> = HashMap::default();
+    v.insert(1, 0);
+    let mut trace = vec![];
+
+    for d in 0..=(max as isize) {
+        trace.push(v.clone());
+        let mut k = -d;
+        while k <= d {
+            let mut x = if k == -d || (k != d && v[&(k - 1)] < v[&(k + 1)]) { v[&(k + 1)] } else { v[&(k - 1)] + 1 };
+
+            let mut y = (x as isize - k) as usize;
+
+            // Advance along the diagonal while nodes are equal
+            while x < n && y < m && is_equal(&a_nodes[x], &b_nodes[y]) {
+                x += 1;
+                y += 1;
+            }
+
+            v.insert(k, x);
+
+            // Found the end
+            if x >= n && y >= m {
+                return Ok((trace, x, y));
+            }
+
+            k += 2;
+        }
+    }
+
+    Err("Myers diff algorithm failed to converge")
+}
+
+/// Checks if two `DefSignatureNode` instances can be matched for diffing.
+///
+/// Two nodes are considered matchable if they have the same:
+/// - name
+/// - `is_function` flag
+///
+/// We don't check hash here because we want to match nodes even if their
+/// content changed. The hash difference will be detected later to determine
+/// if they belong in the "keep" or "changed" set.
+fn is_equal(a_node: &DefSignatureNode, b_node: &DefSignatureNode) -> bool {
+    a_node.name == b_node.name && a_node.is_function == b_node.is_function
+}
+
+/// Extracts the diff elements from the Myers trace.
+///
+/// Walks backward through the trace to build a sequence of Keep, Remove, and Add operations.
+fn extract_diff<'nodes>(
+    trace: &[HashMap<isize, usize>],
+    mut x: usize,
+    mut y: usize,
+    a_nodes: &'nodes [DefSignatureNode],
+    b_nodes: &'nodes [DefSignatureNode],
+) -> Vec<AstDiffElem<'nodes>> {
+    let mut result = vec![];
+    let mut d = trace.len() as isize - 1;
+
+    while d >= 0 {
+        let v = &trace[d as usize];
+        let k = (x as isize) - (y as isize);
+
+        let prev_k = if k == -d || (k != d && v[&(k - 1)] < v[&(k + 1)]) { k + 1 } else { k - 1 };
+
+        let prev_x = v[&prev_k];
+        let prev_y = prev_x as isize - prev_k;
+
+        // Walk diagonals (unchanged elements)
+        while x > prev_x && y as isize > prev_y {
+            result.push(AstDiffElem::Keep(&a_nodes[x - 1], &b_nodes[y - 1]));
+            x -= 1;
+            y -= 1;
+        }
+
+        if d == 0 {
+            break;
+        }
+
+        // Deletions
+        while x > prev_x {
+            result.push(AstDiffElem::Remove(&a_nodes[x - 1]));
+            x -= 1;
+        }
+
+        // Additions
+        while y as isize > prev_y {
+            result.push(AstDiffElem::Add(&b_nodes[y - 1]));
+            y -= 1;
+        }
+
+        d -= 1;
+    }
+
+    result.reverse();
+    result
+}
+
+/// Represents a single element in the CST diff.
+#[derive(Debug)]
+enum AstDiffElem<'nodes> {
+    /// Node unchanged in both old and new versions
+    Keep(&'nodes DefSignatureNode, &'nodes DefSignatureNode),
+    /// Node was removed in the new version
+    Remove(&'nodes DefSignatureNode),
+    /// Node was added in the new version
+    Add(&'nodes DefSignatureNode),
+}

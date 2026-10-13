@@ -1,0 +1,303 @@
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::Ordering::Relaxed;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+use mago_allocator::LocalArena;
+
+use mago_database::ReadDatabase;
+use mago_database::file::File;
+use mago_linter::Linter;
+use mago_linter::external::ExternalLinter;
+use mago_linter::registry::RuleRegistry;
+use mago_linter::settings::Settings;
+use mago_names::resolver::NameResolver;
+use mago_php_version::PHPVersion;
+use mago_reporting::Issue;
+use mago_reporting::IssueCollection;
+use mago_semantics::SemanticsChecker;
+use mago_syntax::parser::parse_file_with_settings;
+use mago_syntax::settings::ParserSettings;
+
+use crate::OrchestratorError;
+use crate::service::pipeline::StatelessParallelPipeline;
+use crate::service::pipeline::StatelessReducer;
+use crate::service::refuse_sharp_file;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::service::telemetry::LintPhaseTelemetry;
+
+/// Defines the different operational modes for the linter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LintMode {
+    /// Runs only parsing and semantic checks. This is the fastest mode.
+    SemanticsOnly,
+    /// Runs all checks: semantics, compilation, and the full linter rule set.
+    Full,
+}
+
+/// Service responsible for running the linting pipeline.
+#[derive(Debug)]
+pub struct LintService {
+    /// The read-only database containing source files to lint.
+    database: ReadDatabase,
+
+    /// The linter settings to configure the linting process.
+    settings: Settings,
+
+    /// The parser settings to configure the parsing process.
+    parser_settings: ParserSettings,
+
+    /// Whether to display progress bars during linting.
+    use_progress_bars: bool,
+
+    /// Optional worker-backed custom linter rules.
+    external_linter: Option<Arc<ExternalLinter>>,
+}
+
+impl LintService {
+    /// Creates a new instance of the `LintService`.
+    ///
+    /// # Arguments
+    ///
+    /// * `database` - The read-only database containing source files to lint.
+    /// * `settings` - The linter settings to configure the linting process.
+    /// * `parser_settings` - The parser settings to configure the parsing process.
+    /// * `use_progress_bars` - Whether to display progress bars during linting.
+    ///
+    /// # Returns
+    ///
+    /// A new `LintService` instance.
+    #[must_use]
+    pub fn new(
+        database: ReadDatabase,
+        settings: Settings,
+        parser_settings: ParserSettings,
+        use_progress_bars: bool,
+    ) -> Self {
+        Self { database, settings, parser_settings, use_progress_bars, external_linter: None }
+    }
+
+    /// Adds worker-backed custom rules to parallel full lint runs.
+    #[must_use]
+    pub fn with_external_linter(mut self, external_linter: Arc<ExternalLinter>) -> Self {
+        self.external_linter = Some(external_linter);
+        self
+    }
+
+    /// Creates a `RuleRegistry` based on the current settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `only` - An optional list of specific rules to include.
+    /// * `include_disabled` - Whether to include disabled rules in the registry.
+    ///
+    /// # Returns
+    ///
+    /// A configured `RuleRegistry` instance.
+    #[must_use]
+    pub fn create_registry(&self, only: Option<&[String]>, include_disabled: bool) -> RuleRegistry {
+        let registry = RuleRegistry::build(&self.settings, only, include_disabled);
+        if let Some(only) = only
+            && registry.is_empty()
+            && !self
+                .external_linter
+                .as_ref()
+                .is_some_and(|external| only.iter().any(|code| external.contains_rule(code)))
+        {
+            tracing::warn!("No rules found for the specified 'only' filter: {:?}", only);
+        }
+
+        registry
+    }
+
+    /// Lints a single file synchronously without using parallel processing.
+    ///
+    /// This method is designed for environments where threading is not available,
+    /// such as WebAssembly. It performs the same checks as the parallel `lint` method
+    /// but operates on a single file at a time.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The file to lint.
+    /// * `mode` - The operational mode for linting (semantics only or full).
+    /// * `only` - An optional list of specific rules to include.
+    ///
+    /// # Returns
+    ///
+    /// An `IssueCollection` containing all issues found in the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError::SharpNotSupported`] for a PHP# file.
+    pub fn lint_file(
+        &self,
+        file: &File,
+        mode: LintMode,
+        only: Option<&[String]>,
+        include_disabled: bool,
+    ) -> Result<IssueCollection, OrchestratorError> {
+        refuse_sharp_file("lint", file)?;
+
+        let arena = LocalArena::new();
+        let program = parse_file_with_settings(&arena, file, self.parser_settings);
+        let resolved_names = NameResolver::new(&arena).resolve(program);
+
+        let mut issues = IssueCollection::new();
+        if program.has_errors() {
+            issues.extend(program.errors.iter().map(Issue::from));
+        }
+
+        let semantics_checker = SemanticsChecker::new(self.settings.php_version);
+        issues.extend(semantics_checker.check(file, program, &resolved_names));
+
+        if mode == LintMode::Full {
+            let registry = Arc::new(self.create_registry(only, include_disabled));
+            let linter = Linter::from_registry(&arena, registry, self.settings.php_version);
+
+            issues.extend(linter.lint(file, program, &resolved_names));
+        }
+
+        Ok(issues)
+    }
+
+    /// Runs the linting pipeline in the specified mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - The operational mode for linting (semantics only or full).
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the final `IssueCollection` or an `OrchestratorError`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when worker pipelines fail or rule loading rejects the input.
+    pub fn lint(self, mode: LintMode, only: Option<&[String]>) -> Result<IssueCollection, OrchestratorError> {
+        const PROGRESS_BAR_THEME: &str = "🧹 Linting";
+
+        let context = LintContext {
+            php_version: self.settings.php_version,
+            parser_settings: self.parser_settings,
+            registry: Arc::new(self.create_registry(only, false)),
+            mode,
+            external_linter: self.external_linter,
+        };
+
+        let pipeline = StatelessParallelPipeline::new(
+            PROGRESS_BAR_THEME,
+            self.database,
+            context,
+            Box::new(LintResultReducer),
+            self.use_progress_bars,
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let trace_enabled = tracing::enabled!(tracing::Level::TRACE);
+        #[cfg(not(target_arch = "wasm32"))]
+        let telemetry = Arc::new(LintPhaseTelemetry::default());
+        #[cfg(not(target_arch = "wasm32"))]
+        let telemetry_for_closure = Arc::clone(&telemetry);
+
+        let result = pipeline.run(move |context, arena, file| {
+            refuse_sharp_file("lint", &file)?;
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let per_file_start = trace_enabled.then(Instant::now);
+            #[cfg(not(target_arch = "wasm32"))]
+            let parse_start = trace_enabled.then(Instant::now);
+            let program = parse_file_with_settings(arena, &file, context.parser_settings);
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(start) = parse_start {
+                telemetry_for_closure.parse_ns.fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let resolve_start = trace_enabled.then(Instant::now);
+            let resolved_names = NameResolver::new(arena).resolve(program);
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(start) = resolve_start {
+                telemetry_for_closure.resolve_ns.fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+            }
+
+            let mut issues = IssueCollection::new();
+
+            if program.has_errors() {
+                issues.extend(program.errors.iter().map(Issue::from));
+            }
+
+            let semantics_checker = SemanticsChecker::new(context.php_version);
+            #[cfg(not(target_arch = "wasm32"))]
+            let semantics_start = trace_enabled.then(Instant::now);
+            issues.extend(semantics_checker.check(&file, program, &resolved_names));
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(start) = semantics_start {
+                telemetry_for_closure.semantics_ns.fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+            }
+
+            if context.mode == LintMode::Full {
+                #[cfg(not(target_arch = "wasm32"))]
+                let lint_start = trace_enabled.then(Instant::now);
+                let linter = Linter::from_registry(arena, context.registry, context.php_version);
+                if let Some(external_linter) = context.external_linter.as_deref() {
+                    issues.extend(linter.lint_with_external(&file, program, &resolved_names, external_linter)?);
+                } else {
+                    issues.extend(linter.lint(&file, program, &resolved_names));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(start) = lint_start {
+                    telemetry_for_closure.lint_ns.fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(start) = per_file_start {
+                telemetry_for_closure.per_file_total_ns.fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+                telemetry_for_closure.files.fetch_add(1, Relaxed);
+            }
+
+            Ok(issues)
+        });
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if trace_enabled {
+            telemetry.dump();
+        }
+
+        result
+    }
+}
+
+/// Shared, read-only context provided to each parallel linting task.
+#[derive(Clone)]
+struct LintContext {
+    /// The target PHP version for analysis.
+    pub php_version: PHPVersion,
+    /// The parser settings to use.
+    pub parser_settings: ParserSettings,
+    /// A pre-configured `RuleRegistry` instance.
+    pub registry: Arc<RuleRegistry>,
+    /// The operational mode, determining which checks to run.
+    pub mode: LintMode,
+    /// Worker-backed custom rules, when configured by the host.
+    pub external_linter: Option<Arc<ExternalLinter>>,
+}
+
+/// The "reduce" step for the linting pipeline.
+///
+/// This struct implements both stateful and stateless reduction, aggregating
+/// `IssueCollection`s from parallel tasks into a single, final collection.
+#[derive(Debug)]
+struct LintResultReducer;
+
+impl StatelessReducer<IssueCollection, IssueCollection> for LintResultReducer {
+    fn reduce(&self, results: Vec<IssueCollection>) -> Result<IssueCollection, OrchestratorError> {
+        let mut final_issues = IssueCollection::new();
+        for issues in results {
+            final_issues.extend(issues);
+        }
+
+        Ok(final_issues)
+    }
+}

@@ -1,0 +1,161 @@
+use mago_allocator::Arena;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::expander::get_parameter_dependent_signature_of_function_like_identifier;
+use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
+use mago_codex::ttype::get_mixed_closure;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::union::TUnion;
+use mago_span::HasSpan;
+use mago_syntax::cst::StaticMethodPartialApplication;
+use mago_word::WordMap;
+use mago_word::ascii_lowercase_word;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::expression::partial_application::create_closure_from_partial_application;
+use crate::invocation::Invocation;
+use crate::invocation::InvocationArgumentsSource;
+use crate::invocation::InvocationTarget;
+use crate::invocation::InvocationTargetParameter;
+use crate::invocation::MethodInvocationKind;
+use crate::invocation::MethodTargetContext;
+use crate::invocation::analyzer::analyze_invocation;
+use crate::resolver::static_method::resolve_static_method_targets;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodPartialApplication<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let method_resolution =
+            resolve_static_method_targets(context, block_context, artifacts, self.class, &self.method, self.span())?;
+
+        let mut identifiers = vec![];
+        for resolved_method in &method_resolution.resolved_methods {
+            let class_name = ascii_lowercase_word(resolved_method.classname.as_ref());
+            let method_name = resolved_method.method_identifier.get_method_name();
+            artifacts.symbol_references.add_reference_to_class_member(
+                &block_context.scope,
+                (class_name, method_name),
+                false,
+            );
+
+            identifiers.push(FunctionLikeIdentifier::Method(
+                resolved_method.classname,
+                resolved_method.method_identifier.get_method_name(),
+            ));
+        }
+
+        let resulting_type = if self.argument_list.is_first_class_callable() {
+            if identifiers.is_empty() {
+                if method_resolution.has_invalid_target { get_never() } else { get_mixed_closure() }
+            } else {
+                TUnion::from_vec(
+                    identifiers
+                        .into_iter()
+                        .map(|identifier| {
+                            match get_signature_of_function_like_identifier(&identifier, context.codebase) {
+                                Some(mut sig) => {
+                                    sig.is_closure = true;
+                                    TAtomic::Callable(TCallable::Signature(sig))
+                                }
+                                None => TAtomic::Callable(TCallable::Alias(identifier)),
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        } else {
+            let mut closure_types = Vec::new();
+            for resolved_method in method_resolution.resolved_methods {
+                let identifier = FunctionLikeIdentifier::Method(
+                    resolved_method.classname,
+                    resolved_method.method_identifier.get_method_name(),
+                );
+
+                let Some(signature) =
+                    get_parameter_dependent_signature_of_function_like_identifier(&identifier, context.codebase)
+                else {
+                    continue;
+                };
+
+                let Some(metadata) = context.codebase.get_function_like(&identifier) else {
+                    continue;
+                };
+                let Some(class_like_metadata) = context.codebase.get_class_like(resolved_method.classname.as_bytes())
+                else {
+                    continue;
+                };
+
+                let original_parameters: Vec<_> =
+                    metadata.parameters.iter().map(InvocationTargetParameter::FunctionLike).collect();
+
+                let invocation_target = InvocationTarget::FunctionLike {
+                    identifier,
+                    metadata,
+                    inferred_return_type: None,
+                    effective_signature: None,
+                    method_context: Some(MethodTargetContext {
+                        invocation_kind: MethodInvocationKind::Static,
+                        declaring_method_id: Some(resolved_method.method_identifier),
+                        class_like_metadata,
+                        class_type: resolved_method.static_class_type,
+                        declaring_object_type: resolved_method.declaring_object,
+                    }),
+                    span: self.method.span(),
+                };
+
+                let mut invocation = Invocation::new(
+                    invocation_target,
+                    InvocationArgumentsSource::PartialArgumentList(&self.argument_list),
+                    self.span(),
+                );
+
+                let mut template_result = TemplateResult::default();
+                let mut parameter_types = WordMap::default();
+
+                analyze_invocation(
+                    context,
+                    block_context,
+                    artifacts,
+                    &mut invocation,
+                    Some((resolved_method.classname, None)),
+                    None,
+                    &mut template_result,
+                    &mut parameter_types,
+                )?;
+
+                closure_types.push(create_closure_from_partial_application(
+                    context,
+                    &invocation,
+                    &signature,
+                    &self.argument_list,
+                    &original_parameters,
+                    &template_result,
+                    &parameter_types,
+                ));
+            }
+
+            if closure_types.is_empty() {
+                if method_resolution.has_invalid_target { get_never() } else { get_mixed_closure() }
+            } else {
+                TUnion::from_vec(closure_types)
+            }
+        };
+
+        artifacts.set_expression_type(self, resulting_type);
+
+        Ok(())
+    }
+}

@@ -1,0 +1,1052 @@
+use std::sync::Arc;
+
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::metadata::CodebaseMetadata;
+use crate::misc::GenericParent;
+use crate::ttype::TType;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::array::keyed::TKeyedArray;
+use crate::ttype::atomic::callable::TCallable;
+use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::object::r#enum::TEnum;
+use crate::ttype::atomic::object::named::TNamedObject;
+use crate::ttype::atomic::reference::TReference;
+use crate::ttype::atomic::scalar::TScalar;
+use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use crate::ttype::atomic::scalar::string::TString;
+use crate::ttype::atomic::scalar::string::TStringCasing;
+use crate::ttype::atomic::scalar::string::TStringLiteral;
+use crate::ttype::cast::can_atomic_be_callable;
+use crate::ttype::comparator::ComparisonResult;
+use crate::ttype::comparator::array_comparator;
+use crate::ttype::comparator::callable_comparator;
+use crate::ttype::comparator::derived_comparator;
+use crate::ttype::comparator::generic_comparator;
+use crate::ttype::comparator::object_comparator;
+use crate::ttype::comparator::resource_comparator;
+use crate::ttype::comparator::scalar_comparator;
+use crate::ttype::comparator::union_comparator;
+use crate::ttype::union::TUnion;
+
+use super::iterable_comparator;
+
+pub fn is_contained_by(
+    codebase: &CodebaseMetadata,
+    input_type_part: &TAtomic,
+    container_type_part: &TAtomic,
+    inside_assertion: bool,
+    atomic_comparison_result: &mut ComparisonResult,
+) -> bool {
+    if std::ptr::eq(input_type_part, container_type_part) {
+        return true;
+    }
+
+    if input_type_part == container_type_part {
+        return true;
+    }
+
+    if matches!(input_type_part, TAtomic::Error) || matches!(container_type_part, TAtomic::Error) {
+        return true;
+    }
+
+    // Handle TAtomic::Alias - expand both input and container
+    if let TAtomic::Alias(alias) = container_type_part {
+        let Some(container_union) = alias.resolve(codebase) else {
+            return false;
+        };
+
+        for container_atomic in container_union.types.iter() {
+            if container_atomic == container_type_part {
+                continue;
+            }
+
+            if is_contained_by(codebase, input_type_part, container_atomic, inside_assertion, atomic_comparison_result)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    if let TAtomic::Alias(alias) = input_type_part {
+        let Some(input_union) = alias.resolve(codebase) else {
+            return false;
+        };
+
+        for input_atomic in input_union.types.iter() {
+            if input_atomic == input_type_part {
+                continue;
+            }
+
+            if !is_contained_by(codebase, input_atomic, container_type_part, inside_assertion, atomic_comparison_result)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // `T <= A & B`
+    if let Some(container_intersection_types) = container_type_part.get_intersection_types()
+        && !container_intersection_types.is_empty()
+    {
+        for container_intersection_type in container_intersection_types {
+            if !is_contained_by(
+                codebase,
+                input_type_part,
+                container_intersection_type,
+                inside_assertion,
+                atomic_comparison_result,
+            ) {
+                return false;
+            }
+        }
+
+        // intersection <= intersection (e.g., A&B <= C&D)
+        if input_type_part.has_intersection_types() {
+            // We have proven the input is a subtype of all the container's parts.
+            // This is sufficient.
+            return true;
+        }
+    }
+
+    // `A & B <= T`
+    if let Some(input_intersection_types) = input_type_part.get_intersection_types()
+        && !input_intersection_types.is_empty()
+    {
+        for input_intersection_type in input_intersection_types {
+            if is_contained_by(
+                codebase,
+                input_intersection_type,
+                container_type_part,
+                inside_assertion,
+                atomic_comparison_result,
+            ) {
+                return true;
+            }
+        }
+    }
+
+    if inside_assertion
+        && let TAtomic::GenericParameter(container_generic) = container_type_part
+        && let TAtomic::GenericParameter(input_generic) = input_type_part
+    {
+        // Different template parameters are not contained by each other during assertion reconciliation
+        if (input_generic.parameter_name != container_generic.parameter_name
+            || input_generic.defining_entity != container_generic.defining_entity)
+            && !is_forwarded_template_parameter(codebase, input_generic, container_generic)
+        {
+            return false;
+        }
+    }
+
+    let container_refuses_null = atomic_comparison_result.sharp_rules
+        && matches!(container_type_part, TAtomic::Mixed(mixed) if mixed.is_non_null());
+    if (container_type_part.is_vanilla_mixed() && !container_refuses_null)
+        || container_type_part.is_templated_as_vanilla_mixed()
+    {
+        return true;
+    }
+
+    if container_type_part.is_mixed() || container_type_part.is_templated_as_mixed() {
+        if matches!(container_type_part, TAtomic::Mixed(mixed) if mixed.is_non_null())
+            && (matches!(input_type_part, TAtomic::Null)
+                || matches!(input_type_part, TAtomic::Mixed(mixed) if !mixed.is_non_null()))
+        {
+            return false;
+        }
+
+        if matches!(container_type_part, TAtomic::Mixed(mixed) if mixed.is_truthy()) && input_type_part.is_falsy() {
+            return false;
+        }
+
+        if matches!(container_type_part, TAtomic::Mixed(mixed) if mixed.is_falsy()) && input_type_part.is_truthy() {
+            return false;
+        }
+
+        return true;
+    }
+
+    if input_type_part.is_derived() || container_type_part.is_derived() {
+        return derived_comparator::is_contained_by(
+            codebase,
+            input_type_part,
+            container_type_part,
+            inside_assertion,
+            &mut ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules),
+        );
+    }
+
+    if input_type_part.is_some_scalar() {
+        if container_type_part.is_generic_scalar() {
+            return true;
+        }
+
+        if container_type_part.is_some_scalar() {
+            return scalar_comparator::is_contained_by(
+                codebase,
+                input_type_part,
+                container_type_part,
+                inside_assertion,
+                atomic_comparison_result,
+            );
+        }
+    }
+
+    if matches!(container_type_part, TAtomic::Placeholder) || matches!(input_type_part, TAtomic::Placeholder) {
+        return true;
+    }
+
+    if matches!(input_type_part, TAtomic::Never) {
+        return true;
+    }
+
+    if input_type_part.is_mixed() || input_type_part.is_templated_as_mixed() {
+        atomic_comparison_result.type_coerced = Some(true);
+        atomic_comparison_result.type_coerced_from_nested_mixed = Some(true);
+        return false;
+    }
+
+    if let TAtomic::Object(TObject::Enum(enum_container)) = container_type_part {
+        return match input_type_part {
+            TAtomic::Object(TObject::Enum(enum_input)) => {
+                if !codebase.is_instance_of(enum_input.get_name().as_bytes(), enum_container.get_name().as_bytes()) {
+                    return false;
+                }
+
+                if let Some(container_case) = enum_container.case.as_ref() {
+                    if let Some(input_case) = enum_input.case.as_ref() {
+                        return container_case == input_case;
+                    }
+                    return false;
+                }
+
+                true
+            }
+            TAtomic::Object(TObject::Named(named_object)) if enum_container.case.is_none() => {
+                if !codebase.is_instance_of(named_object.get_name().as_bytes(), enum_container.get_name().as_bytes()) {
+                    return false;
+                }
+
+                if named_object.has_type_parameters() {
+                    atomic_comparison_result.type_coerced = Some(true);
+                }
+
+                true
+            }
+            _ => false,
+        };
+    }
+
+    if matches!(input_type_part, TAtomic::Null) {
+        if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = container_type_part
+            && (constraint.is_nullable() || constraint.is_mixed())
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    if let TAtomic::Callable(TCallable::Signature(_)) = container_type_part {
+        if can_atomic_be_callable(input_type_part, codebase) {
+            return callable_comparator::is_contained_by(
+                codebase,
+                input_type_part,
+                container_type_part,
+                atomic_comparison_result,
+            );
+        }
+
+        return false;
+    }
+
+    if let TAtomic::Callable(input_callable) = input_type_part
+        && input_callable.is_closure()
+        && let TAtomic::Object(TObject::Named(container_object)) = container_type_part
+        && container_object.get_name().as_bytes().eq_ignore_ascii_case(b"Closure")
+    {
+        return true;
+    }
+
+    if let TAtomic::Resource(_) = container_type_part {
+        return resource_comparator::is_contained_by(input_type_part, container_type_part);
+    }
+
+    if let TAtomic::Array(container_array) = container_type_part
+        && let TAtomic::Array(input_array) = input_type_part
+    {
+        return array_comparator::is_array_contained_by_array(
+            codebase,
+            input_array,
+            container_array,
+            inside_assertion,
+            atomic_comparison_result,
+        );
+    }
+
+    if let TAtomic::Iterable(_) = container_type_part {
+        return iterable_comparator::is_contained_by(
+            codebase,
+            input_type_part,
+            container_type_part,
+            inside_assertion,
+            atomic_comparison_result,
+        );
+    }
+
+    if matches!(container_type_part, TAtomic::Object(TObject::Any))
+        && (matches!(input_type_part, TAtomic::Object(_))
+            || matches!(input_type_part, TAtomic::Callable(callable) if callable.is_closure()))
+    {
+        return true;
+    }
+
+    if let TAtomic::Object(TObject::HasMethod(container_has_method)) = container_type_part {
+        return match input_type_part {
+            TAtomic::Object(TObject::Named(input_object)) => {
+                codebase.method_exists(input_object.get_name().as_bytes(), container_has_method.get_method().as_bytes())
+            }
+            TAtomic::Object(TObject::Enum(input_enum)) => {
+                codebase.method_exists(input_enum.get_name().as_bytes(), container_has_method.get_method().as_bytes())
+            }
+            TAtomic::Object(TObject::HasMethod(input_has_method)) => {
+                input_has_method.has_method(container_has_method.get_method().as_bytes())
+            }
+            _ => false,
+        };
+    }
+
+    if let TAtomic::Object(TObject::WithProperties(container_object_with_properties)) = container_type_part
+        && let TAtomic::Object(input_object) = input_type_part
+    {
+        return match input_object {
+            TObject::Any => {
+                !container_object_with_properties.sealed && container_object_with_properties.known_properties.is_empty()
+            }
+            TObject::WithProperties(input_object_with_properties) => {
+                if container_object_with_properties.sealed && !input_object_with_properties.sealed {
+                    return false;
+                }
+
+                for (container_property_name, (container_property_indefinite, container_property_type)) in
+                    &container_object_with_properties.known_properties
+                {
+                    let Some((input_property_indefinite, input_property_type)) =
+                        input_object_with_properties.known_properties.get(container_property_name)
+                    else {
+                        if *container_property_indefinite && input_object_with_properties.sealed {
+                            continue;
+                        }
+
+                        return false;
+                    };
+
+                    if !*container_property_indefinite && *input_property_indefinite {
+                        return false;
+                    }
+
+                    if !union_comparator::is_contained_by(
+                        codebase,
+                        input_property_type,
+                        container_property_type,
+                        false,
+                        false,
+                        inside_assertion,
+                        atomic_comparison_result,
+                    ) {
+                        return false;
+                    }
+                }
+
+                true
+            }
+            TObject::Named(TNamedObject { name: input_object_name, .. })
+            | TObject::Enum(TEnum { name: input_object_name, .. }) => {
+                let Some(class_like_metadata) = codebase.get_class_like(input_object_name.as_bytes()) else {
+                    return false;
+                };
+
+                for (container_property_name, (container_property_indefinite, container_property_type)) in
+                    &container_object_with_properties.known_properties
+                {
+                    let property_name = concat_word!(b"$", container_property_name);
+
+                    let real_property = class_like_metadata
+                        .declaring_property_ids
+                        .get(&property_name)
+                        .and_then(|declaring_class| codebase.get_class_like(declaring_class.as_bytes()))
+                        .and_then(|declaring_metadata| declaring_metadata.properties.get(&property_name));
+
+                    // Structural containment is an external view: a publicly readable real
+                    // property governs; otherwise a magic `@property*` tag documents the
+                    // `__get` interface and applies instead.  A non-public real property
+                    // without a tag is still accepted, as it always was here.
+                    let declared_property = match real_property {
+                        Some(real) if real.read_visibility.is_public() => Some(real),
+                        real => class_like_metadata
+                            .magic_property_ids
+                            .get(&property_name)
+                            .and_then(|tag_class| codebase.get_class_like(tag_class.as_bytes()))
+                            .and_then(|tag_metadata| tag_metadata.magic_properties.get(&property_name))
+                            .or(real),
+                    };
+
+                    let Some(declared_property) = declared_property else {
+                        if *container_property_indefinite {
+                            continue;
+                        }
+                        return false;
+                    };
+
+                    match declared_property.type_metadata.as_ref() {
+                        Some(property_type_metadata) => {
+                            if !union_comparator::is_contained_by(
+                                codebase,
+                                container_property_type,
+                                &property_type_metadata.type_union,
+                                false,
+                                false,
+                                inside_assertion,
+                                atomic_comparison_result,
+                            ) {
+                                return false;
+                            }
+                        }
+                        None => {
+                            if !container_property_type.is_mixed() {
+                                return false;
+                            }
+                        }
+                    }
+                }
+
+                if container_object_with_properties.sealed {
+                    // For sealed objects, we need to ensure the input object doesn't have
+                    // properties that aren't in the container type
+                    for property_name in class_like_metadata.declaring_property_ids.keys() {
+                        let actual_property_name =
+                            word(property_name.as_bytes().strip_prefix(b"$").unwrap_or(property_name.as_bytes()));
+
+                        // Check if this property exists in our container's known properties
+                        if !container_object_with_properties.known_properties.contains_key(&actual_property_name) {
+                            return false; // Input object has a property not allowed in sealed container
+                        }
+                    }
+                }
+
+                true
+            }
+            TObject::HasMethod(_) | TObject::HasProperty(_) => false,
+        };
+    }
+
+    if matches!(input_type_part, TAtomic::Object(TObject::Any))
+        && let TAtomic::Object(TObject::Named(_) | TObject::Enum(_)) = container_type_part
+    {
+        atomic_comparison_result.type_coerced = Some(true);
+        return false;
+    }
+
+    if let TAtomic::GenericParameter(container_generic) = container_type_part
+        && let TAtomic::GenericParameter(input_generic) = input_type_part
+    {
+        return union_comparator::is_contained_by(
+            codebase,
+            &input_generic.constraint,
+            &container_generic.constraint,
+            false,
+            input_generic.constraint.ignore_falsable_issues(),
+            inside_assertion,
+            atomic_comparison_result,
+        );
+    }
+
+    if (matches!(input_type_part, TAtomic::Object(TObject::Named(_) | TObject::Enum(_)))
+        || input_type_part.is_templated_as_object())
+        && (matches!(container_type_part, TAtomic::Object(TObject::Named(_) | TObject::Enum(_)))
+            || container_type_part.is_templated_as_object())
+    {
+        if !object_comparator::is_intersection_shallowly_contained_by(
+            codebase,
+            input_type_part,
+            container_type_part,
+            inside_assertion,
+            atomic_comparison_result,
+        ) {
+            return false;
+        }
+
+        if matches!(container_type_part, TAtomic::Object(TObject::Named(obj)) if obj.has_type_parameters())
+            && !generic_comparator::is_contained_by(
+                codebase,
+                input_type_part,
+                container_type_part,
+                inside_assertion,
+                atomic_comparison_result,
+            )
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    if let TAtomic::GenericParameter(TGenericParameter { constraint: container_constraint, .. }) = container_type_part {
+        return inside_assertion
+            && container_constraint.types.iter().any(|container_extends_type_part| {
+                is_contained_by(
+                    codebase,
+                    input_type_part,
+                    container_extends_type_part,
+                    inside_assertion,
+                    atomic_comparison_result,
+                )
+            });
+    }
+
+    if let TAtomic::GenericParameter(TGenericParameter { constraint: input_constraint, .. }) = input_type_part {
+        for input_constraint_part in input_constraint.types.iter() {
+            if matches!(input_constraint_part, TAtomic::Null) && matches!(container_type_part, TAtomic::Null) {
+                continue;
+            }
+
+            if is_contained_by(
+                codebase,
+                input_constraint_part,
+                container_type_part,
+                inside_assertion,
+                atomic_comparison_result,
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    false
+}
+
+fn is_forwarded_template_parameter(
+    codebase: &CodebaseMetadata,
+    input_generic: &TGenericParameter,
+    container_generic: &TGenericParameter,
+) -> bool {
+    let (GenericParent::ClassLike(input_class), GenericParent::ClassLike(container_class)) =
+        (&input_generic.defining_entity, &container_generic.defining_entity)
+    else {
+        return false;
+    };
+
+    input_class != container_class
+        && codebase
+            .get_class_like(input_class.as_bytes())
+            .and_then(|metadata| metadata.template_extended_parameters.get(container_class))
+            .is_some_and(|parameters| parameters.contains_key(&container_generic.parameter_name))
+}
+
+pub(crate) fn can_be_identical(
+    codebase: &CodebaseMetadata,
+    first_part: &TAtomic,
+    second_part: &TAtomic,
+    inside_assertion: bool,
+    allow_type_coercion: bool,
+) -> bool {
+    if matches!(
+        (first_part, second_part),
+        // If either part is a variable, they can be identical
+        (TAtomic::Variable(_) | TAtomic::Mixed(_), _)
+            | (_, TAtomic::Variable(_) | TAtomic::Mixed(_))
+            | (TAtomic::Iterable(_), TAtomic::Iterable(_) | TAtomic::Array(_) | TAtomic::Object(_))
+            | (TAtomic::Array(_) | TAtomic::Object(_), TAtomic::Iterable(_))
+            | (TAtomic::Scalar(TScalar::Numeric | TScalar::ArrayKey), TAtomic::Scalar(TScalar::String(_)))
+            | (TAtomic::Scalar(TScalar::String(_)), TAtomic::Scalar(TScalar::Numeric | TScalar::ArrayKey))
+            | (
+                TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_) | TScalar::ArrayKey),
+                TAtomic::Scalar(TScalar::Numeric)
+            )
+            | (
+                TAtomic::Scalar(TScalar::Numeric),
+                TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_) | TScalar::ArrayKey)
+            )
+    ) {
+        return true;
+    }
+
+    // (class-string, string) overlap: when both sides are literal, the exact
+    // class name must equal the exact string; otherwise they can overlap.
+    if let (TAtomic::Scalar(TScalar::ClassLikeString(class_string)), TAtomic::Scalar(TScalar::String(string)))
+    | (TAtomic::Scalar(TScalar::String(string)), TAtomic::Scalar(TScalar::ClassLikeString(class_string))) =
+        (first_part, second_part)
+    {
+        return match (class_string, string.get_known_literal_value()) {
+            (TClassLikeString::Literal { value }, Some(str_value)) => value.as_bytes().eq_ignore_ascii_case(str_value),
+            _ => true,
+        };
+    }
+
+    if matches!(first_part, TAtomic::Callable(_)) != matches!(second_part, TAtomic::Callable(_))
+        && can_atomic_be_callable(first_part, codebase)
+        && can_atomic_be_callable(second_part, codebase)
+    {
+        return true;
+    }
+
+    if let (TAtomic::Object(TObject::Enum(first_enum)), TAtomic::Object(TObject::Enum(second_enum))) =
+        (first_part, second_part)
+    {
+        if !first_enum.name.as_bytes().eq_ignore_ascii_case(second_enum.name.as_bytes()) {
+            return false;
+        }
+
+        return match (first_enum.case, second_enum.case) {
+            (Some(first_case), Some(second_case)) => first_case == second_case,
+            _ => true,
+        };
+    }
+
+    if (first_part.is_list() && second_part.is_non_empty_list())
+        || (second_part.is_list() && first_part.is_non_empty_list())
+    {
+        return if let Some(first_element_type) = first_part.get_list_element_type()
+            && let Some(second_element_type) = second_part.get_list_element_type()
+        {
+            union_comparator::can_expression_types_be_identical(
+                codebase,
+                first_element_type,
+                second_element_type,
+                inside_assertion,
+                false,
+            )
+        } else {
+            false
+        };
+    }
+
+    if let (TAtomic::Array(TArray::Keyed(first_array)), TAtomic::Array(TArray::Keyed(second_array))) =
+        (first_part, second_part)
+    {
+        return keyed_arrays_can_be_identical(first_array, second_array, codebase, inside_assertion);
+    }
+
+    if let (TAtomic::Array(TArray::Keyed(keyed_array)), TAtomic::Array(TArray::List(list)))
+    | (TAtomic::Array(TArray::List(list)), TAtomic::Array(TArray::Keyed(keyed_array))) = (first_part, second_part)
+    {
+        if keyed_array.known_non_list {
+            return false;
+        }
+
+        if let Some(known_items) = &keyed_array.known_items {
+            for (key, (optional, _)) in known_items.iter() {
+                if *optional {
+                    continue;
+                }
+                if key.is_string() {
+                    return false;
+                }
+            }
+        }
+
+        if let Some((key_type, _)) = keyed_array.parameters.as_ref()
+            && !key_type.has_int()
+        {
+            return false;
+        }
+
+        let list_has_known_elements = list.known_elements.as_ref().is_some_and(|e| !e.is_empty());
+        let list_element_is_never = list.element_type.is_never();
+
+        if let Some((_, keyed_val_type)) = keyed_array.parameters.as_ref() {
+            if list_has_known_elements
+                && list_element_is_never
+                && let Some(known_elements) = list.known_elements.as_ref()
+            {
+                for (_, list_elem_type) in known_elements.values() {
+                    if union_comparator::can_expression_types_be_identical(
+                        codebase,
+                        keyed_val_type.as_ref(),
+                        list_elem_type,
+                        inside_assertion,
+                        false,
+                    ) {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            return union_comparator::can_expression_types_be_identical(
+                codebase,
+                keyed_val_type.as_ref(),
+                list.element_type.as_ref(),
+                inside_assertion,
+                false,
+            );
+        }
+
+        if let Some(known_items) = &keyed_array.known_items {
+            if known_items.is_empty() {
+                return true;
+            }
+
+            if let Some(known_elements) = &list.known_elements {
+                if known_elements.is_empty() {
+                    // Fall through to check against general element type
+                } else {
+                    for (_, keyed_item_type) in known_items.values() {
+                        for (_, list_elem_type) in known_elements.values() {
+                            if union_comparator::can_expression_types_be_identical(
+                                codebase,
+                                keyed_item_type,
+                                list_elem_type,
+                                inside_assertion,
+                                false,
+                            ) {
+                                return true;
+                            }
+                        }
+                    }
+
+                    return false;
+                }
+            }
+
+            if !list_element_is_never {
+                for (_, keyed_item_type) in known_items.values() {
+                    if union_comparator::can_expression_types_be_identical(
+                        codebase,
+                        keyed_item_type,
+                        list.element_type.as_ref(),
+                        inside_assertion,
+                        false,
+                    ) {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            // If list element is never and has no known elements, keyed array can't be a list
+            return false;
+        }
+
+        // If keyed array has neither parameters nor known_items, it's an empty array
+        // which can be a list
+        return true;
+    }
+
+    if let (TAtomic::Scalar(TScalar::Integer(first_integer)), TAtomic::Scalar(TScalar::Integer(second_integer))) =
+        (first_part, second_part)
+        && !first_integer.is_of_literal_origin()
+        && !second_integer.is_of_literal_origin()
+        && first_integer.overlaps(*second_integer)
+    {
+        return true;
+    }
+
+    if let (TAtomic::Scalar(TScalar::String(first_string)), TAtomic::Scalar(TScalar::String(second_string))) =
+        (first_part, second_part)
+        && strings_can_be_identical(first_string, second_string)
+    {
+        return true;
+    }
+
+    let mut first_comparison_result = ComparisonResult::new();
+    let mut second_comparison_result = ComparisonResult::new();
+
+    if is_contained_by(codebase, first_part, second_part, inside_assertion, &mut first_comparison_result)
+        || is_contained_by(codebase, second_part, first_part, inside_assertion, &mut second_comparison_result)
+        || (first_comparison_result.type_coerced.unwrap_or(false)
+            && second_comparison_result.type_coerced.unwrap_or(false))
+        || (allow_type_coercion && first_part.is_some_scalar() && second_part.is_some_scalar())
+    {
+        return true;
+    }
+
+    if let TAtomic::GenericParameter(first_generic) = first_part {
+        for first_constraint_part in first_generic.constraint.types.iter() {
+            if can_be_identical(codebase, first_constraint_part, second_part, inside_assertion, allow_type_coercion) {
+                return true;
+            }
+        }
+    }
+
+    if let TAtomic::GenericParameter(second_generic) = second_part {
+        for second_constraint_part in second_generic.constraint.types.iter() {
+            if can_be_identical(codebase, first_part, second_constraint_part, inside_assertion, allow_type_coercion) {
+                return true;
+            }
+        }
+    }
+
+    if let (TAtomic::Object(first_object), TAtomic::Object(second_object)) = (first_part, second_part)
+        && let (Some(first_name), Some(second_name)) = (first_object.get_name(), second_object.get_name())
+    {
+        return match (codebase.get_class_like(first_name.as_bytes()), codebase.get_class_like(second_name.as_bytes())) {
+            (Some(c1), Some(c2)) => c1.kind.is_interface() || c2.kind.is_interface(),
+            _ => true,
+        };
+    }
+
+    matches!(
+        (first_part, second_part),
+        (TAtomic::Object(_), TAtomic::Reference(TReference::Symbol { .. }))
+            | (
+                TAtomic::Reference(TReference::Symbol { .. }),
+                TAtomic::Object(_) | TAtomic::Reference(TReference::Symbol { .. })
+            )
+    )
+}
+
+/// Checks whether two string types can share at least one concrete value.
+///
+/// PHP string flags (casing, non-emptiness, numeric-ness, callable-ness) live
+/// on independent dimensions, so types like `non-empty-string` and
+/// `lowercase-string` are not in a subtype relation yet still overlap
+/// (`"abc"` is both). Subtype-based comparison misses this; we enumerate the
+/// conflicts instead and return `true` whenever none apply.
+fn strings_can_be_identical(lhs: &TString, rhs: &TString) -> bool {
+    if let (Some(TStringLiteral::Value(l)), Some(TStringLiteral::Value(r))) = (&lhs.literal, &rhs.literal) {
+        return l == r;
+    }
+
+    let literal_value = match (&lhs.literal, &rhs.literal) {
+        (Some(TStringLiteral::Value(v)), _) => Some((v.as_bytes(), rhs)),
+        (_, Some(TStringLiteral::Value(v))) => Some((v.as_bytes(), lhs)),
+        _ => None,
+    };
+
+    if let Some((value, constraints)) = literal_value {
+        if constraints.is_non_empty && value.is_empty() {
+            return false;
+        }
+
+        match constraints.casing {
+            TStringCasing::Lowercase if value.iter().any(u8::is_ascii_uppercase) => return false,
+            TStringCasing::Uppercase if value.iter().any(u8::is_ascii_lowercase) => return false,
+            _ => {}
+        }
+
+        return true;
+    }
+
+    true
+}
+
+fn entry_can_match_parameters(
+    codebase: &CodebaseMetadata,
+    entry: &(bool, TUnion),
+    parameters: Option<&(Arc<TUnion>, Arc<TUnion>)>,
+    inside_assertion: bool,
+) -> bool {
+    match parameters {
+        Some(parameters) => union_comparator::can_expression_types_be_identical(
+            codebase,
+            &entry.1,
+            &parameters.1,
+            inside_assertion,
+            false,
+        ),
+        None => entry.0,
+    }
+}
+
+fn parameters_can_be_identical(
+    codebase: &CodebaseMetadata,
+    first_array: &TKeyedArray,
+    second_array: &TKeyedArray,
+    inside_assertion: bool,
+) -> bool {
+    match (&first_array.parameters, &second_array.parameters) {
+        (Some(first_parameters), Some(second_parameters)) => {
+            union_comparator::can_expression_types_be_identical(
+                codebase,
+                &first_parameters.0,
+                &second_parameters.0,
+                inside_assertion,
+                false,
+            ) && union_comparator::can_expression_types_be_identical(
+                codebase,
+                &first_parameters.1,
+                &second_parameters.1,
+                inside_assertion,
+                false,
+            )
+        }
+        _ => true,
+    }
+}
+
+fn keyed_arrays_can_be_identical(
+    first_array: &TKeyedArray,
+    second_array: &TKeyedArray,
+    codebase: &CodebaseMetadata,
+    inside_assertion: bool,
+) -> bool {
+    if first_array.non_empty || second_array.non_empty {
+        return parameters_can_be_identical(codebase, first_array, second_array, inside_assertion);
+    }
+
+    match (&first_array.known_items, &second_array.known_items) {
+        (Some(first_known_items), Some(second_known_items)) => {
+            let mut all_keys = first_known_items.keys().collect::<Vec<_>>();
+            all_keys.extend(second_known_items.keys());
+
+            for key in all_keys {
+                match (first_known_items.get(key), second_known_items.get(key)) {
+                    (Some(first_entry), Some(second_entry)) => {
+                        if !union_comparator::can_expression_types_be_identical(
+                            codebase,
+                            &first_entry.1,
+                            &second_entry.1,
+                            inside_assertion,
+                            false,
+                        ) {
+                            return false;
+                        }
+                    }
+                    (Some(first_entry), None) => {
+                        if !entry_can_match_parameters(
+                            codebase,
+                            first_entry,
+                            second_array.parameters.as_ref(),
+                            inside_assertion,
+                        ) {
+                            return false;
+                        }
+                    }
+                    (None, Some(second_entry)) => {
+                        if !entry_can_match_parameters(
+                            codebase,
+                            second_entry,
+                            first_array.parameters.as_ref(),
+                            inside_assertion,
+                        ) {
+                            return false;
+                        }
+                    }
+                    #[allow(clippy::unreachable)]
+                    (None, None) => {
+                        unreachable!("key {key:?} should exist in at least one map, but found in neither");
+                    }
+                }
+            }
+        }
+        (Some(first_known_items), None) => {
+            for first_entry in first_known_items.values() {
+                if !entry_can_match_parameters(
+                    codebase,
+                    first_entry,
+                    second_array.parameters.as_ref(),
+                    inside_assertion,
+                ) {
+                    return false;
+                }
+            }
+        }
+        (None, Some(second_known_items)) => {
+            for second_entry in second_known_items.values() {
+                if !entry_can_match_parameters(
+                    codebase,
+                    second_entry,
+                    first_array.parameters.as_ref(),
+                    inside_assertion,
+                ) {
+                    return false;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    parameters_can_be_identical(codebase, first_array, second_array, inside_assertion)
+}
+
+#[cfg(test)]
+mod tests {
+    use mago_word::word;
+
+    use crate::ttype::atomic::TAtomic;
+    use crate::ttype::atomic::scalar::TScalar;
+    use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
+    use crate::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
+    use crate::ttype::atomic::scalar::string::TString;
+    use crate::ttype::comparator::tests::create_test_codebase;
+
+    use super::can_be_identical;
+
+    fn class_string_literal(name: &str) -> TAtomic {
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::literal(word(name))))
+    }
+
+    fn class_string_any() -> TAtomic {
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::any(TClassLikeStringKind::Class)))
+    }
+
+    fn string_literal(value: &str) -> TAtomic {
+        TAtomic::Scalar(TScalar::String(TString::known_literal(word(value))))
+    }
+
+    fn general_string() -> TAtomic {
+        TAtomic::Scalar(TScalar::String(TString::general()))
+    }
+
+    #[test]
+    fn literal_class_string_and_mismatching_literal_string_cannot_be_identical() {
+        let codebase = create_test_codebase("<?php");
+        let class_string = class_string_literal("Baz");
+        let string = string_literal("foo");
+
+        assert!(!can_be_identical(&codebase, &class_string, &string, false, false));
+        assert!(!can_be_identical(&codebase, &string, &class_string, false, false));
+    }
+
+    #[test]
+    fn literal_class_string_and_matching_literal_string_can_be_identical() {
+        let codebase = create_test_codebase("<?php");
+        let class_string = class_string_literal("Baz");
+        let string = string_literal("Baz");
+
+        assert!(can_be_identical(&codebase, &class_string, &string, false, false));
+        assert!(can_be_identical(&codebase, &string, &class_string, false, false));
+    }
+
+    #[test]
+    fn literal_class_string_and_literal_string_match_case_insensitively() {
+        let codebase = create_test_codebase("<?php");
+        let class_string = class_string_literal("Baz");
+        let string = string_literal("bAZ");
+
+        assert!(can_be_identical(&codebase, &class_string, &string, false, false));
+        assert!(can_be_identical(&codebase, &string, &class_string, false, false));
+    }
+
+    #[test]
+    fn literal_class_string_and_general_string_can_be_identical() {
+        let codebase = create_test_codebase("<?php");
+        let class_string = class_string_literal("Baz");
+        let string = general_string();
+
+        assert!(can_be_identical(&codebase, &class_string, &string, false, false));
+        assert!(can_be_identical(&codebase, &string, &class_string, false, false));
+    }
+
+    #[test]
+    fn any_class_string_and_literal_string_can_be_identical() {
+        let codebase = create_test_codebase("<?php");
+        let class_string = class_string_any();
+        let string = string_literal("foo");
+
+        assert!(can_be_identical(&codebase, &class_string, &string, false, false));
+        assert!(can_be_identical(&codebase, &string, &class_string, false, false));
+    }
+}

@@ -1,0 +1,454 @@
+use mago_allocator::Arena;
+use mago_allocator::CollectIn;
+use mago_allocator::vec::Vec;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::ClassConstantAccess;
+use mago_syntax::cst::ClassLikeConstantSelector;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::CompositeString;
+use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Identifier;
+use mago_syntax::cst::StaticMethodCall;
+use mago_syntax::cst::Variable;
+use unicode_width::UnicodeWidthStr;
+
+use mago_syntax::cst::Access;
+use mago_syntax::cst::ArrayElement;
+use mago_syntax::cst::Call;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Literal;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::PartialApplication;
+use mago_syntax::cst::StringPart;
+
+use crate::document::Align;
+use crate::document::BreakMode;
+use crate::document::Document;
+use crate::document::IndentIfBreak;
+use crate::document::Separator;
+use crate::internal::FormatterState;
+use crate::internal::format::call_arguments::promote_argument_list_to_partial;
+use crate::internal::format::call_arguments::should_break_all_arguments;
+use crate::internal::format::misc::is_breaking_expression;
+use crate::internal::format::misc::is_simple_single_line_expression;
+
+use super::format::call_arguments::should_expand_first_arg;
+use super::format::call_arguments::should_expand_last_arg;
+
+#[inline]
+pub fn spaces<A>(arena: &A, count: usize) -> &[u8]
+where
+    A: Arena,
+{
+    let mut spaces = Vec::with_capacity_in(count, arena);
+    spaces.resize(count, b' ');
+    spaces.leak()
+}
+
+#[inline]
+pub const fn has_naked_left_side(expression: &Expression) -> bool {
+    matches!(
+        expression,
+        Expression::Binary(_)
+            | Expression::UnaryPostfix(_)
+            | Expression::Assignment(_)
+            | Expression::Conditional(_)
+            | Expression::ArrayAccess(_)
+            | Expression::ArrayAppend(_)
+            | Expression::Call(_)
+            | Expression::Access(_)
+            | Expression::PartialApplication(_)
+    )
+}
+
+#[inline]
+pub fn get_left_side<'arena>(expression: &'arena Expression<'arena>) -> Option<&'arena Expression<'arena>> {
+    match expression {
+        Expression::Binary(binary) => Some(binary.lhs),
+        Expression::UnaryPostfix(unary) => Some(unary.operand),
+        Expression::Assignment(assignment) => Some(assignment.lhs),
+        Expression::Conditional(conditional) => Some(conditional.condition),
+        Expression::ArrayAccess(array_access) => Some(array_access.array),
+        Expression::ArrayAppend(array_append) => Some(array_append.array),
+        Expression::Call(call) => Some(match call {
+            Call::Function(function_call) => function_call.function,
+            Call::Method(method_call) => method_call.object,
+            Call::NullSafeMethod(null_safe_method_call) => null_safe_method_call.object,
+            Call::StaticMethod(static_method_call) => static_method_call.class,
+        }),
+        Expression::Access(access) => Some(match access {
+            Access::Property(property_access) => property_access.object,
+            Access::NullSafeProperty(null_safe_property_access) => null_safe_property_access.object,
+            Access::StaticProperty(static_property_access) => static_property_access.class,
+            Access::ClassConstant(class_constant_access) => class_constant_access.class,
+        }),
+        Expression::PartialApplication(partial_application) => Some(match partial_application {
+            PartialApplication::Function(function_partial_application) => function_partial_application.function,
+            PartialApplication::Method(method_partial_application) => method_partial_application.object,
+            PartialApplication::StaticMethod(static_method_partial_application) => {
+                static_method_partial_application.class
+            }
+        }),
+        _ => None,
+    }
+}
+
+#[inline]
+pub fn is_at_call_like_expression<A>(f: &FormatterState<'_, '_, A>) -> bool
+where
+    A: Arena,
+{
+    let Some(grant_parent) = f.grandparent_node() else {
+        return false;
+    };
+
+    matches!(
+        grant_parent,
+        Node::FunctionCall(_)
+            | Node::MethodCall(_)
+            | Node::StaticMethodCall(_)
+            | Node::NullSafeMethodCall(_)
+            | Node::FunctionPartialApplication(_)
+            | Node::MethodPartialApplication(_)
+            | Node::StaticMethodPartialApplication(_)
+    )
+}
+
+#[inline]
+pub fn unwrap_parenthesized<'ast, 'arena>(mut expression: &'ast Expression<'arena>) -> &'ast Expression<'arena> {
+    while let Expression::Parenthesized(parenthesized) = expression {
+        expression = parenthesized.expression;
+    }
+
+    expression
+}
+
+#[inline]
+pub fn is_at_callee<A>(f: &FormatterState<'_, '_, A>) -> bool
+where
+    A: Arena,
+{
+    let Node::Expression(expression) = f.parent_node() else {
+        return false;
+    };
+
+    let Some(parent) = f.grandparent_node() else {
+        return false;
+    };
+
+    match parent {
+        Node::FunctionCall(call) => call.function == expression,
+        Node::MethodCall(call) => call.object == expression,
+        Node::StaticMethodCall(call) => call.class == expression,
+        Node::NullSafeMethodCall(call) => call.object == expression,
+        Node::FunctionPartialApplication(partial_application) => partial_application.function == expression,
+        Node::MethodPartialApplication(partial_application) => partial_application.object == expression,
+        Node::StaticMethodPartialApplication(partial_application) => partial_application.class == expression,
+        _ => false,
+    }
+}
+
+#[inline]
+pub fn will_break<'arena, A>(document: &'arena Document<'arena, A>) -> bool
+where
+    A: Arena,
+{
+    let check_array = |array: &Vec<'arena, Document<'arena, A>, A>| array.iter().rev().any(|doc| will_break(doc));
+
+    match document {
+        Document::BreakParent => true,
+        Document::Line(doc) => doc.hard,
+        Document::Group(group) => {
+            if *group.break_mode.borrow() == BreakMode::Force {
+                return true;
+            }
+
+            check_array(&group.contents)
+        }
+        Document::IfBreak(d) => will_break(d.flat_content) || will_break(d.break_contents),
+        Document::Array(contents)
+        | Document::Indent(contents)
+        | Document::LineSuffix(contents)
+        | Document::IndentIfBreak(IndentIfBreak { contents, .. })
+        | Document::Align(Align { contents, .. }) => check_array(contents),
+        _ => false,
+    }
+}
+
+/// Split a byte slice on any line terminator: `\r\n`, `\n`, or bare `\r`.
+///
+/// behaves like `str::split('\n')` — a trailing line terminator produces a
+/// trailing empty slice.
+pub(crate) fn split_any_newline(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut remaining: Option<&[u8]> = Some(text);
+    std::iter::from_fn(move || {
+        let text = remaining?;
+
+        for i in 0..text.len() {
+            if text[i] == b'\r' {
+                let line = &text[..i];
+                remaining = Some(if text.get(i + 1) == Some(&b'\n') { &text[i + 2..] } else { &text[i + 1..] });
+                return Some(line);
+            } else if text[i] == b'\n' {
+                let line = &text[..i];
+                remaining = Some(&text[i + 1..]);
+                return Some(line);
+            }
+        }
+
+        remaining = None;
+        Some(text)
+    })
+}
+
+#[inline]
+pub fn replace_end_of_line<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    document: Document<'arena, A>,
+    replacement: Separator,
+    halted_compilation: bool,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let Document::String(text) = document else {
+        return document;
+    };
+
+    // Do not modify the content if the compilation was halted.
+    if halted_compilation {
+        return Document::String(text);
+    }
+
+    Document::Array(Document::join(
+        f.arena,
+        split_any_newline(text).map(Document::String).collect_in::<Vec<'arena, _, A>>(f.arena),
+        replacement,
+    ))
+}
+
+#[inline]
+pub fn could_expand_value<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    value: &'arena Expression<'arena>,
+    nested_args: bool,
+) -> bool
+where
+    A: Arena,
+{
+    match value {
+        Expression::Array(expr) => {
+            // If empty, we can't expand it.
+            if expr.elements.is_empty() {
+                return false;
+            }
+
+            // If we have more than 3 elements, we should expand it.
+            // This is a somewhat arbitrary limit, but it helps to keep things readable.
+            if expr.elements.len() >= 4 {
+                return true;
+            }
+
+            // If it has at least one key-value pair, we should expand it.
+            if expr.elements.iter().any(ArrayElement::is_key_value) {
+                return true;
+            }
+
+            expr.elements.iter().any(|element| match element {
+                ArrayElement::Variadic(e) => !is_simple_single_line_expression(f, e.value),
+                ArrayElement::Value(e) => !is_simple_single_line_expression(f, e.value),
+                ArrayElement::KeyValue(key_value) => could_expand_value(f, key_value.value, nested_args),
+                _ => false,
+            })
+        }
+        Expression::LegacyArray(expr) => !expr.elements.is_empty(),
+        Expression::List(expr) => !expr.elements.is_empty(),
+        Expression::AnonymousClass(_) => true,
+        Expression::Closure(_) => true,
+        Expression::Match(m) => !m.arms.is_empty(),
+        Expression::Binary(operation) => could_expand_value(f, operation.lhs, nested_args),
+        Expression::ArrowFunction(arrow_function) => match unwrap_parenthesized(arrow_function.expression) {
+            Expression::Call(_) => true,
+            Expression::Conditional(c) => c.then.is_some(),
+            other => is_breaking_expression(f, other, true),
+        },
+        Expression::Instantiation(instantiation) => {
+            let Expression::Identifier(_) = instantiation.class else {
+                return false;
+            };
+
+            let Some(arguments) = instantiation.argument_list.as_ref() else {
+                return false;
+            };
+
+            let arguments_len = arguments.arguments.len();
+
+            let Some(first_arg) = arguments.arguments.first() else {
+                return false;
+            };
+
+            if arguments_len == 1 {
+                return could_expand_value(f, first_arg.value(), true);
+            }
+
+            let partial_arguments = promote_argument_list_to_partial(f.arena, arguments);
+            should_break_all_arguments(f, partial_arguments, false)
+                || should_expand_first_arg(f, partial_arguments, true)
+                || should_expand_last_arg(f, partial_arguments, true)
+        }
+        Expression::Literal(Literal::String(literal_string)) => {
+            literal_string.raw.contains(&b'\n') || literal_string.raw.contains(&b'\r')
+        }
+        Expression::CompositeString(composite_string) => composite_string.parts().iter().any(|part| match part {
+            StringPart::Literal(literal_string) => {
+                literal_string.raw.contains(&b'\n') || literal_string.raw.contains(&b'\r')
+            }
+            _ => false,
+        }),
+        Expression::Call(call) if !nested_args => {
+            let argument_list = call.get_argument_list();
+
+            if let Some(first_arg) = argument_list.arguments.first()
+                && argument_list.arguments.len() == 1
+            {
+                return could_expand_value(f, first_arg.value(), true);
+            }
+
+            let partial_arguments = promote_argument_list_to_partial(f.arena, argument_list);
+            should_break_all_arguments(f, partial_arguments, false)
+                || should_expand_first_arg(f, partial_arguments, true)
+                || should_expand_last_arg(f, partial_arguments, true)
+        }
+        _ => false,
+    }
+}
+
+pub fn foreach_binary_operand<F>(expr: &Expression<'_>, f: &mut F)
+where
+    F: FnMut(&Expression<'_>),
+{
+    let Expression::Binary(binary) = expr else {
+        return;
+    };
+
+    f(binary.rhs);
+    foreach_binary_operand(binary.rhs, f);
+
+    f(binary.lhs);
+    foreach_binary_operand(binary.lhs, f);
+}
+
+pub fn get_expression_width(element: &Expression<'_>) -> Option<usize> {
+    fn get_argument_width(argument: &Argument<'_>) -> Option<usize> {
+        match argument {
+            Argument::Positional(arg) => match arg.ellipsis {
+                Some(_) => get_expression_width(arg.value).map(|width| width + 3),
+                None => get_expression_width(arg.value),
+            },
+            Argument::Named(arg) => get_expression_width(arg.value).map(|mut width| {
+                width += 2;
+                width += string_width(arg.name.value);
+                width
+            }),
+        }
+    }
+
+    fn get_argument_list_width(argument_list: &ArgumentList<'_>) -> Option<usize> {
+        let mut width = 2;
+        for (i, argument) in argument_list.arguments.iter().enumerate() {
+            if i > 0 {
+                width += 2;
+            }
+
+            width += get_argument_width(argument)?;
+        }
+
+        Some(width)
+    }
+
+    Some(match element {
+        Expression::Literal(literal) => match literal {
+            Literal::String(literal_string) => string_width(literal_string.raw),
+            Literal::Integer(literal_integer) => string_width(literal_integer.raw),
+            Literal::Float(literal_float) => string_width(literal_float.raw),
+            Literal::True(_) => 4,
+            Literal::False(_) => 5,
+            Literal::Null(_) => 4,
+        },
+        Expression::CompositeString(composite_string) => get_composite_string_width(composite_string)?,
+        Expression::MagicConstant(magic_constant) => string_width(magic_constant.value().value),
+        Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(local) })
+        | Expression::Identifier(Identifier::Local(local)) => string_width(local.value),
+        Expression::Variable(Variable::Direct(variable)) => string_width(variable.name),
+        Expression::Call(Call::Function(FunctionCall { function, argument_list })) => {
+            let function_width = get_expression_width(function)?;
+            let args_width = get_argument_list_width(argument_list)?;
+
+            function_width + args_width
+        }
+        Expression::Call(Call::StaticMethod(StaticMethodCall {
+            class,
+            method: ClassLikeMemberSelector::Identifier(method),
+            argument_list,
+            ..
+        })) => {
+            let class_width = get_expression_width(class)?;
+            let method_width = string_width(method.value);
+            let args_width = get_argument_list_width(argument_list)?;
+
+            class_width + 2 + method_width + args_width
+        }
+        Expression::Access(Access::ClassConstant(ClassConstantAccess {
+            class,
+            constant: ClassLikeConstantSelector::Identifier(constant),
+            ..
+        })) => {
+            return get_expression_width(class).map(|class| class + 2 + string_width(constant.value));
+        }
+        _ => {
+            return None;
+        }
+    })
+}
+
+fn get_composite_string_width(composite_string: &CompositeString<'_>) -> Option<usize> {
+    let mut width = match composite_string {
+        CompositeString::Interpolated(interpolated) => {
+            interpolated.prefix.map_or(0, |prefix| string_width(prefix.value)) + 2
+        }
+        CompositeString::ShellExecute(_) => 2,
+        CompositeString::Document(_) => return None,
+    };
+
+    for part in composite_string.parts() {
+        width += match part {
+            StringPart::Literal(literal) => {
+                if literal.raw.contains(&b'\n') || literal.raw.contains(&b'\r') {
+                    return None;
+                }
+
+                string_width(literal.raw)
+            }
+            StringPart::Expression(expression) => get_expression_width(expression)?,
+            StringPart::BracedExpression(braced) => get_expression_width(braced.expression)? + 2,
+        };
+    }
+
+    Some(width)
+}
+
+#[inline]
+pub fn string_width(s: &[u8]) -> usize {
+    let line = split_any_newline(s).last().unwrap_or(b"");
+    let line_str = String::from_utf8_lossy(line);
+
+    if line_str.contains("الله") {
+        // The word "الله" is a special case, as it is usually rendered as a single glyph
+        // while being 4 characters wide. This is a hack to handle this case.
+        line_str.replace("الله", "_").width()
+    } else {
+        line_str.width()
+    }
+}

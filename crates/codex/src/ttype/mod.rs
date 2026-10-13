@@ -1,0 +1,1673 @@
+use std::borrow::Cow;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use mago_word::Word;
+use mago_word::word;
+
+use crate::metadata::CodebaseMetadata;
+use crate::metadata::class_like::ClassLikeMetadata;
+use crate::misc::GenericParent;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::array::keyed::TKeyedArray;
+use crate::ttype::atomic::array::list::TList;
+use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::object::named::TNamedObject;
+use crate::ttype::atomic::scalar::TScalar;
+use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use crate::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
+use crate::ttype::atomic::scalar::int::TInteger;
+use crate::ttype::atomic::scalar::string::TString;
+use crate::ttype::atomic::scalar::string::TStringCasing;
+use crate::ttype::atomic::scalar::string::TStringLiteral;
+use crate::ttype::comparator::ComparisonResult;
+use crate::ttype::comparator::union_comparator;
+use crate::ttype::expander::TypeExpansionOptions;
+use crate::ttype::resolution::TypeResolutionContext;
+use crate::ttype::shared::ARRAYKEY_ATOMIC;
+use crate::ttype::shared::BOOL_ATOMIC;
+use crate::ttype::shared::CALLABLE_STRING_ATOMIC;
+use crate::ttype::shared::CLASS_STRING_ATOMIC;
+use crate::ttype::shared::CLOSED_RESOURCE_ATOMIC;
+use crate::ttype::shared::EMPTY_ATOMIC_SLICE;
+use crate::ttype::shared::EMPTY_KEYED_ARRAY_ATOMIC;
+use crate::ttype::shared::EMPTY_SCALAR_ATOMIC_SLICE;
+use crate::ttype::shared::EMPTY_STRING_ATOMIC;
+use crate::ttype::shared::FALSE_ATOMIC;
+use crate::ttype::shared::FLOAT_ATOMIC;
+use crate::ttype::shared::INT_ATOMIC;
+use crate::ttype::shared::INT_FLOAT_ATOMIC_SLICE;
+use crate::ttype::shared::INT_STRING_ATOMIC_SLICE;
+use crate::ttype::shared::ISSET_FROM_LOOP_MIXED_ATOMIC;
+use crate::ttype::shared::LOWERCASE_CALLABLE_STRING_ATOMIC;
+use crate::ttype::shared::LOWERCASE_STRING_ATOMIC;
+use crate::ttype::shared::MINUS_ONE_INT_ATOMIC;
+use crate::ttype::shared::MIXED_ATOMIC;
+use crate::ttype::shared::MIXED_CALLABLE_ATOMIC;
+use crate::ttype::shared::MIXED_CLOSURE_ATOMIC;
+use crate::ttype::shared::MIXED_ITERABLE_ATOMIC;
+use crate::ttype::shared::NEGATIVE_INT_ATOMIC;
+use crate::ttype::shared::NEVER_ATOMIC;
+use crate::ttype::shared::NON_EMPTY_LOWERCASE_STRING_ATOMIC;
+use crate::ttype::shared::NON_EMPTY_STRING_ATOMIC;
+use crate::ttype::shared::NON_EMPTY_UNSPECIFIED_LITERAL_STRING_ATOMIC;
+use crate::ttype::shared::NON_EMPTY_UPPERCASE_STRING_ATOMIC;
+use crate::ttype::shared::NON_NEGATIVE_INT_ATOMIC;
+use crate::ttype::shared::NON_POSITIVE_INT_ATOMIC;
+use crate::ttype::shared::NULL_ATOMIC;
+use crate::ttype::shared::NULL_FLOAT_ATOMIC_SLICE;
+use crate::ttype::shared::NULL_INT_ATOMIC_SLICE;
+use crate::ttype::shared::NULL_OBJECT_ATOMIC_SLICE;
+use crate::ttype::shared::NULL_SCALAR_ATOMIC_SLICE;
+use crate::ttype::shared::NULL_STRING_ATOMIC_SLICE;
+use crate::ttype::shared::NUMERIC_ATOMIC;
+use crate::ttype::shared::NUMERIC_STRING_ATOMIC;
+use crate::ttype::shared::NUMERIC_TRUTHY_STRING_ATOMIC;
+use crate::ttype::shared::OBJECT_ATOMIC;
+use crate::ttype::shared::ONE_INT_ATOMIC;
+use crate::ttype::shared::OPEN_RESOURCE_ATOMIC;
+use crate::ttype::shared::PLACEHOLDER_ATOMIC;
+use crate::ttype::shared::POSITIVE_INT_ATOMIC;
+use crate::ttype::shared::RESOURCE_ATOMIC;
+use crate::ttype::shared::SCALAR_ATOMIC;
+use crate::ttype::shared::SIGNUM_RESULT_SLICE;
+use crate::ttype::shared::STRING_ATOMIC;
+use crate::ttype::shared::TRUE_ATOMIC;
+use crate::ttype::shared::TRUTHY_LOWERCASE_STRING_ATOMIC;
+use crate::ttype::shared::TRUTHY_MIXED_ATOMIC;
+use crate::ttype::shared::TRUTHY_STRING_ATOMIC;
+use crate::ttype::shared::TRUTHY_UPPERCASE_STRING_ATOMIC;
+use crate::ttype::shared::UNSPECIFIED_LITERAL_FLOAT_ATOMIC;
+use crate::ttype::shared::UNSPECIFIED_LITERAL_INT_ATOMIC;
+use crate::ttype::shared::UNSPECIFIED_LITERAL_STRING_ATOMIC;
+use crate::ttype::shared::UPPERCASE_CALLABLE_STRING_ATOMIC;
+use crate::ttype::shared::UPPERCASE_STRING_ATOMIC;
+use crate::ttype::shared::VOID_ATOMIC;
+use crate::ttype::shared::ZERO_INT_ATOMIC;
+use crate::ttype::template::TemplateResult;
+use crate::ttype::template::inferred_type_replacer;
+use crate::ttype::union::TUnion;
+
+pub mod atomic;
+pub mod builder;
+pub mod cast;
+pub mod combination;
+pub mod combiner;
+pub mod comparator;
+pub mod error;
+pub mod expander;
+pub mod flags;
+pub mod resolution;
+pub mod shared;
+pub mod template;
+pub mod union;
+
+/// A reference to a type in the type system, which can be either a union or an atomic type.
+#[derive(Clone, Copy, Debug)]
+pub enum TypeRef<'ty> {
+    Union(&'ty TUnion),
+    Atomic(&'ty TAtomic),
+}
+
+/// A trait to be implemented by all types in the type system.
+pub trait TType {
+    /// Returns a vector of child type nodes that this type contains.
+    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        vec![]
+    }
+
+    /// Returns a vector of all child type nodes, including nested ones.
+    fn get_all_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        let mut child_nodes = self.get_child_nodes();
+        let mut all_child_nodes = Vec::with_capacity(16);
+
+        while let Some(child_node) = child_nodes.pop() {
+            let new_child_nodes = match child_node {
+                TypeRef::Union(union) => union.get_child_nodes(),
+                TypeRef::Atomic(atomic) => atomic.get_child_nodes(),
+            };
+
+            all_child_nodes.push(child_node);
+
+            child_nodes.extend(new_child_nodes);
+        }
+
+        all_child_nodes
+    }
+
+    /// Checks if this type can have intersection types (`&B&S`).
+    fn can_be_intersected(&self) -> bool {
+        false
+    }
+
+    /// Returns a slice of the additional intersection types (`&B&S`), if any. Contains boxed atomic types.
+    fn get_intersection_types(&self) -> Option<&[TAtomic]> {
+        None
+    }
+
+    /// Returns a mutable slice of the additional intersection types (`&B&S`), if any. Contains boxed atomic types.
+    fn get_intersection_types_mut(&mut self) -> Option<&mut Vec<TAtomic>> {
+        None
+    }
+
+    /// Checks if this type has intersection types.
+    fn has_intersection_types(&self) -> bool {
+        false
+    }
+
+    /// Adds an intersection type to this type.
+    ///
+    /// Returns `true` if the intersection type was added successfully,
+    ///  or `false` if this type does not support intersection types.
+    fn add_intersection_type(&mut self, _intersection_type: TAtomic) -> bool {
+        false
+    }
+
+    fn needs_population(&self) -> bool {
+        false
+    }
+
+    fn is_expandable(&self) -> bool {
+        false
+    }
+
+    /// Returns true if this type has complex structure that benefits from
+    /// multiline formatting when used as a generic parameter.
+    fn is_complex(&self) -> bool {
+        false
+    }
+
+    /// Return a human-readable atom for this type, which is
+    /// suitable for use in error messages or debugging.
+    ///
+    /// The resulting identifier must be unique for the type,
+    /// but it does not have to be globally unique.
+    fn get_id(&self) -> Word;
+
+    fn get_pretty_id(&self) -> Word {
+        self.get_pretty_id_with_indent(0)
+    }
+
+    fn get_pretty_id_with_indent(&self, _indent: usize) -> Word {
+        self.get_id()
+    }
+}
+
+/// Implements the `TType` trait for `TypeRef`.
+impl<'ty> TType for TypeRef<'ty> {
+    fn get_child_nodes(&self) -> Vec<TypeRef<'ty>> {
+        match self {
+            TypeRef::Union(ttype) => ttype.get_child_nodes(),
+            TypeRef::Atomic(ttype) => ttype.get_child_nodes(),
+        }
+    }
+
+    fn can_be_intersected(&self) -> bool {
+        match self {
+            TypeRef::Union(ttype) => ttype.can_be_intersected(),
+            TypeRef::Atomic(ttype) => ttype.can_be_intersected(),
+        }
+    }
+
+    fn get_intersection_types(&self) -> Option<&[TAtomic]> {
+        match self {
+            TypeRef::Union(ttype) => ttype.get_intersection_types(),
+            TypeRef::Atomic(ttype) => ttype.get_intersection_types(),
+        }
+    }
+
+    fn has_intersection_types(&self) -> bool {
+        match self {
+            TypeRef::Union(ttype) => ttype.has_intersection_types(),
+            TypeRef::Atomic(ttype) => ttype.has_intersection_types(),
+        }
+    }
+
+    fn needs_population(&self) -> bool {
+        match self {
+            TypeRef::Union(ttype) => ttype.needs_population(),
+            TypeRef::Atomic(ttype) => ttype.needs_population(),
+        }
+    }
+
+    fn is_expandable(&self) -> bool {
+        match self {
+            TypeRef::Union(ttype) => ttype.is_expandable(),
+            TypeRef::Atomic(ttype) => ttype.is_expandable(),
+        }
+    }
+
+    fn is_complex(&self) -> bool {
+        match self {
+            TypeRef::Union(ttype) => ttype.is_complex(),
+            TypeRef::Atomic(ttype) => ttype.is_complex(),
+        }
+    }
+
+    fn get_id(&self) -> Word {
+        match self {
+            TypeRef::Union(ttype) => ttype.get_id(),
+            TypeRef::Atomic(ttype) => ttype.get_id(),
+        }
+    }
+
+    fn get_pretty_id_with_indent(&self, indent: usize) -> Word {
+        match self {
+            TypeRef::Union(ttype) => ttype.get_pretty_id_with_indent(indent),
+            TypeRef::Atomic(ttype) => ttype.get_pretty_id_with_indent(indent),
+        }
+    }
+}
+
+impl<'ty> From<&'ty TUnion> for TypeRef<'ty> {
+    fn from(reference: &'ty TUnion) -> Self {
+        TypeRef::Union(reference)
+    }
+}
+
+impl<'ty> From<&'ty TAtomic> for TypeRef<'ty> {
+    fn from(reference: &'ty TAtomic) -> Self {
+        TypeRef::Atomic(reference)
+    }
+}
+
+/// Creates a `TUnion` from a `TInteger`, using a canonical static type where possible.
+///
+/// This function is a key optimization point. It checks if the provided `TInteger`
+/// matches a common, reusable form (like "any integer" or "a positive integer").
+/// If it does, it returns a zero-allocation `TUnion` that borrows a static,
+/// shared instance.
+///
+/// For specific literal values or ranges that do not have a canonical static
+/// representation, it falls back to creating a new, owned `TUnion`, which
+/// involves a heap allocation.
+#[must_use]
+pub fn get_union_from_integer(integer: &TInteger) -> TUnion {
+    if integer.is_unspecified() {
+        return get_int();
+    }
+
+    if integer.is_positive() {
+        return get_positive_int();
+    }
+
+    if integer.is_negative() {
+        return get_negative_int();
+    }
+
+    if integer.is_non_negative() {
+        return get_non_negative_int();
+    }
+
+    if integer.is_non_positive() {
+        return get_non_positive_int();
+    }
+
+    TUnion::from_single(Cow::Owned(TAtomic::Scalar(TScalar::Integer(*integer))))
+}
+
+#[inline]
+#[must_use]
+pub fn wrap_atomic(tinner: TAtomic) -> TUnion {
+    TUnion::from_single(Cow::Owned(tinner))
+}
+
+#[inline]
+#[must_use]
+pub fn get_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(INT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_positive_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(POSITIVE_INT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_negative_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NEGATIVE_INT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_non_positive_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NON_POSITIVE_INT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_non_negative_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NON_NEGATIVE_INT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_non_zero_int() -> TUnion {
+    TUnion::from_vec(vec![
+        TAtomic::Scalar(TScalar::Integer(TInteger::negative())),
+        TAtomic::Scalar(TScalar::Integer(TInteger::positive())),
+    ])
+}
+
+#[inline]
+#[must_use]
+pub fn get_unspecified_literal_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(UNSPECIFIED_LITERAL_INT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_unspecified_literal_float() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(UNSPECIFIED_LITERAL_FLOAT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_int_range(from: Option<i64>, to: Option<i64>) -> TUnion {
+    let atomic = match (from, to) {
+        (Some(from), Some(to)) => TAtomic::Scalar(TScalar::Integer(TInteger::Range(from, to))),
+        (Some(from), None) => {
+            if 0 == from {
+                return get_non_negative_int();
+            }
+
+            if 1 == from {
+                return get_positive_int();
+            }
+
+            TAtomic::Scalar(TScalar::Integer(TInteger::From(from)))
+        }
+        (None, Some(to)) => {
+            if 0 == to {
+                return get_non_positive_int();
+            }
+
+            if -1 == to {
+                return get_negative_int();
+            }
+
+            TAtomic::Scalar(TScalar::Integer(TInteger::To(to)))
+        }
+        (None, None) => return get_int(),
+    };
+
+    TUnion::from_single(Cow::Owned(atomic))
+}
+
+/// Returns a zero-allocation `TUnion` for the type `-1|0|1`.
+#[inline]
+#[must_use]
+pub fn get_signum_result() -> TUnion {
+    TUnion::new(Cow::Borrowed(SIGNUM_RESULT_SLICE))
+}
+
+/// Returns a zero-allocation `TUnion` for the integer literal `1`.
+#[inline]
+#[must_use]
+pub fn get_one_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(ONE_INT_ATOMIC))
+}
+
+/// Returns a zero-allocation `TUnion` for the integer literal `0`.
+#[inline]
+#[must_use]
+pub fn get_zero_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(ZERO_INT_ATOMIC))
+}
+
+/// Returns a zero-allocation `TUnion` for the integer literal `-1`.
+#[inline]
+#[must_use]
+pub fn get_minus_one_int() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(MINUS_ONE_INT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_literal_int(value: i64) -> TUnion {
+    if value == 0 {
+        return get_zero_int();
+    }
+
+    if value == 1 {
+        return get_one_int();
+    }
+
+    if value == -1 {
+        return get_minus_one_int();
+    }
+
+    TUnion::from_single(Cow::Owned(TAtomic::Scalar(TScalar::literal_int(value))))
+}
+
+#[inline]
+#[must_use]
+pub fn get_int_or_float() -> TUnion {
+    TUnion::new(Cow::Borrowed(INT_FLOAT_ATOMIC_SLICE))
+}
+
+#[inline]
+#[must_use]
+pub fn get_int_or_string() -> TUnion {
+    TUnion::new(Cow::Borrowed(INT_STRING_ATOMIC_SLICE))
+}
+
+#[inline]
+#[must_use]
+pub fn get_nullable_int() -> TUnion {
+    TUnion::new(Cow::Borrowed(NULL_INT_ATOMIC_SLICE))
+}
+
+#[inline]
+#[must_use]
+pub fn get_nullable_float() -> TUnion {
+    TUnion::new(Cow::Borrowed(NULL_FLOAT_ATOMIC_SLICE))
+}
+
+#[inline]
+#[must_use]
+pub fn get_nullable_object() -> TUnion {
+    TUnion::new(Cow::Borrowed(NULL_OBJECT_ATOMIC_SLICE))
+}
+
+#[inline]
+#[must_use]
+pub fn get_nullable_string() -> TUnion {
+    TUnion::new(Cow::Borrowed(NULL_STRING_ATOMIC_SLICE))
+}
+
+#[inline]
+#[must_use]
+pub fn get_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(STRING_ATOMIC))
+}
+
+/// Returns a zero-allocation `TUnion` for a `string` with the specified properties.
+///
+/// This function maps all possible boolean property combinations to a canonical,
+/// static `TAtomic` instance, avoiding heap allocations for common string types.
+#[must_use]
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn get_string_with_props(
+    is_numeric: bool,
+    is_truthy: bool,
+    is_non_empty: bool,
+    is_callable: bool,
+    casing: TStringCasing,
+) -> TUnion {
+    if is_callable {
+        return match casing {
+            TStringCasing::Lowercase => TUnion::from_single(Cow::Borrowed(LOWERCASE_CALLABLE_STRING_ATOMIC)),
+            TStringCasing::Uppercase => TUnion::from_single(Cow::Borrowed(UPPERCASE_CALLABLE_STRING_ATOMIC)),
+            TStringCasing::Unspecified => TUnion::from_single(Cow::Borrowed(CALLABLE_STRING_ATOMIC)),
+        };
+    }
+
+    let atomic_ref = match (is_numeric, is_truthy, is_non_empty, casing) {
+        // is_numeric = true
+        (true, true, _, _) => NUMERIC_TRUTHY_STRING_ATOMIC,
+        (true, false, _, _) => NUMERIC_STRING_ATOMIC,
+        // is_numeric = false, is_truthy = true
+        (false, true, _, TStringCasing::Unspecified) => TRUTHY_STRING_ATOMIC,
+        (false, true, _, TStringCasing::Uppercase) => TRUTHY_UPPERCASE_STRING_ATOMIC,
+        (false, true, _, TStringCasing::Lowercase) => TRUTHY_LOWERCASE_STRING_ATOMIC,
+        // is_numeric = false, is_truthy = false
+        (false, false, false, TStringCasing::Unspecified) => STRING_ATOMIC,
+        (false, false, false, TStringCasing::Uppercase) => UPPERCASE_STRING_ATOMIC,
+        (false, false, false, TStringCasing::Lowercase) => LOWERCASE_STRING_ATOMIC,
+        (false, false, true, TStringCasing::Unspecified) => NON_EMPTY_STRING_ATOMIC,
+        (false, false, true, TStringCasing::Uppercase) => NON_EMPTY_UPPERCASE_STRING_ATOMIC,
+        (false, false, true, TStringCasing::Lowercase) => NON_EMPTY_LOWERCASE_STRING_ATOMIC,
+    };
+
+    TUnion::from_single(Cow::Borrowed(atomic_ref))
+}
+
+#[inline]
+#[must_use]
+pub fn get_class_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(CLASS_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_literal_string(value: Word) -> TUnion {
+    TUnion::from_single(Cow::Owned(TAtomic::Scalar(TScalar::literal_string(value))))
+}
+
+#[inline]
+#[must_use]
+pub fn get_float() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(FLOAT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_literal_float(v: f64) -> TUnion {
+    TUnion::from_single(Cow::Owned(TAtomic::Scalar(TScalar::literal_float(v))))
+}
+
+#[inline]
+#[must_use]
+pub fn get_mixed() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(MIXED_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_truthy_mixed() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(TRUTHY_MIXED_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_isset_from_mixed_mixed() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(ISSET_FROM_LOOP_MIXED_ATOMIC))
+}
+
+#[must_use]
+pub fn get_mixed_maybe_from_loop(from_loop_isset: bool) -> TUnion {
+    if from_loop_isset { get_isset_from_mixed_mixed() } else { get_mixed() }
+}
+
+#[inline]
+#[must_use]
+pub fn get_never() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NEVER_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_resource() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(RESOURCE_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_closed_resource() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(CLOSED_RESOURCE_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_open_resource() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(OPEN_RESOURCE_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_placeholder() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(PLACEHOLDER_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_void() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(VOID_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_null() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NULL_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_undefined_null() -> TUnion {
+    let mut null = TUnion::from_single(Cow::Borrowed(NULL_ATOMIC));
+    null.set_possibly_undefined(true, None);
+    null
+}
+
+#[inline]
+#[must_use]
+pub fn get_arraykey() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(ARRAYKEY_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_bool() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(BOOL_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_false() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(FALSE_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_true() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(TRUE_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_object() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(OBJECT_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_numeric() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NUMERIC_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_callable_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(CALLABLE_STRING_ATOMIC))
+}
+
+#[must_use]
+pub fn get_numeric_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NUMERIC_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_lowercase_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(LOWERCASE_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_non_empty_lowercase_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NON_EMPTY_LOWERCASE_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_uppercase_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(UPPERCASE_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_non_empty_uppercase_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NON_EMPTY_UPPERCASE_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_non_empty_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NON_EMPTY_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_empty_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(&EMPTY_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_truthy_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(TRUTHY_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_unspecified_literal_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(UNSPECIFIED_LITERAL_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_non_empty_unspecified_literal_string() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(NON_EMPTY_UNSPECIFIED_LITERAL_STRING_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_scalar() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(SCALAR_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_nullable_scalar() -> TUnion {
+    TUnion::new(Cow::Borrowed(NULL_SCALAR_ATOMIC_SLICE))
+}
+
+#[inline]
+#[must_use]
+pub fn get_mixed_iterable() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(&MIXED_ITERABLE_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_empty_keyed_array() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(&EMPTY_KEYED_ARRAY_ATOMIC))
+}
+
+/// The `empty` type: every value for which PHP's `empty()` returns true,
+/// i.e. `null|0|0.0|'0'|''|false|array{}`.
+#[inline]
+#[must_use]
+pub fn get_empty() -> TUnion {
+    TUnion::new(Cow::Borrowed(EMPTY_ATOMIC_SLICE.as_slice()))
+}
+
+/// The `empty-scalar` type: every scalar for which PHP's `empty()` returns
+/// true, i.e. `0|0.0|'0'|''|false`.
+#[inline]
+#[must_use]
+pub fn get_empty_scalar() -> TUnion {
+    TUnion::new(Cow::Borrowed(EMPTY_SCALAR_ATOMIC_SLICE.as_slice()))
+}
+
+#[inline]
+#[must_use]
+pub fn get_mixed_list() -> TUnion {
+    get_list(get_mixed())
+}
+
+#[inline]
+#[must_use]
+pub fn get_mixed_keyed_array() -> TUnion {
+    get_keyed_array(get_arraykey(), get_mixed())
+}
+
+#[inline]
+#[must_use]
+pub fn get_mixed_callable() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(&MIXED_CALLABLE_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_mixed_closure() -> TUnion {
+    TUnion::from_single(Cow::Borrowed(&MIXED_CLOSURE_ATOMIC))
+}
+
+#[inline]
+#[must_use]
+pub fn get_named_object(name: Word, type_resolution_context: Option<&TypeResolutionContext>) -> TUnion {
+    if let Some(type_resolution_context) = type_resolution_context
+        && let Some(defining_entities) = type_resolution_context.get_template_definition(name)
+    {
+        let first = &defining_entities[0];
+        return wrap_atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic {
+            kind: TClassLikeStringKind::Class,
+            parameter_name: name,
+            defining_entity: first.defining_entity,
+            constraint: Arc::new((*(first.constraint.get_single())).clone()),
+        })));
+    }
+
+    wrap_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(name))))
+}
+
+#[inline]
+#[must_use]
+pub fn get_list(element_type: TUnion) -> TUnion {
+    wrap_atomic(TAtomic::Array(TArray::List(TList::new(Arc::new(element_type)))))
+}
+
+#[inline]
+#[must_use]
+pub fn get_non_empty_list(element_type: TUnion) -> TUnion {
+    wrap_atomic(TAtomic::Array(TArray::List(TList::new_non_empty(Arc::new(element_type)))))
+}
+
+#[inline]
+#[must_use]
+pub fn get_keyed_array(key_parameter: TUnion, value_parameter: TUnion) -> TUnion {
+    wrap_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+        Arc::new(key_parameter),
+        Arc::new(value_parameter),
+    ))))
+}
+
+#[inline]
+#[must_use]
+pub fn add_optional_union_type(base_type: TUnion, maybe_type: Option<&TUnion>, codebase: &CodebaseMetadata) -> TUnion {
+    if let Some(type_2) = maybe_type {
+        add_union_type(base_type, type_2, codebase, combiner::CombinerOptions::default())
+    } else {
+        base_type
+    }
+}
+
+/// Reference-counted variant of [`add_optional_union_type`].
+#[must_use]
+pub fn add_optional_union_type_rc(
+    base_type: &Rc<TUnion>,
+    maybe_type: Option<&TUnion>,
+    codebase: &CodebaseMetadata,
+) -> Rc<TUnion> {
+    match maybe_type {
+        Some(type_2) => {
+            Rc::new(add_union_type((**base_type).clone(), type_2, codebase, combiner::CombinerOptions::default()))
+        }
+        None => Rc::clone(base_type),
+    }
+}
+
+#[inline]
+#[must_use]
+pub fn combine_optional_union_types(
+    type_1: Option<&TUnion>,
+    type_2: Option<&TUnion>,
+    codebase: &CodebaseMetadata,
+) -> TUnion {
+    match (type_1, type_2) {
+        (Some(type_1), Some(type_2)) => {
+            combine_union_types(type_1, type_2, codebase, combiner::CombinerOptions::default())
+        }
+        (Some(type_1), None) => type_1.clone(),
+        (None, Some(type_2)) => type_2.clone(),
+        (None, None) => get_mixed(),
+    }
+}
+
+/// Reference-counted variant of [`combine_union_types`].
+#[inline]
+#[must_use]
+pub fn combine_union_types_rc(
+    type_1: &Rc<TUnion>,
+    type_2: &Rc<TUnion>,
+    codebase: &CodebaseMetadata,
+    options: combiner::CombinerOptions,
+) -> Rc<TUnion> {
+    if Rc::ptr_eq(type_1, type_2) {
+        return Rc::clone(type_1);
+    }
+
+    Rc::new(combine_union_types(type_1, type_2, codebase, options))
+}
+
+#[inline]
+#[must_use]
+pub fn combine_union_types(
+    type_1: &TUnion,
+    type_2: &TUnion,
+    codebase: &CodebaseMetadata,
+    options: combiner::CombinerOptions,
+) -> TUnion {
+    combine_union_types_inner(type_1, type_2, codebase, options, false)
+}
+
+#[inline]
+#[must_use]
+pub fn combine_union_types_preserving_array_shapes(
+    type_1: &TUnion,
+    type_2: &TUnion,
+    codebase: &CodebaseMetadata,
+    options: combiner::CombinerOptions,
+) -> TUnion {
+    combine_union_types_inner(type_1, type_2, codebase, options, true)
+}
+
+fn combine_union_types_inner(
+    type_1: &TUnion,
+    type_2: &TUnion,
+    codebase: &CodebaseMetadata,
+    options: combiner::CombinerOptions,
+    preserve_array_shapes: bool,
+) -> TUnion {
+    if type_1 == type_2 {
+        return type_1.clone();
+    }
+
+    let mut combined_type = if type_1.is_never() || type_1.is_never_template() {
+        type_2.clone()
+    } else if type_2.is_never() || type_2.is_never_template() {
+        type_1.clone()
+    } else if type_1.is_vanilla_mixed() && type_2.is_vanilla_mixed() {
+        get_mixed()
+    } else {
+        let mut all_atomic_types = type_1.types.to_vec();
+        all_atomic_types.extend(type_2.types.iter().cloned());
+
+        let types = if preserve_array_shapes {
+            combiner::combine_preserving_array_shapes(all_atomic_types, codebase, options)
+        } else {
+            combiner::combine(all_atomic_types, codebase, options)
+        };
+
+        let mut result = TUnion::from_vec(types);
+
+        if type_1.had_template() && type_2.had_template() {
+            result.set_had_template(true);
+        }
+
+        if type_1.reference_free() && type_2.reference_free() {
+            result.set_reference_free(true);
+        }
+
+        result
+    };
+
+    if type_1.possibly_undefined() || type_2.possibly_undefined() {
+        combined_type.set_possibly_undefined(true, None);
+    }
+
+    if type_1.possibly_undefined_from_try() || type_2.possibly_undefined_from_try() {
+        combined_type.set_possibly_undefined_from_try(true);
+    }
+
+    if type_1.ignore_falsable_issues() || type_2.ignore_falsable_issues() {
+        combined_type.set_ignore_falsable_issues(true);
+    }
+
+    combined_type
+}
+
+#[inline]
+#[must_use]
+pub fn add_union_type(
+    base_type: TUnion,
+    other_type: &TUnion,
+    codebase: &CodebaseMetadata,
+    options: combiner::CombinerOptions,
+) -> TUnion {
+    add_union_type_inner(base_type, other_type, codebase, options, false)
+}
+
+#[inline]
+#[must_use]
+pub fn add_union_type_preserving_array_shapes(
+    base_type: TUnion,
+    other_type: &TUnion,
+    codebase: &CodebaseMetadata,
+    options: combiner::CombinerOptions,
+) -> TUnion {
+    add_union_type_inner(base_type, other_type, codebase, options, true)
+}
+
+fn add_union_type_inner(
+    mut base_type: TUnion,
+    other_type: &TUnion,
+    codebase: &CodebaseMetadata,
+    options: combiner::CombinerOptions,
+    preserve_array_shapes: bool,
+) -> TUnion {
+    if &base_type != other_type {
+        base_type.types = if base_type.is_vanilla_mixed() && other_type.is_vanilla_mixed() {
+            base_type.types
+        } else if preserve_array_shapes {
+            combine_union_types_preserving_array_shapes(&base_type, other_type, codebase, options).types
+        } else {
+            combine_union_types(&base_type, other_type, codebase, options).types
+        };
+
+        if !other_type.had_template() {
+            base_type.set_had_template(false);
+        }
+
+        if !other_type.reference_free() {
+            base_type.set_reference_free(false);
+        }
+    }
+
+    if other_type.possibly_undefined() {
+        base_type.set_possibly_undefined(true, None);
+    }
+    if other_type.possibly_undefined_from_try() {
+        base_type.set_possibly_undefined_from_try(true);
+    }
+    if other_type.ignore_falsable_issues() {
+        base_type.set_ignore_falsable_issues(true);
+    }
+    if other_type.ignore_nullable_issues() {
+        base_type.set_ignore_nullable_issues(true);
+    }
+
+    base_type
+}
+
+#[must_use]
+pub fn intersect_union_types(type_1: &TUnion, type_2: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
+    if type_1 == type_2 {
+        return Some(type_1.clone());
+    }
+
+    if type_1.is_never() || type_2.is_never() {
+        return Some(get_never());
+    }
+
+    let mut intersection_performed = false;
+
+    if type_1.is_mixed() {
+        if type_2.is_mixed() {
+            return Some(get_mixed());
+        }
+
+        return Some(type_2.clone());
+    } else if type_2.is_mixed() {
+        return Some(type_1.clone());
+    }
+
+    let mut intersected_atomic_types = vec![];
+    for type_1_atomic in type_1.types.iter() {
+        for type_2_atomic in type_2.types.iter() {
+            if let Some(intersection_atomic) =
+                intersect_atomic_types(type_1_atomic, type_2_atomic, codebase, &mut intersection_performed)
+            {
+                intersected_atomic_types.push(intersection_atomic);
+            }
+        }
+    }
+
+    let mut combined_type: Option<TUnion> = None;
+    if !intersected_atomic_types.is_empty() {
+        let combined_vec = combiner::combine(intersected_atomic_types, codebase, combiner::CombinerOptions::default());
+        if !combined_vec.is_empty() {
+            combined_type = Some(TUnion::from_vec(combined_vec));
+        }
+    }
+
+    // If atomic-level intersection didn't yield a result, check for subtyping at the union level.
+    if !intersection_performed {
+        if union_comparator::is_contained_by(
+            codebase,
+            type_1,
+            type_2,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::default(),
+        ) {
+            combined_type = Some(type_1.clone());
+        } else if union_comparator::is_contained_by(
+            codebase,
+            type_2,
+            type_1,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::default(),
+        ) {
+            combined_type = Some(type_2.clone());
+        }
+    }
+
+    if let Some(mut final_type) = combined_type {
+        final_type.set_possibly_undefined(
+            type_1.possibly_undefined() && type_2.possibly_undefined(),
+            Some(type_1.possibly_undefined_from_try() && type_2.possibly_undefined_from_try()),
+        );
+        final_type.set_ignore_falsable_issues(type_1.ignore_falsable_issues() && type_2.ignore_falsable_issues());
+        final_type.set_ignore_nullable_issues(type_1.ignore_nullable_issues() && type_2.ignore_nullable_issues());
+
+        return Some(final_type);
+    }
+
+    None
+}
+
+/// This is the core logic used by `intersect_union_types`.
+fn intersect_atomic_types(
+    type_1: &TAtomic,
+    type_2: &TAtomic,
+    codebase: &CodebaseMetadata,
+    intersection_performed: &mut bool,
+) -> Option<TAtomic> {
+    if let (TAtomic::Scalar(TScalar::Integer(t1_int)), TAtomic::Scalar(TScalar::Integer(t2_int))) = (type_1, type_2) {
+        let (min1, max1) = t1_int.get_bounds();
+        let (min2, max2) = t2_int.get_bounds();
+
+        let new_min = match (min1, min2) {
+            (Some(m1), Some(m2)) => Some(m1.max(m2)),
+            (Some(m), None) | (None, Some(m)) => Some(m),
+            (None, None) => None,
+        };
+
+        let new_max = match (max1, max2) {
+            (Some(m1), Some(m2)) => Some(m1.min(m2)),
+            (Some(m), None) | (None, Some(m)) => Some(m),
+            (None, None) => None,
+        };
+
+        let intersected_int = if let (Some(min), Some(max)) = (new_min, new_max) {
+            if min > max {
+                return None;
+            }
+
+            if min == max { TInteger::Literal(min) } else { TInteger::Range(min, max) }
+        } else if let Some(min) = new_min {
+            TInteger::From(min)
+        } else if let Some(max) = new_max {
+            TInteger::To(max)
+        } else {
+            TInteger::Unspecified
+        };
+
+        *intersection_performed = true;
+        return Some(TAtomic::Scalar(TScalar::Integer(intersected_int)));
+    }
+
+    let t1_union = TUnion::from_atomic(type_1.clone());
+    let t2_union = TUnion::from_atomic(type_2.clone());
+
+    let mut narrower_type = None;
+    let mut wider_type = None;
+
+    if union_comparator::is_contained_by(
+        codebase,
+        &t2_union,
+        &t1_union,
+        false,
+        false,
+        false,
+        &mut ComparisonResult::default(),
+    ) {
+        narrower_type = Some(type_2);
+        wider_type = Some(type_1);
+    } else if union_comparator::is_contained_by(
+        codebase,
+        &t1_union,
+        &t2_union,
+        false,
+        false,
+        false,
+        &mut ComparisonResult::default(),
+    ) {
+        narrower_type = Some(type_1);
+        wider_type = Some(type_2);
+    }
+
+    if let (Some(narrower), Some(wider)) = (narrower_type, wider_type) {
+        *intersection_performed = true;
+        let mut result = narrower.clone();
+
+        if narrower.can_be_intersected() && wider.can_be_intersected() {
+            let mut wider_clone = wider.clone();
+            if let Some(types) = wider_clone.get_intersection_types_mut() {
+                types.clear();
+            }
+
+            result.add_intersection_type(wider_clone);
+            if let Some(wider_intersections) = wider.get_intersection_types() {
+                for i_type in wider_intersections {
+                    result.add_intersection_type(i_type.clone());
+                }
+            }
+        }
+        return Some(result);
+    }
+
+    if let (TAtomic::Array(left_array), TAtomic::Array(right_array)) = (type_1, type_2) {
+        // A `Set` meets only another `Set`, or the plain PHP `array` it runs as.
+        match (left_array, right_array) {
+            (TArray::Set(left_element_type), TArray::Set(right_element_type)) => {
+                let element_type = intersect_union_types(left_element_type, right_element_type, codebase)?;
+                *intersection_performed = true;
+                return Some(TAtomic::Array(TArray::Set(Arc::new(element_type))));
+            }
+            (set @ TArray::Set(_), other) | (other, set @ TArray::Set(_)) => {
+                if !other.is_vanilla() {
+                    return None;
+                }
+
+                *intersection_performed = true;
+                return Some(TAtomic::Array(set.clone()));
+            }
+            _ => {}
+        }
+
+        let array_has_known_shape = |array: &TArray| match array {
+            TArray::List(list) => list.known_elements.is_some(),
+            TArray::Keyed(keyed) => keyed.known_items.is_some(),
+            TArray::Set(_) => false,
+        };
+
+        if array_has_known_shape(left_array) || array_has_known_shape(right_array) {
+            return None;
+        }
+
+        let (left_key, left_value) = get_array_parameters(left_array, codebase);
+        let (right_key, right_value) = get_array_parameters(right_array, codebase);
+
+        let key = intersect_union_types(&left_key, &right_key, codebase).unwrap_or_else(get_never);
+        let value = intersect_union_types(&left_value, &right_value, codebase).unwrap_or_else(get_never);
+
+        let is_list = left_array.is_list() || right_array.is_list();
+        let non_empty = left_array.is_non_empty() || right_array.is_non_empty();
+
+        if non_empty && (key.is_never() || value.is_never()) {
+            return None;
+        }
+
+        *intersection_performed = true;
+        let array = if is_list {
+            let mut list = TList::new(Arc::new(value));
+            list.non_empty = non_empty;
+            TArray::List(list)
+        } else {
+            TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(key), Arc::new(value)).with_non_empty(non_empty))
+        };
+
+        return Some(TAtomic::Array(array));
+    }
+
+    if let (TAtomic::Scalar(TScalar::String(s)), TAtomic::Scalar(TScalar::Numeric))
+    | (TAtomic::Scalar(TScalar::Numeric), TAtomic::Scalar(TScalar::String(s))) = (type_1, type_2)
+    {
+        *intersection_performed = true;
+        return Some(TAtomic::Scalar(TScalar::String(s.as_numeric(true))));
+    }
+
+    if let (TAtomic::Scalar(TScalar::String(s1)), TAtomic::Scalar(TScalar::String(s2))) = (type_1, type_2) {
+        if let (Some(v1), Some(v2)) = (&s1.get_known_literal_value(), &s2.get_known_literal_value())
+            && v1 != v2
+        {
+            return None;
+        }
+
+        let combined = TAtomic::Scalar(TScalar::String(TString {
+            is_numeric: s1.is_numeric || s2.is_numeric,
+            is_truthy: s1.is_truthy || s2.is_truthy,
+            is_non_empty: s1.is_non_empty || s2.is_non_empty,
+            is_callable: false,
+            casing: match (s1.casing, s2.casing) {
+                (TStringCasing::Lowercase, TStringCasing::Lowercase) => TStringCasing::Lowercase,
+                (TStringCasing::Uppercase, TStringCasing::Uppercase) => TStringCasing::Uppercase,
+                _ => TStringCasing::Unspecified,
+            },
+            literal: if s1.is_literal_origin() && s2.is_literal_origin() {
+                Some(TStringLiteral::Unspecified)
+            } else {
+                None
+            },
+        }));
+        *intersection_performed = true;
+        return Some(combined);
+    }
+
+    if type_1.can_be_intersected() && type_2.can_be_intersected() {
+        if let (TAtomic::Object(TObject::Named(n1)), TAtomic::Object(TObject::Named(n2))) = (type_1, type_2)
+            && let (Some(c1), Some(c2)) =
+                (codebase.get_class_like(n1.name.as_bytes()), codebase.get_class_like(n2.name.as_bytes()))
+            && !c1.kind.is_interface()
+            && !c1.kind.is_trait()
+            && !c2.kind.is_interface()
+            && !c2.kind.is_trait()
+        {
+            return None;
+        }
+
+        let mut result = type_1.clone();
+        result.add_intersection_type(type_2.clone());
+        if let Some(intersections) = type_2.get_intersection_types() {
+            for i in intersections {
+                result.add_intersection_type(i.clone());
+            }
+        }
+
+        *intersection_performed = true;
+        return Some(result);
+    }
+
+    None
+}
+
+pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<(TUnion, TUnion)> {
+    if let Some(generator_parameters) = atomic.get_generator_parameters() {
+        let mut key_type = generator_parameters.0;
+        let mut value_type = generator_parameters.1;
+
+        expander::expand_union(codebase, &mut key_type, &TypeExpansionOptions::default());
+        expander::expand_union(codebase, &mut value_type, &TypeExpansionOptions::default());
+
+        return Some((key_type, value_type));
+    }
+
+    let parameters = 'parameters: {
+        match atomic {
+            TAtomic::Iterable(iterable) => {
+                let mut key_type = iterable.get_key_type().clone();
+                let mut value_type = iterable.get_value_type().clone();
+
+                expander::expand_union(codebase, &mut key_type, &TypeExpansionOptions::default());
+                expander::expand_union(codebase, &mut value_type, &TypeExpansionOptions::default());
+
+                Some((key_type, value_type))
+            }
+            TAtomic::Array(array_type) => {
+                let (mut key_type, mut value_type) = get_array_parameters(array_type, codebase);
+
+                expander::expand_union(codebase, &mut key_type, &TypeExpansionOptions::default());
+                expander::expand_union(codebase, &mut value_type, &TypeExpansionOptions::default());
+
+                Some((key_type, value_type))
+            }
+            TAtomic::Object(object) => {
+                let name = object.get_name()?;
+                let traversable = word("traversable");
+                let iterator = word("iterator");
+                let iterator_aggregate = word("iteratoraggregate");
+
+                let class_metadata = codebase.get_class_like(name.as_bytes())?;
+                if !codebase.is_instance_of(class_metadata.name.as_bytes(), traversable.as_bytes()) {
+                    break 'parameters None;
+                }
+
+                let is_iterator_interface = name == iterator || name == traversable || name == iterator_aggregate;
+                if !is_iterator_interface
+                    && codebase.is_instance_of(class_metadata.name.as_bytes(), iterator.as_bytes())
+                    && let (Some(key_type), Some(value_type)) = (
+                        get_iterator_method_return_type(codebase, name, b"key"),
+                        get_iterator_method_return_type(codebase, name, b"current"),
+                    )
+                {
+                    let contains_generic_param = |t: &TUnion| t.types.iter().any(atomic::TAtomic::is_generic_parameter);
+
+                    if !key_type.is_mixed()
+                        && !value_type.is_mixed()
+                        && !contains_generic_param(&key_type)
+                        && !contains_generic_param(&value_type)
+                    {
+                        return Some((key_type, value_type));
+                    }
+                }
+
+                let traversable_metadata = codebase.get_class_like(traversable.as_bytes())?;
+                let key_template = traversable_metadata.template_types.get_index(0).map(|(name, _)| *name)?;
+                let value_template = traversable_metadata.template_types.get_index(1).map(|(name, _)| *name)?;
+
+                let key_type = get_specialized_template_type(
+                    codebase,
+                    key_template,
+                    traversable,
+                    class_metadata,
+                    object.get_type_parameters(),
+                )
+                .unwrap_or_else(get_mixed);
+
+                let value_type = get_specialized_template_type(
+                    codebase,
+                    value_template,
+                    traversable,
+                    class_metadata,
+                    object.get_type_parameters(),
+                )
+                .unwrap_or_else(get_mixed);
+
+                Some((key_type, value_type))
+            }
+            _ => None,
+        }
+    };
+
+    if let Some((key_type, value_type)) = parameters {
+        return Some((key_type, value_type));
+    }
+
+    if let Some(intersection_types) = atomic.get_intersection_types() {
+        for intersection_type in intersection_types {
+            if let Some((key_type, value_type)) = get_iterable_parameters(intersection_type, codebase) {
+                return Some((key_type, value_type));
+            }
+        }
+    }
+
+    None
+}
+
+/// Returns the key type plain PHP sees for `key_type`.
+///
+/// A PHP# `Map` keyed by a backed enum holds each case's backing value at runtime, as spec section 12 writes it, so
+/// plain PHP sees an enum key as the enum's backing type.
+#[must_use]
+pub fn get_backing_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMetadata) -> Cow<'key, TUnion> {
+    let backing_type = |atomic: &TAtomic| match atomic {
+        TAtomic::Object(TObject::Enum(enum_object)) => {
+            codebase.get_class_like(enum_object.name.as_bytes())?.enum_type.clone()
+        }
+        _ => None,
+    };
+
+    if !key_type.types.iter().any(|atomic| backing_type(atomic).is_some()) {
+        return Cow::Borrowed(key_type);
+    }
+
+    Cow::Owned(TUnion::from_vec(
+        key_type.types.iter().map(|atomic| backing_type(atomic).unwrap_or_else(|| atomic.clone())).collect(),
+    ))
+}
+
+#[must_use]
+pub fn get_array_parameters(array_type: &TArray, codebase: &CodebaseMetadata) -> (TUnion, TUnion) {
+    match array_type {
+        TArray::Keyed(keyed_data) => {
+            let mut key_types = vec![];
+            let mut value_param;
+
+            if let Some((key_param, value_p)) = &keyed_data.parameters {
+                key_types.extend(key_param.types.iter().cloned());
+                value_param = (**value_p).clone();
+            } else {
+                key_types.push(TAtomic::Never);
+                value_param = get_never();
+            }
+
+            if let Some(known_items) = &keyed_data.known_items {
+                for (key, (_, item_type)) in known_items {
+                    key_types.push(key.to_atomic());
+                    value_param =
+                        add_union_type(value_param, item_type, codebase, combiner::CombinerOptions::default());
+                }
+            }
+
+            if key_types.is_empty() {
+                key_types.push(TAtomic::Never);
+            }
+
+            let combined_key_types = combiner::combine(key_types, codebase, combiner::CombinerOptions::default());
+            let key_param_union = TUnion::from_vec(combined_key_types);
+
+            (key_param_union, value_param)
+        }
+        TArray::List(list_data) => {
+            let mut key_types = vec![];
+            let mut value_type = (*list_data.element_type).clone();
+
+            if let Some(known_elements) = &list_data.known_elements {
+                for (key_idx, (_, element_type)) in known_elements {
+                    key_types.push(TAtomic::Scalar(TScalar::literal_int(*key_idx as i64)));
+
+                    value_type =
+                        combine_union_types(element_type, &value_type, codebase, combiner::CombinerOptions::default());
+                }
+            }
+
+            if key_types.is_empty() || !value_type.is_never() {
+                if value_type.is_never() {
+                    key_types.push(TAtomic::Never);
+                } else {
+                    key_types.push(TAtomic::Scalar(TScalar::Integer(TInteger::non_negative())));
+                }
+            }
+
+            let key_type =
+                TUnion::from_vec(combiner::combine(key_types, codebase, combiner::CombinerOptions::default()));
+
+            (key_type, value_type)
+        }
+        // A `Set` is keyed by each element, which runs as its backing value when it is a backed enum, as a `Map`'s
+        // key does.
+        TArray::Set(element_type) => (element_type.as_ref().clone(), element_type.as_ref().clone()),
+    }
+}
+
+#[must_use]
+pub fn get_iterable_value_parameter(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<TUnion> {
+    if let Some(generator_parameters) = atomic.get_generator_parameters() {
+        return Some(generator_parameters.1);
+    }
+
+    let parameter = match atomic {
+        TAtomic::Iterable(iterable) => Some(iterable.get_value_type().clone()),
+        TAtomic::Array(array_type) => Some(get_array_value_parameter(array_type, codebase)),
+        TAtomic::Object(object) => {
+            let name = object.get_name()?;
+            let traversable = word("traversable");
+
+            let class_metadata = codebase.get_class_like(name.as_bytes())?;
+            if !codebase.is_instance_of(class_metadata.name.as_bytes(), traversable.as_bytes()) {
+                return None;
+            }
+
+            let traversable_metadata = codebase.get_class_like(traversable.as_bytes())?;
+            let value_template = traversable_metadata.template_types.get_index(1).map(|(name, _)| *name)?;
+
+            get_specialized_template_type(
+                codebase,
+                value_template,
+                traversable,
+                class_metadata,
+                object.get_type_parameters(),
+            )
+        }
+        _ => None,
+    };
+
+    if let Some(value_param) = parameter {
+        return Some(value_param);
+    }
+
+    if let Some(intersection_types) = atomic.get_intersection_types() {
+        for intersection_type in intersection_types {
+            if let Some(value_param) = get_iterable_value_parameter(intersection_type, codebase) {
+                return Some(value_param);
+            }
+        }
+    }
+
+    None
+}
+
+#[must_use]
+pub fn get_array_value_parameter(array_type: &TArray, codebase: &CodebaseMetadata) -> TUnion {
+    match array_type {
+        TArray::Keyed(keyed_data) => {
+            let mut value_param;
+
+            if let Some((_, value_p)) = &keyed_data.parameters {
+                value_param = (**value_p).clone();
+            } else {
+                value_param = get_never();
+            }
+
+            if let Some(known_items) = &keyed_data.known_items {
+                for (_, item_type) in known_items.values() {
+                    value_param =
+                        combine_union_types(item_type, &value_param, codebase, combiner::CombinerOptions::default());
+                }
+            }
+
+            value_param
+        }
+        TArray::List(list_data) => {
+            let mut value_param = (*list_data.element_type).clone();
+
+            if let Some(known_elements) = &list_data.known_elements {
+                for (_, element_type) in known_elements.values() {
+                    value_param =
+                        combine_union_types(element_type, &value_param, codebase, combiner::CombinerOptions::default());
+                }
+            }
+
+            value_param
+        }
+        TArray::Set(element_type) => element_type.as_ref().clone(),
+    }
+}
+
+/// Resolves a generic template from an ancestor class in the context of a descendant class.
+///
+/// This function correctly traverses the pre-calculated inheritance map to determine the
+/// concrete type of a template parameter.
+#[must_use]
+pub fn get_specialized_template_type(
+    codebase: &CodebaseMetadata,
+    template_name: Word,
+    template_defining_class_id: Word,
+    instantiated_class_metadata: &ClassLikeMetadata,
+    instantiated_type_parameters: Option<&[TUnion]>,
+) -> Option<TUnion> {
+    let defining_class_metadata = codebase.get_class_like(template_defining_class_id.as_bytes())?;
+
+    if defining_class_metadata.name == instantiated_class_metadata.name {
+        let index = instantiated_class_metadata.get_template_index_for_name(template_name)?;
+
+        let Some(instantiated_type_parameters) = instantiated_type_parameters else {
+            let template = instantiated_class_metadata.get_template_type(template_name)?;
+            let mut result = template.constraint.clone();
+
+            expander::expand_union(codebase, &mut result, &TypeExpansionOptions::default());
+
+            return Some(result);
+        };
+
+        let mut result = instantiated_type_parameters.get(index).cloned()?;
+
+        expander::expand_union(codebase, &mut result, &TypeExpansionOptions::default());
+
+        return Some(result);
+    }
+
+    let template = defining_class_metadata.get_template_type(template_name)?;
+    let template_union = wrap_atomic(TAtomic::GenericParameter(TGenericParameter {
+        parameter_name: template_name,
+        defining_entity: template.defining_entity,
+        constraint: Arc::new(template.constraint.clone()),
+        intersection_types: None,
+    }));
+
+    let mut template_result = TemplateResult::default();
+    for (defining_class, template_parameters) in &instantiated_class_metadata.template_extended_parameters {
+        for (parameter_name, parameter_type) in template_parameters {
+            template_result.add_lower_bound(
+                *parameter_name,
+                GenericParent::ClassLike(*defining_class),
+                parameter_type.clone(),
+            );
+        }
+    }
+
+    let mut template_type = inferred_type_replacer::replace(&template_union, &template_result, codebase);
+    if let Some(type_parameters) = instantiated_type_parameters {
+        let mut template_result = TemplateResult::default();
+        for (i, parameter_type) in type_parameters.iter().enumerate() {
+            if let Some(parameter_name) = instantiated_class_metadata.get_template_name_for_index(i) {
+                template_result.add_lower_bound(
+                    parameter_name,
+                    GenericParent::ClassLike(instantiated_class_metadata.name),
+                    parameter_type.clone(),
+                );
+            }
+        }
+
+        if !template_result.lower_bounds.is_empty() {
+            template_type = inferred_type_replacer::replace(&template_type, &template_result, codebase);
+        }
+    }
+
+    expander::expand_union(codebase, &mut template_type, &TypeExpansionOptions::default());
+
+    Some(template_type)
+}
+
+fn get_iterator_method_return_type(
+    codebase: &CodebaseMetadata,
+    class_name: Word,
+    method_name: &[u8],
+) -> Option<TUnion> {
+    let method = codebase.get_declaring_method(class_name.as_bytes(), method_name)?;
+    let return_type_meta = method.return_type_metadata.as_ref()?;
+    let mut return_type = return_type_meta.type_union.clone();
+    expander::expand_union(codebase, &mut return_type, &TypeExpansionOptions::default());
+    Some(return_type)
+}

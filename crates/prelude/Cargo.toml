@@ -1,0 +1,42 @@
+[package]
+name = "mago-prelude"
+description = "The pre-compiled prelude of PHP's built-in symbols, used by Mago for fast, dependency-free analysis."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
+mago-codex = { workspace = true }
+mago-database = { workspace = true }
+
+mago-allocator = { workspace = true, optional = true }
+rust-embed = { workspace = true, optional = true }
+mago-syntax = { workspace = true, optional = true }
+mago-names = { workspace = true, optional = true }
+mago-php-version = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = [
+    "dep:serde",
+    "dep:bincode",
+    "mago-codex/serde",
+]
+build = ["serde", "mago-allocator", "rust-embed", "mago-syntax", "mago-names", "mago-php-version"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "prelude"
+harness = false
+required-features = ["build"]

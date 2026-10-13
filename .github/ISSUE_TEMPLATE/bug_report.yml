@@ -1,0 +1,41 @@
+name: "Bug Report"
+description: "Report a bug or unexpected behavior in Mago."
+labels: ["t-bug", "needs-triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide a clear description and reproduction steps.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Description"
+      description: "What happened? What did you expect?"
+      placeholder: "Mago reports a false positive for..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: "Reproduction"
+      description: "Provide the steps and code that reproduce the issue."
+      placeholder: |
+        1. Create a file with...
+        2. Run `mago lint`...
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: "Environment"
+      description: "Mago version, OS, and installation method."
+      placeholder: |
+        - mago-sharp: 0.y.z
+        - OS: macOS / Linux / Windows
+        - Installed via: install script / Composer / Nix
+    validations:
+      required: true

@@ -1,0 +1,991 @@
+use mago_allocator::prelude::*;
+use mago_database::file::HasFileId;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax_core::stack::ensure_sufficient_stack;
+
+use crate::T;
+use crate::cst::cst::Access;
+use crate::cst::cst::ArrayAccess;
+use crate::cst::cst::ArrayAppend;
+use crate::cst::cst::Assignment;
+use crate::cst::cst::AssignmentOperator;
+use crate::cst::cst::Binary;
+use crate::cst::cst::BinaryOperator;
+use crate::cst::cst::Call;
+use crate::cst::cst::ClassConstantAccess;
+use crate::cst::cst::ClassLikeConstantSelector;
+use crate::cst::cst::ClassLikeMemberSelector;
+use crate::cst::cst::Clone;
+use crate::cst::cst::Conditional;
+use crate::cst::cst::ConstantAccess;
+use crate::cst::cst::Expression;
+use crate::cst::cst::FunctionCall;
+use crate::cst::cst::FunctionPartialApplication;
+use crate::cst::cst::MethodCall;
+use crate::cst::cst::MethodPartialApplication;
+use crate::cst::cst::NullSafeMethodCall;
+use crate::cst::cst::NullSafePropertyAccess;
+use crate::cst::cst::Parenthesized;
+use crate::cst::cst::PartialApplication;
+use crate::cst::cst::Pipe;
+use crate::cst::cst::PropertyAccess;
+use crate::cst::cst::StaticMethodCall;
+use crate::cst::cst::StaticMethodPartialApplication;
+use crate::cst::cst::StaticPropertyAccess;
+use crate::cst::cst::UnaryPostfix;
+use crate::cst::cst::UnaryPostfixOperator;
+use crate::cst::cst::UnaryPrefix;
+use crate::cst::cst::UnaryPrefixOperator;
+use crate::dialect::Dialect;
+use crate::error::ParseError;
+use crate::parser::MAX_RECURSION_DEPTH;
+use crate::parser::Parser;
+use crate::token::Associativity;
+use crate::token::GetPrecedence;
+use crate::token::Precedence;
+use crate::token::Token;
+use crate::token::TokenKind;
+
+impl<'arena, A> Parser<'_, 'arena, A>
+where
+    A: Arena,
+{
+    pub(crate) fn parse_expression(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+        self.parse_expression_with_precedence(Precedence::Lowest)
+    }
+
+    /// Parses an expression optionally prefixed with `&` (reference), for positions where
+    /// a by-reference value is legal (array element value, yield value, `list(&$x)` destructuring).
+    /// `&` outside such positions must remain a syntax error, so callers in those positions
+    /// should use this helper instead of `parse_expression`.
+    pub(crate) fn parse_possibly_referenced_expression(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+        if matches!(self.stream.peek_kind(0)?, Some(T!["&"])) {
+            let ampersand_span = self.stream.eat_span(T!["&"])?;
+            let referenced_expr = self.parse_expression_with_precedence(Precedence::Reference)?;
+
+            return Ok(self.arena.alloc(Expression::UnaryPrefix(UnaryPrefix {
+                operator: UnaryPrefixOperator::Reference(ampersand_span),
+                operand: referenced_expr,
+            })));
+        }
+
+        self.parse_expression()
+    }
+
+    /// Returns `true` when `kind` could begin a value expression. Mirrors the
+    /// starter set accepted by [`Self::parse_lhs_expression`].
+    pub(crate) const fn is_at_start_of_expression(kind: TokenKind) -> bool {
+        if kind.is_literal() || kind.is_unary_prefix() || kind.is_magic_constant() || kind.is_construct() {
+            return true;
+        }
+
+        if matches!(
+            kind,
+            T!["#["
+                | "clone"
+                | "function"
+                | "fn"
+                | "static"
+                | "self"
+                | "parent"
+                | "list"
+                | "new"
+                | "throw"
+                | "yield"
+                | "match"
+                | "array"
+                | "["
+                | "("
+                | "\""
+                | "<<<"
+                | "`"]
+        ) {
+            return true;
+        }
+
+        if matches!(kind, T![Dollar | DollarLeftBrace | Variable]) {
+            return true;
+        }
+
+        matches!(kind, T![Identifier | QualifiedIdentifier | FullyQualifiedIdentifier])
+            || kind.is_soft_reserved_identifier()
+    }
+
+    /// Internal expression parsing that uses arena-allocated references to reduce stack usage.
+    /// Returns `&'arena Expression<'arena>` (8 bytes) instead of `Expression<'arena>` (488 bytes).
+    pub(crate) fn parse_expression_with_precedence(
+        &mut self,
+        precedence: Precedence,
+    ) -> Result<&'arena Expression<'arena>, ParseError> {
+        self.state.recursion_depth += 1;
+        if self.state.recursion_depth > MAX_RECURSION_DEPTH {
+            self.state.recursion_depth -= 1;
+            let file_id = self.stream.file_id();
+            let span =
+                self.stream.lookahead(0)?.map(|t| t.span_for(file_id)).unwrap_or_else(|| {
+                    Span::new(file_id, self.stream.current_position(), self.stream.current_position())
+                });
+
+            return Err(self.recursion_limit_exceeded(span));
+        }
+
+        let result = ensure_sufficient_stack(|| self.parse_expression_with_precedence_inner(precedence));
+        self.state.recursion_depth -= 1;
+        result
+    }
+
+    fn parse_expression_with_precedence_inner(
+        &mut self,
+        precedence: Precedence,
+    ) -> Result<&'arena Expression<'arena>, ParseError> {
+        let left = self.parse_lhs_expression(precedence)?;
+
+        self.parse_expression_continuation(left, precedence)
+    }
+
+    pub(crate) fn parse_expression_continuation(
+        &mut self,
+        mut left: &'arena Expression<'arena>,
+        precedence: Precedence,
+    ) -> Result<&'arena Expression<'arena>, ParseError> {
+        while let Some(next) = self.stream.lookahead(0)? {
+            let kind = self.operator_kind(next)?;
+
+            if !matches!(precedence, Precedence::Instanceof | Precedence::New)
+                && !matches!(kind, T!["(" | "::"])
+                && let Expression::Identifier(identifier) = left
+            {
+                left = self.arena.alloc(Expression::ConstantAccess(ConstantAccess { name: *identifier }));
+            }
+
+            // Stop parsing if the next token is a terminator.
+            if matches!(kind, T![";" | "?>"]) {
+                break;
+            }
+
+            if let Some(error) = self.parse_lambda_after_an_operator(left, precedence)? {
+                left = error;
+                continue;
+            }
+
+            if self.is_at_is_or_as()? {
+                if Precedence::SharpComparison <= precedence {
+                    break;
+                }
+
+                left = self.parse_is_or_as(left)?;
+                continue;
+            }
+
+            // Don't allow function calls on error expressions.
+            // This prevents `if(...)` from being parsed as a function call when `if` is an unexpected token.
+            if matches!(left, Expression::Error(_)) && matches!(kind, T!["("]) {
+                break;
+            }
+
+            if kind.is_postfix() {
+                let postfix_precedence = Precedence::postfix(&kind);
+                if postfix_precedence < precedence {
+                    break;
+                }
+
+                left = self.parse_postfix_expression(left, kind, precedence)?;
+            } else if kind.is_infix() {
+                let infix_precedence = Precedence::infix(&kind).in_dialect(self.dialect);
+
+                if infix_precedence < precedence {
+                    break;
+                }
+
+                if infix_precedence == precedence
+                    && let Some(Associativity::Left) = infix_precedence.associativity()
+                {
+                    break;
+                }
+
+                if let Expression::Binary(binary) = left
+                    && matches!(binary.rhs, Expression::Assignment(_))
+                    && infix_precedence > binary.operator.precedence().in_dialect(self.dialect)
+                {
+                    left = self.arena.alloc(Expression::Binary(Binary {
+                        lhs: binary.lhs,
+                        operator: binary.operator,
+                        rhs: self.parse_infix_expression(binary.rhs)?,
+                    }));
+                } else {
+                    left = self.parse_infix_expression(left)?;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(left)
+    }
+
+    #[inline]
+    fn parse_lhs_expression(&mut self, precedence: Precedence) -> Result<&'arena Expression<'arena>, ParseError> {
+        let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+        let next = self.stream.peek_kind(1)?;
+
+        let is_call = precedence != Precedence::New && matches!(next, Some(T!["("]));
+        let is_call_or_access =
+            is_call || matches!(next, Some(T![LeftBracket | ColonColon | MinusGreaterThan | QuestionMinusGreaterThan]));
+
+        if token.kind.is_literal() && (!token.kind.is_keyword() || !is_call_or_access) {
+            return Ok(self.arena.alloc(Expression::Literal(self.parse_literal()?)));
+        }
+
+        if token.kind.is_unary_prefix() {
+            return Ok(self.arena.alloc(Expression::UnaryPrefix(self.parse_unary_prefix_operation()?)));
+        }
+
+        if matches!(token.kind, T!["#["]) {
+            return self.parse_arrow_function_or_closure();
+        }
+
+        if matches!(token.kind, T!["clone"]) {
+            return Ok(self.arena.alloc(self.parse_ambiguous_clone_expression()?));
+        }
+
+        if self.dialect.is_sharp() && self.is_at_lambda(precedence)? {
+            return self.parse_lambda();
+        }
+
+        if !self.state.within_string_interpolation
+            && (matches!((token.kind, next), (T!["function" | "fn"], _))
+                || matches!((token.kind, next), (T!["static"], Some(T!["function" | "fn"]))))
+        {
+            return self.parse_arrow_function_or_closure();
+        }
+
+        // `new Report.fromJson(…)` calls a named constructor, spec section 9.1: in PHP# a name after `new` is a class,
+        // so a `.` after it names the constructor. It parses whole as one error, and its value is the error expression.
+        if self.dialect.is_sharp()
+            && token.kind == T!["new"]
+            && next == Some(T![Identifier])
+            && self.stream.peek_kind(2)? == Some(T!["."])
+            && self.stream.peek_kind(3)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
+        {
+            let new = self.stream.consume_span()?;
+            let class = self.parse_local_identifier()?;
+            self.stream.consume()?;
+            let name = self.parse_local_identifier()?;
+            let end = match self.parse_optional_argument_list()? {
+                Some(arguments) => arguments.span(),
+                None => name.span,
+            };
+            self.errors.push(ParseError::NotSupportedYetInSharp("A named constructor", class.span.join(name.span)));
+
+            return Ok(self.arena.alloc(Expression::Error(new.join(end))));
+        }
+
+        if self.is_at_type_of()? {
+            return Ok(self.arena.alloc(Expression::TypeOf(self.parse_type_of()?)));
+        }
+
+        // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`.
+        if self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"super" && next == Some(T!["."]) {
+            return Ok(self.arena.alloc(Expression::Parent(self.expect_any_keyword()?)));
+        }
+
+        Ok(self.arena.alloc(match (token.kind, next) {
+            (T!["static"], _) => Expression::Static(self.expect_any_keyword()?),
+            (T!["self"], _) if !is_call => Expression::Self_(self.expect_any_keyword()?),
+            (T!["parent"], _) if !is_call => Expression::Parent(self.expect_any_keyword()?),
+            (kind, _) if kind.is_construct() => self.parse_construct()?,
+            (T!["list"], Some(T!["("])) => Expression::List(self.parse_list()?),
+            (T!["new"], Some(T!["class" | "#["])) => Expression::AnonymousClass(self.parse_anonymous_class()?),
+            (T!["new"], Some(T!["static"])) => Expression::Instantiation(self.parse_instantiation()?),
+            (T!["new"], Some(kind)) if kind.is_modifier() => Expression::AnonymousClass(self.parse_anonymous_class()?),
+            (T!["new"], _) => Expression::Instantiation(self.parse_instantiation()?),
+            (T!["throw"], _) => Expression::Throw(self.parse_throw()?),
+            (T!["yield"], _) => Expression::Yield(self.parse_yield()?),
+            (T!["\""] | T!["<<<"] | T!["`"], ..) => Expression::CompositeString(self.parse_string()?),
+            (T!["("], _) => Expression::Parenthesized(Parenthesized {
+                left_parenthesis: self.stream.eat_span(T!["("])?,
+                expression: self.parse_expression_with_precedence(Precedence::Lowest)?,
+                right_parenthesis: self.stream.eat_span(T![")"])?,
+            }),
+            (T!["match"], Some(T!["("])) if self.dialect.is_sharp() => {
+                Expression::PatternMatch(self.parse_pattern_match()?)
+            }
+            (T!["match"], Some(T!["("])) => Expression::Match(self.parse_match()?),
+            (T!["array"], Some(T!["("])) => Expression::LegacyArray(self.parse_legacy_array()?),
+            (T!["["], _) => Expression::Array(self.parse_array()?),
+            (T![Dollar | DollarLeftBrace | Variable], _) => Expression::Variable(self.parse_variable()?),
+            (kind, _) if kind.is_magic_constant() => Expression::MagicConstant(self.parse_magic_constant()?),
+            (kind, ..)
+                if matches!(kind, T![Identifier | QualifiedIdentifier | FullyQualifiedIdentifier | "clone"])
+                    || kind.is_soft_reserved_identifier()
+                    || (self.state.within_string_interpolation && kind.is_reserved_identifier()) =>
+            {
+                Expression::Identifier(self.parse_identifier()?)
+            }
+            _ => {
+                // Check if this is a token that we should NOT consume.
+                // 1. Statement-starting keywords should always be left for the statement parser
+                // 2. Closing delimiters (`)`, `]`, `}`, `,`) should be preserved ONLY when we're
+                //    inside a sub-expression (precedence > Lowest), as they might be part of an
+                //    outer context. At the top level (Lowest precedence), consume them to avoid
+                //    infinite loops.
+                let is_statement_keyword = matches!(
+                    token.kind,
+                    T!["if"
+                        | "else"
+                        | "elseif"
+                        | "while"
+                        | "do"
+                        | "for"
+                        | "foreach"
+                        | "switch"
+                        | "try"
+                        | "catch"
+                        | "finally"
+                        | "class"
+                        | "interface"
+                        | "trait"
+                        | "enum"
+                        | "function"
+                        | "fn"
+                        | "return"
+                        | "break"
+                        | "continue"
+                        | "goto"
+                        | "declare"
+                        | "namespace"
+                        | "use"
+                        | "const"
+                        | "global"
+                        | "abstract"
+                        | "final"]
+                );
+                let is_closing_delimiter = matches!(token.kind, T![")" | "]" | "}" | ","]);
+                let should_preserve =
+                    is_statement_keyword || (is_closing_delimiter && precedence != Precedence::Lowest);
+
+                if should_preserve {
+                    let pos = self.stream.current_position();
+                    let span = Span::new(self.stream.file_id(), pos, pos);
+                    let err = self.stream.unexpected(Some(token), &[]);
+                    self.errors.push(err);
+                    Expression::Error(span)
+                } else {
+                    // Consume the unexpected token to prevent infinite loops
+                    let consumed = self.stream.consume()?;
+                    let err = self.stream.unexpected(Some(consumed), &[]);
+                    let span = err.span();
+                    self.errors.push(err);
+                    Expression::Error(span)
+                }
+            }
+        }))
+    }
+
+    fn parse_arrow_function_or_closure(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+        let attributes = self.parse_attribute_list_sequence()?;
+
+        let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+        let after = self.stream.lookahead(1)?;
+
+        Ok(match (next.kind, after.map(|t| t.kind)) {
+            (T!["function"], _) | (T!["static"], Some(T!["function"])) => {
+                self.parse_closure_with_attributes(attributes)?
+            }
+            (T!["fn"], _) | (T!["static"], Some(T!["fn"])) => self.parse_arrow_function_with_attributes(attributes)?,
+            _ => return Err(self.stream.unexpected(Some(next), &[T!["function"], T!["fn"], T!["static"]])),
+        })
+    }
+
+    /// Returns the operator the next token stands for in the current dialect.
+    ///
+    /// In PHP#, `.` is member access, which PHP writes `->`, and `?` written right before `.` is null-safe member
+    /// access, which PHP writes `?->`.
+    fn operator_kind(&mut self, token: Token<'_>) -> Result<TokenKind, ParseError> {
+        Ok(match (self.dialect, token.kind) {
+            (Dialect::Sharp, T!["."]) => T!["->"],
+            (Dialect::Sharp, T!["?"])
+                if self
+                    .stream
+                    .lookahead(1)?
+                    .is_some_and(|next| next.kind == T!["."] && next.start.offset == token.start.offset + 1) =>
+            {
+                T!["?->"]
+            }
+            _ => token.kind,
+        })
+    }
+
+    /// Consumes an operator, and reports it when PHP# does not have it, such as `->` where PHP# writes `.`. Returns
+    /// its span, and whether it is refused: the expression it builds still parses so the rest of the file does, and
+    /// stands as an error expression, so no stage after the parser checks it.
+    ///
+    /// PHP#'s `?.` is two tokens, consumed together.
+    fn consume_operator_span(&mut self) -> Result<(Span, bool), ParseError> {
+        let token = self.stream.consume()?;
+        let span = token.span_for(self.stream.file_id());
+        if self.dialect.is_sharp() && token.kind == T!["?"] {
+            return Ok((span.join(self.stream.eat_span(T!["."])?), false));
+        }
+
+        let refused = self.dialect.is_sharp() && matches!(token.kind, T!["->" | "?->" | "::" | ".="]);
+        if refused {
+            self.errors.push(ParseError::PhpSyntaxInSharp(token.kind, span));
+        }
+
+        Ok((span, refused))
+    }
+
+    fn parse_postfix_expression(
+        &mut self,
+        lhs: &'arena Expression<'arena>,
+        operator: TokenKind,
+        precedence: Precedence,
+    ) -> Result<&'arena Expression<'arena>, ParseError> {
+        let mut refused = false;
+        let expression = self.arena.alloc(match operator {
+            T!["("] => {
+                let partial_args = self.parse_partial_argument_list()?;
+
+                if partial_args.has_placeholders() {
+                    Expression::PartialApplication(PartialApplication::Function(FunctionPartialApplication {
+                        function: lhs,
+                        argument_list: partial_args,
+                    }))
+                } else {
+                    Expression::Call(Call::Function(FunctionCall {
+                        function: lhs,
+                        argument_list: partial_args.into_argument_list(self.arena),
+                    }))
+                }
+            }
+            T!["["] => {
+                let left_bracket = self.stream.consume_span()?;
+                let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+                if matches!(next.kind, T!["]"]) {
+                    Expression::ArrayAppend(ArrayAppend {
+                        array: lhs,
+                        left_bracket,
+                        right_bracket: self.stream.consume_span()?,
+                    })
+                } else {
+                    let is_numeric_offset = matches!(next.kind, T![OffsetNumber])
+                        || (matches!(next.kind, T!["-"])
+                            && matches!(self.stream.peek_kind(1)?, Some(T![OffsetNumber])));
+
+                    let index = if is_numeric_offset {
+                        self.parse_interpolated_numeric_offset()?
+                    } else if matches!(next.kind, T![OffsetString]) {
+                        self.parse_interpolated_string_offset()?
+                    } else {
+                        self.parse_expression_with_precedence(Precedence::Lowest)?
+                    };
+
+                    Expression::ArrayAccess(ArrayAccess {
+                        array: lhs,
+                        left_bracket,
+                        index,
+                        right_bracket: self.stream.eat_span(T!["]"])?,
+                    })
+                }
+            }
+            T!["::"] => {
+                let (double_colon, operator_refused) = self.consume_operator_span()?;
+                refused = operator_refused;
+                let selector = self.parse_classlike_member_selector()?;
+                let current = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+
+                if Precedence::CallDim > precedence && matches!(current.kind, T!["("]) {
+                    let partial_args = self.parse_partial_argument_list()?;
+
+                    if partial_args.has_placeholders() {
+                        Expression::PartialApplication(PartialApplication::StaticMethod(
+                            StaticMethodPartialApplication {
+                                class: lhs,
+                                double_colon,
+                                method: selector,
+                                argument_list: partial_args,
+                            },
+                        ))
+                    } else {
+                        Expression::Call(Call::StaticMethod(StaticMethodCall {
+                            class: lhs,
+                            double_colon,
+                            method: selector,
+                            argument_list: partial_args.into_argument_list(self.arena),
+                        }))
+                    }
+                } else {
+                    match selector {
+                        ClassLikeMemberSelector::Identifier(local_identifier) => {
+                            Expression::Access(Access::ClassConstant(ClassConstantAccess {
+                                class: lhs,
+                                double_colon,
+                                constant: ClassLikeConstantSelector::Identifier(local_identifier),
+                            }))
+                        }
+                        ClassLikeMemberSelector::Expression(class_like_member_expression_selector) => {
+                            Expression::Access(Access::ClassConstant(ClassConstantAccess {
+                                class: lhs,
+                                double_colon,
+                                constant: ClassLikeConstantSelector::Expression(class_like_member_expression_selector),
+                            }))
+                        }
+                        ClassLikeMemberSelector::Missing(span) => {
+                            Expression::Access(Access::ClassConstant(ClassConstantAccess {
+                                class: lhs,
+                                double_colon,
+                                constant: ClassLikeConstantSelector::Missing(span),
+                            }))
+                        }
+                        ClassLikeMemberSelector::Variable(variable) => {
+                            Expression::Access(Access::StaticProperty(StaticPropertyAccess {
+                                class: lhs,
+                                double_colon,
+                                property: variable,
+                            }))
+                        }
+                    }
+                }
+            }
+            T!["->"] => {
+                let (arrow, operator_refused) = self.consume_operator_span()?;
+                refused = operator_refused;
+                let selector = self.parse_classlike_member_selector()?;
+
+                if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
+                    let partial_args = self.parse_partial_argument_list()?;
+
+                    if partial_args.has_placeholders() {
+                        Expression::PartialApplication(PartialApplication::Method(MethodPartialApplication {
+                            object: lhs,
+                            arrow,
+                            method: selector,
+                            argument_list: partial_args,
+                        }))
+                    } else {
+                        Expression::Call(Call::Method(MethodCall {
+                            object: lhs,
+                            arrow,
+                            method: selector,
+                            argument_list: partial_args.into_argument_list(self.arena),
+                        }))
+                    }
+                } else {
+                    Expression::Access(Access::Property(PropertyAccess { object: lhs, arrow, property: selector }))
+                }
+            }
+            T!["?->"] => {
+                let (question_mark_arrow, operator_refused) = self.consume_operator_span()?;
+                refused = operator_refused;
+                let selector = self.parse_classlike_member_selector()?;
+
+                if Precedence::CallDim > precedence && matches!(self.stream.peek_kind(0)?, Some(T!["("])) {
+                    Expression::Call(Call::NullSafeMethod(NullSafeMethodCall {
+                        object: lhs,
+                        question_mark_arrow,
+                        method: selector,
+                        argument_list: self.parse_argument_list()?,
+                    }))
+                } else {
+                    Expression::Access(Access::NullSafeProperty(NullSafePropertyAccess {
+                        object: lhs,
+                        question_mark_arrow,
+                        property: selector,
+                    }))
+                }
+            }
+            T!["++"] => Expression::UnaryPostfix(UnaryPostfix {
+                operand: lhs,
+                operator: UnaryPostfixOperator::PostIncrement(self.stream.consume_span()?),
+            }),
+            T!["--"] => Expression::UnaryPostfix(UnaryPostfix {
+                operand: lhs,
+                operator: UnaryPostfixOperator::PostDecrement(self.stream.consume_span()?),
+            }),
+            // The dispatch above already filtered the postfix operators we accept; reaching the
+            // wildcard means the caller passed a non-postfix kind, which is a parser bug — bubble
+            // it up as an unexpected-token error instead of panicking.
+            _ => return Err(self.stream.unexpected(None, &[])),
+        });
+
+        Ok(if refused { self.arena.alloc(Expression::Error(expression.span())) } else { expression })
+    }
+
+    fn parse_infix_expression(
+        &mut self,
+        lhs: &'arena Expression<'arena>,
+    ) -> Result<&'arena Expression<'arena>, ParseError> {
+        let operator = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+
+        Ok(self.arena.alloc(match operator.kind {
+            T!["??"] => {
+                let qq = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::NullCoalesce)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::NullCoalesce(qq), rhs })
+            }
+            T!["?"] => {
+                if matches!(self.stream.peek_kind(1)?, Some(T![":"])) {
+                    Expression::Conditional(Conditional {
+                        condition: lhs,
+                        question_mark: self.stream.consume_span()?,
+                        then: None,
+                        colon: self.stream.consume_span()?,
+                        r#else: self.parse_expression_with_precedence(Precedence::ElvisOrConditional)?,
+                    })
+                } else {
+                    Expression::Conditional(Conditional {
+                        condition: lhs,
+                        question_mark: self.stream.consume_span()?,
+                        then: Some(self.parse_expression_with_precedence(Precedence::Lowest)?),
+                        colon: self.stream.eat_span(T![":"])?,
+                        r#else: self.parse_expression_with_precedence(Precedence::ElvisOrConditional)?,
+                    })
+                }
+            }
+            T!["+"] => Expression::Binary(Binary {
+                lhs,
+                operator: BinaryOperator::Addition(self.stream.consume_span()?),
+                rhs: self.parse_expression_with_precedence(Precedence::AddSub)?,
+            }),
+            T!["-"] => Expression::Binary(Binary {
+                lhs,
+                operator: BinaryOperator::Subtraction(self.stream.consume_span()?),
+                rhs: self.parse_expression_with_precedence(Precedence::AddSub)?,
+            }),
+            T!["*"] => Expression::Binary(Binary {
+                lhs,
+                operator: BinaryOperator::Multiplication(self.stream.consume_span()?),
+                rhs: self.parse_expression_with_precedence(Precedence::MulDivMod)?,
+            }),
+            T!["/"] => Expression::Binary(Binary {
+                lhs,
+                operator: BinaryOperator::Division(self.stream.consume_span()?),
+                rhs: self.parse_expression_with_precedence(Precedence::MulDivMod)?,
+            }),
+            T!["%"] => Expression::Binary(Binary {
+                lhs,
+                operator: BinaryOperator::Modulo(self.stream.consume_span()?),
+                rhs: self.parse_expression_with_precedence(Precedence::MulDivMod)?,
+            }),
+            T!["**"] => Expression::Binary(Binary {
+                lhs,
+                operator: BinaryOperator::Exponentiation(self.stream.consume_span()?),
+                rhs: self.parse_expression_with_precedence(Precedence::Pow)?,
+            }),
+            T!["="] => {
+                let operator = AssignmentOperator::Assign(self.stream.consume_span()?);
+
+                let by_ref = matches!(self.stream.peek_kind(0)?, Some(T!["&"]));
+
+                let rhs = if by_ref {
+                    let ampersand_span = self.stream.eat_span(T!["&"])?;
+                    let referenced_expr = self.parse_expression_with_precedence(Precedence::Reference)?;
+
+                    self.arena.alloc(Expression::UnaryPrefix(UnaryPrefix {
+                        operator: UnaryPrefixOperator::Reference(ampersand_span),
+                        operand: referenced_expr,
+                    }))
+                } else {
+                    self.parse_expression_with_precedence(Precedence::Assignment)?
+                };
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["+="] => {
+                let operator = AssignmentOperator::Addition(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["-="] => {
+                let operator = AssignmentOperator::Subtraction(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["*="] => {
+                let operator = AssignmentOperator::Multiplication(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["/="] => {
+                let operator = AssignmentOperator::Division(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["%="] => {
+                let operator = AssignmentOperator::Modulo(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["**="] => {
+                let operator = AssignmentOperator::Exponentiation(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["&="] => {
+                let operator = AssignmentOperator::BitwiseAnd(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["|="] => {
+                let operator = AssignmentOperator::BitwiseOr(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["^="] => {
+                let operator = AssignmentOperator::BitwiseXor(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["<<="] => {
+                let operator = AssignmentOperator::LeftShift(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T![">>="] => {
+                let operator = AssignmentOperator::RightShift(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T!["??="] => {
+                let operator = AssignmentOperator::Coalesce(self.stream.consume_span()?);
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+
+                return Ok(self.create_assignment_expression(lhs, operator, rhs));
+            }
+            T![".="] => {
+                let (operator, refused) = self.consume_operator_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Assignment)?;
+                if refused {
+                    return Ok(self.arena.alloc(Expression::Error(lhs.span().join(rhs.span()))));
+                }
+
+                return Ok(self.create_assignment_expression(lhs, AssignmentOperator::Concat(operator), rhs));
+            }
+            T!["&"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::BitwiseAnd)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::BitwiseAnd(operator), rhs })
+            }
+            T!["|"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::BitwiseOr)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::BitwiseOr(operator), rhs })
+            }
+            T!["^"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::BitwiseXor)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::BitwiseXor(operator), rhs })
+            }
+            T!["<<"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::BitShift)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::LeftShift(operator), rhs })
+            }
+            T![">>"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::BitShift)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::RightShift(operator), rhs })
+            }
+            T!["=="] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Equality.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::Equal(operator), rhs })
+            }
+            T!["==="] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Equality.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::Identical(operator), rhs })
+            }
+            T!["!="] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Equality.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::NotEqual(operator), rhs })
+            }
+            T!["!=="] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Equality.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::NotIdentical(operator), rhs })
+            }
+            T!["<>"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Equality.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::AngledNotEqual(operator), rhs })
+            }
+            T!["<"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Comparison.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::LessThan(operator), rhs })
+            }
+            T![">"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Comparison.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::GreaterThan(operator), rhs })
+            }
+            T!["<="] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Comparison.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::LessThanOrEqual(operator), rhs })
+            }
+            T![">="] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Comparison.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::GreaterThanOrEqual(operator), rhs })
+            }
+            T!["<=>"] => {
+                let operator = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Equality.in_dialect(self.dialect))?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::Spaceship(operator), rhs })
+            }
+            T!["&&"] => {
+                let and = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::And)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::And(and), rhs })
+            }
+            T!["||"] => {
+                let or = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Or)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::Or(or), rhs })
+            }
+            T!["and"] => {
+                let and = self.expect_any_keyword()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::KeyAnd)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::LowAnd(and), rhs })
+            }
+            T!["or"] => {
+                let or = self.expect_any_keyword()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::KeyOr)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::LowOr(or), rhs })
+            }
+            T!["xor"] => {
+                let xor = self.expect_any_keyword()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::KeyXor)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::LowXor(xor), rhs })
+            }
+            T!["."] => {
+                let dot = self.stream.consume_span()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Concat)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::StringConcat(dot), rhs })
+            }
+            T!["instanceof"] => {
+                let instanceof = self.expect_any_keyword()?;
+                let rhs = self.parse_expression_with_precedence(Precedence::Instanceof)?;
+
+                Expression::Binary(Binary { lhs, operator: BinaryOperator::Instanceof(instanceof), rhs })
+            }
+            T!["|>"] => {
+                let operator = self.stream.consume_span()?;
+                let callable = self.parse_expression_with_precedence(Precedence::Pipe)?;
+
+                Expression::Pipe(Pipe { input: lhs, operator, callable })
+            }
+            // The dispatch above already filtered the infix operators we accept; reaching the
+            // wildcard means the caller passed a non-infix kind, which is a parser bug — bubble
+            // it up as an unexpected-token error instead of panicking.
+            _ => return Err(self.stream.unexpected(None, &[])),
+        }))
+    }
+
+    /// Creates an `Expression` representing an assignment operation while ensuring correct associativity.
+    ///
+    /// In PHP, assignment operations have right-to-left associativity. This function
+    /// takes the left-hand side expression (`lhs`), the assignment operator, and the
+    /// right-hand side expression (`rhs`) and constructs an `Expression` that represents
+    /// the assignment while applying the correct associativity.
+    ///
+    /// This ensures that when an assignment is nested within another expression, the assignment
+    /// is applied to the rightmost operand of the parent expression.
+    ///
+    /// For example:
+    ///
+    ///  * `($x == $y) = $z` is transformed to `$x == ($y = $z)`
+    ///  * `($x && $y) = $z` is transformed to `$x && ($y = $z)`
+    ///  * `($x + $y) = $z` is transformed to `$x + ($y = $z)`
+    ///  * `((string) $bar) = $foo` is transformed to `(string) ($bar = $foo)`
+    fn create_assignment_expression(
+        &mut self,
+        lhs: &'arena Expression<'arena>,
+        operator: AssignmentOperator,
+        rhs: &'arena Expression<'arena>,
+    ) -> &'arena Expression<'arena> {
+        match lhs {
+            Expression::UnaryPrefix(prefix) => {
+                if !prefix.operator.is_increment_or_decrement() && Precedence::Assignment < prefix.operator.precedence()
+                {
+                    // make `(--$x) = $y` into `--($x = $y)`
+                    self.arena.alloc(Expression::UnaryPrefix(UnaryPrefix {
+                        operator: prefix.operator.clone(),
+                        operand: self.create_assignment_expression(prefix.operand, operator, rhs),
+                    }))
+                } else {
+                    self.arena.alloc(Expression::Assignment(Assignment { lhs, operator, rhs }))
+                }
+            }
+            Expression::Binary(operation) => {
+                let assignment_precedence = Precedence::Assignment;
+                let binary_precedence = operation.operator.precedence();
+
+                if assignment_precedence < binary_precedence {
+                    // make `($x == $y) = $z` into `$x == ($y = $z)`
+                    self.arena.alloc(Expression::Binary(Binary {
+                        lhs: operation.lhs,
+                        operator: operation.operator,
+                        rhs: self.create_assignment_expression(operation.rhs, operator, rhs),
+                    }))
+                } else {
+                    self.arena.alloc(Expression::Assignment(Assignment { lhs, operator, rhs }))
+                }
+            }
+            Expression::Conditional(conditional) => self.arena.alloc(Expression::Conditional(Conditional {
+                condition: conditional.condition,
+                question_mark: conditional.question_mark,
+                then: conditional.then,
+                colon: conditional.colon,
+                r#else: self.create_assignment_expression(conditional.r#else, operator, rhs),
+            })),
+            // `clone` is the highest-precedence prefix construct, but assignment's
+            // LHS is grammatically a variable, so `clone $b = 1` binds as
+            // `clone ($b = 1)` (the `=` shifts into clone's operand), not
+            // `(clone $b) = 1`.
+            Expression::Clone(cloned) => self.arena.alloc(Expression::Clone(Clone {
+                clone: cloned.clone,
+                object: self.create_assignment_expression(cloned.object, operator, rhs),
+            })),
+            _ => self.arena.alloc(Expression::Assignment(Assignment { lhs, operator, rhs })),
+        }
+    }
+}

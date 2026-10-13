@@ -1,0 +1,83 @@
+//! Error types for the orchestrator crate.
+
+use mago_analyzer::error::AnalysisError;
+use mago_analyzer::external::ExternalAnalyzerError;
+use mago_analyzer::plugin::PluginError;
+use mago_database::error::DatabaseError;
+use mago_linter::external::ExternalLintError;
+
+/// Errors that can occur during orchestration operations.
+#[derive(Debug)]
+pub enum OrchestratorError {
+    /// An error occurred while accessing the database.
+    Database(DatabaseError),
+    /// An error occurred during analysis.
+    Analysis(AnalysisError),
+    /// An error occurred while accessing the cache (lock poisoning).
+    CacheLockPoisoned,
+    /// A tool was asked to process a PHP# file, which it does not support yet.
+    SharpNotSupported {
+        /// The `mago` command, such as `lint`.
+        tool: &'static str,
+        /// The name of the PHP# file.
+        file: String,
+    },
+    /// A general error with a message.
+    General(String),
+}
+
+impl std::fmt::Display for OrchestratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Database(error) => write!(f, "Database error: {error}"),
+            Self::Analysis(error) => write!(f, "Analysis error: {error}"),
+            Self::CacheLockPoisoned => write!(f, "Cache lock poisoned"),
+            Self::SharpNotSupported { tool, file } => {
+                write!(f, "`mago {tool}` does not support PHP# files yet: {file}")
+            }
+            Self::General(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for OrchestratorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            Self::Analysis(error) => Some(error),
+            Self::CacheLockPoisoned => None,
+            Self::SharpNotSupported { .. } => None,
+            Self::General(_) => None,
+        }
+    }
+}
+
+impl From<DatabaseError> for OrchestratorError {
+    fn from(error: DatabaseError) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl From<AnalysisError> for OrchestratorError {
+    fn from(error: AnalysisError) -> Self {
+        Self::Analysis(error)
+    }
+}
+
+impl From<PluginError> for OrchestratorError {
+    fn from(error: PluginError) -> Self {
+        Self::Analysis(AnalysisError::from(error))
+    }
+}
+
+impl From<ExternalAnalyzerError> for OrchestratorError {
+    fn from(error: ExternalAnalyzerError) -> Self {
+        Self::Analysis(AnalysisError::from(error))
+    }
+}
+
+impl From<ExternalLintError> for OrchestratorError {
+    fn from(error: ExternalLintError) -> Self {
+        Self::General(format!("External linter error: {error}"))
+    }
+}

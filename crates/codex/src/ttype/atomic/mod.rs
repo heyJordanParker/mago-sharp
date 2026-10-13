@@ -1,0 +1,1060 @@
+use std::sync::Arc;
+
+use mago_word::Word;
+use mago_word::ascii_lowercase_word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::metadata::CodebaseMetadata;
+use crate::reference::ReferenceSource;
+use crate::reference::SymbolReferences;
+use crate::symbol::SymbolKind;
+use crate::symbol::Symbols;
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::atomic::alias::TAlias;
+use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::array::key::ArrayKey;
+use crate::ttype::atomic::callable::TCallable;
+use crate::ttype::atomic::conditional::TConditional;
+use crate::ttype::atomic::derived::TDerived;
+use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::iterable::TIterable;
+use crate::ttype::atomic::mixed::TMixed;
+use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::object::r#enum::TEnum;
+use crate::ttype::atomic::object::named::TNamedObject;
+use crate::ttype::atomic::reference::TReference;
+use crate::ttype::atomic::reference::TReferenceMemberSelector;
+use crate::ttype::atomic::resource::TResource;
+use crate::ttype::atomic::scalar::TScalar;
+use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use crate::ttype::atomic::scalar::int::TInteger;
+use crate::ttype::atomic::scalar::string::TString;
+use crate::ttype::atomic::scalar::string::TStringLiteral;
+use crate::ttype::get_arraykey;
+use crate::ttype::get_mixed;
+use crate::ttype::union::TUnion;
+use crate::ttype::union::populate_union_type;
+
+pub mod alias;
+pub mod array;
+pub mod callable;
+pub mod conditional;
+pub mod derived;
+pub mod generic;
+pub mod iterable;
+pub mod mixed;
+pub mod object;
+pub mod reference;
+pub mod resource;
+pub mod scalar;
+
+#[allow(clippy::derived_hash_with_manual_eq)]
+#[derive(Debug, Clone, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TAtomic {
+    Scalar(TScalar),
+    Callable(TCallable),
+    Mixed(TMixed),
+    Object(TObject),
+    Array(TArray),
+    Iterable(TIterable),
+    Resource(TResource),
+    Reference(TReference),
+    GenericParameter(TGenericParameter),
+    Variable(Word),
+    Conditional(TConditional),
+    Derived(TDerived),
+    Alias(TAlias),
+    Never,
+    Null,
+    Void,
+    Placeholder,
+    /// The type of a PHP# expression a parse error refused. It fits every type both ways, absorbs every union it
+    /// joins, and adds no issue, because the parse error already reports the expression.
+    Error,
+}
+
+impl PartialEq for TAtomic {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        if std::ptr::eq(self, other) {
+            return true;
+        }
+
+        match (self, other) {
+            (TAtomic::Scalar(a), TAtomic::Scalar(b)) => a == b,
+            (TAtomic::Callable(a), TAtomic::Callable(b)) => a == b,
+            (TAtomic::Mixed(a), TAtomic::Mixed(b)) => a == b,
+            (TAtomic::Object(a), TAtomic::Object(b)) => a == b,
+            (TAtomic::Array(a), TAtomic::Array(b)) => a == b,
+            (TAtomic::Iterable(a), TAtomic::Iterable(b)) => a == b,
+            (TAtomic::Resource(a), TAtomic::Resource(b)) => a == b,
+            (TAtomic::Reference(a), TAtomic::Reference(b)) => a == b,
+            (TAtomic::GenericParameter(a), TAtomic::GenericParameter(b)) => a == b,
+            (TAtomic::Variable(a), TAtomic::Variable(b)) => a == b,
+            (TAtomic::Conditional(a), TAtomic::Conditional(b)) => a == b,
+            (TAtomic::Derived(a), TAtomic::Derived(b)) => a == b,
+            (TAtomic::Alias(a), TAtomic::Alias(b)) => a == b,
+            (TAtomic::Never, TAtomic::Never)
+            | (TAtomic::Null, TAtomic::Null)
+            | (TAtomic::Void, TAtomic::Void)
+            | (TAtomic::Placeholder, TAtomic::Placeholder)
+            | (TAtomic::Error, TAtomic::Error) => true,
+            _ => false,
+        }
+    }
+}
+
+impl TAtomic {
+    /// Returns true if this atomic is a Placeholder or contains Placeholder in type parameters.
+    #[must_use]
+    pub fn contains_placeholder(&self) -> bool {
+        match self {
+            TAtomic::Placeholder => true,
+            TAtomic::Object(TObject::Named(named)) => {
+                named.get_type_parameters().is_some_and(|params| params.iter().any(|p| p.contains_placeholder()))
+            }
+            TAtomic::Array(array) => array.contains_placeholder(),
+            _ => false,
+        }
+    }
+
+    /// Intersects two string atomics, returning `None` if either is not a string or no string satisfies both.
+    #[must_use]
+    pub fn intersect_strings(&self, other: &TAtomic) -> Option<TAtomic> {
+        let (TAtomic::Scalar(TScalar::String(left)), TAtomic::Scalar(TScalar::String(right))) = (self, other) else {
+            return None;
+        };
+
+        left.intersect(right).map(|string| TAtomic::Scalar(TScalar::String(string)))
+    }
+
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        match self {
+            TAtomic::Scalar(scalar) => scalar.is_numeric(),
+            TAtomic::GenericParameter(parameter) => parameter.constraint.is_numeric(),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_int_or_float(&self) -> bool {
+        match self {
+            TAtomic::Scalar(scalar) => scalar.is_int_or_float(),
+            TAtomic::GenericParameter(parameter) => parameter.constraint.is_int_or_float(),
+            _ => false,
+        }
+    }
+
+    /// Returns `Some(true)` if this type is effectively an int, `Some(false)` if effectively a float,
+    /// or `None` if neither. Considers generic parameter constraints (e.g., `T of int` is treated as int).
+    #[must_use]
+    pub fn effective_int_or_float(&self) -> Option<bool> {
+        match self {
+            TAtomic::Scalar(TScalar::Integer(_)) => Some(true),
+            TAtomic::Scalar(TScalar::Float(_)) => Some(false),
+            TAtomic::GenericParameter(parameter) => parameter.constraint.effective_int_or_float(),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_mixed(&self) -> bool {
+        matches!(self, TAtomic::Mixed(_))
+    }
+
+    #[must_use]
+    pub const fn is_vanilla_mixed(&self) -> bool {
+        matches!(self, TAtomic::Mixed(_))
+    }
+
+    #[must_use]
+    pub const fn is_mixed_isset_from_loop(&self) -> bool {
+        matches!(self, TAtomic::Mixed(mixed) if mixed.is_isset_from_loop())
+    }
+
+    #[must_use]
+    pub const fn is_never(&self) -> bool {
+        matches!(self, TAtomic::Never)
+    }
+
+    #[must_use]
+    pub fn is_templated_as_never(&self) -> bool {
+        matches!(self, TAtomic::GenericParameter(parameter) if parameter.constraint.is_never())
+    }
+
+    #[must_use]
+    pub fn is_templated_as_mixed(&self) -> bool {
+        matches!(self, TAtomic::GenericParameter(parameter) if parameter.is_constrained_as_mixed())
+    }
+
+    #[must_use]
+    pub fn is_templated_as_vanilla_mixed(&self) -> bool {
+        matches!(self, TAtomic::GenericParameter(parameter) if parameter.is_constrained_as_vanilla_mixed())
+    }
+
+    pub fn map_generic_parameter_constraint<F, T>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&TUnion) -> T,
+    {
+        if let TAtomic::GenericParameter(parameter) = self { Some(f(parameter.constraint.as_ref())) } else { None }
+    }
+
+    #[must_use]
+    pub fn is_enum(&self) -> bool {
+        matches!(self, TAtomic::Object(TObject::Enum(TEnum { .. })))
+    }
+
+    #[must_use]
+    pub fn is_object_type(&self) -> bool {
+        match self {
+            TAtomic::Object(_) => true,
+            TAtomic::Callable(callable) => callable.is_closure(),
+            TAtomic::GenericParameter(parameter) => parameter.is_constrained_as_objecty(),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_static(&self) -> bool {
+        matches!(self, TAtomic::Object(TObject::Named(named_object)) if named_object.is_static)
+    }
+
+    #[must_use]
+    pub fn is_this(&self) -> bool {
+        matches!(self, TAtomic::Object(TObject::Named(named_object)) if named_object.is_this())
+    }
+
+    #[must_use]
+    pub fn get_object_or_enum_name(&self) -> Option<Word> {
+        match self {
+            TAtomic::Object(object) => match object {
+                TObject::Named(named_object) => Some(named_object.get_name()),
+                TObject::Enum(r#enum) => Some(r#enum.get_name()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn get_all_object_names(&self) -> Vec<Word> {
+        let mut object_names = vec![];
+
+        if let TAtomic::Object(object) = self {
+            match object {
+                TObject::Named(named_object) => object_names.push(named_object.get_name()),
+                TObject::Enum(r#enum) => object_names.push(r#enum.get_name()),
+                _ => {}
+            }
+        }
+
+        for intersection_type in self.get_intersection_types().unwrap_or_default() {
+            object_names.extend(intersection_type.get_all_object_names());
+        }
+
+        object_names
+    }
+
+    #[must_use]
+    pub fn is_generator(&self) -> bool {
+        matches!(&self, TAtomic::Object(object) if {
+            object.get_name().is_some_and(|name| name.as_bytes().eq_ignore_ascii_case(b"Generator"))
+        })
+    }
+
+    #[must_use]
+    pub fn get_generator_parameters(&self) -> Option<(TUnion, TUnion, TUnion, TUnion)> {
+        let generator_parameters = 'parameters: {
+            let TAtomic::Object(TObject::Named(named_object)) = self else {
+                break 'parameters None;
+            };
+
+            let object_name = named_object.get_name();
+            if !object_name.as_bytes().eq_ignore_ascii_case(b"Generator") {
+                break 'parameters None;
+            }
+
+            let parameters = named_object.get_type_parameters().unwrap_or_default();
+            match parameters {
+                [] => Some((get_mixed(), get_mixed(), get_mixed(), get_mixed())),
+                [a] => Some((get_mixed(), a.clone(), get_mixed(), get_mixed())),
+                [a, b] => Some((a.clone(), b.clone(), get_mixed(), get_mixed())),
+                [a, b, c] => Some((a.clone(), b.clone(), c.clone(), get_mixed())),
+                [a, b, c, d] => Some((a.clone(), b.clone(), c.clone(), d.clone())),
+                _ => None,
+            }
+        };
+
+        if let Some(parameters) = generator_parameters {
+            return Some(parameters);
+        }
+
+        if let Some(intersection_types) = self.get_intersection_types() {
+            for intersection_type in intersection_types {
+                if let Some(parameters) = intersection_type.get_generator_parameters() {
+                    return Some(parameters);
+                }
+            }
+        }
+
+        None
+    }
+
+    #[must_use]
+    pub fn is_templated_as_object(&self) -> bool {
+        matches!(self, TAtomic::GenericParameter(parameter) if {
+            parameter.constraint.is_objecty() && parameter.intersection_types.is_none()
+        })
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_list(&self) -> bool {
+        matches!(self, TAtomic::Array(array) if array.is_list())
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_vanilla_array(&self) -> bool {
+        matches!(self, TAtomic::Array(array) if array.is_vanilla())
+    }
+
+    pub fn get_list_element_type(&self) -> Option<&TUnion> {
+        match self {
+            TAtomic::Array(array) => array.get_list().map(array::list::TList::get_element_type),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn is_non_empty_list(&self) -> bool {
+        matches!(self, TAtomic::Array(array) if array.get_list().is_some_and(array::list::TList::is_non_empty))
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty_array(&self) -> bool {
+        matches!(self, TAtomic::Array(array) if array.is_empty())
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_keyed_array(&self) -> bool {
+        matches!(self, TAtomic::Array(array) if array.is_keyed())
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_array(&self) -> bool {
+        matches!(self, TAtomic::Array(_))
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_iterable(&self) -> bool {
+        matches!(self, TAtomic::Iterable(_))
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn extends_or_implements(&self, codebase: &CodebaseMetadata, interface: &[u8]) -> bool {
+        let object = match self {
+            TAtomic::Object(object) => object,
+            TAtomic::GenericParameter(parameter) => {
+                if let Some(intersection_types) = parameter.get_intersection_types() {
+                    for intersection_type in intersection_types {
+                        if intersection_type.extends_or_implements(codebase, interface) {
+                            return true;
+                        }
+                    }
+                }
+
+                for constraint_atomic in parameter.constraint.types.as_ref() {
+                    if constraint_atomic.extends_or_implements(codebase, interface) {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            TAtomic::Iterable(iterable) => {
+                if let Some(intersection_types) = iterable.get_intersection_types() {
+                    for intersection_type in intersection_types {
+                        if intersection_type.extends_or_implements(codebase, interface) {
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            }
+            // bottom type: subtype of all types; the error type fits every type
+            TAtomic::Never | TAtomic::Error => return true,
+            _ => return false,
+        };
+
+        if let Some(object_name) = object.get_name() {
+            if object_name.as_bytes() == interface {
+                return true;
+            }
+
+            if codebase.is_instance_of(object_name.as_bytes(), interface) {
+                return true;
+            }
+        }
+
+        if let Some(intersection_types) = object.get_intersection_types() {
+            for intersection_type in intersection_types {
+                if intersection_type.extends_or_implements(codebase, interface) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_countable(&self, codebase: &CodebaseMetadata) -> bool {
+        match self {
+            TAtomic::Array(_) => true,
+            _ => self.extends_or_implements(codebase, b"Countable"),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_traversable(&self, codebase: &CodebaseMetadata) -> bool {
+        self.extends_or_implements(codebase, b"Traversable")
+            || self.extends_or_implements(codebase, b"Iterator")
+            || self.extends_or_implements(codebase, b"IteratorAggregate")
+            || self.extends_or_implements(codebase, b"Generator")
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_array_or_traversable(&self, codebase: &CodebaseMetadata) -> bool {
+        match self {
+            TAtomic::Iterable(_) => true,
+            TAtomic::Array(_) => true,
+            _ => self.is_traversable(codebase),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn could_be_array_or_traversable(&self, codebase: &CodebaseMetadata) -> bool {
+        self.is_mixed() || self.is_array_or_traversable(codebase)
+    }
+
+    #[must_use]
+    pub fn is_non_empty_array(&self) -> bool {
+        matches!(self, TAtomic::Array(array) if array.is_non_empty())
+    }
+
+    pub fn to_array_key(&self) -> Option<ArrayKey> {
+        match self {
+            TAtomic::Scalar(TScalar::Integer(int)) => int.get_literal_value().map(ArrayKey::Integer),
+            TAtomic::Scalar(TScalar::String(TString { literal: Some(TStringLiteral::Value(value)), .. })) => {
+                Some(ArrayKey::from_string(*value))
+            }
+            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value })) => {
+                Some(ArrayKey::String(*value))
+            }
+            _ => None,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_generic_scalar(&self) -> bool {
+        matches!(self, TAtomic::Scalar(TScalar::Generic))
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_some_scalar(&self) -> bool {
+        matches!(self, TAtomic::Scalar(_))
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_null(&self) -> bool {
+        matches!(self, TAtomic::Null)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_void(&self) -> bool {
+        matches!(self, TAtomic::Void)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_falsable(&self) -> bool {
+        matches!(
+            self,
+            TAtomic::Scalar(scalar) if scalar.is_false() || scalar.is_general_bool() || scalar.is_generic()
+        )
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_resource(&self) -> bool {
+        matches!(self, TAtomic::Resource(_))
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_literal(&self) -> bool {
+        match self {
+            TAtomic::Scalar(scalar) => scalar.is_literal_value(),
+            TAtomic::Null => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_callable(&self) -> bool {
+        matches!(self, TAtomic::Callable(_))
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_conditional(&self) -> bool {
+        matches!(self, TAtomic::Conditional(_))
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_generic_parameter(&self) -> bool {
+        matches!(self, TAtomic::GenericParameter(_))
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn get_generic_parameter_name(&self) -> Option<Word> {
+        match self {
+            TAtomic::GenericParameter(parameter) => Some(parameter.parameter_name),
+            _ => None,
+        }
+    }
+
+    /// Is this a type that could potentially be callable at runtime?
+    #[inline]
+    #[must_use]
+    pub const fn can_be_callable(&self) -> bool {
+        matches!(
+            self,
+            TAtomic::Callable(_)
+                | TAtomic::Scalar(TScalar::String(_))
+                | TAtomic::Array(TArray::List(_) | TArray::Keyed(_))
+                | TAtomic::Object(TObject::Named(_))
+        )
+    }
+
+    #[must_use]
+    pub fn is_truthy(&self) -> bool {
+        match &self {
+            TAtomic::Scalar(scalar) => scalar.is_truthy(),
+            TAtomic::Array(array) => array.is_truthy(),
+            TAtomic::Mixed(mixed) => mixed.is_truthy(),
+            TAtomic::Resource(resource) => resource.closed.is_none_or(|closed| !closed),
+            TAtomic::Object(_) | TAtomic::Callable(_) => true,
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_falsy(&self) -> bool {
+        match &self {
+            TAtomic::Scalar(scalar) if scalar.is_falsy() => true,
+            TAtomic::Array(array) if array.is_falsy() => true,
+            TAtomic::Mixed(mixed) if mixed.is_falsy() => true,
+            TAtomic::Resource(resource) => resource.closed.is_some_and(|closed| closed),
+            TAtomic::Null | TAtomic::Void => true,
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_array_accessible_with_string_key(&self) -> bool {
+        matches!(self, TAtomic::Array(array) if array.is_keyed())
+    }
+
+    #[must_use]
+    pub fn is_array_accessible_with_int_or_string_key(&self) -> bool {
+        matches!(self, TAtomic::Array(_))
+    }
+
+    #[must_use]
+    pub fn is_derived(&self) -> bool {
+        matches!(self, TAtomic::Derived(_))
+    }
+
+    pub fn remove_placeholders(&mut self) {
+        match self {
+            TAtomic::Array(array) => {
+                array.remove_placeholders();
+            }
+            TAtomic::Object(TObject::Named(named_object)) => {
+                let name = named_object.get_name();
+                if let Some(type_parameters) = named_object.get_type_parameters_mut() {
+                    if name.as_bytes().eq_ignore_ascii_case(b"Traversable") {
+                        let has_kv_pair = type_parameters.len() == 2;
+
+                        if let Some(key_or_value_param) = type_parameters.get_mut(0)
+                            && matches!(key_or_value_param.get_single(), TAtomic::Placeholder)
+                        {
+                            *key_or_value_param = if has_kv_pair { get_arraykey() } else { get_mixed() };
+                        }
+
+                        if has_kv_pair
+                            && let Some(value_param) = type_parameters.get_mut(1)
+                            && matches!(value_param.get_single(), TAtomic::Placeholder)
+                        {
+                            *value_param = get_mixed();
+                        }
+                    } else {
+                        for type_param in type_parameters {
+                            if matches!(type_param.get_single(), TAtomic::Placeholder) {
+                                *type_param = get_mixed();
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[must_use]
+    pub fn get_integer(&self) -> Option<TInteger> {
+        match self {
+            TAtomic::Scalar(TScalar::Integer(integer)) => Some(*integer),
+            _ => None,
+        }
+    }
+}
+
+macro_rules! scalar_forwarding_predicates {
+    ($($method:ident => $scalar_method:ident),* $(,)?) => {
+        $(
+            #[inline]
+            #[must_use]
+            pub const fn $method(&self) -> bool {
+                matches!(self, TAtomic::Scalar(scalar) if scalar.$scalar_method())
+            }
+        )*
+    };
+}
+
+macro_rules! scalar_forwarding_getters {
+    ($($method:ident => $scalar_method:ident -> $return_type:ty),* $(,)?) => {
+        $(
+            #[inline]
+            #[must_use]
+            pub fn $method(&self) -> Option<$return_type> {
+                match self {
+                    TAtomic::Scalar(scalar) => scalar.$scalar_method(),
+                    _ => None,
+                }
+            }
+        )*
+    };
+}
+
+impl TAtomic {
+    scalar_forwarding_predicates! {
+        is_any_string => is_any_string,
+        is_string => is_string,
+        is_string_of_literal_origin => is_literal_origin_string,
+        is_non_empty_string => is_non_empty_string,
+        is_known_literal_string => is_known_literal_string,
+        is_literal_class_string => is_literal_class_string,
+        is_string_subtype => is_non_boring_string,
+        is_array_key => is_array_key,
+        is_int => is_int,
+        is_literal_int => is_literal_int,
+        is_float => is_float,
+        is_literal_float => is_literal_float,
+        is_bool => is_bool,
+        is_general_bool => is_general_bool,
+        is_general_string => is_general_string,
+        is_true => is_true,
+        is_false => is_false,
+    }
+
+    scalar_forwarding_getters! {
+        get_literal_string_value => get_known_literal_string_value -> &[u8],
+        get_class_string_value => get_literal_class_string_value -> Word,
+        get_literal_int_value => get_literal_int_value -> i64,
+        get_maximum_int_value => get_maximum_int_value -> i64,
+        get_minimum_int_value => get_minimum_int_value -> i64,
+        get_literal_float_value => get_literal_float_value -> f64,
+    }
+}
+
+macro_rules! with_inner_ttype {
+    ($self:expr, $ttype:ident => $body:expr, $fallback:expr) => {
+        match $self {
+            TAtomic::Scalar($ttype) => $body,
+            TAtomic::Callable($ttype) => $body,
+            TAtomic::Mixed($ttype) => $body,
+            TAtomic::Object($ttype) => $body,
+            TAtomic::Array($ttype) => $body,
+            TAtomic::Iterable($ttype) => $body,
+            TAtomic::Resource($ttype) => $body,
+            TAtomic::Reference($ttype) => $body,
+            TAtomic::GenericParameter($ttype) => $body,
+            TAtomic::Conditional($ttype) => $body,
+            TAtomic::Derived($ttype) => $body,
+            TAtomic::Alias($ttype) => $body,
+            _ => $fallback,
+        }
+    };
+}
+
+impl TType for TAtomic {
+    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        with_inner_ttype!(self, ttype => ttype.get_child_nodes(), vec![])
+    }
+
+    fn can_be_intersected(&self) -> bool {
+        with_inner_ttype!(self, ttype => ttype.can_be_intersected(), false)
+    }
+
+    fn get_intersection_types(&self) -> Option<&[TAtomic]> {
+        with_inner_ttype!(self, ttype => ttype.get_intersection_types(), None)
+    }
+
+    fn get_intersection_types_mut(&mut self) -> Option<&mut Vec<TAtomic>> {
+        with_inner_ttype!(self, ttype => ttype.get_intersection_types_mut(), None)
+    }
+
+    fn has_intersection_types(&self) -> bool {
+        with_inner_ttype!(self, ttype => ttype.has_intersection_types(), false)
+    }
+
+    fn add_intersection_type(&mut self, intersection_type: TAtomic) -> bool {
+        with_inner_ttype!(self, ttype => ttype.add_intersection_type(intersection_type), false)
+    }
+
+    fn needs_population(&self) -> bool {
+        if let Some(intersection) = self.get_intersection_types()
+            && intersection.iter().any(|intersection_type| intersection_type.needs_population())
+        {
+            return true;
+        }
+
+        with_inner_ttype!(self, ttype => ttype.needs_population(), false)
+    }
+
+    #[inline]
+    fn is_expandable(&self) -> bool {
+        if let Some(intersection) = self.get_intersection_types()
+            && intersection.iter().any(|intersection_type| intersection_type.is_expandable())
+        {
+            return true;
+        }
+
+        with_inner_ttype!(self, ttype => ttype.is_expandable(), false)
+    }
+
+    fn is_complex(&self) -> bool {
+        if let Some(intersection) = self.get_intersection_types()
+            && intersection.iter().any(|intersection_type| intersection_type.is_complex())
+        {
+            return true;
+        }
+
+        with_inner_ttype!(self, ttype => ttype.is_complex(), false)
+    }
+
+    fn get_id(&self) -> Word {
+        with_inner_ttype!(self, ttype => ttype.get_id(), match self {
+            TAtomic::Variable(name) => *name,
+            TAtomic::Never => word("never"),
+            TAtomic::Null => word("null"),
+            TAtomic::Void => word("void"),
+            TAtomic::Error => word(""),
+            _ => word("_"),
+        })
+    }
+
+    fn get_pretty_id_with_indent(&self, indent: usize) -> Word {
+        with_inner_ttype!(self, ttype => ttype.get_pretty_id_with_indent(indent), match self {
+            TAtomic::Variable(name) => *name,
+            TAtomic::Never => word("never"),
+            TAtomic::Null => word("null"),
+            TAtomic::Void => word("void"),
+            TAtomic::Error => word(""),
+            _ => word("_"),
+        })
+    }
+}
+
+pub(crate) fn append_intersection_ids(mut base: Word, intersection_types: &[TAtomic], indent: Option<usize>) -> Word {
+    for atomic in intersection_types {
+        let atomic_id = match indent {
+            Some(indent) => atomic.get_pretty_id_with_indent(indent),
+            None => atomic.get_id(),
+        };
+
+        base = if atomic.has_intersection_types() {
+            concat_word!(base, b"&(", atomic_id, b")")
+        } else {
+            concat_word!(base, b"&", atomic_id)
+        };
+    }
+
+    base
+}
+
+/// Records a reference to the class-like `name` names, by the lowercase name its declaration has, so a change to
+/// the declaration reaches the reference however the code wrote the name.
+fn add_symbol_reference(reference_source: &ReferenceSource, symbol_references: &mut SymbolReferences, name: Word) {
+    let name = ascii_lowercase_word(name.as_bytes());
+    match reference_source {
+        ReferenceSource::Symbol(in_signature, a) => {
+            symbol_references.add_symbol_reference_to_symbol(*a, name, *in_signature);
+        }
+        ReferenceSource::ClassLikeMember(in_signature, a, b) => {
+            symbol_references.add_class_member_reference_to_symbol((*a, *b), name, *in_signature);
+        }
+        ReferenceSource::File(in_signature, file) => {
+            symbol_references.add_file_reference_to_class_member(*file, (name, mago_word::empty_word()), *in_signature);
+        }
+    }
+}
+
+pub fn populate_atomic_type(
+    unpopulated_atomic: &mut TAtomic,
+    codebase_symbols: &Symbols,
+    reference_source: Option<&ReferenceSource>,
+    symbol_references: &mut SymbolReferences,
+    force: bool,
+) {
+    macro_rules! populate {
+        (union $target:expr) => {
+            populate_union_type($target, codebase_symbols, reference_source, symbol_references, force)
+        };
+        (atomic $target:expr) => {
+            populate_atomic_type($target, codebase_symbols, reference_source, symbol_references, force)
+        };
+    }
+
+    match unpopulated_atomic {
+        TAtomic::Array(array) => match array {
+            TArray::List(list) => {
+                populate!(union Arc::make_mut(&mut list.element_type));
+
+                if let Some(known_elements) = list.known_elements.as_mut() {
+                    for (_, element_type) in known_elements.values_mut() {
+                        populate!(union element_type);
+                    }
+                }
+            }
+            TArray::Keyed(keyed_array) => {
+                if let Some(known_items) = keyed_array.known_items.as_mut() {
+                    for (_, item_type) in known_items.values_mut() {
+                        populate!(union item_type);
+                    }
+                }
+
+                if let Some(parameters) = &mut keyed_array.parameters {
+                    populate!(union Arc::make_mut(&mut parameters.0));
+
+                    populate!(union Arc::make_mut(&mut parameters.1));
+                }
+            }
+            TArray::Set(element_type) => populate!(union Arc::make_mut(element_type)),
+        },
+        TAtomic::Callable(TCallable::Signature(signature)) => {
+            if let Some(return_type) = signature.get_return_type_mut() {
+                populate!(union return_type);
+            }
+
+            for param in signature.get_parameters_mut() {
+                if let Some(param_type) = param.get_type_signature_mut() {
+                    populate!(union param_type);
+                }
+            }
+
+            for constraint in &mut signature.constraints {
+                populate!(union Arc::make_mut(&mut constraint.input_type));
+                populate!(union Arc::make_mut(&mut constraint.parameter_type));
+            }
+        }
+        TAtomic::Object(TObject::Named(named_object)) => {
+            let name = named_object.get_name();
+
+            if !named_object.is_intersection()
+                && !named_object.has_type_parameters()
+                && codebase_symbols.contains_enum(name)
+            {
+                *unpopulated_atomic = TAtomic::Object(TObject::new_enum(name));
+            } else {
+                if let Some(type_parameters) = named_object.get_type_parameters_mut() {
+                    for parameter in type_parameters {
+                        populate!(union parameter);
+                    }
+                }
+
+                if let Some(intersection_types) = named_object.get_intersection_types_mut() {
+                    for intersection_type in intersection_types {
+                        populate!(atomic intersection_type);
+                    }
+                }
+            }
+
+            if let Some(reference_source) = reference_source {
+                add_symbol_reference(reference_source, symbol_references, name);
+            }
+        }
+        TAtomic::Object(TObject::WithProperties(keyed_array)) => {
+            for (_, item_type) in keyed_array.known_properties.values_mut() {
+                populate!(union item_type);
+            }
+        }
+        TAtomic::Iterable(iterable) => {
+            populate!(union iterable.get_key_type_mut());
+
+            populate!(union iterable.get_value_type_mut());
+
+            if let Some(intersection_types) = iterable.get_intersection_types_mut() {
+                for intersection_type in intersection_types {
+                    populate!(atomic intersection_type);
+                }
+            }
+        }
+        TAtomic::Reference(reference) => match reference {
+            TReference::Symbol { name, parameters, variances, intersection_types } => {
+                if let Some(parameters) = parameters {
+                    for parameter in parameters {
+                        populate!(union parameter);
+                    }
+                }
+
+                if let Some(reference_source) = reference_source {
+                    add_symbol_reference(reference_source, symbol_references, *name);
+                }
+
+                if let Some(symbol_kind) = codebase_symbols.get_kind(ascii_lowercase_word(name.as_bytes())) {
+                    if symbol_kind == SymbolKind::Enum {
+                        *unpopulated_atomic = TAtomic::Object(TObject::new_enum(*name));
+                    } else {
+                        let intersection_types = intersection_types.take().map(|intersection_types| {
+                            intersection_types
+                                .into_iter()
+                                .map(|mut intersection_type| {
+                                    populate!(atomic &mut intersection_type);
+
+                                    intersection_type
+                                })
+                                .collect::<Vec<_>>()
+                        });
+
+                        let mut named_object = TNamedObject::new(*name)
+                            .with_type_parameters(parameters.clone())
+                            .with_variances(variances.clone());
+                        if let Some(intersection_types) = intersection_types {
+                            for intersection_type in intersection_types {
+                                named_object.add_intersection_type(intersection_type);
+                            }
+                        }
+
+                        *unpopulated_atomic = TAtomic::Object(TObject::Named(named_object));
+                    }
+                }
+            }
+            TReference::Member { class_like_name, member_selector } => {
+                if let TReferenceMemberSelector::Identifier(member_name) = member_selector
+                    && let Some(reference_source) = reference_source
+                {
+                    let member = (ascii_lowercase_word(class_like_name.as_bytes()), *member_name);
+                    match reference_source {
+                        ReferenceSource::Symbol(in_signature, a) => {
+                            symbol_references.add_symbol_reference_to_class_member(*a, member, *in_signature);
+                        }
+                        ReferenceSource::ClassLikeMember(in_signature, a, b) => {
+                            symbol_references.add_class_member_reference_to_class_member(
+                                (*a, *b),
+                                member,
+                                *in_signature,
+                            );
+                        }
+                        ReferenceSource::File(in_signature, file) => {
+                            symbol_references.add_file_reference_to_class_member(*file, member, *in_signature);
+                        }
+                    }
+                }
+            }
+            TReference::Global { .. } => {
+                // Global-constant wildcards are resolved at expansion time; nothing to populate.
+            }
+        },
+        TAtomic::GenericParameter(TGenericParameter { constraint, intersection_types, .. }) => {
+            populate!(union Arc::make_mut(constraint));
+
+            if let Some(intersection_types) = intersection_types.as_mut() {
+                for intersection_type in intersection_types {
+                    populate!(atomic intersection_type);
+                }
+            }
+        }
+        TAtomic::Scalar(TScalar::ClassLikeString(
+            TClassLikeString::OfType { constraint, .. } | TClassLikeString::Generic { constraint, .. },
+        )) => {
+            populate!(atomic Arc::make_mut(constraint));
+        }
+        TAtomic::Conditional(conditional) => {
+            populate!(union conditional.get_subject_mut());
+
+            populate!(union conditional.get_target_mut());
+
+            populate!(union conditional.get_then_mut());
+
+            populate!(union conditional.get_otherwise_mut());
+        }
+        TAtomic::Derived(derived) => match derived {
+            TDerived::IntMask(int_mask) => {
+                for value in int_mask.get_values_mut() {
+                    populate!(union value);
+                }
+            }
+            TDerived::IndexAccess(index_access) => {
+                populate!(union index_access.get_target_type_mut());
+
+                populate!(union index_access.get_index_type_mut());
+            }
+            TDerived::TemplateType(template_type) => {
+                populate!(union template_type.get_object_mut());
+
+                populate!(union template_type.get_class_name_mut());
+
+                populate!(union template_type.get_template_name_mut());
+            }
+            TDerived::Intersection(intersection) => {
+                populate!(union intersection.get_base_type_mut());
+                if let Some(intersection_types) = intersection.get_intersection_types_mut() {
+                    for intersection_type in intersection_types {
+                        populate!(atomic intersection_type);
+                    }
+                }
+            }
+            _ => {
+                if let Some(target) = derived.get_target_type_mut() {
+                    populate!(union target);
+                }
+            }
+        },
+        _ => {}
+    }
+}

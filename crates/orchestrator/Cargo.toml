@@ -1,0 +1,42 @@
+[package]
+name = "mago-orchestrator"
+description = "An orchestrator crate for Mago, coordinating various components to provide a unified PHP tooling experience."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mago-allocator = { workspace = true }
+mago-syntax = { workspace = true }
+mago-reporting = { workspace = true }
+mago-bytes = { workspace = true }
+mago-word = { workspace = true }
+mago-database = { workspace = true, features = ["loader"] }
+mago-linter = { workspace = true }
+mago-names = { workspace = true }
+mago-formatter = { workspace = true }
+mago-php-version = { workspace = true }
+mago-semantics = { workspace = true }
+mago-codex = { workspace = true }
+mago-collector = { workspace = true }
+mago-analyzer = { workspace = true }
+mago-guard = { workspace = true }
+mago-sharp-bridge = { workspace = true }
+foldhash = { workspace = true }
+tracing = { workspace = true }
+indicatif = { workspace = true }
+rayon = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mago-sharp-lean = { workspace = true }
+
+[dev-dependencies]
+mago-prelude = { workspace = true, features = ["build"] }

@@ -1,0 +1,70 @@
+use crate::FingerprintOptions;
+use crate::Fingerprintable;
+use mago_names::ResolvedNames;
+use mago_syntax::cst::Modifier;
+use std::hash::Hash;
+
+impl Fingerprintable for Modifier<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        _resolved_names: &ResolvedNames,
+        _options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        match self {
+            Modifier::Static(_) => "static".hash(hasher),
+            Modifier::Final(_) => "final".hash(hasher),
+            Modifier::Abstract(_) => "abstract".hash(hasher),
+            Modifier::Readonly(_) => "readonly".hash(hasher),
+            Modifier::Public(_) => "public".hash(hasher),
+            Modifier::PublicSet(_) => "public_set".hash(hasher),
+            Modifier::Protected(_) => "protected".hash(hasher),
+            Modifier::ProtectedSet(_) => "protected_set".hash(hasher),
+            Modifier::Private(_) => "private".hash(hasher),
+            Modifier::PrivateSet(_) => "private_set".hash(hasher),
+            Modifier::Virtual(_) => "virtual".hash(hasher),
+            Modifier::Override(_) => "override".hash(hasher),
+            Modifier::Required(_) => "required".hash(hasher),
+            Modifier::Extern(_) => "extern".hash(hasher),
+        }
+    }
+}
+
+#[inline]
+pub fn fingerprint_modifiers<'modifier, H>(
+    modifiers: impl IntoIterator<Item = &'modifier Modifier<'modifier>>,
+    hasher: &mut H,
+    _resolved_names: &ResolvedNames,
+    _options: &FingerprintOptions<'_>,
+) where
+    H: std::hash::Hasher,
+{
+    let mut modifier_strings: Vec<&str> = modifiers
+        .into_iter()
+        .filter_map(|m| match m {
+            Modifier::Public(_) => None, // Skip public modifier
+            Modifier::Static(_) => Some("static"),
+            Modifier::Final(_) => Some("final"),
+            Modifier::Abstract(_) => Some("abstract"),
+            Modifier::Readonly(_) => Some("readonly"),
+            Modifier::PublicSet(_) => Some("public_set"),
+            Modifier::Protected(_) => Some("protected"),
+            Modifier::ProtectedSet(_) => Some("protected_set"),
+            Modifier::Private(_) => Some("private"),
+            Modifier::PrivateSet(_) => Some("private_set"),
+            Modifier::Virtual(_) => Some("virtual"),
+            Modifier::Override(_) => Some("override"),
+            Modifier::Required(_) => Some("required"),
+            Modifier::Extern(_) => Some("extern"),
+        })
+        .collect();
+
+    modifier_strings.sort_unstable();
+
+    for modifier_str in modifier_strings {
+        modifier_str.hash(hasher);
+    }
+}

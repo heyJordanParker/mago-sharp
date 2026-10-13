@@ -1,0 +1,29 @@
+/// Describes the known truthiness of a `Mixed` type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[repr(u8)]
+pub enum TMixedTruthiness {
+    /// The value could be truthy or falsy.
+    #[default]
+    Undetermined,
+    /// The value is definitely truthy (evaluates to `true`). Excludes null, false, 0, "", [], etc.
+    Truthy,
+    /// The value is definitely falsy (evaluates to `false`). Includes null, false, 0, "", [], etc.
+    Falsy,
+}
+
+impl TMixedTruthiness {
+    /// Returns true if the value is definitely truthy.
+    #[inline]
+    #[must_use]
+    pub const fn is_truthy(&self) -> bool {
+        matches!(self, TMixedTruthiness::Truthy)
+    }
+
+    /// Returns true if the value is definitely falsy.
+    #[inline]
+    #[must_use]
+    pub const fn is_falsy(&self) -> bool {
+        matches!(self, TMixedTruthiness::Falsy)
+    }
+}

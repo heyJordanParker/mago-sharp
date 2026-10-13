@@ -1,0 +1,96 @@
+//! Error types for the reporting crate.
+//!
+//! This module defines the error types that can occur during issue reporting,
+//! including database errors, JSON serialization errors, file I/O errors,
+//! and invalid configuration errors.
+
+use codespan_reporting::files::Error as FilesError;
+#[cfg(feature = "serde")]
+use serde_json::Error as JsonError;
+use std::io::Error as IoError;
+
+use mago_database::error::DatabaseError;
+
+/// Errors that can occur during issue reporting.
+#[derive(Debug)]
+pub enum ReportingError {
+    /// An error occurred while accessing the database.
+    DatabaseError(DatabaseError),
+    /// An error occurred while serializing or deserializing JSON.
+    #[cfg(feature = "serde")]
+    JsonError(JsonError),
+    /// An error occurred while accessing source files.
+    FilesError(FilesError),
+    /// An I/O error occurred.
+    IoError(IoError),
+    /// An invalid reporting target was specified.
+    InvalidTarget(String),
+    /// An invalid reporting format was specified.
+    InvalidFormat(String),
+}
+
+impl ReportingError {
+    #[must_use]
+    pub fn is_broken_pipe(&self) -> bool {
+        let err = match self {
+            Self::IoError(err) => err,
+            Self::FilesError(FilesError::Io(err)) => err,
+            _ => return false,
+        };
+
+        err.raw_os_error() == Some(32) || err.kind() == std::io::ErrorKind::BrokenPipe
+    }
+}
+
+impl std::fmt::Display for ReportingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DatabaseError(error) => write!(f, "{error}"),
+            #[cfg(feature = "serde")]
+            Self::JsonError(error) => write!(f, "Json error: {error}"),
+            Self::FilesError(error) => write!(f, "Files error: {error}"),
+            Self::IoError(error) => write!(f, "IO error: {error}"),
+            Self::InvalidTarget(target) => write!(f, "Invalid target: {target}"),
+            Self::InvalidFormat(format) => write!(f, "Invalid format: {format}"),
+        }
+    }
+}
+
+impl std::error::Error for ReportingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DatabaseError(error) => Some(error),
+            #[cfg(feature = "serde")]
+            Self::JsonError(error) => Some(error),
+            Self::FilesError(error) => Some(error),
+            Self::IoError(error) => Some(error),
+            Self::InvalidTarget(_) => None,
+            Self::InvalidFormat(_) => None,
+        }
+    }
+}
+
+impl From<DatabaseError> for ReportingError {
+    fn from(error: DatabaseError) -> Self {
+        Self::DatabaseError(error)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl From<JsonError> for ReportingError {
+    fn from(error: JsonError) -> Self {
+        Self::JsonError(error)
+    }
+}
+
+impl From<FilesError> for ReportingError {
+    fn from(error: FilesError) -> Self {
+        Self::FilesError(error)
+    }
+}
+
+impl From<IoError> for ReportingError {
+    fn from(error: IoError) -> Self {
+        Self::IoError(error)
+    }
+}

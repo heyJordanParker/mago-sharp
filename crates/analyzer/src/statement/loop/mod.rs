@@ -1,0 +1,1900 @@
+use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::rc::Rc;
+use std::str::FromStr;
+use std::sync::Arc;
+
+use foldhash::HashSet;
+use indexmap::IndexMap;
+
+use mago_algebra::clause::Clause;
+use mago_algebra::find_satisfying_assignments;
+use mago_algebra::negate_formula;
+use mago_allocator::Arena;
+use mago_reporting::IssueCollection;
+
+use mago_algebra::saturate_clauses;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::ttype;
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::array::list::TList;
+use mago_codex::ttype::atomic::derived::TDerived;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::bool::TBool;
+use mago_codex::ttype::atomic::scalar::int::TInteger;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combine_union_types_preserving_array_shapes;
+use mago_codex::ttype::combine_union_types_rc;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_arraykey;
+use mago_codex::ttype::get_iterable_parameters;
+use mago_codex::ttype::get_literal_string;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_non_empty_string;
+use mago_codex::ttype::get_string;
+use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Foreach;
+use mago_syntax::cst::Literal;
+use mago_syntax::cst::LiteralInteger;
+use mago_syntax::cst::Statement;
+use mago_word::Word;
+use mago_word::WordSet;
+use mago_word::word;
+
+use crate::analyzable::Analyzable;
+use crate::analyze_statements;
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::context::block::BreakContext;
+use crate::context::scope::control_action::ControlAction;
+use crate::context::scope::loop_scope::LoopScope;
+use crate::context::scope::var_has_root;
+use crate::context::utils::inherit_branch_context_properties;
+use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
+use crate::formula::get_formula;
+use crate::formula::negate_or_synthesize;
+use crate::reconciler::reconcile_keyed_types;
+use crate::resolver::method::get_declared_collection;
+use crate::statement::r#loop::assignment_map_visitor::get_assignment_map;
+use crate::statement::r#loop::cleaner::clean_nodes;
+use crate::utils::names::display_atomic;
+use crate::utils::names::display_bool;
+use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_code_member;
+use crate::utils::names::display_missing_imports;
+use crate::utils::names::display_type;
+
+mod assignment_map_visitor;
+mod cleaner;
+
+pub mod r#break;
+pub mod r#continue;
+pub mod r#do;
+pub mod r#for;
+pub mod foreach;
+pub mod r#while;
+
+pub fn parse_control_flow_level<'ctx, 'arena, A>(
+    level: Option<&Expression<'arena>>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    code: IssueCode,
+    message: &str,
+) -> Result<u64, AnalysisError>
+where
+    A: Arena,
+{
+    let Some(expression) = level else {
+        return Ok(1);
+    };
+
+    if let Expression::Literal(Literal::Integer(LiteralInteger { value: Some(integer_value), .. })) = expression {
+        return Ok(*integer_value);
+    }
+
+    expression.analyze(context, block_context, artifacts)?;
+
+    let expression_type = artifacts
+        .get_expression_type(expression)
+        .map_or_else(|| "unknown".to_string(), |union| display_type(context, union));
+    context.collector.report_with_code(
+        code,
+        Issue::error(message.to_string()).with_annotation(Annotation::primary(expression.span()).with_message(
+            format!("Expected an integer literal here, found an expression of type `{expression_type}`."),
+        )),
+    );
+
+    Ok(1)
+}
+
+fn get_ordinal_string(n: usize) -> String {
+    match n {
+        1 => "first".to_string(),
+        2 => "second".to_string(),
+        3 => "third".to_string(),
+        4 => "fourth".to_string(),
+        5 => "fifth".to_string(),
+        _ => {
+            let suffix = match n % 10 {
+                1 if n % 100 != 11 => "st",
+                2 if n % 100 != 12 => "nd",
+                3 if n % 100 != 13 => "rd",
+                _ => "th",
+            };
+
+            format!("{n}{suffix}")
+        }
+    }
+}
+
+fn analyze_for_or_while_loop<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    initializations: &'ast [&'arena Expression<'arena>],
+    conditions: &'ast [&'arena Expression<'arena>],
+    increments: &'ast [&'arena Expression<'arena>],
+    statements: &'ast [Statement<'arena>],
+    span: Span,
+    infinite_loop: bool,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let pre_assigned_var_ids = block_context.assigned_variable_ids.clone();
+    block_context.assigned_variable_ids.clear();
+    for initialization_expression in initializations {
+        initialization_expression.analyze(context, block_context, artifacts)?;
+    }
+
+    block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
+
+    let mut loop_block_context = block_context.clone();
+    loop_block_context.flags.set_inside_loop(true);
+    loop_block_context.break_types.push(BreakContext::Loop(span));
+    let previous_loop_bounds = loop_block_context.loop_bounds;
+    loop_block_context.loop_bounds = span.to_offset_tuple();
+
+    let mut loop_scope = LoopScope::new(span, block_context.locals.clone(), None);
+    loop_scope.variables_possibly_in_scope =
+        if infinite_loop { block_context.variables_possibly_in_scope.clone() } else { WordSet::default() };
+
+    let (inner_loop_block_context, loop_scope) = analyze(
+        context,
+        statements,
+        conditions,
+        increments.to_vec(),
+        loop_scope,
+        &mut loop_block_context,
+        block_context,
+        artifacts,
+        false,
+        infinite_loop,
+    )?;
+
+    loop_block_context.loop_bounds = previous_loop_bounds;
+
+    let always_enters_loop = infinite_loop || loop_scope.truthy_pre_conditions;
+
+    if loop_scope.condition_always_false {
+        for condition in conditions {
+            let type_id = artifacts
+                .get_expression_type(*condition)
+                .map_or_else(|| "false".to_owned(), |condition_type| display_type(context, condition_type));
+            let value = display_bool(context, false);
+
+            context.collector.report_with_code(
+                IssueCode::ImpossibleCondition,
+                Issue::warning(format!("This loop condition (type `{type_id}`) will always evaluate to {value}."))
+                    .with_annotation(
+                        Annotation::primary(condition.span()).with_message(format!(
+                            "This condition is always {value}, the loop body will never execute"
+                        )),
+                    )
+                    .with_help("Check the logic of this loop condition. The loop body is unreachable."),
+            );
+        }
+    }
+
+    inherit_loop_block_context(
+        context,
+        block_context,
+        loop_block_context,
+        inner_loop_block_context,
+        loop_scope,
+        always_enters_loop,
+        infinite_loop,
+    );
+
+    if always_enters_loop && !infinite_loop {
+        for variable_type in block_context.locals.values_mut() {
+            let mut union = (**variable_type).clone();
+            if mark_array_keys_definite(&mut union) {
+                *variable_type = Rc::new(union);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn inherit_loop_block_context<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &mut BlockContext<'ctx>,
+    loop_block_context: BlockContext<'ctx>,
+    inner_loop_block_context: BlockContext<'ctx>,
+    loop_scope: LoopScope,
+    always_enters_loop: bool,
+    known_infinite_loop: bool,
+) where
+    A: Arena,
+{
+    let has_break = loop_scope.final_actions.contains(ControlAction::Break);
+    let has_continue = loop_scope.final_actions.contains(ControlAction::Continue);
+    let has_break_or_continue = has_break || has_continue;
+    let can_leave_loop = !known_infinite_loop || has_break;
+
+    inherit_branch_context_properties(context, block_context, &inner_loop_block_context);
+
+    if can_leave_loop {
+        if !always_enters_loop {
+            if loop_scope.condition_always_false {
+                for (variable, pre_loop_type) in &loop_scope.parent_context_variables {
+                    block_context.locals.insert(*variable, Rc::clone(pre_loop_type));
+                }
+            }
+
+            for (variable, _) in inner_loop_block_context.locals {
+                block_context.variables_possibly_in_scope.insert(variable);
+            }
+        } else {
+            for (variable, variable_type) in inner_loop_block_context.locals {
+                if !has_break_or_continue {
+                    block_context.locals.insert(variable, variable_type);
+                    continue;
+                }
+
+                if let Some(possible_type) = loop_scope.possibly_defined_loop_parent_variables.get(&variable) {
+                    block_context.locals.insert(
+                        variable,
+                        Rc::new(ttype::combine_union_types(
+                            &variable_type,
+                            possible_type,
+                            context.codebase,
+                            CombinerOptions::default(),
+                        )),
+                    );
+                }
+            }
+        }
+    } else {
+        block_context.control_actions.insert(ControlAction::End);
+        block_context.flags.set_has_returned(true);
+    }
+
+    if can_leave_loop {
+        block_context.variables_possibly_in_scope.extend(loop_block_context.variables_possibly_in_scope);
+        block_context.possibly_assigned_variable_ids.extend(loop_block_context.possibly_assigned_variable_ids);
+    } else {
+        block_context.variables_possibly_in_scope = loop_scope.variables_possibly_in_scope;
+    }
+}
+
+#[allow(clippy::similar_names)]
+fn analyze<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    statements: &'ast [Statement<'arena>],
+    pre_conditions: &[&'ast Expression<'arena>],
+    post_expressions: Vec<&'ast Expression<'arena>>,
+    mut loop_scope: LoopScope,
+    loop_context: &mut BlockContext<'ctx>,
+    loop_parent_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    is_do: bool,
+    always_enters_loop: bool,
+) -> Result<(BlockContext<'ctx>, LoopScope), AnalysisError>
+where
+    A: Arena,
+{
+    let always_enters_loop = Cell::new(always_enters_loop);
+
+    let (mut assignment_map, first_variable_id) =
+        get_assignment_map(pre_conditions, &post_expressions, statements, context.resolved_names);
+    let assignment_depth_limit = context.settings.loop_assignment_depth_threshold as usize;
+    let assignment_depth = if let Some(first_variable_id) = first_variable_id {
+        get_assignment_map_depth(first_variable_id, &mut assignment_map, assignment_depth_limit)
+    } else {
+        0
+    };
+
+    let mut always_assigned_before_loop_body_variables = WordSet::default();
+
+    let mut pre_condition_clauses = Vec::new();
+
+    let codebase = context.codebase;
+
+    if pre_conditions.is_empty() {
+        always_assigned_before_loop_body_variables =
+            BlockContext::get_new_or_updated_locals(loop_parent_context, loop_context);
+    } else {
+        let assertion_context = context.get_assertion_context_from_block(loop_context);
+
+        let mut complex_conditions = vec![];
+        for pre_condition in pre_conditions {
+            let condition_span = pre_condition.span();
+            let clauses = get_formula(
+                condition_span,
+                condition_span,
+                pre_condition,
+                assertion_context,
+                artifacts,
+                &context.settings.algebra_thresholds(),
+                context.settings.formula_size_threshold,
+            )
+            .unwrap_or_else(|| {
+                complex_conditions.push(condition_span);
+
+                vec![]
+            });
+
+            pre_condition_clauses.push(clauses);
+        }
+
+        let statements_span = match (statements.first(), statements.last()) {
+            (Some(first), Some(last)) => Some(first.span().join(last.span())),
+            _ => None,
+        };
+
+        if let Some(statements_span) = statements_span {
+            for complex_condition in complex_conditions {
+                context.collector.report_with_code(
+                    IssueCode::ConditionIsTooComplex,
+                    Issue::warning("Loop condition is too complex for precise type analysis.")
+                        .with_annotation(
+                            Annotation::primary(complex_condition)
+                                .with_message("This loop condition is too complex for the analyzer to fully understand"),
+                        )
+                        .with_annotation(
+                            Annotation::secondary(statements_span)
+                                .with_message("Type inference within the loop statement(s) may be inaccurate as a result"),
+                        )
+                        .with_note(
+                            "The analyzer limits the number of logical paths it explores for a single condition to prevent performance issues."
+                        )
+                        .with_note(
+                            "Because this limit was exceeded, type assertions from the condition may not be applied correctly, which can affect variable types on subsequent loop iterations."
+                        )
+                        .with_help(
+                            "Consider refactoring this complex condition into a simpler expression or breaking it down into intermediate boolean variables before the loop.",
+                        ),
+                );
+            }
+        }
+    }
+
+    let final_actions = ControlAction::from_statements(statements.iter().collect(), vec![], Some(artifacts), true);
+    let does_always_break = final_actions.len() == 1 && final_actions.contains(ControlAction::Break);
+
+    let mut continue_context;
+    let mut inner_do_context = None;
+
+    let mut pre_conditions_applied = false;
+
+    if assignment_depth == 0 || does_always_break {
+        continue_context = loop_context.clone();
+
+        artifacts.set_loop_scope(loop_scope.clone());
+        for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+            let Some(clauses) = pre_condition_clauses.get(condition_offset) else {
+                continue;
+            };
+
+            apply_pre_condition_to_loop_context(
+                context,
+                pre_condition,
+                clauses,
+                &mut continue_context,
+                loop_parent_context,
+                artifacts,
+                is_do,
+                !pre_conditions_applied,
+            )?;
+        }
+
+        pre_conditions_applied = true;
+        if !pre_conditions.is_empty() {
+            // SAFETY: `artifacts.loop_scope` is set to `Some(loop_scope)` immediately before entering
+            // this branch (it was placed there for the pre-condition analysis), so taking it now is sound.
+            loop_scope = unsafe { artifacts.take_loop_scope_unchecked() };
+            if loop_scope.truthy_pre_conditions {
+                always_enters_loop.set(true);
+            }
+
+            artifacts.set_loop_scope(loop_scope.clone());
+        }
+
+        analyze_statements(statements, context, &mut continue_context, artifacts)?;
+        loop_scope = unsafe {
+            // SAFETY: we know the loop scope will remain in the context.
+            artifacts.take_loop_scope_unchecked()
+        };
+
+        update_loop_scope_contexts(&loop_scope, loop_context, &mut continue_context, loop_parent_context, context);
+
+        loop_context.flags.set_inside_loop_expressions(true);
+        for post_expression in post_expressions {
+            post_expression.analyze(context, loop_context, artifacts)?;
+        }
+        loop_context.flags.set_inside_loop_expressions(true);
+    } else {
+        let original_parent_context = loop_parent_context.clone();
+
+        let mut pre_loop_context = loop_context.clone();
+
+        let (result, mut recorded_issues) = context.record(|context| {
+            if !is_do {
+                artifacts.set_loop_scope(loop_scope);
+                for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                    apply_pre_condition_to_loop_context(
+                        context,
+                        pre_condition,
+                        unsafe {
+                            // SAFETY: we know the pre_condition_clauses will contain
+                            // the clauses for the pre_condition at condition_offset.
+                            pre_condition_clauses.get_unchecked(condition_offset)
+                        },
+                        loop_context,
+                        loop_parent_context,
+                        artifacts,
+                        is_do,
+                        !pre_conditions_applied,
+                    )?;
+                }
+
+                pre_conditions_applied = true;
+
+                // SAFETY: `artifacts.loop_scope` was set above before analyzing pre-conditions; taking it
+                // back into the local `loop_scope` binding is sound because no other code path consumes it.
+                loop_scope = unsafe { artifacts.take_loop_scope_unchecked() };
+            }
+
+            let mut continue_context = loop_context.clone();
+
+            loop_scope = {
+                artifacts.set_loop_scope(loop_scope);
+                analyze_statements(statements, context, &mut continue_context, artifacts)?;
+
+                unsafe {
+                    // SAFETY: we know the loop scope will remain in the context.
+                    artifacts.take_loop_scope_unchecked()
+                }
+            };
+
+            update_loop_scope_contexts(
+                &loop_scope,
+                loop_context,
+                &mut continue_context,
+                &original_parent_context,
+                context,
+            );
+
+            if is_do {
+                inner_do_context = Some(continue_context.clone());
+
+                for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                    always_assigned_before_loop_body_variables.extend(apply_pre_condition_to_loop_context(
+                        context,
+                        pre_condition,
+                        unsafe {
+                            // SAFETY: we know the pre_condition_clauses will contain
+                            // the clauses for the pre_condition at condition_offset.
+                            pre_condition_clauses.get_unchecked(condition_offset)
+                        },
+                        &mut continue_context,
+                        loop_parent_context,
+                        artifacts,
+                        is_do,
+                        !pre_conditions_applied,
+                    )?);
+                }
+
+                pre_conditions_applied = true;
+            }
+
+            continue_context.flags.set_inside_loop_expressions(true);
+            for post_expression in &post_expressions {
+                post_expression.analyze(context, &mut continue_context, artifacts)?;
+            }
+
+            continue_context.flags.set_inside_loop_expressions(false);
+
+            Result::<_, AnalysisError>::Ok((loop_scope, continue_context))
+        });
+
+        (loop_scope, continue_context) = result?;
+
+        let first_iteration_issues = if is_do { recorded_issues.clone() } else { IssueCollection::new() };
+
+        if !pre_conditions.is_empty() && loop_scope.truthy_pre_conditions {
+            always_enters_loop.set(true);
+        }
+
+        for (variable_id, continue_type) in continue_context.locals.iter_mut() {
+            let Some(parent_type) = original_parent_context.locals.get(variable_id) else {
+                continue;
+            };
+
+            if !parent_type.is_single() {
+                continue;
+            }
+
+            let TAtomic::Scalar(TScalar::Integer(parent_int)) = parent_type.get_single() else {
+                continue;
+            };
+
+            let mut body_bounds: Option<(Option<i64>, Option<i64>)> = None;
+            let mut all_integers = true;
+            for atomic in continue_type.types.iter() {
+                let TAtomic::Scalar(TScalar::Integer(int)) = atomic else {
+                    all_integers = false;
+                    break;
+                };
+                let (lb, ub) = int.get_bounds();
+                body_bounds = Some(match body_bounds {
+                    None => (lb, ub),
+                    Some((prev_lb, prev_ub)) => (
+                        match (prev_lb, lb) {
+                            (Some(a), Some(b)) => Some(std::cmp::min(a, b)),
+                            _ => None,
+                        },
+                        match (prev_ub, ub) {
+                            (Some(a), Some(b)) => Some(std::cmp::max(a, b)),
+                            _ => None,
+                        },
+                    ),
+                });
+            }
+            if !all_integers {
+                continue;
+            }
+            let Some((body_lb, body_ub)) = body_bounds else {
+                continue;
+            };
+
+            let (parent_lb, parent_ub) = parent_int.get_bounds();
+
+            let ub_grew = match (parent_ub, body_ub) {
+                (Some(p), Some(b)) => b > p,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            let lb_shrunk = match (parent_lb, body_lb) {
+                (Some(p), Some(b)) => b < p,
+                (Some(_), None) => true,
+                _ => false,
+            };
+
+            let new_ub = if ub_grew { None } else { body_ub };
+            let new_lb = if lb_shrunk { None } else { body_lb };
+
+            if new_ub != body_ub || new_lb != body_lb {
+                *continue_type = Rc::new(TUnion::from_atomic(TAtomic::Scalar(TScalar::Integer(
+                    TInteger::from_bounds(new_lb, new_ub),
+                ))));
+            }
+        }
+
+        let mut i = 0;
+        while i <= assignment_depth {
+            let mut variables_to_remove = Vec::new();
+
+            loop_scope.iteration_count += 1;
+
+            let mut has_changes = pre_loop_context
+                .locals
+                .iter()
+                .any(|(variable_id, _)| !continue_context.locals.contains_key(variable_id));
+
+            let mut different_from_pre_loop_types = HashSet::default();
+
+            for (variable_id, continue_context_type) in continue_context.locals.clone() {
+                let has_self_descending_reference = continue_context
+                    .references_in_scope
+                    .get(&variable_id)
+                    .is_some_and(|referenced| *referenced != variable_id && var_has_root(*referenced, variable_id));
+
+                if always_assigned_before_loop_body_variables.contains(&variable_id) {
+                    // set the variables to whatever the while/foreach loop expects them to be
+                    if let Some(pre_loop_context_type) = pre_loop_context.locals.get(&variable_id) {
+                        if continue_context_type != *pre_loop_context_type {
+                            different_from_pre_loop_types.insert(variable_id);
+                            has_changes = true;
+                        }
+                    } else {
+                        has_changes = true;
+                    }
+                } else if let Some(parent_context_type) = original_parent_context.locals.get(&variable_id) {
+                    if continue_context_type != *parent_context_type {
+                        if !has_self_descending_reference {
+                            has_changes = true;
+                        }
+
+                        continue_context.locals.insert(
+                            variable_id,
+                            Rc::new(simplify_generic_subset_arrays(combine_loop_types(
+                                &continue_context_type,
+                                parent_context_type,
+                                context.codebase,
+                                CombinerOptions::default(),
+                                has_self_descending_reference,
+                            ))),
+                        );
+
+                        pre_loop_context.remove_variable_from_conflicting_clauses(context, variable_id, None);
+
+                        loop_parent_context.possibly_assigned_variable_ids.insert(variable_id);
+                    }
+
+                    if let Some(loop_context_type) = loop_context.locals.get(&variable_id)
+                        && continue_context_type != *loop_context_type
+                    {
+                        if !has_self_descending_reference {
+                            has_changes = true;
+                        }
+
+                        let combined = combine_loop_types(
+                            &continue_context_type,
+                            loop_context_type,
+                            codebase,
+                            CombinerOptions::default(),
+                            has_self_descending_reference,
+                        );
+
+                        let combined = simplify_generic_subset_arrays(combined);
+
+                        continue_context.locals.insert(variable_id, Rc::new(combined));
+
+                        // if there's a change, invalidate related clauses
+                        pre_loop_context.remove_variable_from_conflicting_clauses(context, variable_id, None);
+                    }
+
+                    // Include widened types from by-reference mutations so they
+                    // propagate to subsequent iterations. This uses a dedicated
+                    // field separate from `possibly_redefined_loop_parent_variables`
+                    // to avoid leaking break-path types into the continue context.
+                    if let Some(byref_type) = loop_scope.by_reference_loop_mutations.get(&variable_id) {
+                        let existing = continue_context.locals.get(&variable_id).cloned();
+                        let combined = match existing {
+                            Some(existing_type) if existing_type.as_ref() != byref_type.as_ref() => {
+                                if !has_self_descending_reference {
+                                    has_changes = true;
+                                }
+                                simplify_generic_subset_arrays(combine_loop_types(
+                                    &existing_type,
+                                    byref_type,
+                                    codebase,
+                                    CombinerOptions::default(),
+                                    has_self_descending_reference,
+                                ))
+                            }
+                            Some(existing_type) => (*existing_type).clone(),
+                            None => (**byref_type).clone(),
+                        };
+
+                        continue_context.locals.insert(variable_id, Rc::new(combined));
+                    }
+                } else {
+                    if !recorded_issues.is_empty() {
+                        has_changes = true;
+                    }
+
+                    if !is_do {
+                        variables_to_remove.push(variable_id);
+                    }
+                }
+            }
+
+            continue_context.flags.set_has_returned(false);
+
+            // if there are no changes to the types, no need to re-examine
+            if !has_changes {
+                continue_context.flags.set_inside_loop_expressions(true);
+                for post_expression in &post_expressions {
+                    post_expression.analyze(context, &mut continue_context, artifacts)?;
+                }
+                continue_context.flags.set_inside_loop_expressions(false);
+
+                break;
+            }
+
+            for variable_id in variables_to_remove {
+                continue_context.locals.remove(&variable_id);
+            }
+
+            continue_context.clauses.clone_from(&pre_loop_context.clauses);
+            continue_context.by_reference_constraints.clone_from(&pre_loop_context.by_reference_constraints);
+
+            let (result, new_recorded_issues) = context.record(|context| -> Result<LoopScope, AnalysisError> {
+                for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                    if is_do {
+                        context.collector.start_recording();
+                    }
+
+                    let result = apply_pre_condition_to_loop_context(
+                        context,
+                        pre_condition,
+                        unsafe {
+                            // SAFETY: we know the pre_condition_clauses will contain
+                            // the clauses for the pre_condition at condition_offset.
+                            pre_condition_clauses.get_unchecked(condition_offset)
+                        },
+                        &mut continue_context,
+                        loop_parent_context,
+                        artifacts,
+                        is_do,
+                        !pre_conditions_applied,
+                    );
+
+                    if is_do {
+                        context.collector.finish_recording();
+                    }
+
+                    result?;
+                }
+
+                pre_conditions_applied = true;
+
+                for variable_id in &always_assigned_before_loop_body_variables {
+                    let pre_loop_context_type = pre_loop_context.locals.get(variable_id);
+
+                    if if different_from_pre_loop_types.contains(variable_id) {
+                        true
+                    } else if continue_context.locals.contains_key(variable_id) {
+                        pre_loop_context_type.is_none()
+                    } else {
+                        true
+                    } {
+                        if let Some(pre_loop_context_type) = pre_loop_context_type {
+                            continue_context.locals.insert(*variable_id, Rc::clone(pre_loop_context_type));
+                        } else {
+                            continue_context.locals.remove(variable_id);
+                        }
+                    }
+                }
+
+                continue_context.clauses.clone_from(&pre_loop_context.clauses);
+
+                clean_nodes(statements, artifacts);
+
+                let loop_scope = {
+                    artifacts.set_loop_scope(loop_scope);
+                    analyze_statements(statements, context, &mut continue_context, artifacts)?;
+
+                    unsafe {
+                        // SAFETY: we know the loop scope will remain in the context.
+                        artifacts.take_loop_scope_unchecked()
+                    }
+                };
+
+                update_loop_scope_contexts(
+                    &loop_scope,
+                    loop_context,
+                    &mut continue_context,
+                    &original_parent_context,
+                    context,
+                );
+
+                if is_do {
+                    inner_do_context = Some(continue_context.clone());
+
+                    for (condition_offset, pre_condition) in pre_conditions.iter().enumerate() {
+                        apply_pre_condition_to_loop_context(
+                            context,
+                            pre_condition,
+                            unsafe {
+                                // SAFETY: we know the pre_condition_clauses will contain
+                                // the clauses for the pre_condition at condition_offset.
+                                pre_condition_clauses.get_unchecked(condition_offset)
+                            },
+                            &mut continue_context,
+                            loop_parent_context,
+                            artifacts,
+                            is_do,
+                            !pre_conditions_applied,
+                        )?;
+                    }
+
+                    pre_conditions_applied = true;
+                }
+
+                continue_context.flags.set_inside_loop_expressions(true);
+                for post_expression in &post_expressions {
+                    post_expression.analyze(context, &mut continue_context, artifacts)?;
+                }
+                continue_context.flags.set_inside_loop_expressions(false);
+
+                Ok(loop_scope)
+            });
+
+            loop_scope = result?;
+            recorded_issues = new_recorded_issues;
+
+            i += 1;
+        }
+
+        for issue in first_iteration_issues {
+            if !is_iteration_dependent_truthiness_issue(issue.code.as_deref())
+                && !recorded_issues.iter().any(|existing| existing == &issue)
+            {
+                recorded_issues.push(issue);
+            }
+        }
+
+        if !recorded_issues.is_empty() {
+            for issue in recorded_issues {
+                context.collector.report(issue);
+            }
+        }
+    }
+
+    debug_assert!(pre_conditions_applied, "Pre-conditions should have been applied at least once.");
+
+    let does_sometimes_break = loop_scope.final_actions.contains(ControlAction::Break);
+    let does_sometimes_continue = loop_scope.final_actions.contains(ControlAction::Continue);
+    let does_always_break = does_sometimes_break && loop_scope.final_actions.len() == 1;
+    let preserve_array_shapes_for = continue_context
+        .references_in_scope
+        .iter()
+        .filter_map(|(reference, referenced)| {
+            (*reference != *referenced && var_has_root(*referenced, *reference)).then_some(*reference)
+        })
+        .collect::<WordSet>();
+
+    let can_overwrite_empty_array = always_enters_loop.get() && !does_sometimes_break && !does_sometimes_continue;
+    if does_sometimes_break {
+        if let Some(mut inner_do_context_inner) = inner_do_context {
+            for (variable_id, possibly_redefined_variable_type) in &loop_scope.possibly_redefined_loop_parent_variables
+            {
+                if let Some(do_context_type) = inner_do_context_inner.locals.get_mut(variable_id) {
+                    *do_context_type = if do_context_type == possibly_redefined_variable_type {
+                        Rc::clone(possibly_redefined_variable_type)
+                    } else {
+                        Rc::new(combine_loop_types(
+                            possibly_redefined_variable_type,
+                            do_context_type,
+                            codebase,
+                            CombinerOptions {
+                                overwrite_empty_array: can_overwrite_empty_array,
+                                ..CombinerOptions::default()
+                            },
+                            preserve_array_shapes_for.contains(variable_id),
+                        ))
+                    };
+                }
+
+                loop_parent_context.possibly_assigned_variable_ids.insert(*variable_id);
+            }
+
+            inner_do_context = Some(inner_do_context_inner);
+        } else {
+            for (variable_id, variable_type) in &loop_scope.possibly_redefined_loop_parent_variables {
+                if let Some(loop_parent_context_type) = loop_parent_context.locals.get_mut(variable_id) {
+                    *loop_parent_context_type = Rc::new(combine_loop_types(
+                        variable_type,
+                        loop_parent_context_type,
+                        codebase,
+                        CombinerOptions {
+                            overwrite_empty_array: can_overwrite_empty_array,
+                            ..CombinerOptions::default()
+                        },
+                        preserve_array_shapes_for.contains(variable_id),
+                    ));
+                }
+
+                loop_parent_context.possibly_assigned_variable_ids.insert(*variable_id);
+            }
+        }
+    }
+
+    for (variable_id, variable_type) in &loop_parent_context.locals.clone() {
+        if let Some(loop_context_type) = loop_context.locals.get(variable_id) {
+            if loop_context_type != variable_type {
+                loop_parent_context.locals.insert(
+                    *variable_id,
+                    Rc::new(combine_loop_types(
+                        variable_type,
+                        loop_context_type,
+                        codebase,
+                        CombinerOptions {
+                            overwrite_empty_array: can_overwrite_empty_array,
+                            ..CombinerOptions::default()
+                        },
+                        preserve_array_shapes_for.contains(variable_id),
+                    )),
+                );
+
+                loop_parent_context.remove_variable_from_conflicting_clauses(context, *variable_id, None);
+            } else if let Some(loop_parent_context_type) = loop_parent_context.locals.get_mut(variable_id)
+                && loop_parent_context_type != loop_context_type
+            {
+                *loop_parent_context_type = Rc::clone(loop_context_type);
+            }
+        }
+    }
+
+    if !does_always_break {
+        for (variable_id, variable_type) in loop_parent_context.locals.clone() {
+            if let Some(continue_context_type) = continue_context.locals.get_mut(&variable_id) {
+                if continue_context_type.is_mixed() {
+                    loop_parent_context.locals.insert(variable_id, Rc::clone(continue_context_type));
+                    loop_parent_context.remove_variable_from_conflicting_clauses(context, variable_id, None);
+                } else if continue_context_type != &variable_type {
+                    loop_parent_context.locals.insert(
+                        variable_id,
+                        Rc::new(combine_loop_types(
+                            &variable_type,
+                            continue_context_type,
+                            codebase,
+                            CombinerOptions {
+                                overwrite_empty_array: can_overwrite_empty_array,
+                                ..CombinerOptions::default()
+                            },
+                            preserve_array_shapes_for.contains(&variable_id),
+                        )),
+                    );
+                    loop_parent_context.remove_variable_from_conflicting_clauses(context, variable_id, None);
+                } else if let Some(loop_parent_context_type) = loop_parent_context.locals.get_mut(&variable_id) {
+                    *loop_parent_context_type = Rc::clone(continue_context_type);
+                }
+            } else {
+                loop_parent_context.locals.remove(&variable_id);
+            }
+        }
+    }
+
+    if !pre_conditions.is_empty() && !pre_condition_clauses.is_empty() && !does_sometimes_break {
+        // if the loop contains an assertion and there are no break statements, we can negate that assertion
+        // and apply it to the current context
+
+        let pre_condition_clauses = pre_condition_clauses.into_iter().flatten().collect();
+        let negated_pre_condition_clauses = if pre_conditions.len() == 1 {
+            negate_or_synthesize(
+                pre_condition_clauses,
+                pre_conditions[0],
+                context.get_assertion_context_from_block(&continue_context),
+                artifacts,
+                &context.settings.algebra_thresholds(),
+                context.settings.formula_size_threshold,
+            )
+        } else {
+            negate_formula(pre_condition_clauses, &context.settings.algebra_thresholds()).unwrap_or_default()
+        };
+
+        let (negated_pre_condition_types, _) =
+            find_satisfying_assignments(negated_pre_condition_clauses.iter().as_slice(), None, &mut WordSet::default());
+
+        if !negated_pre_condition_types.is_empty() {
+            let mut changed_variable_ids = WordSet::default();
+
+            reconcile_keyed_types(
+                context,
+                &negated_pre_condition_types,
+                IndexMap::new(),
+                &mut continue_context,
+                &mut changed_variable_ids,
+                &WordSet::default(),
+                &unsafe {
+                    // SAFETY: we know that pre_conditions is not empty, so we can safely
+                    // get the span of the first pre_condition.
+                    pre_conditions.get_unchecked(0).span()
+                },
+                true,
+                false,
+            );
+
+            for variable_id in changed_variable_ids {
+                if let Some(reconciled_type) = continue_context.locals.get(&variable_id) {
+                    if loop_parent_context.locals.contains_key(&variable_id) {
+                        loop_parent_context.locals.insert(variable_id, Rc::clone(reconciled_type));
+                    }
+
+                    loop_parent_context.remove_variable_from_conflicting_clauses(context, variable_id, None);
+                }
+            }
+        }
+    }
+
+    if always_enters_loop.get() {
+        for (variable_id, variable_type) in &continue_context.locals {
+            // if there are break statements in the loop it's not certain
+            // that the loop has finished executing, so the assertions at the end
+            // the loop in the while conditional may not hold
+            if does_sometimes_break || does_sometimes_continue {
+                if let Some(possibly_defined_type) = loop_scope.possibly_defined_loop_parent_variables.get(variable_id)
+                {
+                    loop_parent_context.locals.insert(
+                        *variable_id,
+                        Rc::new(combine_loop_types(
+                            variable_type,
+                            possibly_defined_type,
+                            codebase,
+                            CombinerOptions {
+                                overwrite_empty_array: can_overwrite_empty_array,
+                                ..CombinerOptions::default()
+                            },
+                            preserve_array_shapes_for.contains(variable_id),
+                        )),
+                    );
+                } else if let Some(possibly_redefined_type) =
+                    loop_scope.possibly_redefined_loop_parent_variables.get(variable_id)
+                {
+                    loop_parent_context.locals.insert(
+                        *variable_id,
+                        Rc::new(combine_loop_types(
+                            variable_type,
+                            possibly_redefined_type,
+                            codebase,
+                            CombinerOptions {
+                                overwrite_empty_array: can_overwrite_empty_array,
+                                ..CombinerOptions::default()
+                            },
+                            preserve_array_shapes_for.contains(variable_id),
+                        )),
+                    );
+                }
+            } else {
+                loop_parent_context.locals.insert(*variable_id, Rc::clone(variable_type));
+            }
+        }
+    }
+
+    if let Some(inner_do_context) = inner_do_context {
+        continue_context = inner_do_context;
+    }
+
+    // Track references set in the loop to make sure they aren't reused later
+    loop_parent_context.update_references_possibly_from_confusing_scope(&continue_context);
+
+    Ok((continue_context, loop_scope))
+}
+
+/// Recursively marks all optional known items in array types as definite.
+///
+/// After a loop that always enters, keys added inside the loop body are guaranteed
+/// to exist. This applies at all nesting levels, both in known items' values and
+/// in generic parameter values.
+fn mark_array_keys_definite(union: &mut TUnion) -> bool {
+    let mut changed = false;
+    for atomic in union.types.to_mut().iter_mut() {
+        match atomic {
+            TAtomic::Array(TArray::Keyed(TKeyedArray { known_items: Some(items), parameters, .. })) => {
+                for (optional, value) in items.values_mut() {
+                    if *optional {
+                        *optional = false;
+                        changed = true;
+                    }
+
+                    if mark_array_keys_definite(value) {
+                        changed = true;
+                    }
+                }
+
+                if let Some((_, value_type)) = parameters {
+                    let value = Arc::make_mut(value_type);
+                    if mark_array_keys_definite(value) {
+                        changed = true;
+                    }
+                }
+            }
+            TAtomic::Array(TArray::List(TList { known_elements: Some(elements), element_type, .. })) => {
+                for (optional, value) in elements.values_mut() {
+                    if *optional {
+                        *optional = false;
+                        changed = true;
+                    }
+
+                    if mark_array_keys_definite(value) {
+                        changed = true;
+                    }
+                }
+
+                let el = Arc::make_mut(element_type);
+                if mark_array_keys_definite(el) {
+                    changed = true;
+                }
+            }
+            TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((_, value_type)), .. })) => {
+                let value = Arc::make_mut(value_type);
+                if mark_array_keys_definite(value) {
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    changed
+}
+
+/// Returns whether an issue's claim can be invalidated by a later do-while iteration.
+///
+/// The first iteration is analyzed with the pre-loop types, then the body is analyzed
+/// again with the stabilized loop-carried types. Safety issues found only on the first
+/// iteration remain relevant because a do-while body always executes once. A claim that
+/// a condition or comparison is always true or false, however, is only valid when it is
+/// also found after the loop types stabilize.
+fn is_iteration_dependent_truthiness_issue(code: Option<&str>) -> bool {
+    let Some(code) = code else {
+        return false;
+    };
+
+    matches!(
+        IssueCode::from_str(code),
+        Ok(IssueCode::ImpossibleCondition
+            | IssueCode::RedundantComparison
+            | IssueCode::RedundantCondition
+            | IssueCode::RedundantTypeComparison)
+    )
+}
+
+/// Compute the depth of the loop's assignment dependency graph, clamped to `maximum`.
+///
+/// The walk short-circuits as soon as `maximum` is reached, so deep graphs
+/// cost O(maximum) work instead of traversing every chain down to the leaves.
+fn get_assignment_map_depth(
+    first_variable_id: Word,
+    assignment_map: &mut BTreeMap<Word, BTreeSet<Word>>,
+    maximum: usize,
+) -> usize {
+    if maximum == 0 {
+        return 0;
+    }
+
+    let Some(assignment_variable_ids) = assignment_map.remove(&first_variable_id) else {
+        return 0;
+    };
+
+    let mut max_depth = 0;
+    for assignment_variable_id in assignment_variable_ids {
+        let mut depth = 1;
+
+        if depth < maximum && assignment_map.contains_key(&assignment_variable_id) {
+            depth += get_assignment_map_depth(assignment_variable_id, assignment_map, maximum - 1);
+        }
+
+        if depth > max_depth {
+            max_depth = depth;
+            if max_depth >= maximum {
+                return maximum;
+            }
+        }
+    }
+
+    max_depth
+}
+
+/// Check if a loop condition can evaluate to false with the initial variable types.
+///
+/// For simple comparisons like `$i < $n`, tests whether the types' bounds
+/// allow the comparison to be false. For example, `int(0) < int<0, max>`
+/// can be false when `$n = 0`.
+#[allow(clippy::similar_names)]
+fn can_condition_be_initially_false(pre_condition: &Expression<'_>, artifacts: &AnalysisArtifacts) -> bool {
+    let Expression::Binary(binary) = pre_condition else {
+        return artifacts.get_expression_type(pre_condition).is_none_or(|ct| !ct.is_always_truthy());
+    };
+
+    match binary.operator {
+        BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => {
+            return can_condition_be_initially_false(binary.lhs, artifacts)
+                || can_condition_be_initially_false(binary.rhs, artifacts);
+        }
+        BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => {
+            return can_condition_be_initially_false(binary.lhs, artifacts)
+                && can_condition_be_initially_false(binary.rhs, artifacts);
+        }
+        _ => {}
+    }
+
+    let Some(left_type) = artifacts.get_expression_type(binary.lhs) else {
+        return false;
+    };
+
+    let Some(right_type) = artifacts.get_expression_type(binary.rhs) else {
+        return false;
+    };
+
+    let left_int = left_type.types.iter().find_map(|a| match a {
+        TAtomic::Scalar(TScalar::Integer(i)) => Some(i),
+        _ => None,
+    });
+
+    let right_int = right_type.types.iter().find_map(|a| match a {
+        TAtomic::Scalar(TScalar::Integer(i)) => Some(i),
+        _ => None,
+    });
+
+    let (Some(left_int), Some(right_int)) = (left_int, right_int) else {
+        return false;
+    };
+
+    let (left_lb, left_ub) = left_int.get_bounds();
+    let (right_lb, right_ub) = right_int.get_bounds();
+
+    match &binary.operator {
+        BinaryOperator::LessThan(_) => match (left_ub, right_lb) {
+            (None, _) | (_, None) => true,
+            (Some(a), Some(b)) => a >= b,
+        },
+        BinaryOperator::LessThanOrEqual(_) => match (left_ub, right_lb) {
+            (None, _) | (_, None) => true,
+            (Some(a), Some(b)) => a > b,
+        },
+        BinaryOperator::GreaterThan(_) => match (left_lb, right_ub) {
+            (None, _) | (_, None) => true,
+            (Some(a), Some(b)) => a <= b,
+        },
+        BinaryOperator::GreaterThanOrEqual(_) => match (left_lb, right_ub) {
+            (None, _) | (_, None) => true,
+            (Some(a), Some(b)) => a < b,
+        },
+        _ => false,
+    }
+}
+
+fn apply_pre_condition_to_loop_context<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    pre_condition: &Expression<'arena>,
+    pre_condition_clauses: &[Clause],
+    loop_context: &mut BlockContext<'ctx>,
+    loop_parent_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    is_do: bool,
+    first_application: bool,
+) -> Result<WordSet, AnalysisError>
+where
+    A: Arena,
+{
+    let pre_condition_span = pre_condition.span();
+    let pre_referenced_variable_ids = std::mem::take(&mut loop_context.conditionally_referenced_variable_ids);
+
+    loop_context.flags.set_inside_conditional(true);
+    loop_context.flags.set_inside_loop_expressions(true);
+
+    pre_condition.analyze(context, loop_context, artifacts)?;
+
+    loop_context.flags.set_inside_loop_expressions(false);
+    loop_context.flags.set_inside_conditional(false);
+
+    if first_application {
+        let condition_type = artifacts.get_expression_type(pre_condition);
+        let is_always_falsy = condition_type.is_some_and(|ct| ct.is_always_falsy());
+        let is_always_truthy = condition_type.is_some_and(|ct| ct.is_always_truthy());
+
+        if is_always_falsy {
+            if let Some(loop_scope) = artifacts.get_loop_scope_mut() {
+                loop_scope.truthy_pre_conditions = false;
+                loop_scope.condition_always_false = true;
+            }
+        } else if !is_always_truthy {
+            // The condition is indeterminate (bool). Check if the loop condition
+            // can be false with the initial variable values by testing the boundary
+            // of integer ranges involved in the comparison.
+            if can_condition_be_initially_false(pre_condition, artifacts)
+                && let Some(loop_scope) = artifacts.get_loop_scope_mut()
+            {
+                loop_scope.truthy_pre_conditions = false;
+            }
+        }
+    }
+
+    let mut new_referenced_variable_ids = loop_context.conditionally_referenced_variable_ids.clone();
+    loop_context.conditionally_referenced_variable_ids.extend(pre_referenced_variable_ids);
+
+    let always_assigned_before_loop_body_variables =
+        BlockContext::get_new_or_updated_locals(loop_context, loop_parent_context);
+
+    loop_context.clauses = saturate_clauses(
+        {
+            let mut clauses = loop_parent_context.clauses.iter().map(|v| &**v).collect::<Vec<_>>();
+            clauses.extend(pre_condition_clauses.iter());
+            clauses
+        },
+        &context.settings.algebra_thresholds(),
+    )
+    .into_iter()
+    .map(Rc::new)
+    .collect();
+
+    let (reconcilable_while_types, active_while_types) = find_satisfying_assignments(
+        loop_context.clauses.iter().map(|v| (**v).clone()).collect::<Vec<_>>().as_slice(),
+        Some(pre_condition_span),
+        &mut new_referenced_variable_ids,
+    );
+
+    if !reconcilable_while_types.is_empty() {
+        reconcile_keyed_types(
+            context,
+            &reconcilable_while_types,
+            active_while_types,
+            loop_context,
+            &mut WordSet::default(),
+            &new_referenced_variable_ids,
+            &pre_condition_span,
+            first_application,
+            false,
+        );
+    }
+
+    if is_do {
+        return Ok(WordSet::default());
+    }
+
+    if !loop_context.clauses.is_empty() {
+        let mut loop_context_clauses = loop_context.clauses.clone();
+
+        for variable_id in &always_assigned_before_loop_body_variables {
+            loop_context_clauses = BlockContext::filter_clauses(context, *variable_id, loop_context_clauses, None);
+        }
+
+        loop_context.clauses = loop_context_clauses;
+    }
+
+    Ok(always_assigned_before_loop_body_variables)
+}
+
+fn update_loop_scope_contexts<'ctx, A>(
+    loop_scope: &LoopScope,
+    loop_context: &mut BlockContext<'ctx>,
+    continue_context: &mut BlockContext<'ctx>,
+    pre_outer_context: &BlockContext<'ctx>,
+    context: &Context<'ctx, '_, A>,
+) where
+    A: Arena,
+{
+    if loop_scope.final_actions.contains(ControlAction::Continue) {
+        for (variable_id, variable_type) in &loop_scope.redefined_loop_variables {
+            continue_context.locals.insert(*variable_id, Rc::clone(variable_type));
+        }
+
+        for (variable_id, variable_type) in &loop_scope.possibly_redefined_loop_variables {
+            if continue_context.has_variable(variable_id.as_bytes()) {
+                continue_context.locals.insert(
+                    *variable_id,
+                    combine_union_types_rc(
+                        unsafe {
+                            // SAFETY: we know that variable_id exists in continue_context.locals.
+                            continue_context.locals.get(variable_id).unwrap_unchecked()
+                        },
+                        variable_type,
+                        context.codebase,
+                        CombinerOptions::default(),
+                    ),
+                );
+            }
+        }
+    } else {
+        loop_context.locals.clone_from(&pre_outer_context.locals);
+    }
+
+    for (variable_id, pre_type) in &pre_outer_context.locals {
+        if let Some(current_type) = continue_context.locals.get(variable_id)
+            && current_type.is_never()
+        {
+            continue_context.locals.insert(*variable_id, Rc::clone(pre_type));
+        }
+    }
+}
+
+fn get_and_expressions<'ast, 'arena>(cond: &'ast Expression<'arena>) -> Vec<&'ast Expression<'arena>> {
+    if let Expression::Binary(binary) = &cond
+        && let BinaryOperator::Or(_) | BinaryOperator::LowOr(_) = binary.operator
+    {
+        let mut anded = get_and_expressions(binary.lhs);
+        anded.extend(get_and_expressions(binary.rhs));
+        return anded;
+    }
+
+    vec![cond]
+}
+
+/// Analyzes the `foreach` iterator expression.
+///
+/// # Returns
+///
+/// A tuple containing:
+///
+/// - `bool`: `true` if the iterator is determined to always have at least one entry, `false` otherwise.
+/// - `TUnion`: The combined type of the keys produced by the iterator.
+/// - `TUnion`: The combined type of the values produced by the iterator.
+///
+/// Reports issues if the iterator type is problematic (e.g., null, scalar, non-traversable object).
+fn analyze_iterator<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    iterator: &'ast Expression<'arena>,
+    iterator_variable_id: Option<Word>,
+    foreach: &'ast Foreach<'arena>,
+) -> Result<(bool, TUnion, TUnion), AnalysisError>
+where
+    A: Arena,
+{
+    let was_inside_general_use = block_context.flags.inside_general_use();
+    block_context.flags.set_inside_general_use(true);
+    iterator.analyze(context, block_context, artifacts)?;
+    block_context.flags.set_inside_general_use(was_inside_general_use);
+
+    let (loop_code, in_loop, empty_collection, iterable_kinds) = if context.dialect.is_sharp() {
+        ("loop", "a loop", "an empty list", "an `Iterable<T>`")
+    } else {
+        ("`foreach`", "`foreach`", "an empty array", "an array or a Traversable object")
+    };
+
+    let iterator_type = if let Some(it_type) = artifacts.get_rc_expression_type(iterator).cloned() {
+        it_type
+    } else if let Some(var_type) = iterator_variable_id.and_then(|v| block_context.locals.get(&v).cloned()) {
+        var_type
+    } else {
+        let requirement = if context.dialect.is_sharp() {
+            "A loop requires an `Iterable<T>`."
+        } else {
+            "Foreach loops require an array or an object implementing `Traversable` to iterate over."
+        };
+        context.collector.report_with_code(
+            IssueCode::UnknownIteratorType,
+            Issue::error(format!("Cannot determine the type of the expression provided to {in_loop}."))
+                .with_annotation(
+                    Annotation::primary(iterator.span())
+                        .with_message("The type of this expression is unknown here"),
+                )
+                .with_note(requirement)
+                .with_help(
+                    "Ensure the expression is well-defined and has a known iterable type. Check for undefined variables or unresolvable function calls."
+                )
+        );
+
+        return Ok((false, get_mixed(), get_mixed()));
+    };
+
+    if is_refused_type(&iterator_type) {
+        return Ok((false, TUnion::clone(&iterator_type), TUnion::clone(&iterator_type)));
+    }
+
+    if iterator_type.is_never() {
+        return Ok((false, get_never(), get_never()));
+    }
+
+    if iterator_type.is_null() {
+        let (iterating, null_check) = if context.dialect.is_sharp() {
+            ("Iterating over `null`", "if (iterable != null)")
+        } else {
+            ("In PHP, iterating over `null` with `foreach`", "if ($iterable !== null)")
+        };
+        context.collector.report_with_code(
+            IssueCode::NullIterator,
+            Issue::error(format!("Iterating over `null` in {in_loop}."))
+                .with_annotation(Annotation::primary(iterator.span()).with_message("This expression is `null`"))
+                .with_annotation(Annotation::secondary(foreach.body.span()).with_message(format!("This {loop_code} will not be executed")))
+                .with_note(format!("{iterating} behaves like iterating {empty_collection}; the loop body will not execute"))
+                .with_note("This can hide uninitialized variables or logic errors.")
+                .with_help(format!("Ensure the expression is initialized to {iterable_kinds}. If `null` is a possible expected state, consider an explicit check before the loop (e.g., `{null_check}`)."))
+        );
+
+        return Ok((false, get_never(), get_never()));
+    }
+
+    if iterator_type.is_false() {
+        let iterating = if context.dialect.is_sharp() {
+            "Iterating over `false`"
+        } else {
+            "In PHP, iterating over `false` with `foreach`"
+        };
+        context.collector.report_with_code(
+            IssueCode::FalseIterator,
+            Issue::error(format!("Iterating over `false` in {in_loop}."))
+                .with_annotation(Annotation::primary(iterator.span()).with_message("This expression is `false`"))
+                .with_annotation(Annotation::secondary(foreach.span()).with_message(format!("This {loop_code} will not be executed")))
+                .with_note(format!("{iterating} behaves like iterating {empty_collection}; the loop body will not execute."))
+                .with_note("This often indicates a function call that failed or an unintended boolean value.")
+                .with_help(format!("Ensure the expression evaluates to {iterable_kinds}. Check the return value of functions if this `false` is unexpected."))
+        );
+
+        return Ok((false, get_arraykey(), get_never()));
+    }
+
+    if iterator_type.is_nullable() && !iterator_type.ignore_nullable_issues() {
+        let iterator_type_str = display_type(context, &iterator_type);
+        context.collector.report_with_code(
+            IssueCode::PossiblyNullIterator,
+            Issue::warning(format!("Expression being iterated (type `{iterator_type_str}`) might be `null` at runtime."))
+                .with_annotation(Annotation::primary(iterator.span()).with_message("This might be `null`"))
+                .with_annotation(Annotation::secondary(foreach.span()).with_message(format!("This {loop_code} might not be executed")))
+                .with_note(format!("If this expression is `null`, it will be treated as {empty_collection}, and the loop body will not execute."))
+                .with_help("Consider checking for `null` before the loop if this is not intended."),
+        );
+    }
+
+    if iterator_type.is_falsable() && !iterator_type.ignore_falsable_issues() {
+        let iterator_type_str = display_type(context, &iterator_type);
+        context.collector.report_with_code(
+            IssueCode::PossiblyFalseIterator,
+            Issue::warning(format!("Expression being iterated (type `{iterator_type_str}`) might be `false` at runtime."))
+                .with_annotation(Annotation::primary(iterator.span()).with_message("This might be `false`"))
+                .with_annotation(Annotation::secondary(foreach.span()).with_message(format!("This {loop_code} might not be executed")))
+                .with_note(format!("If this expression is `false`, it will be treated as {empty_collection}, and the loop body will not execute."))
+                .with_help(if context.dialect.is_sharp() {
+                    "Consider checking for `false` before the loop if this is not intended."
+                } else {
+                    "Consider checking for `false` or truthiness before the loop if this is not intended."
+                }),
+        );
+    }
+
+    let mut always_enters_loop = true;
+    let mut key_type = None;
+    let mut value_type = None;
+    let mut has_valid_iterable_type = false;
+    let mut invalid_atomic_ids = Vec::with_capacity(iterator_type.types.len());
+    let iterator_atomics: Vec<&TAtomic> = iterator_type
+        .types
+        .iter()
+        .flat_map(|atomic| match atomic {
+            TAtomic::Derived(TDerived::Intersection(intersection)) => intersection.get_base_type().types.as_ref(),
+            _ => std::slice::from_ref(atomic),
+        })
+        .map(|atomic| match atomic {
+            TAtomic::GenericParameter(generic_parameter) => generic_parameter.get_constraint().get_single(),
+            atomic => atomic,
+        })
+        .collect();
+
+    // Spec section 12 reads a PHP# `List`'s indexes from `entries()`, and a `Set` has no keys of its own, so `[k, v]`
+    // reads a `Map`. A place is every collection it is declared as, whatever literal it holds, so each of them must be
+    // a `Map`, and the first that is not is reported. A `Map`'s key reads back as its key type: the lowering casts a
+    // `string` key PHP stored as an `int`.
+    if context.dialect.is_sharp()
+        && let Some(key) = foreach.target.key()
+    {
+        let keyless = |atomic: &TAtomic| match atomic {
+            TAtomic::Array(TArray::List(_)) => {
+                Some(("List", "Loop over `list.entries()` to read each index with its value."))
+            }
+            TAtomic::Array(TArray::Set(_)) => {
+                Some(("Set", "Loop over the elements alone, as in `for (const x of set)`."))
+            }
+            _ => None,
+        };
+        let refused = match get_declared_collection(context, block_context, artifacts, iterator) {
+            Some(declared) => declared.types.iter().find_map(keyless),
+            None => iterator_atomics.iter().copied().find_map(keyless),
+        };
+
+        if let Some((kind, help)) = refused {
+            context.collector.report_with_code(
+                IssueCode::InvalidIterator,
+                Issue::error(format!("`for (const [k, v] of x)` reads the keys of a `Map`, and this is a `{kind}`."))
+                    .with_annotation(Annotation::primary(iterator.span()).with_message(format!("This is a `{kind}`.")))
+                    .with_annotation(Annotation::secondary(key.span()).with_message("Its key is read here."))
+                    .with_help(help),
+            );
+        }
+    }
+
+    for iterator_atomic in iterator_atomics {
+        match iterator_atomic {
+            TAtomic::Null | TAtomic::Scalar(TScalar::Bool(TBool { value: Some(false) })) => {
+                always_enters_loop = false;
+            }
+            TAtomic::Array(array) => {
+                has_valid_iterable_type = true;
+                if !array.is_non_empty() {
+                    always_enters_loop = false;
+                }
+
+                let (k, v) = get_array_parameters(array, context.codebase);
+
+                key_type = Some(add_optional_union_type(k, key_type.as_ref(), context.codebase));
+                value_type = Some(add_optional_union_type(v, value_type.as_ref(), context.codebase));
+            }
+            TAtomic::Iterable(iterable) => {
+                has_valid_iterable_type = true;
+                always_enters_loop = false;
+
+                key_type = Some(add_optional_union_type(
+                    iterable.key_type.as_ref().clone(),
+                    key_type.as_ref(),
+                    context.codebase,
+                ));
+
+                value_type = Some(add_optional_union_type(
+                    iterable.value_type.as_ref().clone(),
+                    value_type.as_ref(),
+                    context.codebase,
+                ));
+            }
+            TAtomic::Object(object) => {
+                let (obj_key_type, obj_value_type) = match object {
+                    TObject::Any | TObject::WithProperties(_) | TObject::HasMethod(_) | TObject::HasProperty(_) => {
+                        always_enters_loop = false;
+
+                        let (title, annotation, note, help) = if context.dialect.is_sharp() {
+                            (
+                                "Iterating over an `Object`. This will iterate its public properties.",
+                                "Iterating an `Object` type",
+                                "When a loop reads an `Object` whose class is unknown, PHP iterates its public properties. The keys are the property names, and the values are `Any?`.",
+                                "For predictable and type-safe iteration, give the value an `Iterable<T>` type.",
+                            )
+                        } else {
+                            (
+                                "Iterating over a generic `object`. This will iterate its public properties.",
+                                "Iterating a generic `object` type",
+                                "When `foreach` is used on a generic `object` whose specific class is unknown, PHP will attempt to iterate over its public properties. The keys will be property names (strings) and values their types (typically `mixed` from a static analysis perspective).",
+                                "For predictable and type-safe iteration, ensure the object is an instance of a class implementing `Iterator` or `IteratorAggregate`.",
+                            )
+                        };
+                        context.collector.report_with_code(
+                            IssueCode::GenericObjectIteration,
+                            Issue::warning(title)
+                                .with_annotation(Annotation::primary(iterator.span()).with_message(annotation))
+                                .with_note(note)
+                                .with_help(help),
+                        );
+
+                        (get_string(), get_mixed())
+                    }
+                    TObject::Named(atomic_object) => {
+                        always_enters_loop = false;
+
+                        if let Some((k, v)) = get_iterable_parameters(iterator_atomic, context.codebase) {
+                            (k, v)
+                        } else {
+                            let class_name = if context.dialect.is_sharp() {
+                                display_class_like_name(context, atomic_object.name)
+                            } else {
+                                atomic_object.name
+                            };
+                            let iterator_atomic_str = display_atomic(context, iterator_atomic);
+
+                            context.collector.report_with_code(
+                                IssueCode::NonIterableObjectIteration,
+                                Issue::warning(format!(
+                                    "Iterating over object of type `{class_name}` which does not implement `Iterator` or `IteratorAggregate`.",
+                                ))
+                                    .with_annotation(
+                                        Annotation::primary(iterator.span()).with_message(format!("Iterating non-traversable object `{class_name}` of type `{iterator_atomic_str}`")),
+                                    )
+                                    .with_note(format!("PHP will iterate over the public properties of `{class_name}`."))
+                                    .with_help("The keys will be property names (strings) and values will be their types (often `mixed` from a static analysis perspective).")
+                                    .with_help("This might expose internal state or lead to unexpected behavior if properties change.")
+                                    .with_help(format!("For controlled and type-safe iteration, implement the `Iterator` or `IteratorAggregate` interface on class `{class_name}`."))
+                            );
+
+                            (get_string(), get_mixed())
+                        }
+                    }
+                    TObject::Enum(enum_instance) => {
+                        let enum_name = if context.dialect.is_sharp() {
+                            display_class_like_name(context, enum_instance.get_name())
+                        } else {
+                            enum_instance.get_name()
+                        };
+                        let enum_backing_type = context
+                            .codebase
+                            .get_enum(enum_instance.get_name().as_bytes())
+                            .and_then(|class_like| class_like.enum_type.as_ref());
+                        let cases = display_code_member(context, enum_instance.get_name(), "cases()");
+                        // PHP# reads a property as `instance.name` and loops with `for (const case of …)`.
+                        let (instance, case_loop) = if context.dialect.is_sharp() {
+                            ("instance.", format!("for (const case of {cases})"))
+                        } else {
+                            ("$instance->", format!("foreach ({cases} as $case)"))
+                        };
+                        let imports = display_missing_imports(context, [enum_instance.get_name()])
+                            .map(|imports| format!(" {imports}"))
+                            .unwrap_or_default();
+
+                        context.collector.report_with_code(
+                            IssueCode::EnumIteration,
+                            Issue::warning(format!("Iterating directly over the enum enum `{enum_name}`. This will yield its public properties.",))
+                                .with_annotation(
+                                    Annotation::primary(iterator.span()).with_message("This enum instance is being iterated directly"),
+                                )
+                                .with_note(format!(
+                                    "PHP allows iterating an enum case instance like an object, which exposes its public properties: `name` (string){}.",
+                                    if enum_backing_type.is_some() { " and `value` (its scalar backing value)" } else { "" },
+                                ))
+                                .with_note(format!("This is different from iterating through all defined cases of the `{enum_name}` enum using `{cases}`, where each item would be an enum case instance itself."))
+                                .with_note(format!(
+                                    "If you only need the properties of this specific instance, consider accessing them directly (e.g., `{instance}name`{}) for better clarity, unless iterating its few properties is explicitly intended.",
+                                    if enum_backing_type.is_some() { format!(", `{instance}value`") } else { String::new() }
+                                ))
+                                .with_help(format!("If your goal is to loop through all defined cases of the `{enum_name}` enum, use `{cases}` instead (e.g., `{case_loop}`).{imports}")),
+                        );
+
+                        match enum_backing_type {
+                            Some(backing_type) => (
+                                TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::literal_string(word(b"name"))),
+                                    TAtomic::Scalar(TScalar::literal_string(word(b"value"))),
+                                ]),
+                                TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::non_empty_string()),
+                                    backing_type.clone(),
+                                ]),
+                            ),
+                            None => (get_literal_string(word(b"name")), get_non_empty_string()),
+                        }
+                    }
+                };
+
+                has_valid_iterable_type = true;
+
+                key_type = Some(add_optional_union_type(obj_key_type, key_type.as_ref(), context.codebase));
+                value_type = Some(add_optional_union_type(obj_value_type, value_type.as_ref(), context.codebase));
+            }
+            _ => {
+                invalid_atomic_ids.push(display_atomic(context, iterator_atomic));
+            }
+        }
+    }
+
+    if !has_valid_iterable_type {
+        let iterator_type_id_str = display_type(context, &iterator_type);
+        let (requirement, help) = if context.dialect.is_sharp() {
+            (
+                "A loop requires an `Iterable<T>`.",
+                "Ensure the expression always evaluates to an `Iterable<T>`. Check variable types and function return values.",
+            )
+        } else {
+            (
+                "A `foreach` loop requires an array or an object implementing the `Traversable` interface.",
+                "Ensure the expression always evaluates to an array or a traversable object. Check variable types and function return values.",
+            )
+        };
+        let problematic_types_str = if invalid_atomic_ids.is_empty() {
+            format!("resolved to type `{iterator_type_id_str}` which is not iterable in this context")
+        } else if invalid_atomic_ids.len() == 1 {
+            format!("resolved to type `{}`, which is not iterable", invalid_atomic_ids[0])
+        } else {
+            format!(
+                "could be one of the following non-iterable types: `{}` (overall type: `{}`)",
+                invalid_atomic_ids.join("`, `"),
+                iterator_type_id_str
+            )
+        };
+
+        context.collector.report_with_code(
+            IssueCode::InvalidIterator,
+            Issue::error(format!("The expression provided to {in_loop} is not iterable. It {problematic_types_str}."))
+                .with_annotation(
+                    Annotation::primary(iterator.span()).with_message("This expression cannot be iterated"),
+                )
+                .with_note(requirement)
+                .with_note(
+                    "Attempting to iterate other types will result in a runtime error or the loop not executing.",
+                )
+                .with_help(help),
+        );
+
+        return Ok((false, get_never(), get_never()));
+    } else if !invalid_atomic_ids.is_empty() {
+        let iterator_type_id_str = display_type(context, &iterator_type);
+        let problematic_types_list_str = invalid_atomic_ids.join("`, `");
+
+        context.collector.report_with_code(
+            IssueCode::PossiblyInvalidIterator,
+            Issue::warning(format!(
+                "The expression provided to {in_loop} (type `{iterator_type_id_str}`) might not be iterable at runtime."
+            ))
+            .with_annotation(
+                Annotation::primary(iterator.span())
+                    .with_message("This expression has potentially non-iterable types"),
+            )
+            .with_note(format!(
+                "It could evaluate to one of the following non-iterable types: `{problematic_types_list_str}`. If so, a runtime error will occur or the loop will not execute for that specific type."
+            ))
+            .with_help(format!(
+                "Ensure all possible types for this expression are iterable, or add checks to handle non-iterable cases before the loop. For analysis, key/value types will include `{}` due to this uncertainty.",
+                display_type(context, &get_mixed()),
+            )),
+        );
+
+        return Ok((false, get_mixed(), get_mixed()));
+    }
+    // every atomic in the iterator type is iterable; no diagnostic needed
+
+    Ok((always_enters_loop, key_type.unwrap_or_else(get_mixed), value_type.unwrap_or_else(get_mixed)))
+}
+
+fn combine_loop_types(
+    left: &TUnion,
+    right: &TUnion,
+    codebase: &CodebaseMetadata,
+    options: CombinerOptions,
+    preserve_array_shapes: bool,
+) -> TUnion {
+    if preserve_array_shapes {
+        return combine_union_types_preserving_array_shapes(left, right, codebase, options);
+    }
+
+    combine_union_types(left, right, codebase, options)
+}
+
+/// Removes generic keyed arrays from a union when their value parameter shape is a
+/// strict subset of a list element shape in the same union.
+///
+/// These generic keyed arrays arise from assignments on empty arrays inside conditional
+/// branches (e.g., `$arr[$key]['values'][] = ...` on `array{}`). They produce imprecise
+/// value types that incorrectly mark shape keys as possibly-undefined when combined
+/// with more precise list element types.
+fn simplify_generic_subset_arrays(union: TUnion) -> TUnion {
+    if union.types.len() <= 1 {
+        return union;
+    }
+
+    // Collect known_items from list element shapes in this union
+    let list_element_items: Vec<_> = union
+        .types
+        .iter()
+        .filter_map(|atomic| {
+            if let TAtomic::Array(TArray::List(list)) = atomic
+                && list.element_type.types.len() == 1
+                && let Some(TAtomic::Array(TArray::Keyed(keyed_element))) = list.element_type.types.first()
+            {
+                return keyed_element.get_known_items();
+            }
+
+            None
+        })
+        .collect();
+
+    if list_element_items.is_empty() {
+        return union;
+    }
+
+    let original_len = union.types.len();
+    let types: Vec<TAtomic> = union
+        .types
+        .iter()
+        .filter(|atomic| {
+            if let TAtomic::Array(TArray::Keyed(keyed)) = atomic
+                && keyed.get_known_items().is_none()
+                && let Some(params) = keyed.get_generic_parameters()
+                && params.1.types.len() == 1
+                && let Some(TAtomic::Array(TArray::Keyed(value_shape))) = params.1.types.first()
+                && let Some(param_items) = value_shape.get_known_items()
+            {
+                return !list_element_items.iter().any(|list_items| {
+                    param_items.keys().all(|k| list_items.contains_key(k)) && param_items.len() < list_items.len()
+                });
+            }
+
+            true
+        })
+        .cloned()
+        .collect();
+
+    if types.len() == original_len {
+        return union;
+    }
+
+    TUnion::from_vec(types)
+}

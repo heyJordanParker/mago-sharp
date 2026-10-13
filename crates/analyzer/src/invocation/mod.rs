@@ -1,0 +1,752 @@
+use mago_allocator::Arena;
+use std::sync::Arc;
+
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like::TemplateTypes;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
+use mago_codex::misc::VariableIdentifier;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
+use mago_codex::ttype::atomic::callable::parameter::TCallableParameter;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::union::TUnion;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::NamedArgument;
+use mago_syntax::cst::NamedPlaceholderArgument;
+use mago_syntax::cst::PartialArgument;
+use mago_syntax::cst::PartialArgumentList;
+use mago_syntax::cst::Pipe;
+use mago_syntax::cst::PlaceholderArgument;
+use mago_syntax::cst::PositionalArgument;
+use mago_syntax::cst::VariadicPlaceholderArgument;
+use mago_word::Word;
+
+use crate::context::Context;
+
+mod resolver;
+mod template_inference;
+
+pub(crate) use resolver::resolve_invocation_type;
+
+pub(crate) mod arguments;
+
+pub mod analyzer;
+pub mod post_process;
+pub mod return_type_fetcher;
+pub mod template_result;
+
+/// Represents a resolved function, method, or callable invocation.
+#[derive(Debug, Clone)]
+pub struct Invocation<'ctx, 'ast, 'arena> {
+    /// The target being called (function, method, or callable).
+    pub target: InvocationTarget<'ctx>,
+    /// The arguments passed to the call.
+    pub arguments_source: InvocationArgumentsSource<'ast, 'arena>,
+    /// The source span of the entire invocation.
+    pub span: Span,
+}
+
+/// Parameter contract supplied by a provider before argument analysis.
+#[derive(Debug, Clone)]
+pub struct EffectiveCallableSignature {
+    pub parameters: Vec<TCallableParameter>,
+    pub allows_named_arguments: bool,
+    pub display_name: Option<Word>,
+}
+
+/// Context information for method call resolution.
+#[derive(Debug, Clone)]
+pub struct MethodTargetContext<'ctx> {
+    /// Whether the source invocation uses instance-method or static-method syntax.
+    pub invocation_kind: MethodInvocationKind,
+    /// The method identifier, if statically resolved.
+    pub declaring_method_id: Option<MethodIdentifier>,
+    /// Metadata for the class the method is being called on (not necessarily where it's declared).
+    /// This is used for resolving `self` types in return values.
+    pub class_like_metadata: &'ctx ClassLikeMetadata,
+    /// The class type for resolving static references.
+    pub class_type: StaticClassType,
+    /// The object the method was found on when it was reached through a `@mixin`.
+    /// `Some` marks the method as mixin-resolved, which lets its `static` return
+    /// type rebind to the receiver; template inference reads the mixin class's
+    /// template arguments from it.
+    pub declaring_object_type: Option<TNamedObject>,
+}
+
+/// The source-level form of a method invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodInvocationKind {
+    /// An instance method invocation such as `$object->method()`.
+    Instance,
+    /// A static method invocation such as `ClassName::method()`.
+    Static,
+}
+
+/// The target of an invocation (function, method, or callable).
+#[derive(Debug, Clone)]
+pub enum InvocationTarget<'ctx> {
+    /// A dynamic callable (closure, invocable object, etc.).
+    Callable {
+        /// The original function/method identifier, if traceable.
+        source: Option<FunctionLikeIdentifier>,
+        /// The callable's type signature.
+        signature: TCallableSignature,
+        /// Provider-supplied parameter contract, when one handled this call.
+        effective_signature: Option<EffectiveCallableSignature>,
+        /// The span of the callable expression.
+        span: Span,
+    },
+    /// A statically resolved function or method.
+    FunctionLike {
+        /// The function/method identifier.
+        identifier: FunctionLikeIdentifier,
+        /// Function/method metadata.
+        metadata: &'ctx FunctionLikeMetadata,
+        /// Inferred return type (used for closures/arrow functions).
+        inferred_return_type: Option<Arc<TUnion>>,
+        /// Provider-supplied parameter contract, when one handled this call.
+        effective_signature: Option<EffectiveCallableSignature>,
+        /// Method call context, if applicable.
+        method_context: Option<MethodTargetContext<'ctx>>,
+        /// The span of the callable part.
+        span: Span,
+    },
+    /// An otherwise unresolved method established by an external callable-signature provider.
+    ExternalMethod {
+        /// The source-level method identifier requested by the caller.
+        identifier: FunctionLikeIdentifier,
+        /// Provider-supplied parameter contract. This is present before the target is analyzed.
+        effective_signature: Option<EffectiveCallableSignature>,
+        /// Receiver and invocation-kind context supplied to external providers.
+        method_context: MethodTargetContext<'ctx>,
+        /// The span of the callable part.
+        span: Span,
+    },
+}
+
+/// Represents a parameter definition, abstracting over parameters from statically
+/// known functions/methods and parameters from dynamic `TCallableSignature`s.
+///
+/// This allows argument checking logic to treat both sources of parameter information
+/// uniformly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationTargetParameter<'ctx> {
+    /// Parameter from a statically defined function or method.
+    FunctionLike(&'ctx FunctionLikeParameterMetadata),
+    /// Parameter from a `TCallableSignature` (e.g., from a closure type or `callable` type hint).
+    Callable(&'ctx TCallableParameter),
+}
+
+/// Represents the source of arguments for an invocation.
+///
+/// This distinguishes between standard argument lists `func(args)` and
+/// arguments provided via the pipe operator `$input |> func`.
+#[derive(Debug, Clone, Copy)]
+pub enum InvocationArgumentsSource<'ast, 'arena> {
+    /// No arguments are present, e.g., calling `__construct` via `new Foo`,
+    /// or `__toString` via `(string) $foo`.
+    None(Span),
+    /// Arguments are provided in a standard list, like `foo($a, $b)`.
+    ArgumentList(&'ast ArgumentList<'arena>),
+    /// The single argument is the input from a pipe operator, like `$input` in `$input |> foo(...)`.
+    PipeInput(&'ast Pipe<'arena>),
+    /// Arguments from a partial application, which may include placeholders.
+    PartialArgumentList(&'ast PartialArgumentList<'arena>),
+    /// Constructor arguments supplied to an attribute.
+    AttributeArgumentList(&'ast PartialArgumentList<'arena>),
+}
+
+/// Represents a single argument passed during an invocation, abstracting whether
+/// it's a standard argument or a value piped in.
+///
+/// This allows iteration over "effective arguments" regardless of how they were supplied.
+#[derive(Debug, Clone, Copy)]
+pub enum InvocationArgument<'ast, 'arena> {
+    /// The value provided as input via the pipe operator. This is treated as the first positional argument.
+    PipedValue(&'ast Expression<'arena>),
+    /// A positional argument.
+    Positional(&'ast PositionalArgument<'arena>),
+    /// A named argument.
+    Named(&'ast NamedArgument<'arena>),
+    /// A positional placeholder (`?`) in partial application.
+    Placeholder(&'ast PlaceholderArgument),
+    /// A named placeholder (`name: ?`) in partial application.
+    NamedPlaceholder(&'ast NamedPlaceholderArgument<'arena>),
+    /// A variadic placeholder (`...`) in partial application.
+    VariadicPlaceholder(&'ast VariadicPlaceholderArgument),
+}
+
+#[derive(Debug)]
+pub struct InvocationArgumentsIter<'ast, 'arena> {
+    source: InvocationArgumentsSource<'ast, 'arena>,
+    index: usize,
+}
+
+#[derive(Debug)]
+pub struct InvocationTargetParametersIter<'target, 'ctx> {
+    target: &'target InvocationTarget<'ctx>,
+    index: usize,
+}
+
+impl<'ctx, 'ast, 'arena> Invocation<'ctx, 'ast, 'arena> {
+    pub fn new(target: InvocationTarget<'ctx>, arguments: InvocationArgumentsSource<'ast, 'arena>, span: Span) -> Self {
+        Self { target, arguments_source: arguments, span }
+    }
+}
+
+impl<'ctx> InvocationTarget<'ctx> {
+    /// Attempts to guess a human-readable name for the callable target.
+    ///
+    /// Returns the name of a function/method if statically known,
+    /// or "Closure" or "callable" for dynamic callables.
+    pub fn guess_name<A>(&self, context: &Context<'_, '_, A>) -> String
+    where
+        A: Arena,
+    {
+        if let Some(display_name) = match self {
+            InvocationTarget::Callable { effective_signature, .. }
+            | InvocationTarget::FunctionLike { effective_signature, .. }
+            | InvocationTarget::ExternalMethod { effective_signature, .. } => {
+                effective_signature.as_ref().and_then(|signature| signature.display_name)
+            }
+        } {
+            return display_name.to_string();
+        }
+
+        if let Some(receiver) = self.get_sharp_collection_receiver()
+            && let Some(FunctionLikeIdentifier::Method(_, method_name)) = self.get_function_like_identifier()
+            && let Some(collection) = crate::utils::names::display_sharp_collection(context, receiver)
+        {
+            return format!("{collection}.{method_name}");
+        }
+
+        self.get_function_like_identifier()
+            .map(|identifier| crate::utils::names::display_function_like_identifier(context, identifier))
+            .unwrap_or_else(
+                || {
+                    if self.is_non_closure_callable() { "callable".to_string() } else { "Closure".to_string() }
+                },
+            )
+    }
+
+    /// Returns the `Sharp\ListMethods`, `Sharp\MapMethods` or `Sharp\SetMethods` object a PHP# `List`, `Map` or `Set`
+    /// method is called on, typed by the elements of the collection.
+    pub fn get_sharp_collection_receiver(&self) -> Option<&TObject> {
+        match self {
+            InvocationTarget::FunctionLike {
+                method_context: Some(MethodTargetContext { class_type: StaticClassType::Object(object), .. }),
+                ..
+            } if crate::utils::names::sharp_collection_name(object).is_some() => Some(object),
+            _ => None,
+        }
+    }
+
+    /// Guesses the kind of the callable target (e.g., "function", "method", "closure", "callable").
+    pub fn guess_kind(&self) -> &'static str {
+        match self.get_function_like_identifier() {
+            Some(identifier) => match identifier {
+                FunctionLikeIdentifier::Function(_) => "function",
+                FunctionLikeIdentifier::Method(_, _) => "method",
+                FunctionLikeIdentifier::Closure(_) => "closure",
+            },
+            None => {
+                if self.is_non_closure_callable() {
+                    "callable"
+                } else {
+                    "closure"
+                }
+            }
+        }
+    }
+
+    pub const fn is_method_call(&self) -> bool {
+        matches!(self.get_function_like_identifier(), Some(FunctionLikeIdentifier::Method(_, _)))
+    }
+
+    pub const fn is_pure_or_mutation_free(&self) -> bool {
+        match self {
+            InvocationTarget::Callable { signature, .. } => signature.is_pure,
+            InvocationTarget::FunctionLike { metadata, .. } => {
+                metadata.flags.is_pure()
+                    || metadata.flags.is_mutation_free()
+                    || metadata.flags.is_external_mutation_free()
+            }
+            InvocationTarget::ExternalMethod { .. } => false,
+        }
+    }
+
+    /// Checks if the target is a dynamic callable that is not explicitly a closure type.
+    /// This can be true for `callable` type hints or invocable objects that aren't closures.
+    #[inline]
+    pub const fn is_non_closure_callable(&self) -> bool {
+        match self {
+            InvocationTarget::Callable { signature, .. } => !signature.is_closure(),
+            InvocationTarget::FunctionLike { .. } | InvocationTarget::ExternalMethod { .. } => false,
+        }
+    }
+
+    /// Returns the metadata if this target is a statically known function or method.
+    #[inline]
+    pub const fn get_function_like_metadata(&self) -> Option<&'ctx FunctionLikeMetadata> {
+        match self {
+            InvocationTarget::FunctionLike { metadata, .. } => Some(metadata),
+            InvocationTarget::Callable { .. } | InvocationTarget::ExternalMethod { .. } => None,
+        }
+    }
+
+    /// Returns the `FunctionLikeIdentifier` if available (for static functions/methods or traced callables).
+    #[inline]
+    pub const fn get_function_like_identifier(&self) -> Option<&FunctionLikeIdentifier> {
+        match self {
+            InvocationTarget::Callable { source, .. } => source.as_ref(),
+            InvocationTarget::FunctionLike { identifier, .. } | InvocationTarget::ExternalMethod { identifier, .. } => {
+                Some(identifier)
+            }
+        }
+    }
+
+    /// Returns the template type definitions if the target is a generic function or method.
+    #[inline]
+    pub fn get_template_types(&self) -> Option<&'ctx TemplateTypes> {
+        match self {
+            InvocationTarget::FunctionLike { metadata, .. } => Some(&metadata.template_types),
+            InvocationTarget::Callable { .. } | InvocationTarget::ExternalMethod { .. } => None,
+        }
+    }
+
+    /// Checks if the target function/method allows named arguments.
+    #[inline]
+    pub const fn allows_named_arguments(&self) -> bool {
+        match self {
+            InvocationTarget::Callable { effective_signature: Some(signature), .. }
+            | InvocationTarget::FunctionLike { effective_signature: Some(signature), .. }
+            | InvocationTarget::ExternalMethod { effective_signature: Some(signature), .. } => {
+                signature.allows_named_arguments
+            }
+            InvocationTarget::FunctionLike { metadata, .. } => !metadata.flags.forbids_named_arguments(),
+            InvocationTarget::Callable { .. } | InvocationTarget::ExternalMethod { .. } => false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set_effective_signature(&mut self, signature: EffectiveCallableSignature) {
+        match self {
+            InvocationTarget::Callable { effective_signature, .. }
+            | InvocationTarget::FunctionLike { effective_signature, .. }
+            | InvocationTarget::ExternalMethod { effective_signature, .. } => *effective_signature = Some(signature),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn has_effective_signature(&self) -> bool {
+        match self {
+            InvocationTarget::Callable { effective_signature, .. }
+            | InvocationTarget::FunctionLike { effective_signature, .. }
+            | InvocationTarget::ExternalMethod { effective_signature, .. } => effective_signature.is_some(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get_effective_parameter_name(&self, index: usize) -> Option<Word> {
+        match self {
+            InvocationTarget::Callable { effective_signature, .. }
+            | InvocationTarget::FunctionLike { effective_signature, .. }
+            | InvocationTarget::ExternalMethod { effective_signature, .. } => {
+                effective_signature.as_ref()?.parameters.get(index)?.get_name().map(|name| name.0)
+            }
+        }
+    }
+
+    /// Returns the `MethodTargetContext` if this invocation is a method call.
+    #[inline]
+    pub const fn get_method_context(&self) -> Option<&MethodTargetContext<'ctx>> {
+        match self {
+            InvocationTarget::FunctionLike { method_context, .. } => method_context.as_ref(),
+            InvocationTarget::ExternalMethod { method_context, .. } => Some(method_context),
+            InvocationTarget::Callable { .. } => None,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn parameter_count(&self) -> usize {
+        match self {
+            InvocationTarget::Callable { effective_signature: Some(signature), .. }
+            | InvocationTarget::FunctionLike { effective_signature: Some(signature), .. }
+            | InvocationTarget::ExternalMethod { effective_signature: Some(signature), .. } => {
+                signature.parameters.len()
+            }
+            InvocationTarget::Callable { signature, .. } => signature.parameters.len(),
+            InvocationTarget::FunctionLike { metadata, .. } => metadata.parameters.len(),
+            InvocationTarget::ExternalMethod { .. } => 0,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get_parameter<'target>(&'target self, index: usize) -> Option<InvocationTargetParameter<'target>>
+    where
+        'ctx: 'target,
+    {
+        match self {
+            InvocationTarget::Callable { effective_signature: Some(signature), .. }
+            | InvocationTarget::FunctionLike { effective_signature: Some(signature), .. }
+            | InvocationTarget::ExternalMethod { effective_signature: Some(signature), .. } => {
+                signature.parameters.get(index).map(InvocationTargetParameter::Callable)
+            }
+            InvocationTarget::Callable { signature, .. } => {
+                signature.parameters.get(index).map(InvocationTargetParameter::Callable)
+            }
+            InvocationTarget::FunctionLike { metadata, .. } => {
+                metadata.parameters.get(index).map(InvocationTargetParameter::FunctionLike)
+            }
+            InvocationTarget::ExternalMethod { .. } => None,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn iter_parameters<'target>(&'target self) -> InvocationTargetParametersIter<'target, 'ctx>
+    where
+        'ctx: 'target,
+    {
+        InvocationTargetParametersIter { target: self, index: 0 }
+    }
+
+    /// Retrieves a list of parameters for the invocation target.
+    ///
+    /// Parameters are wrapped in `InvocationTargetParameter` to abstract over
+    /// `FunctionLikeParameterMetadata` and `TCallableParameter`.
+    #[inline]
+    pub fn get_parameters<'target>(&'target self) -> Vec<InvocationTargetParameter<'target>>
+    where
+        'ctx: 'target,
+    {
+        self.iter_parameters().collect()
+    }
+
+    /// Retrieves the return type of the invocation target, if known.
+    #[inline]
+    pub fn get_return_type(&self) -> Option<&TUnion> {
+        match self {
+            InvocationTarget::Callable { signature, .. } => signature.get_return_type(),
+            InvocationTarget::FunctionLike { metadata, inferred_return_type, .. } => inferred_return_type
+                .as_deref()
+                .or_else(|| metadata.return_type_metadata.as_ref().map(|type_metadata| &type_metadata.type_union)),
+            InvocationTarget::ExternalMethod { .. } => None,
+        }
+    }
+}
+
+impl<'ctx> InvocationTargetParameter<'ctx> {
+    /// Gets the type (`TUnion`) of the parameter.
+    #[inline]
+    pub fn get_out_type(&self) -> Option<&'ctx TUnion> {
+        match self {
+            InvocationTargetParameter::FunctionLike(metadata) => {
+                metadata.out_type.as_ref().map(|type_metadata| &type_metadata.type_union)
+            }
+            _ => None,
+        }
+    }
+
+    /// Gets the `@param-closure-this` type (`TUnion`) of the parameter, if declared.
+    #[inline]
+    pub fn get_closure_this_type(&self) -> Option<&'ctx TUnion> {
+        match self {
+            InvocationTargetParameter::FunctionLike(metadata) => {
+                metadata.closure_this_type.as_ref().map(|type_metadata| &type_metadata.type_union)
+            }
+            InvocationTargetParameter::Callable(parameter) => parameter.get_closure_this_type(),
+        }
+    }
+
+    /// Gets the type (`TUnion`) of the parameter.
+    #[inline]
+    pub fn get_type(&self) -> Option<&'ctx TUnion> {
+        match self {
+            InvocationTargetParameter::FunctionLike(metadata) => {
+                metadata.get_type_metadata().map(|type_metadata| &type_metadata.type_union)
+            }
+            InvocationTargetParameter::Callable(parameter) => parameter.get_type_signature(),
+        }
+    }
+
+    /// Gets the name of the parameter as a `VariableIdentifier`, if available.
+    #[inline]
+    pub fn get_name(&self) -> Option<&'ctx VariableIdentifier> {
+        match self {
+            InvocationTargetParameter::FunctionLike(metadata) => Some(metadata.get_name()),
+            InvocationTargetParameter::Callable(parameter) => parameter.get_name(),
+        }
+    }
+
+    /// Checks if the parameter is variadic (`...`).
+    #[inline]
+    pub const fn is_variadic(&self) -> bool {
+        match self {
+            InvocationTargetParameter::FunctionLike(metadata) => metadata.flags.is_variadic(),
+            InvocationTargetParameter::Callable(parameter) => parameter.is_variadic(),
+        }
+    }
+
+    #[inline]
+    pub const fn is_by_reference(&self) -> bool {
+        match self {
+            InvocationTargetParameter::FunctionLike(metadata) => metadata.flags.is_by_reference(),
+            InvocationTargetParameter::Callable(parameter) => parameter.is_by_reference(),
+        }
+    }
+
+    /// Checks if the parameter has a default value.
+    #[inline]
+    pub const fn has_default(&self) -> bool {
+        match self {
+            InvocationTargetParameter::FunctionLike(metadata) => metadata.flags.has_default(),
+            InvocationTargetParameter::Callable(parameter) => parameter.has_default(),
+        }
+    }
+
+    /// Get the default value type for the parameter
+    #[inline]
+    pub fn get_default_type(&self) -> Option<&'ctx TUnion> {
+        match self {
+            InvocationTargetParameter::FunctionLike(metadata) => {
+                metadata.get_default_type().map(|type_metadata| &type_metadata.type_union)
+            }
+            InvocationTargetParameter::Callable(_) => None,
+        }
+    }
+}
+
+impl<'ast, 'arena> InvocationArgumentsSource<'ast, 'arena> {
+    #[inline]
+    #[must_use]
+    pub fn argument_count(&self) -> usize {
+        match self {
+            InvocationArgumentsSource::ArgumentList(argument_list) => argument_list.arguments.len(),
+            InvocationArgumentsSource::PipeInput(_) => 1,
+            InvocationArgumentsSource::None(_) => 0,
+            InvocationArgumentsSource::PartialArgumentList(partial_argument_list)
+            | InvocationArgumentsSource::AttributeArgumentList(partial_argument_list) => {
+                partial_argument_list.arguments.len()
+            }
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.argument_count() == 0
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get_argument(&self, index: usize) -> Option<InvocationArgument<'ast, 'arena>> {
+        match self {
+            InvocationArgumentsSource::ArgumentList(argument_list) => {
+                argument_list.arguments.get(index).map(|argument| match argument {
+                    Argument::Positional(positional_argument) => InvocationArgument::Positional(positional_argument),
+                    Argument::Named(named_argument) => InvocationArgument::Named(named_argument),
+                })
+            }
+            InvocationArgumentsSource::PipeInput(pipe) => {
+                if index == 0 {
+                    Some(InvocationArgument::PipedValue(pipe.input))
+                } else {
+                    None
+                }
+            }
+            InvocationArgumentsSource::None(_) => None,
+            InvocationArgumentsSource::PartialArgumentList(partial_argument_list)
+            | InvocationArgumentsSource::AttributeArgumentList(partial_argument_list) => {
+                partial_argument_list.arguments.get(index).map(|partial_argument| match partial_argument {
+                    PartialArgument::Positional(positional_argument) => {
+                        InvocationArgument::Positional(positional_argument)
+                    }
+                    PartialArgument::Named(named_argument) => InvocationArgument::Named(named_argument),
+                    PartialArgument::Placeholder(placeholder) => InvocationArgument::Placeholder(placeholder),
+                    PartialArgument::NamedPlaceholder(named_placeholder) => {
+                        InvocationArgument::NamedPlaceholder(named_placeholder)
+                    }
+                    PartialArgument::VariadicPlaceholder(variadic_placeholder) => {
+                        InvocationArgument::VariadicPlaceholder(variadic_placeholder)
+                    }
+                })
+            }
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn iter_arguments(&self) -> InvocationArgumentsIter<'ast, 'arena> {
+        InvocationArgumentsIter { source: *self, index: 0 }
+    }
+
+    /// Returns a `Vec` of `InvocationArgument` which abstracts over standard arguments
+    /// and piped input. For pipe input, it's a single `PipedValue`.
+    #[inline]
+    pub fn get_arguments(&self) -> Vec<InvocationArgument<'ast, 'arena>> {
+        self.iter_arguments().collect()
+    }
+}
+
+impl<'ast, 'arena> Iterator for InvocationArgumentsIter<'ast, 'arena> {
+    type Item = InvocationArgument<'ast, 'arena>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let argument = self.source.get_argument(self.index);
+        if argument.is_some() {
+            self.index += 1;
+        }
+
+        argument
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.source.argument_count().saturating_sub(self.index);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for InvocationArgumentsIter<'_, '_> {}
+
+impl<'target, 'ctx> Iterator for InvocationTargetParametersIter<'target, 'ctx>
+where
+    'ctx: 'target,
+{
+    type Item = InvocationTargetParameter<'target>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let parameter = self.target.get_parameter(self.index);
+        if parameter.is_some() {
+            self.index += 1;
+        }
+
+        parameter
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.target.parameter_count().saturating_sub(self.index);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'target, 'ctx> ExactSizeIterator for InvocationTargetParametersIter<'target, 'ctx> where 'ctx: 'target {}
+
+impl<'ast, 'arena> InvocationArgument<'ast, 'arena> {
+    /// Checks if this argument is a placeholder (any placeholder variant).
+    #[inline]
+    pub const fn is_placeholder(&self) -> bool {
+        matches!(
+            self,
+            InvocationArgument::Placeholder(_)
+                | InvocationArgument::NamedPlaceholder(_)
+                | InvocationArgument::VariadicPlaceholder(_)
+        )
+    }
+
+    /// Checks if this argument is positional (not named).
+    /// Piped values and positional placeholders are considered positional.
+    #[inline]
+    pub const fn is_positional(&self) -> bool {
+        !matches!(self, InvocationArgument::NamedPlaceholder(_) | InvocationArgument::Named(_))
+    }
+
+    /// Checks if this argument is an unpacked argument (`...$args`).
+    /// Variadic placeholders are considered unpacked.
+    #[inline]
+    pub const fn is_unpacked(&self) -> bool {
+        match self {
+            InvocationArgument::Positional(pos_arg) => pos_arg.ellipsis.is_some(),
+            InvocationArgument::VariadicPlaceholder(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns a reference to the underlying `Expression` of the argument's value.
+    /// Returns `None` for placeholders which have no value expression.
+    #[inline]
+    pub const fn value(&self) -> Option<&'ast Expression<'arena>> {
+        match self {
+            InvocationArgument::PipedValue(expr) => Some(expr),
+            InvocationArgument::Positional(pos_arg) => Some(pos_arg.value),
+            InvocationArgument::Named(named_arg) => Some(named_arg.value),
+            _ => None,
+        }
+    }
+
+    /// If this argument is a standard named argument, returns a reference to it.
+    /// Returns `None` for positional arguments, piped values, or placeholders.
+    #[inline]
+    pub const fn get_named_argument(&self) -> Option<&'ast NamedArgument<'arena>> {
+        match self {
+            InvocationArgument::Named(named_arg) => Some(named_arg),
+            _ => None,
+        }
+    }
+
+    /// Returns the parameter name if this argument specifies one (named arguments and named placeholders).
+    /// Returns `None` for positional arguments and positional placeholders.
+    #[inline]
+    pub const fn get_parameter_name(&self) -> Option<&'arena [u8]> {
+        match self {
+            InvocationArgument::Named(named_arg) => Some(named_arg.name.value),
+            InvocationArgument::NamedPlaceholder(named_ph) => Some(named_ph.name.value),
+            _ => None,
+        }
+    }
+}
+
+impl HasSpan for Invocation<'_, '_, '_> {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl HasSpan for InvocationTarget<'_> {
+    fn span(&self) -> Span {
+        match self {
+            InvocationTarget::Callable { span, .. } => *span,
+            InvocationTarget::FunctionLike { span, .. } => *span,
+            InvocationTarget::ExternalMethod { span, .. } => *span,
+        }
+    }
+}
+
+impl HasSpan for InvocationArgumentsSource<'_, '_> {
+    fn span(&self) -> Span {
+        match self {
+            InvocationArgumentsSource::ArgumentList(arg_list) => arg_list.span(),
+            InvocationArgumentsSource::PipeInput(pipe) => pipe.span(),
+            InvocationArgumentsSource::None(span) => *span,
+            InvocationArgumentsSource::PartialArgumentList(partial_arg_list)
+            | InvocationArgumentsSource::AttributeArgumentList(partial_arg_list) => partial_arg_list.span(),
+        }
+    }
+}
+
+impl HasSpan for InvocationArgument<'_, '_> {
+    fn span(&self) -> Span {
+        match self {
+            InvocationArgument::PipedValue(expr) => expr.span(),
+            InvocationArgument::Positional(pos_arg) => pos_arg.span(),
+            InvocationArgument::Named(named_arg) => named_arg.span(),
+            InvocationArgument::Placeholder(placeholder) => placeholder.span(),
+            InvocationArgument::NamedPlaceholder(named_placeholder) => named_placeholder.span(),
+            InvocationArgument::VariadicPlaceholder(variadic_placeholder) => variadic_placeholder.span(),
+        }
+    }
+}

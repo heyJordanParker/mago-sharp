@@ -1,0 +1,105 @@
+//! Helpers for resolving the *most specific* type a template parameter has
+//! been bound to during inference.
+//!
+//! These are plain bound-resolution helpers that don't depend on the
+//! definition-replacement walker — they're used by both
+//! [`crate::ttype::template::inferred_type_replacer`] and several analyzer
+//! call sites that want to look up the resolved type for a parameter without
+//! triggering a full substitution pass.
+
+use foldhash::HashMap;
+use foldhash::HashSet;
+
+use mago_word::Word;
+
+use crate::metadata::CodebaseMetadata;
+use crate::misc::GenericParent;
+use crate::ttype::add_union_type;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::combiner::CombinerOptions;
+use crate::ttype::get_mixed;
+use crate::ttype::template::TemplateBound;
+use crate::ttype::union::TUnion;
+
+/// Walks the bound graph to find the underlying concrete type a template
+/// parameter eventually resolves to.
+///
+/// When a template parameter's bound is itself another template parameter,
+/// follows the chain through `lower_bounds` until either a concrete type is
+/// found or a cycle is hit (tracked via `visited_entities`).
+#[must_use]
+#[allow(clippy::implicit_hasher)]
+pub fn get_root_template_type(
+    lower_bounds: &HashMap<Word, HashMap<GenericParent, Vec<TemplateBound>>>,
+    parameter_name: Word,
+    defining_entity: &GenericParent,
+    mut visited_entities: HashSet<GenericParent>,
+    codebase: &CodebaseMetadata,
+) -> Option<TUnion> {
+    if visited_entities.contains(defining_entity) {
+        return None;
+    }
+
+    if let Some(mapped) = lower_bounds.get(&parameter_name)
+        && let Some(bounds) = mapped.get(defining_entity)
+    {
+        let mapped_type = get_most_specific_type_from_bounds(bounds, codebase);
+
+        if !mapped_type.is_single() {
+            return Some(mapped_type);
+        }
+
+        let first_template = &mapped_type.get_single();
+
+        if let TAtomic::GenericParameter(TGenericParameter { parameter_name, defining_entity, .. }) = first_template {
+            visited_entities.insert(*defining_entity);
+
+            return Some(
+                get_root_template_type(lower_bounds, *parameter_name, defining_entity, visited_entities, codebase)
+                    .unwrap_or(mapped_type),
+            );
+        }
+
+        return Some(mapped_type);
+    }
+
+    None
+}
+
+/// Combines the relevant bounds for a template parameter into a single union.
+///
+/// "Relevant" is defined by [`get_relevant_bounds`] — typically the bounds
+/// observed at the shallowest appearance depth, plus any equality bounds.
+#[must_use]
+pub fn get_most_specific_type_from_bounds(lower_bounds: &[TemplateBound], codebase: &CodebaseMetadata) -> TUnion {
+    let relevant_bounds = get_relevant_bounds(lower_bounds);
+
+    if relevant_bounds.is_empty() {
+        return get_mixed();
+    }
+
+    if relevant_bounds.len() == 1 {
+        return relevant_bounds[0].bound_type.clone();
+    }
+
+    let mut specific_type = relevant_bounds[0].bound_type.clone();
+
+    for bound in relevant_bounds {
+        specific_type = add_union_type(specific_type, &bound.bound_type, codebase, CombinerOptions::default());
+    }
+
+    specific_type
+}
+
+/// Selects the bounds that should drive the template parameter's resolved type.
+///
+/// Bounds at deeper appearance depths are overshadowed by shallower ones.
+#[must_use]
+pub fn get_relevant_bounds(lower_bounds: &[TemplateBound]) -> Vec<&TemplateBound> {
+    let Some(shallowest_depth) = lower_bounds.iter().map(|bound| bound.appearance_depth).min() else {
+        return vec![];
+    };
+
+    lower_bounds.iter().filter(|bound| bound.appearance_depth == shallowest_depth).collect()
+}

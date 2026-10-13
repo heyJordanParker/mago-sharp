@@ -1,0 +1,386 @@
+use indoc::indoc;
+use mago_allocator::Arena;
+use mago_span::Span;
+use schemars::JsonSchema;
+
+use mago_casing::is_camel_case;
+use mago_casing::is_snake_case;
+use mago_casing::to_camel_case;
+use mago_casing::to_snake_case;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::Level;
+use mago_span::HasSpan;
+use mago_syntax::cst::Assignment;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+use mago_syntax::cst::Variable;
+
+use crate::category::Category;
+use crate::context::LintContext;
+use crate::requirements::RuleRequirements;
+use crate::rule::Config;
+use crate::rule::LintRule;
+use crate::rule::consistency::is_valid_identifier;
+use crate::rule_meta::RuleMeta;
+use crate::settings::RuleSettings;
+
+#[derive(Debug, Clone)]
+pub struct VariableNameRule {
+    meta: &'static RuleMeta,
+    cfg: VariableNameConfig,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct VariableNameConfig {
+    pub level: Level,
+    pub camel: bool,
+    pub either: bool,
+    pub check_parameters: bool,
+}
+
+impl Default for VariableNameConfig {
+    fn default() -> Self {
+        Self { level: Level::Help, camel: false, either: true, check_parameters: true }
+    }
+}
+
+impl Config for VariableNameConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn level(&self) -> Level {
+        self.level
+    }
+}
+
+impl LintRule for VariableNameRule {
+    type Config = VariableNameConfig;
+
+    fn meta() -> &'static RuleMeta {
+        const META: RuleMeta = RuleMeta {
+            name: "Variable Name",
+            code: "variable-name",
+            description: indoc! {"
+                Detects variable declarations that do not follow camel or snake naming convention.
+
+                Variable names should be in camel case or snake case, depending on the configuration.
+            "},
+            good_example: indoc! {r"
+                <?php
+
+                $my_variable = 1;
+
+                function foo($my_param) {}
+            "},
+            bad_example: indoc! {r"
+                <?php
+
+                $MyVariable = 1;
+                $My_Variable = 2;
+
+                function foo($MyParam) {}
+            "},
+            category: Category::Consistency,
+            requirements: RuleRequirements::None,
+        };
+
+        &META
+    }
+
+    fn targets() -> &'static [NodeKind] {
+        const TARGETS: &[NodeKind] = &[NodeKind::Assignment, NodeKind::FunctionLikeParameter];
+
+        TARGETS
+    }
+
+    fn build(settings: &RuleSettings<Self::Config>) -> Self {
+        Self { meta: Self::meta(), cfg: settings.config }
+    }
+
+    fn check<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, node: Node<'_, 'arena>)
+    where
+        A: Arena,
+    {
+        match node {
+            Node::Assignment(assignment) => {
+                self.check_assignment(ctx, assignment);
+            }
+            Node::FunctionLikeParameter(parameter) => {
+                self.check_parameter(ctx, parameter);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl VariableNameRule {
+    fn check_assignment<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, assignment: &Assignment<'arena>)
+    where
+        A: Arena,
+    {
+        if !assignment.operator.is_assign() {
+            return;
+        }
+
+        let Expression::Variable(Variable::Direct(variable)) = assignment.lhs else {
+            return;
+        };
+
+        let name = variable.name;
+
+        if is_special_variable(name) {
+            return;
+        }
+
+        self.check_variable_name(ctx, name, variable.span());
+    }
+
+    fn check_parameter<'arena, A>(
+        &self,
+        ctx: &mut LintContext<'_, 'arena, A>,
+        parameter: &FunctionLikeParameter<'arena>,
+    ) where
+        A: Arena,
+    {
+        if !self.cfg.check_parameters {
+            return;
+        }
+
+        if parameter.is_promoted_property() {
+            return;
+        }
+
+        let name = parameter.variable.name;
+
+        self.check_variable_name(ctx, name, parameter.variable.span());
+    }
+
+    fn check_variable_name<A>(&self, ctx: &mut LintContext<'_, '_, A>, name: &[u8], span: Span)
+    where
+        A: Arena,
+    {
+        let Some(name_str) = std::str::from_utf8(name).ok() else { return };
+        let name = name_str;
+        let clean_name = name.trim_start_matches(|c: char| c == '$' || c == '_' || c.is_ascii_digit());
+
+        if self.cfg.either {
+            if !is_camel_case(clean_name) && !is_snake_case(clean_name) {
+                let camel_name = to_camel_case(clean_name);
+                let snake_name = to_snake_case(clean_name);
+                if !is_valid_identifier(&camel_name) || !is_valid_identifier(&snake_name) {
+                    return;
+                }
+
+                ctx.collector.report(
+                    Issue::new(
+                        self.cfg.level(),
+                        format!("Variable name `{name}` should be in either camel case or snake case."),
+                    )
+                    .with_code(self.meta.code)
+                    .with_annotation(
+                        Annotation::primary(span).with_message(format!("Variable `{name}` is declared here")),
+                    )
+                    .with_note(format!(
+                        "The variable name `{name}` does not follow either camel case or snake naming convention."
+                    ))
+                    .with_help(format!(
+                        "Consider renaming it to `${}` or `${}` to adhere to the naming convention.",
+                        String::from_utf8_lossy(&camel_name),
+                        String::from_utf8_lossy(&snake_name)
+                    )),
+                );
+            }
+
+            return;
+        }
+
+        if self.cfg.camel && !is_camel_case(clean_name) {
+            let suggested_name = to_camel_case(clean_name);
+            if !is_valid_identifier(&suggested_name) {
+                return;
+            }
+
+            ctx.collector.report(
+                Issue::new(self.cfg.level(), format!("Variable name `{name}` should be in camel case."))
+                    .with_code(self.meta.code)
+                    .with_annotation(
+                        Annotation::primary(span).with_message(format!("Variable `{name}` is declared here")),
+                    )
+                    .with_note(format!("The variable name `{name}` does not follow camel naming convention."))
+                    .with_help(format!(
+                        "Consider renaming it to `${}` to adhere to the naming convention.",
+                        String::from_utf8_lossy(&suggested_name)
+                    )),
+            );
+        } else if !self.cfg.camel && !is_snake_case(clean_name) {
+            let suggested_name = to_snake_case(clean_name);
+            if !is_valid_identifier(&suggested_name) {
+                return;
+            }
+
+            ctx.collector.report(
+                Issue::new(self.cfg.level(), format!("Variable name `{name}` should be in snake case."))
+                    .with_code(self.meta.code)
+                    .with_annotation(
+                        Annotation::primary(span).with_message(format!("Variable `{name}` is declared here")),
+                    )
+                    .with_note(format!("The variable name `{name}` does not follow snake naming convention."))
+                    .with_help(format!(
+                        "Consider renaming it to `${}` to adhere to the naming convention.",
+                        String::from_utf8_lossy(&suggested_name)
+                    )),
+            );
+        }
+    }
+}
+
+fn is_special_variable(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"$this"
+            | b"$_"
+            | b"$_GET"
+            | b"$_POST"
+            | b"$_SERVER"
+            | b"$_REQUEST"
+            | b"$_SESSION"
+            | b"$_COOKIE"
+            | b"$_FILES"
+            | b"$_ENV"
+            | b"$GLOBALS"
+            | b"$argc"
+            | b"$argv"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::settings::Settings;
+    use crate::test_lint_failure;
+    use crate::test_lint_success;
+
+    use super::*;
+
+    test_lint_success! {
+        name = snake_case_variable_success,
+        rule = VariableNameRule,
+        settings = |s: &mut Settings| {
+            s.rules.variable_name.config.camel = false;
+            s.rules.variable_name.config.either = false;
+        },
+        code = indoc! {r#"
+            <?php
+
+            $_ = 1;
+            $_foo_bar = 1;
+            $bar_baz = 2;
+            function foo($qux) {}
+        "#}
+    }
+
+    test_lint_success! {
+        name = camel_case_success,
+        rule = VariableNameRule,
+        settings = |s: &mut Settings| {
+            s.rules.variable_name.config.camel = true;
+            s.rules.variable_name.config.either = false;
+        },
+        code = "<?php $myVariableName = 1; $simple = 2;"
+    }
+
+    test_lint_success! {
+        name = either_case_success,
+        rule = VariableNameRule,
+        settings = |s: &mut Settings| {
+            s.rules.variable_name.config.either = true;
+        },
+        code = "<?php $snake_case = 1; $camelCase = 2;"
+    }
+
+    test_lint_success! {
+        name = leading_special_chars_success,
+        rule = VariableNameRule,
+        settings = |s: &mut Settings| { s.rules.variable_name.config.camel = false; },
+        code = "<?php $__hidden_variable = 1; $v1_name = 2;"
+    }
+
+    test_lint_success! {
+        name = special_variables_ignored,
+        rule = VariableNameRule,
+        code = "<?php $this->foo = $_GET; $GLOBALS['x'] = 1; $argv = [];"
+    }
+
+    test_lint_success! {
+        name = parameter_naming_success,
+        rule = VariableNameRule,
+        settings = |s: &mut Settings| { s.rules.variable_name.config.camel = false; },
+        code = "<?php function test($valid_param, $another_one) {}"
+    }
+
+    test_lint_success! {
+        name = skip_parameter_checks,
+        rule = VariableNameRule,
+        settings = |s: &mut Settings| {
+            s.rules.variable_name.config.check_parameters = false;
+            s.rules.variable_name.config.camel = true;
+        },
+        code = "<?php function test($bad_snake_param) {}"
+    }
+
+    test_lint_success! {
+        name = promoted_properties_ignored,
+        rule = VariableNameRule,
+        code = "<?php class Foo { public function __construct(public int $some_Property) {} }"
+    }
+
+    test_lint_success! {
+        name = complex_assignments_ignored,
+        rule = VariableNameRule,
+        code = "<?php $obj->SomeProp = 1; $$dynamic_Var = 2;"
+    }
+
+    test_lint_failure! {
+        name = snake_case_variable_failure,
+        rule = VariableNameRule,
+        count = 2,
+        settings = |s: &mut Settings| {
+            s.rules.variable_name.config.camel = false;
+            s.rules.variable_name.config.either = false;
+        },
+        code = indoc! {r#"
+            <?php
+
+            $_ = 1; // OK
+            $_fooBar = 1;
+            $barBaz = 2;
+            function foo($qux) {} // ok
+        "#}
+    }
+
+    test_lint_failure! {
+        name = camel_case_failure,
+        rule = VariableNameRule,
+        count = 1,
+        settings = |s: &mut Settings| {
+            s.rules.variable_name.config.camel = true;
+            s.rules.variable_name.config.either = false;
+        },
+        code = "<?php $my_variable_name = 1;"
+    }
+
+    test_lint_failure! {
+        name = pascal_case_failure,
+        rule = VariableNameRule,
+        count = 1,
+        settings = |s: &mut Settings| { s.rules.variable_name.config.either = true; },
+        code = "<?php $MyVariable = 1;"
+    }
+}

@@ -1,0 +1,893 @@
+use mago_allocator::Arena;
+use mago_allocator::vec::Vec;
+use mago_allocator::vec_in;
+
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::Statement;
+use mago_syntax::cst::Trivia;
+
+use crate::document::BreakMode;
+use crate::document::Document;
+use crate::document::Group;
+use crate::document::Line;
+use crate::document::Separator;
+use crate::document::Space;
+use crate::internal::FormatterState;
+use crate::internal::comment::Comment;
+use crate::internal::comment::CommentFlags;
+use crate::internal::comment::placement::CommentLinePosition;
+use crate::internal::comment::placement::PlacedComment;
+use crate::internal::comment::placement::Placement;
+
+impl<'arena, A> FormatterState<'_, 'arena, A>
+where
+    A: Arena,
+{
+    #[must_use]
+    pub(crate) fn print_comments(
+        &mut self,
+        before: Option<Document<'arena, A>>,
+        document: Document<'arena, A>,
+        after: Option<Document<'arena, A>>,
+    ) -> Document<'arena, A> {
+        match (before, after) {
+            (Some(before), Some(after)) => Document::Array(vec_in![self.arena; before, document, after]),
+            (Some(before), None) => Document::Array(vec_in![self.arena; before, document]),
+            (None, Some(after)) => Document::Array(vec_in![self.arena; document, after]),
+            (None, None) => document,
+        }
+    }
+
+    /// Returns an iterator over the remaining, unconsumed comments.
+    fn remaining_comments(&self) -> impl Iterator<Item = Comment> {
+        self.all_comments[self.next_comment_index..].iter().map(|trivia| Comment::from_trivia(self.file, trivia))
+    }
+
+    /// Checks if a node is followed by a comment on its own line.
+    ///
+    /// # Arguments
+    ///
+    /// * `span` - The span of the node after which to check for a comment.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the next substantive line is a comment line, `false` otherwise.
+    pub(crate) fn is_followed_by_comment_on_next_line(&self, span: Span) -> bool {
+        let Some(first_char_offset) = self.skip_spaces(Some(span.end_offset()), false) else {
+            return false;
+        };
+
+        if !self.has_newline(first_char_offset, /* backwards */ false) {
+            return false;
+        }
+
+        let Some(next_content_offset) = self.skip_spaces_and_new_lines(Some(first_char_offset), false) else {
+            return false;
+        };
+
+        let remaining_content = &self.source_text[next_content_offset as usize..];
+
+        remaining_content.starts_with(b"//")
+            || remaining_content.starts_with(b"/*")
+            || (remaining_content.starts_with(b"#") && !remaining_content.starts_with(b"#["))
+    }
+
+    /// Checks if a node has a trailing line comment on the same line.
+    ///
+    /// This is different from `is_followed_by_comment_on_next_line` which checks
+    /// for comments on the subsequent line. This method detects trailing comments
+    /// that are on the same line as the node (e.g., `} // comment`).
+    ///
+    /// # Arguments
+    ///
+    /// * `span` - The span of the node to check for same-line trailing comments.
+    ///
+    /// # Returns
+    ///
+    /// `true` if there's a line comment on the same line after the node, `false` otherwise.
+    pub(crate) fn has_same_line_trailing_comment(&self, span: Span) -> bool {
+        let Some(first_char_offset) = self.skip_spaces(Some(span.end_offset()), false) else {
+            return false;
+        };
+
+        // If there's a newline before the next content, the comment is on the next line, not same line
+        if self.has_newline(first_char_offset, /* backwards */ true) {
+            return false;
+        }
+
+        let remaining = &self.source_text[first_char_offset as usize..];
+        remaining.starts_with(b"//") || (remaining.starts_with(b"#") && !remaining.starts_with(b"#["))
+    }
+
+    pub(crate) fn has_leading_own_line_comment(&self, range: Span) -> bool {
+        self.has_comment_with_filter(range, CommentFlags::LEADING, |comment| {
+            self.has_newline(comment.end, /* backwards */ false)
+        })
+    }
+
+    pub(crate) fn has_comment(&self, range: Span, flags: CommentFlags) -> bool {
+        self.has_comment_with_filter(range, flags, |_| true)
+    }
+
+    pub(crate) fn has_comment_with_filter<F>(&self, range: Span, flags: CommentFlags, filter: F) -> bool
+    where
+        F: Fn(&Comment) -> bool,
+    {
+        for comment in self.remaining_comments() {
+            if !filter(&comment) {
+                break;
+            }
+
+            if comment.end <= range.start_offset() {
+                if flags.contains(CommentFlags::LEADING) && comment.matches_flags(flags) {
+                    return true;
+                }
+            } else if range.end_offset() < comment.start && self.is_insignificant(range.end_offset(), comment.start) {
+                if flags.contains(CommentFlags::TRAILING) && comment.matches_flags(flags) {
+                    return true;
+                }
+            } else if comment.end <= range.end_offset() {
+                if flags.contains(CommentFlags::DANGLING) && comment.matches_flags(flags) {
+                    return true;
+                }
+            } else {
+                break;
+            }
+        }
+
+        false
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn has_inner_comment(&self, range: Span) -> bool {
+        for comment in self.remaining_comments() {
+            if comment.start > range.end_offset() {
+                break;
+            }
+
+            if comment.start >= range.start_offset() && comment.end <= range.end_offset() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Returns true if any line comment (not block comment) lies strictly inside the span.
+    #[must_use]
+    #[inline]
+    pub fn has_inner_line_comment_in_range(&self, start: u32, end: u32) -> bool {
+        for comment in self.remaining_comments() {
+            if comment.start > end {
+                break;
+            }
+
+            if comment.start >= start && comment.end <= end && !comment.is_block {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[must_use]
+    pub(crate) fn print_trailing_comments_for_node(&mut self, node: Node<'_, '_>) -> Option<Document<'arena, A>> {
+        self.print_trailing_comments(node.span())
+    }
+
+    #[must_use]
+    pub(crate) fn print_leading_comments(&mut self, range: Span) -> Option<Document<'arena, A>> {
+        self.print_leading_comments_with(range, false)
+    }
+
+    /// Like [`print_leading_comments`] but forces a hard line break after any
+    /// multi-line block comment (i.e. a docblock). Use this at declaration call
+    /// sites — function-like, class-like, property, constant — so docblocks
+    /// always end up on their own line, regardless of how the user wrote them.
+    pub(crate) fn print_leading_comments_for_declaration(&mut self, range: Span) -> Option<Document<'arena, A>> {
+        self.print_leading_comments_with(range, true)
+    }
+
+    /// Print leading comments for a node, picking the declaration-aware variant
+    /// when the node is a declaration so that attached docblocks always end up
+    /// on their own line. Other node kinds preserve the user's spacing as-is.
+    #[must_use]
+    pub(crate) fn print_leading_comments_for_node(&mut self, node: Node<'_, '_>) -> Option<Document<'arena, A>> {
+        if is_declaration_node(node) {
+            self.print_leading_comments_for_declaration(node.span())
+        } else {
+            self.print_leading_comments(node.span())
+        }
+    }
+
+    fn print_leading_comments_with(&mut self, range: Span, force_docblock_break: bool) -> Option<Document<'arena, A>> {
+        let mut parts = vec_in![self.arena];
+
+        while let Some(trivia) = self.all_comments.get(self.next_comment_index) {
+            let comment = Comment::from_trivia(self.file, trivia);
+
+            if comment.end <= range.start_offset() {
+                if self.placed_comments.is_consumed(self.next_comment_index) {
+                    self.next_comment_index += 1;
+                    continue;
+                }
+
+                // Skip leading-placed comments -- emitted by wrap!/add_parens instead
+                if self.placed_comments.is_placed_leading(self.next_comment_index) {
+                    self.next_comment_index += 1;
+                    continue;
+                }
+
+                // Check if comment is in an ignore region - if so, preserve as-is
+                if self.get_ignore_region_for(comment.start).is_some() {
+                    let preserved = Document::String(self.get_source_slice(comment.start, comment.end));
+                    self.push_leading_comment_document(&mut parts, comment, preserved, false, true);
+                } else {
+                    let printed = self.print_comment(comment);
+                    self.push_leading_comment_document(&mut parts, comment, printed, force_docblock_break, false);
+                }
+
+                self.placed_comments.mark_consumed(self.next_comment_index);
+                self.next_comment_index += 1;
+            } else {
+                break;
+            }
+        }
+
+        if parts.is_empty() { None } else { Some(Document::Array(parts)) }
+    }
+
+    #[must_use]
+    pub(crate) fn print_trailing_comments(&mut self, range: Span) -> Option<Document<'arena, A>> {
+        let mut parts = vec_in![self.arena];
+        let mut previous_comment: Option<Comment> = None;
+
+        while let Some(trivia) = self.all_comments.get(self.next_comment_index) {
+            let comment = Comment::from_trivia(self.file, trivia);
+
+            if self.placed_comments.is_consumed(self.next_comment_index) {
+                self.next_comment_index += 1;
+                continue;
+            }
+
+            if range.end_offset() < comment.start && self.is_insignificant(range.end_offset(), comment.start) {
+                let gap = &self.source_text[(range.end_offset() as usize)..(comment.start as usize)];
+                if comment.is_block && gap.contains(&b',') {
+                    break;
+                }
+
+                // Check if comment is in an ignore region - if so, preserve as-is
+                if self.get_ignore_region_for(comment.start).is_some() {
+                    self.print_preserved_trailing_comment(&mut parts, comment);
+                    previous_comment = Some(comment);
+                } else {
+                    previous_comment =
+                        Some(self.print_trailing_comment(&mut parts, comment, previous_comment, range.end_offset()));
+                }
+                self.placed_comments.mark_consumed(self.next_comment_index);
+                self.next_comment_index += 1;
+            } else {
+                break;
+            }
+        }
+
+        if parts.is_empty() { None } else { Some(Document::Array(parts)) }
+    }
+
+    fn push_leading_comment_document(
+        &mut self,
+        parts: &mut Vec<'arena, Document<'arena, A>, A>,
+        comment: Comment,
+        printed: Document<'arena, A>,
+        force_docblock_break: bool,
+        always_break_inline: bool,
+    ) {
+        let comment_document = if comment.is_block {
+            if self.has_newline(comment.end, /* backwards */ false) {
+                if self.has_newline(comment.start, /* backwards */ true) {
+                    Document::Array(vec_in![self.arena;
+                        printed,
+                        Document::BreakParent,
+                        Document::Line(Line::hard()),
+                    ])
+                } else {
+                    Document::Array(vec_in![self.arena; printed, Document::Line(Line::default())])
+                }
+            } else if force_docblock_break && !comment.is_single_line {
+                Document::Array(vec_in![self.arena;
+                    printed,
+                    Document::BreakParent,
+                    Document::Line(Line::hard()),
+                ])
+            } else {
+                Document::Array(vec_in![self.arena; printed, Document::Space(Space::soft())])
+            }
+        } else if always_break_inline || self.has_newline(comment.end, /* backwards */ false) {
+            Document::Array(vec_in![self.arena; printed, Document::BreakParent, Document::Line(Line::hard())])
+        } else {
+            Document::Array(vec_in![self.arena; printed, Document::Space(Space::soft())])
+        };
+
+        parts.push(comment_document);
+
+        if self
+            .skip_spaces(Some(comment.end), false)
+            .and_then(|idx| self.skip_newline(Some(idx), false))
+            .is_some_and(|i| self.has_newline(i, /* backwards */ false))
+        {
+            parts.push(Document::BreakParent);
+            parts.push(Document::Line(Line::hard()));
+        }
+    }
+
+    fn own_line_comment_suffix(&self, start: u32) -> Vec<'arena, Document<'arena, A>, A> {
+        let mut parts = vec_in![self.arena; Document::BreakParent, Document::Line(Line::hard())];
+
+        if self.is_previous_line_empty(start) {
+            parts.push(Document::Line(Line::hard()));
+        }
+
+        parts
+    }
+
+    fn print_trailing_comment(
+        &mut self,
+        parts: &mut Vec<'arena, Document<'arena, A>, A>,
+        comment: Comment,
+        previous: Option<Comment>,
+        token_end_offset: u32,
+    ) -> Comment {
+        let printed = self.print_comment(comment);
+
+        if previous.is_some_and(|c| c.has_line_suffix && !c.is_inline_comment())
+            || self.has_newline(comment.start, /* backwards */ true)
+        {
+            parts.push(printed);
+            parts.push(Document::LineSuffix(self.own_line_comment_suffix(comment.start)));
+
+            return comment.with_line_suffix(true);
+        }
+
+        if !comment.is_block || previous.is_some_and(|c| c.has_line_suffix) {
+            parts.push(Document::LineSuffix(vec_in![self.arena; Document::Space(Space::soft()), printed]));
+            return comment.with_line_suffix(true);
+        }
+
+        let followed_by_semicolon = self
+            .skip_spaces(Some(comment.end), false)
+            .map(|idx| self.source_text.get(idx as usize))
+            .is_some_and(|c| c == Some(&b';'));
+
+        let has_semicolon_in_gap =
+            self.source_text[(token_end_offset as usize)..(comment.start as usize)].contains(&b';');
+
+        if followed_by_semicolon || has_semicolon_in_gap {
+            parts.push(Document::LineSuffix(vec_in![self.arena; Document::Space(Space::soft()), printed]));
+
+            return comment.with_line_suffix(true);
+        }
+
+        parts.push(Document::Array(vec_in![self.arena; Document::Space(Space::soft()), printed]));
+
+        comment.with_line_suffix(false)
+    }
+
+    /// Prints a trailing comment that is within an ignore region, preserving its original formatting.
+    fn print_preserved_trailing_comment(&mut self, parts: &mut Vec<'arena, Document<'arena, A>, A>, comment: Comment) {
+        // Preserve the comment exactly as-is from source
+        let preserved = self.get_source_slice(comment.start, comment.end);
+
+        if self.has_newline(comment.start, /* backwards */ true) {
+            parts.push(Document::String(preserved));
+            parts.push(Document::LineSuffix(self.own_line_comment_suffix(comment.start)));
+        } else if comment.is_inline_comment() {
+            parts.push(Document::LineSuffix(
+                vec_in![self.arena; Document::Space(Space::soft()), Document::String(preserved)],
+            ));
+        } else {
+            parts.push(Document::Array(
+                vec_in![self.arena; Document::Space(Space::soft()), Document::String(preserved)],
+            ));
+        }
+    }
+
+    fn take_comments_while(&mut self, mut matches: impl FnMut(&Self, Comment) -> bool) -> Vec<'arena, Comment, A> {
+        let mut comments = vec_in![self.arena];
+        let mut consumed_count = 0;
+
+        for (offset, trivia) in self.all_comments[self.next_comment_index..].iter().enumerate() {
+            let index = self.next_comment_index + offset;
+            let comment = Comment::from_trivia(self.file, trivia);
+
+            if !matches(self, comment) {
+                break;
+            }
+
+            consumed_count += 1;
+            if self.placed_comments.is_consumed(index) {
+                continue;
+            }
+
+            self.placed_comments.mark_consumed(index);
+            comments.push(comment);
+        }
+
+        self.next_comment_index += consumed_count;
+
+        comments
+    }
+
+    #[must_use]
+    pub(crate) fn print_inner_comment(&mut self, range: Span) -> Option<Document<'arena, A>> {
+        let comments = self.take_comments_while(|_, comment| {
+            comment.start >= range.start_offset() && comment.end <= range.end_offset()
+        });
+
+        let must_break = comments.iter().any(|comment| !comment.is_block);
+        let mut parts = vec_in![self.arena];
+        for comment in comments {
+            parts.push(self.print_comment(comment));
+        }
+
+        if parts.is_empty() {
+            return None;
+        }
+
+        let document = Document::Array(Document::join(self.arena, parts, Separator::HardLine));
+
+        Some(Document::Group(
+            Group::new(vec_in![self.arena;
+                Document::Indent(vec_in![self.arena; Document::Line(Line::default()), document]),
+                Document::Line(Line::default()),
+            ])
+            .with_break_mode(if must_break { BreakMode::Force } else { BreakMode::Auto }),
+        ))
+    }
+
+    #[must_use]
+    pub(crate) fn print_dangling_comments(&mut self, range: Span, indented: bool) -> Option<Document<'arena, A>> {
+        let comments = self.take_comments_while(|_, comment| comment.end <= range.end_offset());
+
+        let mut parts = vec_in![self.arena];
+        for comment in comments {
+            if !indented && self.is_next_line_empty_after_index(comment.end) {
+                parts.push(Document::Array(
+                    vec_in![self.arena; self.print_comment(comment), Document::Line(Line::hard())],
+                ));
+            } else {
+                parts.push(self.print_comment(comment));
+            }
+        }
+
+        if parts.is_empty() {
+            return None;
+        }
+
+        let document = Document::Array(Document::join(self.arena, parts, Separator::HardLine));
+
+        Some(if indented {
+            Document::Array(vec_in![self.arena;
+                Document::Indent(vec_in![self.arena; Document::BreakParent, Document::Line(Line::hard()), document]),
+                Document::Line(Line::hard()),
+            ])
+        } else {
+            Document::Array(vec_in![self.arena; document, Document::Line(Line::hard())])
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn print_dangling_comments_between_nodes(
+        &mut self,
+        after: Span,
+        before: Span,
+    ) -> Option<Document<'arena, A>> {
+        let comments = self.take_comments_while(|state, comment| {
+            comment.start >= after.end_offset()
+                && comment.end <= before.start_offset()
+                && state.is_insignificant(after.end_offset(), comment.start)
+        });
+
+        let mut parts = vec_in![self.arena];
+        for comment in comments {
+            parts.push(self.print_comment(comment));
+        }
+
+        if parts.is_empty() {
+            return None;
+        }
+
+        Some(Document::Indent(vec_in![self.arena;
+            Document::BreakParent,
+            Document::Line(Line::hard()),
+            Document::Array(Document::join(self.arena, parts, Separator::HardLine)),
+        ]))
+    }
+
+    /// Prints trailing comments that appear between two nodes, suitable for use after `{`.
+    /// Unlike `print_dangling_comments_between_nodes`, this uses LineSuffix for inline comments
+    /// to keep them on the same line as the preceding content.
+    #[must_use]
+    pub(crate) fn print_trailing_comments_between_nodes(
+        &mut self,
+        after: Span,
+        before: Span,
+    ) -> Option<Document<'arena, A>> {
+        let mut parts = vec_in![self.arena];
+        let mut previous_comment: Option<Comment> = None;
+
+        while let Some(trivia) = self.all_comments.get(self.next_comment_index) {
+            let comment = Comment::from_trivia(self.file, trivia);
+
+            if self.placed_comments.is_consumed(self.next_comment_index) {
+                self.next_comment_index += 1;
+                continue;
+            }
+
+            // Block comments already placed as leading are left for the node they were placed on.
+            if comment.is_block && self.placed_comments.is_placed_leading(self.next_comment_index) {
+                break;
+            }
+
+            let is_between = comment.start >= after.end_offset() && comment.end <= before.start_offset();
+            let gap_is_ok =
+                after.end_offset() == comment.start || self.is_insignificant(after.end_offset(), comment.start);
+
+            if is_between && gap_is_ok {
+                previous_comment =
+                    Some(self.print_trailing_comment(&mut parts, comment, previous_comment, after.end_offset()));
+                self.placed_comments.mark_consumed(self.next_comment_index);
+                self.next_comment_index += 1;
+            } else {
+                break;
+            }
+        }
+
+        if parts.is_empty() { None } else { Some(Document::Array(parts)) }
+    }
+
+    /// Collect inline block comments between two spans. Returns `None` if no comments
+    /// are present OR if any comment is not a block comment (line comments force a break).
+    #[must_use]
+    pub(crate) fn collect_inline_block_comments_between(
+        &mut self,
+        after: Span,
+        before: Span,
+    ) -> Option<Document<'arena, A>> {
+        let mut collected: std::vec::Vec<usize> = std::vec::Vec::new();
+
+        let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+        let mut gap_end = after.end_offset() as usize;
+
+        for (offset, trivia) in self.all_comments[self.next_comment_index..].iter().enumerate() {
+            let index = self.next_comment_index + offset;
+            let comment = Comment::from_trivia(self.file, trivia);
+
+            if comment.start < after.end_offset() {
+                continue;
+            }
+
+            if comment.end > before.start_offset() {
+                break;
+            }
+
+            let pre_gap = &self.source_text[gap_end..(comment.start as usize)];
+            if !pre_gap.iter().copied().all(is_ws) {
+                return None;
+            }
+
+            if self.placed_comments.is_consumed(index) {
+                gap_end = comment.end as usize;
+                continue;
+            }
+
+            if !comment.is_block {
+                return None;
+            }
+
+            collected.push(index);
+            gap_end = comment.end as usize;
+        }
+
+        let tail = &self.source_text[gap_end..(before.start_offset() as usize)];
+        if !tail.iter().copied().all(is_ws) {
+            return None;
+        }
+
+        if collected.is_empty() {
+            return None;
+        }
+
+        let mut parts = vec_in![self.arena];
+        for index in &collected {
+            self.placed_comments.mark_consumed(*index);
+            let trivia = &self.all_comments[*index];
+            let comment = Comment::from_trivia(self.file, trivia);
+            parts.push(self.print_comment(comment));
+            parts.push(Document::Space(Space::soft()));
+        }
+
+        if let Some(last) = collected.last().copied()
+            && self.next_comment_index <= last
+        {
+            self.next_comment_index = last + 1;
+        }
+
+        Some(Document::Array(parts))
+    }
+
+    #[must_use]
+    fn print_comment(&self, comment: Comment) -> Document<'arena, A> {
+        let content = &self.source_text[comment.start as usize..comment.end as usize];
+
+        if comment.is_inline_comment() {
+            if !comment.is_single_line {
+                return Document::String(content);
+            }
+
+            let new_content: &'arena [u8] = if comment.is_shell_comment {
+                let mut buf = Vec::with_capacity_in(content.len() + 2, self.arena);
+                buf.extend_from_slice(b"// ");
+                buf.extend_from_slice(content[1..].trim_ascii());
+
+                buf.leak()
+            } else if content.starts_with(b"/**") && !content.starts_with(b"/** ") && content.len() > 5 {
+                let inner = &content[3..content.len() - 2];
+                let mut buf = Vec::with_capacity_in(content.len() + 1, self.arena);
+                buf.extend_from_slice(b"/** ");
+                buf.extend_from_slice(inner.trim_ascii());
+                buf.extend_from_slice(b" */");
+
+                buf.leak()
+            } else {
+                content
+            };
+
+            return Document::String(new_content);
+        }
+
+        if !content.contains(&b'\n') && !content.contains(&b'\r') {
+            return Document::String(content);
+        }
+
+        let lines = self.split_lines(content);
+        let mut contents = Vec::with_capacity_in(lines.len() * 2, self.arena);
+
+        let should_add_asterisks = if content.starts_with(b"/**") {
+            true
+        } else {
+            let content_lines = &lines[1..lines.len() - 1];
+
+            let potential_prefix = content_lines
+                .iter()
+                .map(|line| line.trim_ascii_start())
+                .find(|trimmed| !trimmed.is_empty())
+                .and_then(|first_line| first_line.first().copied());
+
+            if let Some(prefix_byte) = potential_prefix {
+                if !prefix_byte.is_ascii_alphanumeric() && prefix_byte != b'*' {
+                    let all_lines_match =
+                        content_lines.iter().all(|line| line.trim_ascii_start().first() == Some(&prefix_byte));
+
+                    !all_lines_match
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        };
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed_line = line.trim_ascii_start();
+
+            let processed_line: &'arena [u8] = if i == 0 {
+                line
+            } else if !should_add_asterisks {
+                let mut buf = Vec::with_capacity_in(trimmed_line.len() + 1, self.arena);
+                buf.push(b' ');
+                buf.extend_from_slice(trimmed_line.trim_ascii_end());
+                buf.leak()
+            } else if trimmed_line.is_empty() {
+                b" *"
+            } else if trimmed_line.starts_with(b"*") {
+                let mut buf = Vec::with_capacity_in(trimmed_line.len() + 1, self.arena);
+                buf.push(b' ');
+                buf.extend_from_slice(trimmed_line.trim_ascii_end());
+                buf.leak()
+            } else {
+                let mut buf = Vec::with_capacity_in(trimmed_line.len() + 3, self.arena);
+                buf.extend_from_slice(b" * ");
+                buf.extend_from_slice(trimmed_line.trim_ascii_end());
+                buf.leak()
+            };
+
+            contents.push(Document::String(processed_line));
+            if i < lines.len() - 1 {
+                contents.push(Document::Line(Line::hard()));
+            }
+        }
+
+        Document::Group(Group::new(contents))
+    }
+
+    pub(crate) fn has_placed_leading_own_line_comment(&self, span: Span) -> bool {
+        self.has_placed_comment_where(span, Placement::Leading, |_, t| {
+            !t.kind.is_block_comment() || t.value.contains(&b'\n')
+        })
+    }
+
+    pub(crate) fn has_placed_trailing_line_comment(&self, span: Span) -> bool {
+        self.has_placed_comment_where(span, Placement::Trailing, |_, t| !t.kind.is_block_comment())
+    }
+
+    /// Check if any placed comment on `span` satisfies the predicate.
+    pub(crate) fn has_placed_comment_where<F>(&self, span: Span, placement: Placement, f: F) -> bool
+    where
+        F: Fn(&PlacedComment, &Trivia<'arena>) -> bool,
+    {
+        self.placed_comments.by_placement(span, placement).any(|placed| {
+            let trivia = &self.all_comments[placed.index];
+            f(placed, trivia)
+        })
+    }
+
+    /// Take placed leading comments as a Document, consuming them.
+    #[must_use]
+    pub(crate) fn take_placed_leading(&mut self, span: Span) -> Option<Document<'arena, A>> {
+        let comments: std::vec::Vec<_> = self.placed_comments.by_placement(span, Placement::Leading).copied().collect();
+        if comments.is_empty() {
+            return None;
+        }
+
+        let mut parts = vec_in![self.arena];
+        for placed in &comments {
+            if self.placed_comments.is_consumed(placed.index) {
+                continue;
+            }
+
+            self.placed_comments.mark_consumed(placed.index);
+            let trivia = &self.all_comments[placed.index];
+            let comment = Comment::from_trivia(self.file, trivia);
+
+            parts.push(self.print_comment(comment));
+
+            if !comment.is_block || !comment.is_single_line {
+                // Line comments and multi-line block comments always end the line.
+                parts.push(Document::BreakParent);
+                parts.push(Document::Line(Line::hard()));
+            } else if self.has_newline(comment.end, /* backwards */ false) {
+                // A line break followed the comment in the source, so allow one here.
+                parts.push(Document::Line(Line::default()));
+            } else {
+                // The comment shared a line with what followed it, so keep them together.
+                parts.push(Document::Space(Space::soft()));
+            }
+        }
+
+        if parts.is_empty() { None } else { Some(Document::Array(parts)) }
+    }
+
+    /// Take placed trailing comments as a Document, consuming them.
+    #[must_use]
+    pub(crate) fn take_placed_trailing(&mut self, span: Span) -> Option<Document<'arena, A>> {
+        let comments: std::vec::Vec<_> =
+            self.placed_comments.by_placement(span, Placement::Trailing).copied().collect();
+        if comments.is_empty() {
+            return None;
+        }
+
+        let mut parts = vec_in![self.arena];
+        for placed in &comments {
+            if self.placed_comments.is_consumed(placed.index) {
+                continue;
+            }
+
+            self.placed_comments.mark_consumed(placed.index);
+            let trivia = &self.all_comments[placed.index];
+            let comment = Comment::from_trivia(self.file, trivia);
+
+            if !trivia.kind.is_block_comment() && placed.line_position == CommentLinePosition::EndOfLine {
+                let printed = self.print_comment(comment);
+                parts.push(Document::LineSuffix(vec_in![self.arena; Document::Space(Space::soft()), printed]));
+                parts.push(Document::BreakParent);
+            } else if !trivia.kind.is_block_comment() {
+                parts.push(Document::BreakParent);
+                parts.push(Document::Line(Line::hard()));
+                parts.push(self.print_comment(comment));
+            } else {
+                parts.push(Document::Space(Space::soft()));
+                parts.push(self.print_comment(comment));
+            }
+        }
+
+        if parts.is_empty() { None } else { Some(Document::Array(parts)) }
+    }
+
+    /// Wrap document in parens, including any placed leading comments inside.
+    #[must_use]
+    pub(crate) fn add_parens_with_placed_leading(
+        &mut self,
+        document: Document<'arena, A>,
+        node: Node<'arena, 'arena>,
+        has_leading_comments: bool,
+    ) -> Document<'arena, A> {
+        let placed = self.take_placed_leading(node.span());
+        let (doc, has_leading) = if let Some(p) = placed {
+            (Document::Array(vec_in![self.arena; p, document]), true)
+        } else {
+            (document, has_leading_comments)
+        };
+
+        self.add_parens(doc, node, has_leading)
+    }
+
+    /// Output any placed leading comments that no inner add_parens claimed.
+    #[must_use]
+    pub(crate) fn prepend_unclaimed_placed_leading(
+        &mut self,
+        span: Span,
+        document: Document<'arena, A>,
+    ) -> Document<'arena, A> {
+        // Wrapper nodes such as `Expression` share a span with the node they hold.
+        // Leave the comments to the outer node, so any parentheses added to it enclose them too.
+        if self.nth_parent_kind(1).is_some_and(|parent| parent.span() == span) {
+            return document;
+        }
+
+        match self.take_placed_leading(span) {
+            // Separate comments from preceding prefix operators.
+            Some(placed) if matches!(self.nth_parent_kind(1), Some(Node::UnaryPrefix(_))) => {
+                Document::Array(vec_in![self.arena; Document::Space(Space::soft()), placed, document])
+            }
+            Some(placed) => Document::Array(vec_in![self.arena; placed, document]),
+            None => document,
+        }
+    }
+}
+
+/// Returns `true` for CST nodes that represent declarations whose attached
+/// docblocks should always live on their own line. Listed conservatively:
+/// expression-shaped wrappers around declarations (closures, anonymous
+/// classes) are deliberately excluded because they appear in expression
+/// contexts where forcing a line break would split arguments or operands.
+///
+/// `Statement` and `ClassLikeMember` are the wrapper enums that actually
+/// consume leading comments via `wrap!` at the top level and inside class
+/// bodies respectively, so we look through them to their declaration variants.
+#[inline]
+const fn is_declaration_node(node: Node<'_, '_>) -> bool {
+    if let Node::Statement(stmt) = node {
+        return matches!(
+            stmt,
+            Statement::Class(_)
+                | Statement::Interface(_)
+                | Statement::Trait(_)
+                | Statement::Enum(_)
+                | Statement::Function(_)
+                | Statement::Constant(_)
+        );
+    }
+
+    if let Node::ClassLikeMember(_) = node {
+        return true;
+    }
+
+    matches!(
+        node,
+        Node::Function(_)
+            | Node::Method(_)
+            | Node::Class(_)
+            | Node::Interface(_)
+            | Node::Trait(_)
+            | Node::Enum(_)
+            | Node::Property(_)
+            | Node::PlainProperty(_)
+            | Node::HookedProperty(_)
+            | Node::ClassLikeConstant(_)
+            | Node::Constant(_)
+            | Node::EnumCase(_)
+    )
+}

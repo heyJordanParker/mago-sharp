@@ -1,0 +1,377 @@
+use mago_allocator::Arena;
+use std::rc::Rc;
+
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::add_union_type;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::intersect_union_types;
+use mago_codex::ttype::union::TUnion;
+use mago_names::display_sharp_member;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::PropertyAccess;
+
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::effects::summary::record_function_values;
+use crate::error::AnalysisError;
+use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::assignment::PropertyWriteKind;
+use crate::expression::assignment::get_written_literal_type;
+use crate::resolver::method::get_declared_type;
+use crate::resolver::property::resolve_instance_properties;
+use crate::utils::expression::get_property_access_expression_id;
+use crate::utils::expression::is_this;
+use crate::utils::get_type_diff;
+use crate::utils::int_refused_for_float;
+use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_type;
+use crate::utils::names::display_value_type;
+use crate::utils::report_int_for_float;
+
+#[inline]
+pub fn analyze<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    property_access: &PropertyAccess<'arena>,
+    is_null_safe: bool,
+    assigned_value_type: &TUnion,
+    assigned_value: Option<&Expression<'arena>>,
+    write_kind: PropertyWriteKind,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let assigned_value_span = assigned_value.map(HasSpan::span);
+    let property_access_id = get_property_access_expression_id(
+        property_access.object,
+        &property_access.property,
+        is_null_safe,
+        block_context.scope.get_class_like_name(),
+        context.resolved_names,
+        Some(context.codebase),
+    );
+
+    let was_inside_assignment = block_context.flags.inside_assignment();
+    block_context.flags.set_inside_assignment(true);
+    let resolution_result = resolve_instance_properties(
+        context,
+        block_context,
+        artifacts,
+        property_access.object,
+        &property_access.property,
+        property_access.arrow.span(),
+        is_null_safe,
+        true, // `for_assignment`
+    )?;
+    block_context.flags.set_inside_assignment(was_inside_assignment);
+
+    // A property a PHP# class declares as a `List`, a `Map` or a `Set`, or a union of them, takes only a literal of a
+    // collection it declares, from `=` and from `??=`, and keeps the collection its literal names when one empties it.
+    // A list literal written to a `Set` is that `Set`. Its object is analyzed by now, so the property is found through
+    // any object: a local, `this`, an element, a call or another property.
+    let target = Expression::Access(Access::Property(property_access.clone()));
+    let declared_type = match write_kind {
+        PropertyWriteKind::Direct | PropertyWriteKind::Coalesce if context.dialect.is_sharp() => {
+            get_declared_type(context, block_context, artifacts, &target)
+        }
+        _ => None,
+    };
+    let mut literal_type = None;
+    if let Some(declared_type) = &declared_type {
+        if let Some(assigned_value) = assigned_value {
+            check_sharp_literal_kind(context, assigned_value, declared_type);
+        }
+        literal_type = get_written_literal_type(
+            context,
+            artifacts,
+            &target,
+            assigned_value,
+            assigned_value_type,
+            declared_type,
+            write_kind == PropertyWriteKind::Coalesce,
+        );
+    }
+    let assigned_value_type = literal_type.as_ref().unwrap_or(assigned_value_type);
+
+    let mut resolved_property_type = None;
+    let mut readable_type: Option<TUnion> = None;
+    let mut has_read_clamp = false;
+    let mut matched_all_properties = true;
+    let mut widened_assigned_type: Option<TUnion> = None;
+    for resolved_property in resolution_result.properties {
+        has_read_clamp |= resolved_property.read_type.is_some();
+
+        // A magic-governed write goes through `__set()`, never through the real property of the
+        // same name that may exist on the declaring class (e.g. a `readonly` backing property).
+        if !resolved_property.is_magic
+            && let Some(declaring_class_id) = resolved_property.declaring_class_id
+        {
+            crate::readonly::check_property_write(
+                context,
+                block_context,
+                artifacts,
+                declaring_class_id,
+                resolved_property.property_name,
+                property_access_id,
+                property_access.span(),
+                property_access.property.span(),
+                write_kind,
+            );
+        }
+
+        let mut union_comparison_result = ComparisonResult::with_sharp_rules(context.dialect.is_sharp());
+
+        let type_match_found = union_comparator::is_contained_by(
+            context.codebase,
+            assigned_value_type,
+            &resolved_property.property_type,
+            assigned_value_type.ignore_nullable_issues(),
+            assigned_value_type.ignore_falsable_issues(),
+            false,
+            &mut union_comparison_result,
+        );
+
+        if type_match_found && let Some(value_span) = assigned_value_span {
+            record_function_values(
+                context,
+                artifacts,
+                assigned_value_type,
+                &resolved_property.property_type,
+                value_span,
+                IssueCode::InvalidPropertyAssignmentValue,
+            );
+        }
+
+        if type_match_found && let Some(replacement) = union_comparison_result.replacement_union_type.take() {
+            widened_assigned_type = Some(match widened_assigned_type {
+                Some(existing) => add_union_type(existing, &replacement, context.codebase, CombinerOptions::default()),
+                None => replacement,
+            });
+        }
+
+        if !type_match_found {
+            let property_name = match resolved_property.declaring_class_id {
+                Some(class_id) if context.dialect.is_sharp() => {
+                    display_sharp_member(display_class_like_name(context, class_id), resolved_property.property_name)
+                }
+                _ => resolved_property.property_name.to_string(),
+            };
+            let property_type_str = display_type(context, &resolved_property.property_type);
+            let assigned_type_str = display_value_type(context, assigned_value_type, &resolved_property.property_type);
+
+            let mut issue;
+
+            if let Some(value) =
+                assigned_value.and_then(|value| int_refused_for_float(&union_comparison_result, artifacts, value))
+            {
+                report_int_for_float(
+                    context,
+                    IssueCode::InvalidPropertyAssignmentValue,
+                    value,
+                    &resolved_property.property_type,
+                );
+            } else if union_comparison_result.type_coerced == Some(true) {
+                let issue_kind;
+
+                if union_comparison_result.type_coerced_from_nested_mixed.unwrap_or(false) {
+                    issue_kind = IssueCode::MixedPropertyTypeCoercion;
+                    issue = Issue::error(format!(
+                        "A value with a less specific type `{assigned_type_str}` is being assigned to property `{property_name}` ({property_type_str})."
+                    ))
+                    .with_note("The assigned value contains a nested `mixed` type, which can hide potential bugs.");
+                } else {
+                    issue_kind = IssueCode::PropertyTypeCoercion;
+                    issue = Issue::error(format!(
+                        "A value of a less specific type `{assigned_type_str}` is being assigned to property `{property_name}` ({property_type_str})."
+                    ))
+                    .with_note(format!("While `{assigned_type_str}` can be assigned to `{property_type_str}`, it is a wider type which may accept values that are invalid for this property."));
+                }
+
+                if let Some(value_span) = assigned_value_span {
+                    issue = issue.with_annotation(
+                        Annotation::primary(value_span)
+                            .with_message(format!("This value has the less specific type `{assigned_type_str}`")),
+                    );
+                } else {
+                    issue = issue.with_annotation(
+                        Annotation::primary(property_access.span())
+                            .with_message("The value assigned to this property is of a less specific type"),
+                    );
+                }
+
+                if let Some(property_span) = resolved_property.property_span {
+                    issue = issue.with_annotation(Annotation::secondary(property_span).with_message(format!(
+                        "This property `{property_name}` is declared with type `{property_type_str}`"
+                    )));
+                }
+
+                if let Some(type_diff) = get_type_diff(context, &resolved_property.property_type, assigned_value_type) {
+                    issue = issue.with_note(type_diff);
+                }
+
+                context.collector.report_with_code(
+                    issue_kind,
+                    issue.with_help(
+                        "Consider adding a type assertion to narrow the type of the value before the assignment.",
+                    ),
+                );
+            } else {
+                if let Some(value_span) = assigned_value_span {
+                    issue = Issue::error(format!(
+                        "Invalid type for property `{property_name}`: expected `{property_type_str}`, but got `{assigned_type_str}`."
+                    ))
+                    .with_annotation(
+                        Annotation::primary(value_span)
+                            .with_message(format!("This expression has type `{assigned_type_str}`")),
+                    );
+                } else {
+                    issue = Issue::error(format!(
+                        "Invalid assignment to property `{property_name}`: cannot assign value of type `{assigned_type_str}` to expected type `{property_type_str}`."
+                    ))
+                    .with_annotation(
+                        Annotation::primary(property_access.span())
+                            .with_message("The value assigned to this property is of an incompatible type"),
+                    );
+                }
+
+                if let Some(property_span) = resolved_property.property_span {
+                    issue = issue.with_annotation(Annotation::secondary(property_span).with_message(format!(
+                        "This property `{property_name}` is declared with type `{property_type_str}`"
+                    )));
+                }
+
+                if let Some(type_diff) = get_type_diff(context, &resolved_property.property_type, assigned_value_type) {
+                    issue = issue.with_note(type_diff);
+                }
+
+                context.collector.report_with_code(
+                    IssueCode::InvalidPropertyAssignmentValue,
+                    issue
+                         .with_note(format!("The type `{assigned_type_str}` is not compatible with and cannot be assigned to `{property_type_str}`."))
+                         .with_help("Change the assigned value to match the property's type, or update the property's type declaration."),
+                );
+            }
+        }
+
+        // The type a read yields for this property: the distinct read type when writes and reads
+        // diverge — a magic property (writes go through `__set`, reads through `__get`) or a hook
+        // property with a wider `set` parameter (writes go through `set`, reads through `get`) —
+        // else the property type itself (writes round-trip).
+        let property_readable_type =
+            resolved_property.read_type.clone().unwrap_or_else(|| resolved_property.property_type.clone());
+        readable_type = Some(add_optional_union_type(property_readable_type, readable_type.as_ref(), context.codebase));
+
+        resolved_property_type = Some(add_optional_union_type(
+            resolved_property.property_type,
+            resolved_property_type.as_ref(),
+            context.codebase,
+        ));
+
+        matched_all_properties &= type_match_found;
+    }
+
+    let mut resulting_type = if matched_all_properties && context.settings.memoize_properties {
+        Some(widened_assigned_type.unwrap_or_else(|| assigned_value_type.clone()))
+    } else {
+        resolved_property_type
+    };
+
+    if resolution_result.has_ambiguous_path
+        || resolution_result.encountered_mixed
+        || resolution_result.has_possibly_defined_property
+    {
+        resulting_type = Some(add_optional_union_type(get_mixed(), resulting_type.as_ref(), context.codebase));
+    }
+
+    if resolution_result.has_error_path || resolution_result.has_invalid_path || resolution_result.encountered_null {
+        resulting_type = Some(add_optional_union_type(get_never(), resulting_type.as_ref(), context.codebase));
+    }
+
+    let resulting_type = Rc::new(resulting_type.unwrap_or_else(get_never));
+
+    if context.settings.memoize_properties
+        && !resolution_result.has_unreadable_property
+        && let Some(property_access_id) = property_access_id
+    {
+        // Memoize the written value so later reads of the same access see it — but only to the
+        // extent it survives a read. When writes and reads diverge — a magic property (read goes
+        // through `__get`, yielding the `@property-read` type) or a hook property with a wider `set`
+        // parameter (read goes through `get`, yielding the property type) — only the part of the
+        // written value that overlaps the read type is observable: intersect with it, and fall back
+        // to the full read type when the write converts (a value that shares nothing with the read
+        // type, e.g. a string coerced to int). Real and dynamic (`stdClass`) properties round-trip
+        // and have no distinct read type, so their written value is memoized as-is.
+        let memoized_type = if has_read_clamp && let Some(readable) = &readable_type {
+            let observable = intersect_union_types(readable, &resulting_type, context.codebase)
+                .filter(|intersection| !intersection.is_never());
+
+            Rc::new(observable.unwrap_or_else(|| readable.clone()))
+        } else {
+            Rc::clone(&resulting_type)
+        };
+
+        block_context.locals.insert(property_access_id, memoized_type);
+    }
+
+    artifacts.set_rc_expression_type(property_access, resulting_type);
+
+    if let Some(property_access_id) = property_access_id {
+        block_context.definitely_uninitialized_property_ids.remove(&property_access_id);
+    }
+
+    if matches!(write_kind, PropertyWriteKind::Direct | PropertyWriteKind::Coalesce)
+        && block_context.flags.collect_initializations()
+        && is_this(property_access.object, context.resolved_names)
+        && let ClassLikeMemberSelector::Identifier(ident) = &property_access.property
+    {
+        let property_name = mago_word::concat_word!(b"$", ident.value);
+        block_context.definitely_initialized_properties.insert(property_name);
+        block_context.possibly_initialized_properties.insert(property_name);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = memoized_property_assignment,
+        code = indoc! {"
+            <?php
+
+            class A {
+                /** @var int<0, max> */
+                private int $a = 0;
+
+                public function work(): void {
+                    $this->a++;
+                    $this->a--;
+                    $this->a += 5;
+                    $this->a -= 2;
+                    $this->a *= 2;
+                    $this->a %= 2;
+                    $this->a = 1;
+                    $this->a = 0;
+                    ++$this->a;
+                    --$this->a;
+                }
+            }
+        "}
+    }
+}

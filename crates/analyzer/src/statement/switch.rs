@@ -1,0 +1,966 @@
+use std::rc::Rc;
+
+use foldhash::HashMap;
+use indexmap::IndexMap;
+
+use mago_algebra::clause::Clause;
+use mago_allocator::Arena;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::union::TUnion;
+use mago_php_version::feature::Feature;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Statement;
+use mago_syntax::cst::Switch;
+use mago_syntax::cst::SwitchCase;
+use mago_syntax::cst::SwitchCaseSeparator;
+use mago_syntax::cst::SwitchExpressionCase;
+use mago_word::Word;
+use mago_word::WordMap;
+use mago_word::WordSet;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::common::synthetic::new_synthetic_disjunctive_equality;
+use crate::common::synthetic::new_synthetic_equals;
+use crate::common::synthetic::new_synthetic_or;
+use crate::common::synthetic::new_synthetic_variable;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::context::block::BreakContext;
+use crate::context::scope::case_scope::CaseScope;
+use crate::context::scope::control_action::BreakType;
+use crate::context::scope::control_action::ControlAction;
+use crate::context::scope::control_action::ControlActionSet;
+use crate::context::utils::inherit_branch_context_properties;
+use crate::error::AnalysisError;
+use crate::expression::binary::utils::is_always_identical_to;
+use crate::formula::get_formula;
+use crate::formula::negate_or_synthesize;
+use crate::reconciler::reconcile_keyed_types;
+use crate::statement::analyze_statements;
+use crate::utils::expression::get_expression_id;
+use crate::utils::expression::get_root_expression_id;
+use crate::utils::misc::check_for_paradox;
+use crate::utils::symbol_existence::extract_function_constant_existence;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Switch<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        SwitchAnalyzer::new(context, block_context, artifacts).analyze(self)
+    }
+}
+
+#[derive(Debug)]
+struct SwitchAnalyzer<'anlyz, 'ctx, 'arena, A>
+where
+    A: Arena,
+{
+    context: &'anlyz mut Context<'ctx, 'arena, A>,
+    block_context: &'anlyz mut BlockContext<'ctx>,
+    artifacts: &'anlyz mut AnalysisArtifacts,
+    new_locals: Option<WordMap<Rc<TUnion>>>,
+    redefined_variables: Option<WordMap<Rc<TUnion>>>,
+    possibly_redefined_variables: Option<WordMap<Rc<TUnion>>>,
+    leftover_statement_groups: Vec<(Vec<Statement<'arena>>, bool)>,
+    leftover_case_equality_expression: Option<Expression<'arena>>,
+    has_fallthrough: bool,
+    has_reachable_fallthrough: bool,
+    negated_clauses: Vec<Clause>,
+    new_assigned_variable_ids: WordMap<u32>,
+    last_case_exit_type: ControlAction,
+    case_exit_types: HashMap<usize, ControlAction>,
+    case_actions: HashMap<usize, ControlActionSet>,
+    seen_case_condition_types: Vec<(Rc<TUnion>, Span)>,
+    has_default_case: bool,
+}
+
+impl<'anlyz, 'ctx, 'arena, A> SwitchAnalyzer<'anlyz, 'ctx, 'arena, A>
+where
+    A: Arena,
+{
+    const SYNTHETIC_SWITCH_VAR_PREFIX: &'static str = "$-tmp-switch-";
+
+    pub fn new(
+        context: &'anlyz mut Context<'ctx, 'arena, A>,
+        block_context: &'anlyz mut BlockContext<'ctx>,
+        artifacts: &'anlyz mut AnalysisArtifacts,
+    ) -> Self {
+        Self {
+            context,
+            block_context,
+            artifacts,
+            new_locals: None,
+            redefined_variables: None,
+            possibly_redefined_variables: None,
+            leftover_statement_groups: vec![],
+            leftover_case_equality_expression: None,
+            has_fallthrough: false,
+            has_reachable_fallthrough: false,
+            negated_clauses: vec![],
+            new_assigned_variable_ids: WordMap::default(),
+            last_case_exit_type: ControlAction::Break,
+            case_exit_types: HashMap::default(),
+            case_actions: HashMap::default(),
+            seen_case_condition_types: vec![],
+            has_default_case: false,
+        }
+    }
+
+    pub fn analyze(mut self, switch: &Switch<'arena>) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let was_inside_conditional = self.block_context.flags.inside_conditional();
+        self.block_context.flags.set_inside_conditional(true);
+        switch.expression.analyze(self.context, self.block_context, self.artifacts)?;
+        self.block_context.flags.set_inside_conditional(was_inside_conditional);
+
+        let subject_type = match self.artifacts.get_rc_expression_type(&switch.expression).cloned() {
+            Some(t) => t,
+            None => Rc::new(get_mixed()),
+        };
+
+        let (is_synthetic, subject_id, root_subject_id, subject_for_conditions) =
+            self.get_subject_info(switch, &subject_type);
+
+        let original_context = self.block_context.clone();
+
+        let cases = switch.body.cases();
+        if cases.is_empty() {
+            return Ok(());
+        }
+
+        let indexed_cases = cases.iter().enumerate().collect::<IndexMap<_, _>>();
+
+        let last_case_index = cases.len() - 1;
+        for (_, case) in &indexed_cases {
+            if case.is_default() {
+                self.has_default_case = true;
+                break;
+            }
+        }
+
+        for (i, case) in indexed_cases.iter().rev() {
+            self.update_case_exit_map(case, *i);
+        }
+
+        let mut previous_empty_cases = vec![];
+
+        let mut previously_matching_case = None;
+        for (i, case) in indexed_cases {
+            let is_last = i == last_case_index;
+
+            if let SwitchCase::Expression(switch_case) = case
+                && case.statements().is_empty()
+                && !is_last
+            {
+                previous_empty_cases.push(switch_case);
+                continue;
+            }
+
+            let is_matching = self.analyze_case(
+                switch,
+                &subject_for_conditions,
+                is_synthetic,
+                subject_id,
+                case,
+                &previous_empty_cases,
+                &original_context,
+                is_last,
+                i,
+                previously_matching_case,
+            )?;
+
+            if is_matching == Some(true) && !case.is_default() {
+                previously_matching_case = Some(case.span());
+            }
+
+            previous_empty_cases = vec![];
+        }
+
+        let all_options_returned = self.case_exit_types.values().all(|t| *t == ControlAction::Return);
+        let is_exhaustive = self.has_default_case || {
+            let mut final_else_context = original_context.clone();
+            let final_else_clauses: Vec<_> =
+                final_else_context.clauses.iter().map(|c| (**c).clone()).chain(self.negated_clauses).collect();
+
+            let mut final_else_referenced_ids = WordSet::default();
+            let (reconcilable_types, _) =
+                mago_algebra::find_satisfying_assignments(&final_else_clauses, None, &mut final_else_referenced_ids);
+
+            if !reconcilable_types.is_empty() {
+                reconcile_keyed_types(
+                    self.context,
+                    &reconcilable_types,
+                    IndexMap::default(),
+                    &mut final_else_context,
+                    &mut WordSet::default(),
+                    &final_else_referenced_ids,
+                    &switch.span(),
+                    false,
+                    false,
+                );
+            }
+
+            final_else_context.locals.get(&subject_id).is_some_and(|t| t.is_never())
+                || root_subject_id
+                    .as_ref()
+                    .is_some_and(|id| final_else_context.locals.get(id).is_some_and(|t| t.is_never()))
+        };
+
+        let mut possibly_redefined_vars = self.possibly_redefined_variables.unwrap_or_default();
+        if let Some(new_locals) = self.new_locals {
+            possibly_redefined_vars.retain(|k, _| !new_locals.contains_key(k));
+            self.block_context.locals.extend(new_locals);
+        }
+
+        if let Some(redefined_vars) = self.redefined_variables {
+            if is_exhaustive {
+                possibly_redefined_vars.retain(|k, _| !redefined_vars.contains_key(k));
+                self.block_context.locals.extend(redefined_vars.iter().map(|(k, v)| (*k, Rc::clone(v))));
+            } else {
+                for (var_id, var_type) in redefined_vars {
+                    possibly_redefined_vars.insert(var_id, var_type);
+                }
+            }
+        }
+
+        for (var_id, var_type) in possibly_redefined_vars {
+            if let Some(context_type) = self.block_context.locals.get(&var_id).cloned() {
+                self.block_context.locals.insert(
+                    var_id,
+                    Rc::new(combine_union_types(
+                        &var_type,
+                        &context_type,
+                        self.context.codebase,
+                        CombinerOptions::default(),
+                    )),
+                );
+            }
+        }
+
+        self.artifacts.fully_matched_switch_offsets.insert(switch.start_position().offset);
+        self.block_context.assigned_variable_ids.extend(self.new_assigned_variable_ids);
+        self.block_context.flags.set_has_returned(all_options_returned && is_exhaustive);
+
+        Ok(())
+    }
+
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn analyze_case<'ast>(
+        &mut self,
+        switch: &Switch,
+        switch_condition: &'ast Expression<'arena>,
+        condition_is_synthetic: bool,
+        switch_var_id: Word,
+        switch_case: &'ast SwitchCase<'arena>,
+        previous_empty_cases: &Vec<&'ast SwitchExpressionCase<'arena>>,
+        original_block_context: &BlockContext<'ctx>,
+        is_last: bool,
+        case_index: usize,
+        previously_matching_case: Option<Span>,
+    ) -> Result<Option<bool>, AnalysisError> {
+        if self.context.settings.version.is_deprecated(Feature::SwitchSemicolonSeparators)
+            && matches!(switch_case.separator(), SwitchCaseSeparator::SemiColon(_))
+        {
+            self.context.collector.report_with_code(
+                IssueCode::DeprecatedFeature,
+                Issue::warning("Deprecated switch case separator")
+                    .with_annotation(
+                        Annotation::primary(switch_case.separator().span())
+                            .with_message("semicolon separators in switch cases are deprecated"),
+                    )
+                    .with_note("Using semicolon separators in switch cases is deprecated as of PHP 8.5.")
+                    .with_help("Use colon separators (`:`) instead of semicolons (`;`) in switch cases."),
+            );
+        }
+
+        if let Some(previously_matching_case_span) = previously_matching_case {
+            if switch_case.is_default() {
+                self.context.collector.report_with_code(
+                    IssueCode::UnreachableSwitchDefault,
+                    Issue::error("Unreachable default case")
+                        .with_annotation(
+                            Annotation::primary(switch_case.span()).with_message("this default case is unreachable"),
+                        )
+                        .with_annotation(
+                            Annotation::secondary(previously_matching_case_span)
+                                .with_message("this previous case always matches, making subsequent cases unreachable"),
+                        )
+                        .with_note("Because a previous case always matches the subject, this default case can never be reached.")
+                        .with_help("Remove this default case or reorder the cases."),
+                );
+            } else {
+                self.context.collector.report_with_code(
+                    IssueCode::UnreachableSwitchCase,
+                    Issue::error("Unreachable switch case")
+                        .with_annotation(
+                            Annotation::primary(switch_case.span()).with_message("this case is unreachable"),
+                        )
+                        .with_annotation(
+                            Annotation::secondary(previously_matching_case_span)
+                                .with_message("this previous case always matches, making subsequent cases unreachable"),
+                        )
+                        .with_note(
+                            "Because a previous case always matches the subject, this case can never be reached.",
+                        )
+                        .with_help("Remove this case or reorder the cases to ensure it can be reached."),
+                );
+            }
+
+            return Ok(Some(false));
+        }
+
+        let mut result = None;
+
+        let case_actions = &self.case_actions[&case_index];
+        let case_exit_type = self.case_exit_types[&case_index];
+
+        let has_ending_statements = case_actions.len() == 1 && case_actions.contains(ControlAction::End);
+        let has_leaving_statements =
+            has_ending_statements || (!case_actions.is_empty() && !case_actions.contains(ControlAction::None));
+
+        let mut case_block_context = original_block_context.clone();
+
+        let mut old_expression_types = self.artifacts.expression_types.clone();
+        let mut case_equality_expression = None;
+
+        if condition_is_synthetic {
+            self.artifacts.set_expression_type(
+                switch_condition,
+                if let Some(t) = self.block_context.locals.get(&switch_var_id) { (**t).clone() } else { get_mixed() },
+            );
+        }
+
+        let switch_condition_type =
+            self.artifacts.get_rc_expression_type(switch_condition).cloned().unwrap_or(Rc::new(get_mixed()));
+
+        if switch_condition_type.is_never() {
+            result = Some(false);
+
+            let (code, message, annotation_message) = if switch_case.is_default() {
+                (IssueCode::UnreachableSwitchDefault, "Unreachable default case", "this default case is unreachable")
+            } else {
+                (IssueCode::UnreachableSwitchCase, "Unreachable switch case", "this case is unreachable")
+            };
+
+            self.context.collector.report_with_code(
+                code,
+                Issue::error(message)
+                    .with_annotation(Annotation::primary(switch_case.span()).with_message(annotation_message))
+                    .with_annotation(
+                        Annotation::secondary(switch.expression.span())
+                            .with_message("The switch subject's type has been fully exhausted by previous cases."),
+                    )
+                    .with_note("The switch subject's type has been fully exhausted by previous cases.")
+                    .with_help("Remove this case or ensure that the switch subject's type can still match it."),
+            );
+        }
+
+        let mut case_has_direct_entry = result != Some(false);
+        let mut case_statements_are_reachable = self.has_reachable_fallthrough || case_has_direct_entry;
+
+        if let Some(case_condition) = switch_case.expression() {
+            let mut has_non_duplicate_empty_case = false;
+            for previous_empty_case in previous_empty_cases {
+                previous_empty_case.expression.analyze(self.context, self.block_context, self.artifacts)?;
+                if !self.check_for_duplicate_case_condition(previous_empty_case.expression, true) {
+                    has_non_duplicate_empty_case = true;
+                }
+            }
+
+            case_condition.analyze(self.context, self.block_context, self.artifacts)?;
+            let has_alternate_entry = self.has_reachable_fallthrough || has_non_duplicate_empty_case;
+            let condition_is_duplicate = self.check_for_duplicate_case_condition(
+                case_condition,
+                switch_case.statements().is_empty() || has_alternate_entry,
+            );
+            if condition_is_duplicate && !has_alternate_entry {
+                result = Some(false);
+            }
+
+            case_has_direct_entry = result != Some(false) && (!condition_is_duplicate || has_non_duplicate_empty_case);
+
+            if result.is_none()
+                && let Some(condition_type) = self.artifacts.get_rc_expression_type(case_condition)
+            {
+                if (switch_condition_type.is_true() && condition_type.is_always_falsy())
+                    || !can_expression_types_be_identical(
+                        self.context.codebase,
+                        switch_condition_type.as_ref(),
+                        condition_type.as_ref(),
+                        false,
+                        true,
+                    )
+                {
+                    result = Some(false);
+
+                    self.context.collector.report_with_code(
+                        IssueCode::NeverMatchingSwitchCase,
+                        Issue::error("Switch case condition will never match")
+                            .with_annotation(Annotation::primary(case_condition.span()).with_message(format!(
+                                "This case with type `{}` will never match the subject type.",
+                                condition_type.get_id()
+                            )))
+                            .with_annotation(
+                                Annotation::secondary(switch.expression.span()).with_message(format!(
+                                    "Switch subject has type `{}`.",
+                                    switch_condition_type.get_id()
+                                )),
+                            )
+                            .with_note("This case condition will never match the switch subject's type.")
+                            .with_help("Remove this case or ensure that the switch subject's type can still match it."),
+                    );
+                } else if !is_last
+                    && ((switch_condition_type.is_true() && condition_type.is_always_truthy())
+                        || is_always_identical_to(condition_type.as_ref(), switch_condition_type.as_ref()))
+                {
+                    result = Some(true);
+
+                    self.context.collector.report_with_code(
+                        IssueCode::AlwaysMatchingSwitchCase,
+                        Issue::error("This switch case will always match, making subsequent cases unreachable.")
+                            .with_annotation(
+                                Annotation::primary(case_condition.span())
+                                    .with_message("This case will always match the subject."),
+                            )
+                            .with_annotation(
+                                Annotation::secondary(switch.expression.span()).with_message(format!(
+                                    "Switch subject has type `{}`.",
+                                    switch_condition_type.get_id()
+                                )),
+                            )
+                            .with_note("All subsequent `case` and `default` statements are unreachable.")
+                            .with_help(
+                                "Remove this case or rearrange the switch cases to ensure that this case is last.",
+                            ),
+                    );
+                }
+            }
+
+            case_statements_are_reachable = has_alternate_entry || result != Some(false);
+
+            case_equality_expression = Some(if !previous_empty_cases.is_empty() {
+                new_synthetic_disjunctive_equality(
+                    self.context.arena,
+                    switch_condition,
+                    case_condition,
+                    previous_empty_cases.iter().map(|c| c.expression).collect::<Vec<_>>(),
+                )
+            } else if switch_condition_type.is_true() {
+                case_condition.clone()
+            } else {
+                new_synthetic_equals(self.context.arena, switch_condition, case_condition)
+            });
+        } else if result.is_none() {
+            result = Some(true);
+        }
+
+        if !has_leaving_statements && !is_last {
+            if let Some(case_equality_expression) = case_equality_expression {
+                self.leftover_case_equality_expression =
+                    Some(if let Some(leftover_case_equality_expr) = &self.leftover_case_equality_expression {
+                        new_synthetic_or(self.context.arena, leftover_case_equality_expr, &case_equality_expression)
+                    } else {
+                        case_equality_expression
+                    });
+            }
+
+            self.has_fallthrough = true;
+            self.has_reachable_fallthrough = case_statements_are_reachable;
+            self.leftover_statement_groups.push((switch_case.statements().to_vec(), case_has_direct_entry));
+            self.artifacts.expression_types = old_expression_types;
+
+            return Ok(result);
+        }
+
+        if let Some(leftover_case_equality_expr) = &self.leftover_case_equality_expression {
+            case_equality_expression = Some(new_synthetic_or(
+                self.context.arena,
+                leftover_case_equality_expr,
+                &case_equality_expression
+                    .unwrap_or_else(|| new_synthetic_equals(self.context.arena, switch_condition, switch_condition)),
+            ));
+        }
+
+        case_block_context.break_types.push(BreakContext::Switch(switch.span()));
+        if !self.has_fallthrough {
+            self.leftover_statement_groups.clear();
+        }
+
+        self.leftover_case_equality_expression = None;
+        let assertion_context = self.context.get_assertion_context_from_block(self.block_context);
+        let case_clauses = if let Some(case_equality_expr) = &case_equality_expression {
+            let span = if let Some(case_condition) = switch_case.expression() {
+                case_condition.span()
+            } else {
+                switch_case.span()
+            };
+
+            // todo: complexity!!
+            get_formula(
+                span,
+                span,
+                case_equality_expr,
+                assertion_context,
+                self.artifacts,
+                &self.context.settings.algebra_thresholds(),
+                self.context.settings.formula_size_threshold,
+            )
+            .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let mut entry_clauses = if !self.negated_clauses.is_empty() && self.negated_clauses.len() < 50 {
+            let mut c = original_block_context.clauses.iter().map(|v| &**v).collect::<Vec<_>>();
+            c.extend(self.negated_clauses.iter());
+
+            mago_algebra::saturate_clauses(c, &self.context.settings.algebra_thresholds())
+        } else {
+            original_block_context.clauses.iter().map(|v| (**v).clone()).collect::<Vec<_>>()
+        };
+
+        case_block_context.clauses = if case_clauses.is_empty() {
+            entry_clauses
+        } else if let Some(case_condition) = switch_case.expression() {
+            check_for_paradox(
+                self.context,
+                &entry_clauses.iter().map(|v| Rc::new(v.clone())).collect::<Vec<_>>(),
+                &case_clauses,
+                case_condition.span(),
+            );
+
+            entry_clauses.extend(case_clauses.clone());
+
+            if entry_clauses.len() < 50 {
+                mago_algebra::saturate_clauses(entry_clauses.iter(), &self.context.settings.algebra_thresholds())
+            } else {
+                entry_clauses
+            }
+        } else {
+            entry_clauses
+        }
+        .into_iter()
+        .map(Rc::new)
+        .collect();
+
+        let (reconcilable_if_types, _) = mago_algebra::find_satisfying_assignments(
+            &case_block_context.clauses.iter().map(|v| v.as_ref().clone()).collect::<Vec<_>>(),
+            None,
+            &mut WordSet::default(),
+        );
+
+        if !reconcilable_if_types.is_empty() {
+            let mut changed_var_ids = WordSet::default();
+
+            reconcile_keyed_types(
+                self.context,
+                &reconcilable_if_types,
+                IndexMap::new(),
+                &mut case_block_context,
+                &mut changed_var_ids,
+                &if switch_case.is_default() { WordSet::default() } else { WordSet::from_iter([switch_var_id]) },
+                &switch_case.span(),
+                true,
+                false,
+            );
+
+            for (var_id, _) in reconcilable_if_types {
+                case_block_context.variables_possibly_in_scope.insert(var_id);
+            }
+
+            if !changed_var_ids.is_empty() {
+                case_block_context.clauses =
+                    BlockContext::remove_reconciled_clause_refs(&case_block_context.clauses, &changed_var_ids).0;
+            }
+        }
+
+        if let Some(case_condition) = switch_case.expression() {
+            extract_function_constant_existence(case_condition, self.artifacts, &mut case_block_context, false);
+        }
+
+        if !case_clauses.is_empty()
+            && let Some(case_equality_expr) = &case_equality_expression
+        {
+            let assertion_context = self.context.get_assertion_context_from_block(self.block_context);
+
+            self.negated_clauses.extend(negate_or_synthesize(
+                case_clauses,
+                case_equality_expr,
+                assertion_context,
+                self.artifacts,
+                &self.context.settings.algebra_thresholds(),
+                self.context.settings.formula_size_threshold,
+            ));
+        }
+
+        self.artifacts.case_scopes.push(CaseScope::new());
+
+        if self.has_fallthrough {
+            self.has_fallthrough = false;
+
+            for (leftover_statements, has_direct_entry) in std::mem::take(&mut self.leftover_statement_groups) {
+                if has_direct_entry {
+                    case_block_context.flags.set_has_returned(false);
+                }
+
+                analyze_statements(&leftover_statements, self.context, &mut case_block_context, self.artifacts)?;
+            }
+
+            if case_has_direct_entry {
+                case_block_context.flags.set_has_returned(false);
+            }
+            for (var_id, original_type) in &original_block_context.locals {
+                if let Some(current_type) = case_block_context.locals.get(var_id)
+                    && current_type != original_type
+                {
+                    case_block_context.locals.insert(
+                        *var_id,
+                        Rc::new(combine_union_types(
+                            current_type,
+                            original_type,
+                            self.context.codebase,
+                            CombinerOptions::default(),
+                        )),
+                    );
+                }
+            }
+
+            analyze_statements(switch_case.statements(), self.context, &mut case_block_context, self.artifacts)?;
+        } else {
+            analyze_statements(switch_case.statements(), self.context, &mut case_block_context, self.artifacts)?;
+        }
+        self.has_reachable_fallthrough = false;
+
+        let Some(case_scope) = self.artifacts.case_scopes.pop() else {
+            return Ok(result);
+        };
+
+        let new_expression_types = self.artifacts.expression_types.clone();
+        old_expression_types.extend(new_expression_types);
+        self.artifacts.expression_types = old_expression_types;
+
+        let case_exit_type = if case_block_context.control_actions.contains(ControlAction::End) {
+            self.case_exit_types.insert(case_index, ControlAction::Return);
+
+            ControlAction::Return
+        } else {
+            case_exit_type
+        };
+
+        if !matches!(case_exit_type, ControlAction::Return) {
+            self.handle_non_returning_case(&case_block_context, original_block_context, case_exit_type);
+        }
+
+        inherit_branch_context_properties(self.context, self.block_context, &case_block_context);
+
+        if let Some(break_vars) = &case_scope.break_vars {
+            if let Some(ref mut possibly_redefined_var_ids) = self.possibly_redefined_variables {
+                for (var_id, var_type) in break_vars {
+                    possibly_redefined_var_ids.insert(
+                        *var_id,
+                        match possibly_redefined_var_ids.get(var_id) {
+                            Some(possibly_redefined_var_type) => Rc::new(combine_union_types(
+                                var_type,
+                                possibly_redefined_var_type,
+                                self.context.codebase,
+                                CombinerOptions::default(),
+                            )),
+                            None => Rc::clone(var_type),
+                        },
+                    );
+                }
+            } else {
+                self.possibly_redefined_variables = Some(
+                    break_vars
+                        .iter()
+                        .filter(|(var_id, _)| self.block_context.locals.contains_key(*var_id))
+                        .map(|(k, v)| (*k, Rc::clone(v)))
+                        .collect(),
+                );
+            }
+
+            if let Some(ref mut new_locals) = self.new_locals {
+                let var_ids: Vec<_> = new_locals.keys().copied().collect();
+                for var_id in var_ids {
+                    if let Some(break_var_type) = break_vars.get(&var_id) {
+                        if case_block_context.locals.contains_key(&var_id) {
+                            let var_type = new_locals.get(&var_id).unwrap();
+                            let combined = Rc::new(combine_union_types(
+                                break_var_type,
+                                var_type,
+                                self.context.codebase,
+                                CombinerOptions::default(),
+                            ));
+                            new_locals.insert(var_id, combined);
+                        } else {
+                            new_locals.remove(&var_id);
+                        }
+                    } else {
+                        new_locals.remove(&var_id);
+                    }
+                }
+            }
+
+            if let Some(ref mut redefined_vars) = self.redefined_variables {
+                let var_ids: Vec<_> = redefined_vars.keys().copied().collect();
+                for var_id in var_ids {
+                    if let Some(break_var_type) = break_vars.get(&var_id) {
+                        let var_type = redefined_vars.get(&var_id).unwrap();
+                        let combined = Rc::new(combine_union_types(
+                            break_var_type,
+                            var_type,
+                            self.context.codebase,
+                            CombinerOptions::default(),
+                        ));
+                        redefined_vars.insert(var_id, combined);
+                    } else {
+                        redefined_vars.remove(&var_id);
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn check_for_duplicate_case_condition(
+        &mut self,
+        condition: &Expression<'arena>,
+        statements_are_reachable: bool,
+    ) -> bool {
+        let Some(condition_type) = self.artifacts.get_rc_expression_type(condition).cloned() else {
+            return false;
+        };
+
+        if !is_always_identical_to(&condition_type, &condition_type) {
+            return false;
+        }
+
+        let duplicate_span = self
+            .seen_case_condition_types
+            .iter()
+            .find_map(|(seen_type, span)| is_always_identical_to(seen_type, &condition_type).then_some(*span));
+
+        if let Some(first_span) = duplicate_span {
+            if statements_are_reachable {
+                self.context.collector.report_with_code(
+                    IssueCode::DuplicateSwitchCase,
+                    Issue::warning("Duplicate switch case")
+                        .with_annotation(
+                            Annotation::primary(condition.span())
+                                .with_message("this case condition duplicates an earlier one"),
+                        )
+                        .with_annotation(
+                            Annotation::secondary(first_span).with_message("the same case value first appears here"),
+                        )
+                        .with_note(
+                            "This label cannot be selected independently, but its statements remain reachable through another case.",
+                        )
+                        .with_help("Remove the duplicate case label while preserving its reachable statements."),
+                );
+            } else {
+                self.context.collector.report_with_code(
+                    IssueCode::UnreachableSwitchCase,
+                    Issue::error("Unreachable switch case")
+                        .with_annotation(
+                            Annotation::primary(condition.span()).with_message("this case can never be entered"),
+                        )
+                        .with_annotation(
+                            Annotation::secondary(first_span).with_message("an earlier case has the same value"),
+                        )
+                        .with_note(
+                            "The earlier identical case is tested first, and control cannot fall through to these statements.",
+                        )
+                        .with_help("Remove this unreachable case and its statements."),
+                );
+            }
+
+            true
+        } else {
+            self.seen_case_condition_types.push((condition_type, condition.span()));
+            false
+        }
+    }
+
+    fn handle_non_returning_case(
+        &mut self,
+        case_block_context: &BlockContext<'ctx>,
+        original_block_context: &BlockContext<'ctx>,
+        case_exit_type: ControlAction,
+    ) {
+        if matches!(case_exit_type, ControlAction::Continue) {
+            return;
+        }
+
+        let mut removed_var_ids = WordSet::default();
+        let case_redefined_vars =
+            case_block_context.get_redefined_locals(&original_block_context.locals, false, &mut removed_var_ids);
+
+        if let Some(possibly_redefined_var_ids) = &mut self.possibly_redefined_variables {
+            for (var_id, var_type) in &case_redefined_vars {
+                possibly_redefined_var_ids.insert(
+                    *var_id,
+                    match possibly_redefined_var_ids.get(var_id) {
+                        Some(possibly_redefined_var_type) => Rc::new(combine_union_types(
+                            var_type,
+                            possibly_redefined_var_type,
+                            self.context.codebase,
+                            CombinerOptions::default(),
+                        )),
+                        None => Rc::clone(var_type),
+                    },
+                );
+            }
+        } else {
+            self.possibly_redefined_variables = Some(
+                case_redefined_vars
+                    .clone()
+                    .into_iter()
+                    .filter(|(var_id, _)| self.block_context.locals.contains_key(var_id))
+                    .collect(),
+            );
+        }
+
+        if let Some(redefined_vars) = &mut self.redefined_variables {
+            let var_ids: Vec<_> = redefined_vars.keys().copied().collect();
+            for var_id in var_ids {
+                if let Some(break_var_type) = case_redefined_vars.get(&var_id) {
+                    let Some(var_type) = redefined_vars.get(&var_id) else {
+                        panic!("invariant: redefined_vars must contain var_id collected from its own keys");
+                    };
+                    let combined = Rc::new(combine_union_types(
+                        break_var_type,
+                        var_type,
+                        self.context.codebase,
+                        CombinerOptions::default(),
+                    ));
+                    redefined_vars.insert(var_id, combined);
+                } else {
+                    redefined_vars.remove(&var_id);
+                }
+            }
+        } else {
+            self.redefined_variables = Some(case_redefined_vars);
+        }
+
+        if let Some(new_locals) = &mut self.new_locals {
+            let var_ids: Vec<_> = new_locals.keys().copied().collect();
+            for var_id in var_ids {
+                if let Some(existing_var_type) = case_block_context.locals.get(&var_id) {
+                    let Some(var_type) = new_locals.get(&var_id) else {
+                        panic!("invariant: new_locals must contain var_id collected from its own keys");
+                    };
+                    let combined = Rc::new(combine_union_types(
+                        existing_var_type,
+                        var_type,
+                        self.context.codebase,
+                        CombinerOptions::default(),
+                    ));
+                    new_locals.insert(var_id, combined);
+                } else {
+                    new_locals.remove(&var_id);
+                }
+            }
+        } else {
+            self.new_locals = Some(
+                case_block_context
+                    .locals
+                    .clone()
+                    .into_iter()
+                    .filter(|(k, _)| !self.block_context.locals.contains_key(k))
+                    .collect(),
+            );
+        }
+    }
+
+    fn get_subject_info(
+        &mut self,
+        switch: &Switch<'arena>,
+        subject_type: &Rc<TUnion>,
+    ) -> (bool, Word, Option<Word>, Expression<'arena>) {
+        if let Some(id) = get_expression_id(
+            switch.expression,
+            self.block_context.scope.get_class_like_name(),
+            self.context.resolved_names,
+            Some(self.context.codebase),
+        ) {
+            (
+                false,
+                id,
+                get_root_expression_id(switch.expression, self.context.resolved_names),
+                switch.expression.clone(),
+            )
+        } else {
+            let subject_id_str =
+                format!("{}{}", Self::SYNTHETIC_SWITCH_VAR_PREFIX, switch.expression.span().start.offset);
+            let subject_id = mago_word::word(&subject_id_str);
+            self.block_context.locals.insert(subject_id, Rc::clone(subject_type));
+            let subject_for_conditions =
+                new_synthetic_variable(self.context.arena, subject_id_str.as_bytes(), switch.expression.span());
+
+            (true, subject_id, None, subject_for_conditions)
+        }
+    }
+
+    fn update_case_exit_map(&mut self, case: &SwitchCase, case_index: usize) {
+        let actions_set = ControlAction::from_statements(
+            case.statements().iter().collect(),
+            vec![BreakType::Switch],
+            Some(self.artifacts),
+            true,
+        );
+
+        let effective_action = if actions_set.contains(ControlAction::None)
+            && matches!(self.last_case_exit_type, ControlAction::Return)
+            && !actions_set.contains(ControlAction::LeaveSwitch)
+            && !actions_set.contains(ControlAction::Break)
+            && !actions_set.contains(ControlAction::BreakImmediateLoop)
+            && !actions_set.contains(ControlAction::Continue)
+        {
+            Some(ControlAction::Return)
+        } else {
+            Self::get_last_action(&actions_set)
+        };
+
+        if let Some(action) = effective_action {
+            self.last_case_exit_type = action;
+        }
+
+        self.case_exit_types.insert(case_index, self.last_case_exit_type);
+        self.case_actions.insert(case_index, actions_set);
+    }
+
+    fn get_last_action(case_actions: &ControlActionSet) -> Option<ControlAction> {
+        match (
+            case_actions.len(),
+            case_actions.contains(ControlAction::None),
+            case_actions.contains(ControlAction::End),
+            case_actions.contains(ControlAction::Continue),
+            case_actions.contains(ControlAction::LeaveSwitch),
+        ) {
+            (1, false, true, _, _) => Some(ControlAction::Return),
+            (1, false, _, true, _) => Some(ControlAction::Continue),
+            (_, false, _, _, true) => Some(ControlAction::Break),
+            (len, true, _, _, _) if len > 1 => Some(ControlAction::Break),
+            _ => None,
+        }
+    }
+}

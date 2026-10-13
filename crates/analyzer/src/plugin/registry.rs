@@ -1,0 +1,2090 @@
+//! Plugin registry for managing and dispatching to providers and hooks.
+
+use std::sync::Arc;
+use std::sync::OnceLock;
+
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::property::PropertyMetadata;
+use mago_codex::ttype::union::TUnion;
+use mago_database::file::File;
+use mago_names::ResolvedNames;
+use mago_reporting::IssueCollection;
+use mago_span::Span;
+use mago_syntax::cst::Class;
+use mago_syntax::cst::Enum;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Function;
+use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Interface;
+use mago_syntax::cst::MethodCall;
+use mago_syntax::cst::NullSafeMethodCall;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::Statement;
+use mago_syntax::cst::Trait;
+use mago_word::Word;
+use mago_word::WordMap;
+use mago_word::WordSet;
+use mago_word::ascii_lowercase_word;
+use mago_word::concat_word;
+
+use crate::artifacts::AnalysisArtifacts;
+use crate::context::block::BlockContext;
+use crate::external::AfterFileAnalysisResult;
+use crate::external::BeforeAnalysisResult;
+use crate::external::CodebaseScanFile;
+use crate::external::CodebaseScanPlan;
+use crate::external::DeclarationRefinement;
+use crate::external::EffectivePropertyType;
+use crate::external::ExternalAnalysisSession;
+use crate::external::ExternalAnalyzer;
+use crate::external::ExternalAnalyzerCapabilities;
+use crate::external::ExternalAnalyzerError;
+use crate::external::ExternalAnalyzerHandle;
+use crate::external::FileAnalysisSnapshot;
+use crate::external::ForwardedCall;
+use crate::external::NodeAnalysisRequirements;
+use crate::external::PropertyAccessKind;
+use crate::invocation::EffectiveCallableSignature;
+use crate::invocation::Invocation;
+use crate::plugin::PluginError;
+use crate::plugin::context::HookContext;
+use crate::plugin::context::InvocationInfo;
+use crate::plugin::context::ProviderContext;
+use crate::plugin::context::ReportedIssue;
+use crate::plugin::error::PluginResult;
+use crate::plugin::hook::ClassDeclarationHook;
+use crate::plugin::hook::EnumDeclarationHook;
+use crate::plugin::hook::ExpressionHook;
+use crate::plugin::hook::ExpressionHookResult;
+use crate::plugin::hook::FunctionCallHook;
+use crate::plugin::hook::FunctionDeclarationHook;
+use crate::plugin::hook::HookAction;
+use crate::plugin::hook::InterfaceDeclarationHook;
+use crate::plugin::hook::IssueFilterDecision;
+use crate::plugin::hook::IssueFilterHook;
+use crate::plugin::hook::MethodCallHook;
+use crate::plugin::hook::NullSafeMethodCallHook;
+use crate::plugin::hook::ProgramHook;
+use crate::plugin::hook::StatementHook;
+use crate::plugin::hook::StaticCall;
+use crate::plugin::hook::StaticMethodCallHook;
+use crate::plugin::hook::TraitDeclarationHook;
+use crate::plugin::provider::assertion::FunctionAssertionProvider;
+use crate::plugin::provider::assertion::InvocationAssertions;
+use crate::plugin::provider::assertion::MethodAssertionProvider;
+use crate::plugin::provider::function::FunctionReturnTypeProvider;
+use crate::plugin::provider::function::FunctionTarget;
+use crate::plugin::provider::method::MethodReturnTypeProvider;
+use crate::plugin::provider::method::MethodTarget;
+use crate::plugin::provider::property::PropertyInitializationProvider;
+use crate::plugin::provider::throw::ExpressionThrowTypeProvider;
+use crate::plugin::provider::throw::FunctionThrowTypeProvider;
+use crate::plugin::provider::throw::MethodThrowTypeProvider;
+
+pub struct ProviderResult {
+    pub return_type: Option<TUnion>,
+    pub issues: Vec<ReportedIssue>,
+}
+
+fn optional_external_hint<T>(operation: &'static str, result: Result<T, Arc<ExternalAnalyzerError>>) -> T
+where
+    T: Default,
+{
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(operation, error = %error, "External analyzer provider failed; using native analysis fallback.");
+            T::default()
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct PluginRegistry {
+    external_analyzer: Option<Arc<ExternalAnalyzerHandle>>,
+    external_capabilities: OnceLock<ExternalAnalyzerCapabilities>,
+    project_sources: Vec<String>,
+    function_exact: WordMap<Vec<usize>>,
+    function_prefix: Vec<(Word, usize)>,
+    function_namespace: Vec<(Word, usize)>,
+    function_providers: Vec<Box<dyn FunctionReturnTypeProvider>>,
+    method_exact: WordMap<Vec<usize>>,
+    method_wildcard: Vec<(Vec<MethodTarget>, usize)>,
+    method_providers: Vec<Box<dyn MethodReturnTypeProvider>>,
+    program_hooks: Vec<Box<dyn ProgramHook>>,
+    statement_hooks: Vec<Box<dyn StatementHook>>,
+    expression_hooks: Vec<Box<dyn ExpressionHook>>,
+    function_call_hooks: Vec<Box<dyn FunctionCallHook>>,
+    method_call_hooks: Vec<Box<dyn MethodCallHook>>,
+    static_method_call_hooks: Vec<Box<dyn StaticMethodCallHook>>,
+    nullsafe_method_call_hooks: Vec<Box<dyn NullSafeMethodCallHook>>,
+    class_hooks: Vec<Box<dyn ClassDeclarationHook>>,
+    interface_hooks: Vec<Box<dyn InterfaceDeclarationHook>>,
+    trait_hooks: Vec<Box<dyn TraitDeclarationHook>>,
+    enum_hooks: Vec<Box<dyn EnumDeclarationHook>>,
+    function_decl_hooks: Vec<Box<dyn FunctionDeclarationHook>>,
+    property_initialization_providers: Vec<Box<dyn PropertyInitializationProvider>>,
+    issue_filter_hooks: Vec<Box<dyn IssueFilterHook>>,
+    function_assertion_exact: WordMap<Vec<usize>>,
+    function_assertion_prefix: Vec<(Word, usize)>,
+    function_assertion_namespace: Vec<(Word, usize)>,
+    function_assertion_providers: Vec<Box<dyn FunctionAssertionProvider>>,
+    method_assertion_exact: WordMap<Vec<usize>>,
+    method_assertion_wildcard: Vec<(Vec<MethodTarget>, usize)>,
+    method_assertion_providers: Vec<Box<dyn MethodAssertionProvider>>,
+    expression_throw_providers: Vec<Box<dyn ExpressionThrowTypeProvider>>,
+    function_throw_exact: WordMap<Vec<usize>>,
+    function_throw_prefix: Vec<(Word, usize)>,
+    function_throw_namespace: Vec<(Word, usize)>,
+    function_throw_providers: Vec<Box<dyn FunctionThrowTypeProvider>>,
+    method_throw_exact: WordMap<Vec<usize>>,
+    method_throw_wildcard: Vec<(Vec<MethodTarget>, usize)>,
+    method_throw_providers: Vec<Box<dyn MethodThrowTypeProvider>>,
+}
+
+#[allow(clippy::missing_fields_in_debug)]
+impl std::fmt::Debug for PluginRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginRegistry")
+            .field("external_analyzer", &self.external_analyzer.is_some())
+            .field("external_capabilities", &self.external_capabilities.get())
+            .field("function_providers", &self.function_providers.len())
+            .field("method_providers", &self.method_providers.len())
+            .field("program_hooks", &self.program_hooks.len())
+            .field("statement_hooks", &self.statement_hooks.len())
+            .field("expression_hooks", &self.expression_hooks.len())
+            .field("function_call_hooks", &self.function_call_hooks.len())
+            .field("method_call_hooks", &self.method_call_hooks.len())
+            .field("static_method_call_hooks", &self.static_method_call_hooks.len())
+            .field("nullsafe_method_call_hooks", &self.nullsafe_method_call_hooks.len())
+            .field("class_hooks", &self.class_hooks.len())
+            .field("interface_hooks", &self.interface_hooks.len())
+            .field("trait_hooks", &self.trait_hooks.len())
+            .field("enum_hooks", &self.enum_hooks.len())
+            .field("function_decl_hooks", &self.function_decl_hooks.len())
+            .field("property_initialization_providers", &self.property_initialization_providers.len())
+            .field("issue_filter_hooks", &self.issue_filter_hooks.len())
+            .field("function_assertion_providers", &self.function_assertion_providers.len())
+            .field("method_assertion_providers", &self.method_assertion_providers.len())
+            .field("expression_throw_providers", &self.expression_throw_providers.len())
+            .field("function_throw_providers", &self.function_throw_providers.len())
+            .field("method_throw_providers", &self.method_throw_providers.len())
+            .finish()
+    }
+}
+
+impl PluginRegistry {
+    /// Attaches worker-backed analyzer plugins to this registry.
+    pub fn set_external_analyzer(&mut self, analyzer: Arc<ExternalAnalyzerHandle>) {
+        self.external_analyzer = Some(analyzer);
+    }
+
+    /// Names the project's own source paths a scoped run loads as context, so external
+    /// codebase-scan hooks read them as they read the analyzed files.
+    pub fn set_project_sources(&mut self, paths: Vec<String>) {
+        self.project_sources = paths;
+    }
+
+    /// Completes concurrent external analyzer initialization before file analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a worker fails to initialize or advertises invalid capabilities.
+    pub fn prepare_external_analyzer(&self) -> PluginResult<()> {
+        let Some(analyzer) = self.external_analyzer.as_deref() else {
+            return Ok(());
+        };
+
+        analyzer.prepare().map_err(PluginError::from)?;
+        let capabilities = analyzer.read(|analyzer| analyzer.capabilities()).map_err(PluginError::from)?;
+        let _capabilities = self.external_capabilities.set(capabilities);
+        Ok(())
+    }
+
+    #[inline]
+    fn has_external_capability(&self, capability: fn(&ExternalAnalyzerCapabilities) -> bool) -> bool {
+        self.external_analyzer.is_some() && self.external_capabilities.get().is_none_or(capability)
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn has_external_method_call_analysis_hooks(&self) -> bool {
+        self.has_external_capability(|capabilities| capabilities.method_call_analysis)
+    }
+
+    /// Completes external initialization and returns its in-memory source stubs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a worker fails to initialize or returns invalid initialization data.
+    pub fn external_initialization_files(&self) -> PluginResult<Vec<File>> {
+        self.prepare_external_analyzer()?;
+        self.external_analyzer
+            .as_deref()
+            .map(ExternalAnalyzerHandle::initialization_files)
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
+    }
+
+    /// Returns compiled host-file selectors for enabled external codebase-scan hooks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the external analyzer cannot initialize or a hook advertises an invalid path pattern.
+    pub fn external_codebase_scan_plan(&self) -> PluginResult<Option<CodebaseScanPlan>> {
+        self.prepare_external_analyzer()?;
+        let plan = self
+            .external_analyzer
+            .as_deref()
+            .map(|analyzer| analyzer.with(ExternalAnalyzer::codebase_scan_plan))
+            .transpose()
+            .map(Option::flatten)
+            .map_err(PluginError::from)?;
+        plan.map(|plan| plan.with_project_sources(&self.project_sources)).transpose().map_err(PluginError::from)
+    }
+
+    /// Replaces each external worker's selected codebase-scan source state and returns the
+    /// declaration refinements its hooks describe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a worker cannot accept or validate the snapshot sequence.
+    pub fn run_external_codebase_scan(&self, files: Vec<CodebaseScanFile>) -> PluginResult<Vec<DeclarationRefinement>> {
+        self.external_analyzer
+            .as_deref()
+            .map(|analyzer| analyzer.with(|analyzer| analyzer.run_codebase_scan(files)))
+            .transpose()
+            .map(|result| result.unwrap_or_default())
+            .map_err(PluginError::from)
+    }
+
+    /// Creates the immutable external-plugin context for one frozen codebase generation.
+    #[must_use]
+    pub fn create_external_analysis_session(
+        &self,
+        files: impl IntoIterator<Item = Arc<File>>,
+    ) -> Option<ExternalAnalysisSession> {
+        self.external_analyzer.as_ref()?;
+        Some(ExternalAnalysisSession::from_files(files))
+    }
+
+    /// Returns whether any enabled external plugin subscribed to per-file completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the external analyzer cannot be initialized.
+    pub fn has_external_after_file_analysis_hooks(&self) -> PluginResult<bool> {
+        self.external_analyzer
+            .as_deref()
+            .map(|analyzer| analyzer.read(|analyzer| analyzer.capabilities().after_file_analysis))
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
+    }
+
+    /// Returns the syntax targets and embedded data requested by enabled external analyzer hooks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the external analyzer cannot be initialized.
+    pub fn external_node_analysis_requirements(&self) -> PluginResult<Option<NodeAnalysisRequirements>> {
+        self.external_analyzer
+            .as_deref()
+            .map(|analyzer| analyzer.read(ExternalAnalyzer::node_analysis_requirements))
+            .transpose()
+            .map(Option::flatten)
+            .map_err(PluginError::from)
+    }
+
+    /// Returns whether any enabled external plugin subscribed to whole-project completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the external analyzer cannot be initialized.
+    pub fn has_external_after_analysis_hooks(&self) -> PluginResult<bool> {
+        self.external_analyzer
+            .as_deref()
+            .map(|analyzer| analyzer.read(|analyzer| analyzer.capabilities().after_analysis))
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
+    }
+
+    /// Runs enabled external hooks after the codebase is frozen and before file analysis starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an external hook cannot be dispatched or returns an invalid response.
+    pub fn run_external_before_analysis_hooks(
+        &self,
+        codebase: &CodebaseMetadata,
+        session: Option<&ExternalAnalysisSession>,
+    ) -> PluginResult<BeforeAnalysisResult> {
+        self.external_analyzer
+            .as_deref()
+            .zip(session)
+            .map(|(analyzer, session)| analyzer.with(|analyzer| analyzer.run_before_analysis_hooks(codebase, session)))
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
+    }
+
+    /// Runs enabled external hooks for one completed file analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an external hook cannot be dispatched or returns an invalid response.
+    pub fn run_external_after_file_analysis_hooks(
+        &self,
+        file: &File,
+        program: &Program<'_>,
+        resolved_names: &ResolvedNames<'_>,
+        artifacts: &AnalysisArtifacts,
+        codebase: &CodebaseMetadata,
+        session: Option<&ExternalAnalysisSession>,
+    ) -> PluginResult<AfterFileAnalysisResult> {
+        self.external_analyzer
+            .as_deref()
+            .zip(session)
+            .map(|(analyzer, session)| {
+                analyzer.with(|analyzer| {
+                    analyzer.run_after_file_analysis_hooks(file, program, resolved_names, artifacts, codebase, session)
+                })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
+    }
+
+    /// Runs enabled external after-file hooks for a batch of completed analyses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an external hook cannot be dispatched or returns an invalid response.
+    pub fn run_external_after_file_analysis_batch_hooks(
+        &self,
+        files: &[Arc<FileAnalysisSnapshot>],
+        codebase: &CodebaseMetadata,
+        session: Option<&ExternalAnalysisSession>,
+    ) -> PluginResult<AfterFileAnalysisResult> {
+        self.external_analyzer
+            .as_deref()
+            .zip(session)
+            .map(|(analyzer, session)| {
+                analyzer.with(|analyzer| analyzer.run_after_file_analysis_batch_hooks(files, codebase, session))
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
+    }
+
+    /// Runs enabled external hooks for the final merged analysis result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an external hook cannot be dispatched or returns an invalid response.
+    pub fn run_external_after_analysis_hooks(
+        &self,
+        result: &crate::analysis_result::AnalysisResult,
+        files: &[Arc<FileAnalysisSnapshot>],
+        codebase: &CodebaseMetadata,
+        session: Option<&ExternalAnalysisSession>,
+    ) -> PluginResult<IssueCollection> {
+        self.external_analyzer
+            .as_deref()
+            .zip(session)
+            .map(|(analyzer, session)| {
+                analyzer.with(|analyzer| analyzer.run_after_analysis_hooks(result, files, codebase, session))
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_library_providers() -> Self {
+        crate::plugin::create_registry()
+    }
+
+    pub fn register_function_provider<P>(&mut self, provider: P)
+    where
+        P: FunctionReturnTypeProvider + 'static,
+    {
+        let index = self.function_providers.len();
+
+        match P::targets() {
+            FunctionTarget::Exact(name) => {
+                self.function_exact.entry(ascii_lowercase_word(name)).or_default().push(index);
+            }
+            FunctionTarget::ExactMultiple(names) => {
+                for name in names {
+                    self.function_exact.entry(ascii_lowercase_word(name)).or_default().push(index);
+                }
+            }
+            FunctionTarget::Prefix(prefix) => {
+                self.function_prefix.push((ascii_lowercase_word(prefix), index));
+            }
+            FunctionTarget::Namespace(ns) => {
+                let ns_lower = ascii_lowercase_word(ns);
+                let ns_pattern = if ns_lower.as_bytes().last() == Some(&b'\\') {
+                    ns_lower
+                } else {
+                    concat_word!(ns_lower.as_bytes(), b"\\")
+                };
+                self.function_namespace.push((ns_pattern, index));
+            }
+        }
+
+        self.function_providers.push(Box::new(provider));
+    }
+
+    pub fn register_method_provider<P>(&mut self, provider: P)
+    where
+        P: MethodReturnTypeProvider + 'static,
+    {
+        let index = self.method_providers.len();
+        let targets = P::targets();
+
+        let mut has_wildcards = false;
+        let mut wildcard_targets = Vec::new();
+
+        for target in targets {
+            if let Some(key) = target.index_key() {
+                self.method_exact.entry(key).or_default().push(index);
+            } else {
+                has_wildcards = true;
+                wildcard_targets.push(*target);
+            }
+        }
+
+        if has_wildcards {
+            self.method_wildcard.push((wildcard_targets, index));
+        }
+
+        self.method_providers.push(Box::new(provider));
+    }
+
+    pub fn register_program_hook<H>(&mut self, hook: H)
+    where
+        H: ProgramHook + 'static,
+    {
+        self.program_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_statement_hook<H>(&mut self, hook: H)
+    where
+        H: StatementHook + 'static,
+    {
+        self.statement_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_expression_hook<H>(&mut self, hook: H)
+    where
+        H: ExpressionHook + 'static,
+    {
+        self.expression_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_function_call_hook<H>(&mut self, hook: H)
+    where
+        H: FunctionCallHook + 'static,
+    {
+        self.function_call_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_method_call_hook<H>(&mut self, hook: H)
+    where
+        H: MethodCallHook + 'static,
+    {
+        self.method_call_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_static_method_call_hook<H>(&mut self, hook: H)
+    where
+        H: StaticMethodCallHook + 'static,
+    {
+        self.static_method_call_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_nullsafe_method_call_hook<H>(&mut self, hook: H)
+    where
+        H: NullSafeMethodCallHook + 'static,
+    {
+        self.nullsafe_method_call_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_class_hook<H>(&mut self, hook: H)
+    where
+        H: ClassDeclarationHook + 'static,
+    {
+        self.class_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_interface_hook<H>(&mut self, hook: H)
+    where
+        H: InterfaceDeclarationHook + 'static,
+    {
+        self.interface_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_trait_hook<H>(&mut self, hook: H)
+    where
+        H: TraitDeclarationHook + 'static,
+    {
+        self.trait_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_enum_hook<H>(&mut self, hook: H)
+    where
+        H: EnumDeclarationHook + 'static,
+    {
+        self.enum_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_function_decl_hook<H>(&mut self, hook: H)
+    where
+        H: FunctionDeclarationHook + 'static,
+    {
+        self.function_decl_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_property_initialization_provider<P>(&mut self, provider: P)
+    where
+        P: PropertyInitializationProvider + 'static,
+    {
+        self.property_initialization_providers.push(Box::new(provider));
+    }
+
+    pub fn register_issue_filter_hook<H>(&mut self, hook: H)
+    where
+        H: IssueFilterHook + 'static,
+    {
+        self.issue_filter_hooks.push(Box::new(hook));
+    }
+
+    pub fn register_function_assertion_provider<P>(&mut self, provider: P)
+    where
+        P: FunctionAssertionProvider + 'static,
+    {
+        let index = self.function_assertion_providers.len();
+
+        match P::targets() {
+            FunctionTarget::Exact(name) => {
+                self.function_assertion_exact.entry(ascii_lowercase_word(name)).or_default().push(index);
+            }
+            FunctionTarget::ExactMultiple(names) => {
+                for name in names {
+                    self.function_assertion_exact.entry(ascii_lowercase_word(name)).or_default().push(index);
+                }
+            }
+            FunctionTarget::Prefix(prefix) => {
+                self.function_assertion_prefix.push((ascii_lowercase_word(prefix), index));
+            }
+            FunctionTarget::Namespace(ns) => {
+                let ns_lower = ascii_lowercase_word(ns);
+                let ns_pattern = if ns_lower.as_bytes().last() == Some(&b'\\') {
+                    ns_lower
+                } else {
+                    concat_word!(ns_lower.as_bytes(), b"\\")
+                };
+                self.function_assertion_namespace.push((ns_pattern, index));
+            }
+        }
+
+        self.function_assertion_providers.push(Box::new(provider));
+    }
+
+    pub fn register_method_assertion_provider<P>(&mut self, provider: P)
+    where
+        P: MethodAssertionProvider + 'static,
+    {
+        let index = self.method_assertion_providers.len();
+        let targets = P::targets();
+
+        let mut has_wildcards = false;
+        let mut wildcard_targets = Vec::new();
+
+        for target in targets {
+            if let Some(key) = target.index_key() {
+                self.method_assertion_exact.entry(key).or_default().push(index);
+            } else {
+                has_wildcards = true;
+                wildcard_targets.push(*target);
+            }
+        }
+
+        if has_wildcards {
+            self.method_assertion_wildcard.push((wildcard_targets, index));
+        }
+
+        self.method_assertion_providers.push(Box::new(provider));
+    }
+
+    pub fn register_expression_throw_provider<P>(&mut self, provider: P)
+    where
+        P: ExpressionThrowTypeProvider + 'static,
+    {
+        self.expression_throw_providers.push(Box::new(provider));
+    }
+
+    pub fn register_function_throw_provider<P>(&mut self, provider: P)
+    where
+        P: FunctionThrowTypeProvider + 'static,
+    {
+        let index = self.function_throw_providers.len();
+
+        match P::targets() {
+            FunctionTarget::Exact(name) => {
+                self.function_throw_exact.entry(ascii_lowercase_word(name)).or_default().push(index);
+            }
+            FunctionTarget::ExactMultiple(names) => {
+                for name in names {
+                    self.function_throw_exact.entry(ascii_lowercase_word(name)).or_default().push(index);
+                }
+            }
+            FunctionTarget::Prefix(prefix) => {
+                self.function_throw_prefix.push((ascii_lowercase_word(prefix), index));
+            }
+            FunctionTarget::Namespace(ns) => {
+                let ns_lower = ascii_lowercase_word(ns);
+                let ns_pattern = if ns_lower.as_bytes().last() == Some(&b'\\') {
+                    ns_lower
+                } else {
+                    concat_word!(ns_lower.as_bytes(), b"\\")
+                };
+                self.function_throw_namespace.push((ns_pattern, index));
+            }
+        }
+
+        self.function_throw_providers.push(Box::new(provider));
+    }
+
+    pub fn register_method_throw_provider<P>(&mut self, provider: P)
+    where
+        P: MethodThrowTypeProvider + 'static,
+    {
+        let index = self.method_throw_providers.len();
+        let targets = P::targets();
+
+        let mut has_wildcards = false;
+        let mut wildcard_targets = Vec::new();
+
+        for target in targets {
+            if let Some(key) = target.index_key() {
+                self.method_throw_exact.entry(key).or_default().push(index);
+            } else {
+                has_wildcards = true;
+                wildcard_targets.push(*target);
+            }
+        }
+
+        if has_wildcards {
+            self.method_throw_wildcard.push((wildcard_targets, index));
+        }
+
+        self.method_throw_providers.push(Box::new(provider));
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_program_hooks(&self) -> bool {
+        !self.program_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_statement_hooks(&self) -> bool {
+        !self.statement_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_expression_hooks(&self) -> bool {
+        !self.expression_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_function_call_hooks(&self) -> bool {
+        !self.function_call_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_method_call_hooks(&self) -> bool {
+        !self.method_call_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_static_method_call_hooks(&self) -> bool {
+        !self.static_method_call_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_nullsafe_method_call_hooks(&self) -> bool {
+        !self.nullsafe_method_call_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_class_hooks(&self) -> bool {
+        !self.class_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_interface_hooks(&self) -> bool {
+        !self.interface_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_trait_hooks(&self) -> bool {
+        !self.trait_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_enum_hooks(&self) -> bool {
+        !self.enum_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_function_decl_hooks(&self) -> bool {
+        !self.function_decl_hooks.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_property_initialization_providers(&self) -> bool {
+        !self.property_initialization_providers.is_empty()
+            || self.has_external_capability(|capabilities| capabilities.property_initialization)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_issue_filter_hooks(&self) -> bool {
+        !self.issue_filter_hooks.is_empty() || self.has_external_capability(|capabilities| capabilities.issue_filters)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_function_assertion_providers(&self) -> bool {
+        !self.function_assertion_providers.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_method_assertion_providers(&self) -> bool {
+        !self.method_assertion_providers.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_expression_throw_providers(&self) -> bool {
+        !self.expression_throw_providers.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_function_throw_providers(&self) -> bool {
+        !self.function_throw_providers.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_method_throw_providers(&self) -> bool {
+        !self.method_throw_providers.is_empty()
+    }
+
+    /// Run all registered program hooks before analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn before_program(
+        &self,
+        file: &File,
+        program: &Program<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<HookAction> {
+        for hook in &self.program_hooks {
+            if hook.before_program(file, program, context)? == HookAction::Skip {
+                return Ok(HookAction::Skip);
+            }
+        }
+        Ok(HookAction::Continue)
+    }
+
+    /// Run all registered program hooks after analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn after_program(
+        &self,
+        file: &File,
+        program: &Program<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.program_hooks {
+            hook.after_program(file, program, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered statement hooks before analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn before_statement(
+        &self,
+        stmt: &Statement<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<HookAction> {
+        for hook in &self.statement_hooks {
+            if hook.before_statement(stmt, context)? == HookAction::Skip {
+                return Ok(HookAction::Skip);
+            }
+        }
+        Ok(HookAction::Continue)
+    }
+
+    /// Run all registered statement hooks after analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn after_statement(&self, stmt: &Statement<'_>, context: &mut HookContext<'_, '_>) -> PluginResult<()> {
+        for hook in &self.statement_hooks {
+            hook.after_statement(stmt, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered expression hooks before analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn before_expression(
+        &self,
+        expr: &Expression<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<ExpressionHookResult> {
+        for hook in &self.expression_hooks {
+            let result = hook.before_expression(expr, context)?;
+            if result.should_skip() {
+                return Ok(result);
+            }
+        }
+        Ok(ExpressionHookResult::Continue)
+    }
+
+    /// Run all registered expression hooks after analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn after_expression(&self, expr: &Expression<'_>, context: &mut HookContext<'_, '_>) -> PluginResult<()> {
+        for hook in &self.expression_hooks {
+            hook.after_expression(expr, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered function call hooks before analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn before_function_call(
+        &self,
+        call: &FunctionCall<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<ExpressionHookResult> {
+        for hook in &self.function_call_hooks {
+            let result = hook.before_function_call(call, context)?;
+            if result.should_skip() {
+                return Ok(result);
+            }
+        }
+        Ok(ExpressionHookResult::Continue)
+    }
+
+    /// Run all registered function call hooks after analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn after_function_call(&self, call: &FunctionCall<'_>, context: &mut HookContext<'_, '_>) -> PluginResult<()> {
+        for hook in &self.function_call_hooks {
+            hook.after_function_call(call, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered method call hooks before analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn before_method_call(
+        &self,
+        call: &MethodCall<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<ExpressionHookResult> {
+        for hook in &self.method_call_hooks {
+            let result = hook.before_method_call(call, context)?;
+            if result.should_skip() {
+                return Ok(result);
+            }
+        }
+        Ok(ExpressionHookResult::Continue)
+    }
+
+    /// Run all registered method call hooks after analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn after_method_call(&self, call: &MethodCall<'_>, context: &mut HookContext<'_, '_>) -> PluginResult<()> {
+        for hook in &self.method_call_hooks {
+            hook.after_method_call(call, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered static method call hooks before analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn before_static_method_call(
+        &self,
+        call: &StaticCall<'_, '_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<ExpressionHookResult> {
+        for hook in &self.static_method_call_hooks {
+            let result = hook.before_static_method_call(call, context)?;
+            if result.should_skip() {
+                return Ok(result);
+            }
+        }
+        Ok(ExpressionHookResult::Continue)
+    }
+
+    /// Run all registered static method call hooks after analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn after_static_method_call(
+        &self,
+        call: &StaticCall<'_, '_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.static_method_call_hooks {
+            hook.after_static_method_call(call, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered nullsafe method call hooks before analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn before_nullsafe_method_call(
+        &self,
+        call: &NullSafeMethodCall<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<ExpressionHookResult> {
+        for hook in &self.nullsafe_method_call_hooks {
+            let result = hook.before_nullsafe_method_call(call, context)?;
+            if result.should_skip() {
+                return Ok(result);
+            }
+        }
+        Ok(ExpressionHookResult::Continue)
+    }
+
+    /// Run all registered nullsafe method call hooks after analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn after_nullsafe_method_call(
+        &self,
+        call: &NullSafeMethodCall<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.nullsafe_method_call_hooks {
+            hook.after_nullsafe_method_call(call, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered class declaration hooks on entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_enter_class(
+        &self,
+        class: &Class<'_>,
+        metadata: &ClassLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.class_hooks {
+            hook.on_enter_class(class, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered class declaration hooks on exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_leave_class(
+        &self,
+        class: &Class<'_>,
+        metadata: &ClassLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.class_hooks {
+            hook.on_leave_class(class, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered interface declaration hooks on entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_enter_interface(
+        &self,
+        interface: &Interface<'_>,
+        metadata: &ClassLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.interface_hooks {
+            hook.on_enter_interface(interface, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered interface declaration hooks on exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_leave_interface(
+        &self,
+        interface: &Interface<'_>,
+        metadata: &ClassLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.interface_hooks {
+            hook.on_leave_interface(interface, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered trait declaration hooks on entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_enter_trait(
+        &self,
+        trait_: &Trait<'_>,
+        metadata: &ClassLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.trait_hooks {
+            hook.on_enter_trait(trait_, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered trait declaration hooks on exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_leave_trait(
+        &self,
+        trait_: &Trait<'_>,
+        metadata: &ClassLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.trait_hooks {
+            hook.on_leave_trait(trait_, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered enum declaration hooks on entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_enter_enum(
+        &self,
+        enum_: &Enum<'_>,
+        metadata: &ClassLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.enum_hooks {
+            hook.on_enter_enum(enum_, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered enum declaration hooks on exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_leave_enum(
+        &self,
+        enum_: &Enum<'_>,
+        metadata: &ClassLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.enum_hooks {
+            hook.on_leave_enum(enum_, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered function declaration hooks on entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_enter_function(
+        &self,
+        function: &Function<'_>,
+        metadata: &FunctionLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.function_decl_hooks {
+            hook.on_enter_function(function, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    /// Run all registered function declaration hooks on exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError`] if any registered hook propagates one.
+    pub fn on_leave_function(
+        &self,
+        function: &Function<'_>,
+        metadata: &FunctionLikeMetadata,
+        context: &mut HookContext<'_, '_>,
+    ) -> PluginResult<()> {
+        for hook in &self.function_decl_hooks {
+            hook.on_leave_function(function, metadata, context)?;
+        }
+        Ok(())
+    }
+
+    fn get_function_provider_indices(&self, name: &[u8]) -> Vec<usize> {
+        let lower_name = ascii_lowercase_word(name);
+        let mut indices = Vec::new();
+
+        if let Some(idxs) = self.function_exact.get(&lower_name) {
+            indices.extend(idxs.iter().copied());
+        }
+
+        for (prefix, idx) in &self.function_prefix {
+            if lower_name.as_bytes().starts_with(prefix.as_bytes()) && !indices.contains(idx) {
+                indices.push(*idx);
+            }
+        }
+
+        for (ns, idx) in &self.function_namespace {
+            if lower_name.as_bytes().starts_with(ns.as_bytes()) && !indices.contains(idx) {
+                indices.push(*idx);
+            }
+        }
+
+        indices
+    }
+
+    fn get_method_provider_indices(&self, class_name: &[u8], method_name: &[u8]) -> Vec<usize> {
+        use mago_word::concat_word;
+        let key = concat_word!(ascii_lowercase_word(class_name), b"::", ascii_lowercase_word(method_name));
+        let mut indices = Vec::new();
+
+        if let Some(idxs) = self.method_exact.get(&key) {
+            indices.extend(idxs.iter().copied());
+        }
+
+        for (targets, idx) in &self.method_wildcard {
+            if !indices.contains(idx) {
+                for target in targets {
+                    if target.matches(class_name, method_name) {
+                        indices.push(*idx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        indices
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn may_have_callable_signature_provider(&self, function_like: &FunctionLikeIdentifier) -> bool {
+        if self.external_analyzer.is_none() {
+            return false;
+        }
+
+        match function_like {
+            FunctionLikeIdentifier::Function(_) => {
+                self.has_external_capability(|capabilities| capabilities.function_signatures)
+            }
+            FunctionLikeIdentifier::Method(_, _) => {
+                self.has_external_capability(|capabilities| capabilities.method_signatures)
+            }
+            FunctionLikeIdentifier::Closure(_) => false,
+        }
+    }
+
+    /// Requests an external provider's effective callable signature before argument analysis.
+    ///
+    /// Provider failures are logged and preserve the native callable signature.
+    pub fn get_function_like_callable_signature<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        artifacts: &AnalysisArtifacts,
+        function_like: &FunctionLikeIdentifier,
+        invocation: &Invocation<'ctx, '_, '_>,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> Option<EffectiveCallableSignature> {
+        let (analyzer, session) = self.external_analyzer.as_deref().zip(external_session)?;
+
+        match function_like {
+            FunctionLikeIdentifier::Function(name)
+                if self.has_external_capability(|capabilities| capabilities.function_signatures) =>
+            {
+                optional_external_hint(
+                    "function callable-signature provider",
+                    analyzer.with(|analyzer| {
+                        analyzer.get_function_callable_signature(
+                            name.as_bytes(),
+                            invocation,
+                            artifacts,
+                            source_file,
+                            codebase,
+                            session,
+                        )
+                    }),
+                )
+            }
+            FunctionLikeIdentifier::Method(class, method)
+                if self.has_external_capability(|capabilities| capabilities.method_signatures) =>
+            {
+                optional_external_hint(
+                    "method callable-signature provider",
+                    analyzer.with(|analyzer| {
+                        analyzer.get_method_callable_signature(
+                            class.as_bytes(),
+                            method.as_bytes(),
+                            invocation,
+                            artifacts,
+                            source_file,
+                            codebase,
+                            session,
+                        )
+                    }),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns a provider result for a function or method invocation.
+    ///
+    /// External provider failures are logged and preserve the native return type.
+    pub fn get_function_like_return_type<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        function_like: &FunctionLikeIdentifier,
+        invocation: &Invocation<'ctx, '_, '_>,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> Option<ProviderResult> {
+        match function_like {
+            FunctionLikeIdentifier::Function(name) => Some(self.get_function_return_type(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                name.as_bytes(),
+                invocation,
+                external_session,
+            )),
+            FunctionLikeIdentifier::Method(class_name, method_name) => Some(self.get_method_return_type(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                class_name.as_bytes(),
+                method_name.as_bytes(),
+                invocation,
+                external_session,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Returns the first applicable function return-type provider result.
+    ///
+    /// External provider failures are logged and preserve the native return type.
+    pub fn get_function_return_type<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        function_name: &[u8],
+        invocation: &Invocation<'ctx, '_, '_>,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> ProviderResult {
+        let indices = self.get_function_provider_indices(function_name);
+        let mut all_issues = Vec::new();
+
+        for idx in indices {
+            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let invocation_info = InvocationInfo::new(invocation);
+
+            if let Some(ty) = self.function_providers[idx].get_return_type(&provider_context, &invocation_info) {
+                all_issues.extend(provider_context.take_issues());
+                return ProviderResult { return_type: Some(ty), issues: all_issues };
+            }
+
+            all_issues.extend(provider_context.take_issues());
+        }
+
+        let return_type = if self.has_external_capability(|capabilities| capabilities.function_return_types) {
+            self.external_analyzer.as_deref().zip(external_session).and_then(|(analyzer, session)| {
+                optional_external_hint(
+                    "function return-type provider",
+                    analyzer.with(|analyzer| {
+                        analyzer.get_function_return_type(
+                            function_name,
+                            invocation,
+                            artifacts,
+                            source_file,
+                            codebase,
+                            session,
+                            block_context.scope.get_function_like_identifier(),
+                        )
+                    }),
+                )
+            })
+        } else {
+            None
+        };
+
+        ProviderResult { return_type, issues: all_issues }
+    }
+
+    /// Returns the first applicable method return-type provider result.
+    ///
+    /// External provider failures are logged and preserve the native return type.
+    pub fn get_method_return_type<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        class_name: &[u8],
+        method_name: &[u8],
+        invocation: &Invocation<'ctx, '_, '_>,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> ProviderResult {
+        let indices = self.get_method_provider_indices(class_name, method_name);
+        let mut all_issues = Vec::new();
+
+        for idx in indices {
+            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let invocation_info = InvocationInfo::new(invocation);
+
+            if let Some(ty) =
+                self.method_providers[idx].get_return_type(&provider_context, class_name, method_name, &invocation_info)
+            {
+                all_issues.extend(provider_context.take_issues());
+                return ProviderResult { return_type: Some(ty), issues: all_issues };
+            }
+
+            all_issues.extend(provider_context.take_issues());
+        }
+
+        let return_type = if self.has_external_capability(|capabilities| capabilities.method_return_types) {
+            self.external_analyzer.as_deref().zip(external_session).and_then(|(analyzer, session)| {
+                optional_external_hint(
+                    "method return-type provider",
+                    analyzer.with(|analyzer| {
+                        analyzer.get_method_return_type(
+                            class_name,
+                            method_name,
+                            invocation,
+                            artifacts,
+                            source_file,
+                            codebase,
+                            session,
+                            block_context.scope.get_function_like_identifier(),
+                        )
+                    }),
+                )
+            })
+        } else {
+            None
+        };
+
+        ProviderResult { return_type, issues: all_issues }
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn may_have_property_type_provider(&self) -> bool {
+        self.has_external_capability(|capabilities| capabilities.property_types)
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn may_have_class_initializer_provider(&self) -> bool {
+        self.has_external_capability(|capabilities| capabilities.class_initializers)
+    }
+
+    /// Requests an external provider's effective magic-property contract.
+    ///
+    /// Provider failures are logged and preserve native property resolution.
+    pub(crate) fn get_property_type(
+        &self,
+        codebase: &CodebaseMetadata,
+        class: &[u8],
+        property: &[u8],
+        access: PropertyAccessKind,
+        receiver_type: &TUnion,
+        span: Span,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> Option<EffectivePropertyType> {
+        if !self.has_external_capability(|capabilities| capabilities.property_types) {
+            return None;
+        }
+
+        self.external_analyzer.as_deref().zip(external_session).and_then(|(analyzer, session)| {
+            optional_external_hint(
+                "property type provider",
+                analyzer.with(|analyzer| {
+                    analyzer.get_property_type(class, property, access, receiver_type, span, codebase, session)
+                }),
+            )
+        })
+    }
+
+    /// Requests the call an external provider says a magic method or property forwards to.
+    ///
+    /// Provider failures are logged and preserve native magic-call resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_forwarded_call(
+        &self,
+        codebase: &CodebaseMetadata,
+        source_file: &File,
+        class: &[u8],
+        member: &[u8],
+        property: bool,
+        receiver_type: &TUnion,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> Option<ForwardedCall> {
+        if !self.has_external_capability(|capabilities| capabilities.call_forwarding) {
+            return None;
+        }
+
+        self.external_analyzer.as_deref().zip(external_session).and_then(|(analyzer, session)| {
+            optional_external_hint(
+                "call forwarding provider",
+                analyzer.with(|analyzer| {
+                    analyzer.get_forwarded_call(class, member, property, receiver_type, source_file, codebase, session)
+                }),
+            )
+        })
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn function_provider_count(&self) -> usize {
+        self.function_providers.len()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn method_provider_count(&self) -> usize {
+        self.method_providers.len()
+    }
+
+    /// Checks whether any registered provider considers a property initialized.
+    ///
+    /// External provider failures are logged and preserve native initialization analysis.
+    pub fn is_property_initialized(
+        &self,
+        codebase: &CodebaseMetadata,
+        source_file: &File,
+        class_metadata: &ClassLikeMetadata,
+        property_metadata: &PropertyMetadata,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> bool {
+        for provider in &self.property_initialization_providers {
+            if provider.is_property_initialized(class_metadata, property_metadata) {
+                return true;
+            }
+        }
+
+        if !self.has_external_capability(|capabilities| capabilities.property_initialization) {
+            return false;
+        }
+
+        self.external_analyzer
+            .as_deref()
+            .zip(external_session)
+            .map(|(analyzer, session)| {
+                optional_external_hint(
+                    "property initialization provider",
+                    analyzer.with(|analyzer| {
+                        analyzer.is_property_initialized(
+                            class_metadata.name.as_bytes(),
+                            property_metadata,
+                            source_file,
+                            codebase,
+                            session,
+                        )
+                    }),
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Returns framework lifecycle methods that initialize properties on `class_metadata`.
+    ///
+    /// External provider failures are logged and preserve native initialization analysis.
+    pub fn get_class_initializers(
+        &self,
+        codebase: &CodebaseMetadata,
+        source_file: &File,
+        class_metadata: &ClassLikeMetadata,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> WordSet {
+        if !self.has_external_capability(|capabilities| capabilities.class_initializers) {
+            return WordSet::default();
+        }
+
+        self.external_analyzer
+            .as_deref()
+            .zip(external_session)
+            .map(|(analyzer, session)| {
+                optional_external_hint(
+                    "class initializer provider",
+                    analyzer.with(|analyzer| {
+                        analyzer.get_class_initializers(class_metadata, source_file, codebase, session)
+                    }),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn get_function_assertion_provider_indices(&self, name: &[u8]) -> Vec<usize> {
+        if self.function_assertion_exact.is_empty()
+            && self.function_assertion_prefix.is_empty()
+            && self.function_assertion_namespace.is_empty()
+        {
+            return Vec::new();
+        }
+
+        let lower_name = ascii_lowercase_word(name);
+        let mut indices = Vec::new();
+
+        if let Some(idxs) = self.function_assertion_exact.get(&lower_name) {
+            indices.extend(idxs.iter().copied());
+        }
+
+        for (prefix, idx) in &self.function_assertion_prefix {
+            if lower_name.as_bytes().starts_with(prefix.as_bytes()) && !indices.contains(idx) {
+                indices.push(*idx);
+            }
+        }
+
+        for (ns, idx) in &self.function_assertion_namespace {
+            if lower_name.as_bytes().starts_with(ns.as_bytes()) && !indices.contains(idx) {
+                indices.push(*idx);
+            }
+        }
+
+        indices
+    }
+
+    fn get_method_assertion_provider_indices(&self, class_name: &[u8], method_name: &[u8]) -> Vec<usize> {
+        if self.method_assertion_exact.is_empty() && self.method_assertion_wildcard.is_empty() {
+            return Vec::new();
+        }
+
+        use mago_word::concat_word;
+        let key = concat_word!(ascii_lowercase_word(class_name), b"::", ascii_lowercase_word(method_name));
+        let mut indices = Vec::new();
+
+        if let Some(idxs) = self.method_assertion_exact.get(&key) {
+            indices.extend(idxs.iter().copied());
+        }
+
+        for (targets, idx) in &self.method_assertion_wildcard {
+            if !indices.contains(idx) {
+                for target in targets {
+                    if target.matches(class_name, method_name) {
+                        indices.push(*idx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        indices
+    }
+
+    /// Returns assertions for a function or method invocation.
+    ///
+    /// External provider failures are logged and preserve native assertion analysis.
+    pub fn get_function_like_assertions<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        function_like: &FunctionLikeIdentifier,
+        invocation: &Invocation<'ctx, '_, '_>,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> Option<InvocationAssertions> {
+        match function_like {
+            FunctionLikeIdentifier::Function(name) => self.get_function_assertions(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                name.as_bytes(),
+                invocation,
+                external_session,
+            ),
+            FunctionLikeIdentifier::Method(class_name, method_name) => self.get_method_assertions(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                class_name.as_bytes(),
+                method_name.as_bytes(),
+                invocation,
+                external_session,
+            ),
+            _ => None,
+        }
+    }
+
+    /// Get assertions for a function invocation from registered providers.
+    ///
+    /// External provider failures are logged and preserve native assertion analysis.
+    pub fn get_function_assertions<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        function_name: &[u8],
+        invocation: &Invocation<'ctx, '_, '_>,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> Option<InvocationAssertions> {
+        let may_have_external = self.has_external_capability(|capabilities| capabilities.function_assertions);
+        if self.function_assertion_providers.is_empty() && !may_have_external {
+            return None;
+        }
+
+        let indices = self.get_function_assertion_provider_indices(function_name);
+
+        for idx in indices {
+            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let invocation_info = InvocationInfo::new(invocation);
+
+            if let Some(assertions) =
+                self.function_assertion_providers[idx].get_assertions(&provider_context, &invocation_info)
+                && !assertions.is_empty()
+            {
+                return Some(assertions);
+            }
+        }
+
+        if !may_have_external {
+            return None;
+        }
+
+        self.external_analyzer.as_deref().zip(external_session).and_then(|(analyzer, session)| {
+            optional_external_hint(
+                "function assertion provider",
+                analyzer.with(|analyzer| {
+                    analyzer.get_function_assertions(
+                        function_name,
+                        invocation,
+                        artifacts,
+                        source_file,
+                        codebase,
+                        session,
+                        block_context.scope.get_function_like_identifier(),
+                    )
+                }),
+            )
+        })
+    }
+
+    /// Get assertions for a method invocation from registered providers.
+    ///
+    /// External provider failures are logged and preserve native assertion analysis.
+    pub fn get_method_assertions<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        class_name: &[u8],
+        method_name: &[u8],
+        invocation: &Invocation<'ctx, '_, '_>,
+        external_session: Option<&ExternalAnalysisSession>,
+    ) -> Option<InvocationAssertions> {
+        let may_have_external = self.has_external_capability(|capabilities| capabilities.method_assertions);
+        if self.method_assertion_providers.is_empty() && !may_have_external {
+            return None;
+        }
+
+        let indices = self.get_method_assertion_provider_indices(class_name, method_name);
+
+        for idx in indices {
+            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let invocation_info = InvocationInfo::new(invocation);
+
+            if let Some(assertions) = self.method_assertion_providers[idx].get_assertions(
+                &provider_context,
+                class_name,
+                method_name,
+                &invocation_info,
+            ) && !assertions.is_empty()
+            {
+                return Some(assertions);
+            }
+        }
+
+        if !may_have_external {
+            return None;
+        }
+
+        self.external_analyzer.as_deref().zip(external_session).and_then(|(analyzer, session)| {
+            optional_external_hint(
+                "method assertion provider",
+                analyzer.with(|analyzer| {
+                    analyzer.get_method_assertions(
+                        class_name,
+                        method_name,
+                        invocation,
+                        artifacts,
+                        source_file,
+                        codebase,
+                        session,
+                        block_context.scope.get_function_like_identifier(),
+                    )
+                }),
+            )
+        })
+    }
+
+    fn get_function_throw_provider_indices(&self, name: &[u8]) -> Vec<usize> {
+        if self.function_throw_exact.is_empty()
+            && self.function_throw_prefix.is_empty()
+            && self.function_throw_namespace.is_empty()
+        {
+            return Vec::new();
+        }
+
+        let lower_name = ascii_lowercase_word(name);
+        let mut indices = Vec::new();
+
+        if let Some(idxs) = self.function_throw_exact.get(&lower_name) {
+            indices.extend(idxs.iter().copied());
+        }
+
+        for (prefix, idx) in &self.function_throw_prefix {
+            if lower_name.as_bytes().starts_with(prefix.as_bytes()) && !indices.contains(idx) {
+                indices.push(*idx);
+            }
+        }
+
+        for (ns, idx) in &self.function_throw_namespace {
+            if lower_name.as_bytes().starts_with(ns.as_bytes()) && !indices.contains(idx) {
+                indices.push(*idx);
+            }
+        }
+
+        indices
+    }
+
+    fn get_method_throw_provider_indices(&self, class_name: &[u8], method_name: &[u8]) -> Vec<usize> {
+        if self.method_throw_providers.is_empty()
+            && self.method_throw_exact.is_empty()
+            && self.method_throw_wildcard.is_empty()
+        {
+            return Vec::new();
+        }
+
+        use mago_word::concat_word;
+        let key = concat_word!(ascii_lowercase_word(class_name), b"::", ascii_lowercase_word(method_name));
+        let mut indices = Vec::new();
+
+        if let Some(idxs) = self.method_throw_exact.get(&key) {
+            indices.extend(idxs.iter().copied());
+        }
+
+        for (targets, idx) in &self.method_throw_wildcard {
+            if !indices.contains(idx) {
+                for target in targets {
+                    if target.matches(class_name, method_name) {
+                        indices.push(*idx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        indices
+    }
+
+    /// Get thrown exception class names for an expression from registered providers.
+    #[must_use]
+    pub fn get_expression_thrown_exceptions<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        expression: &mago_syntax::cst::Expression<'_>,
+    ) -> WordSet {
+        let mut exceptions = WordSet::default();
+
+        for provider in &self.expression_throw_providers {
+            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            exceptions.extend(provider.get_thrown_exceptions(&provider_context, expression));
+        }
+
+        exceptions
+    }
+
+    /// Get thrown exception class names for a function invocation from registered providers.
+    #[must_use]
+    pub fn get_function_thrown_exceptions<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        function_name: &[u8],
+        invocation: &Invocation<'ctx, '_, '_>,
+    ) -> WordSet {
+        let mut exceptions = WordSet::default();
+        let indices = self.get_function_throw_provider_indices(function_name);
+
+        for idx in indices {
+            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let invocation_info = InvocationInfo::new(invocation);
+            exceptions
+                .extend(self.function_throw_providers[idx].get_thrown_exceptions(&provider_context, &invocation_info));
+        }
+
+        exceptions
+    }
+
+    /// Get thrown exception class names for a method invocation from registered providers.
+    #[must_use]
+    pub fn get_method_thrown_exceptions<'ctx>(
+        &self,
+        codebase: &'ctx CodebaseMetadata,
+        source_file: &'ctx File,
+        block_context: &BlockContext<'ctx>,
+        artifacts: &AnalysisArtifacts,
+        class_name: &[u8],
+        method_name: &[u8],
+        invocation: &Invocation<'ctx, '_, '_>,
+    ) -> WordSet {
+        let mut exceptions = WordSet::default();
+        let indices = self.get_method_throw_provider_indices(class_name, method_name);
+
+        for idx in indices {
+            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let invocation_info = InvocationInfo::new(invocation);
+            exceptions.extend(self.method_throw_providers[idx].get_thrown_exceptions(
+                &provider_context,
+                class_name,
+                method_name,
+                &invocation_info,
+            ));
+        }
+
+        exceptions
+    }
+
+    /// Filter issues through all registered issue filter hooks.
+    ///
+    /// Returns a new `IssueCollection` with filtered issues.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a native hook fails or an external issue batch cannot be filtered.
+    pub fn filter_issues(
+        &self,
+        file: &File,
+        issues: IssueCollection,
+        codebase: &CodebaseMetadata,
+        session: Option<&ExternalAnalysisSession>,
+    ) -> PluginResult<IssueCollection> {
+        let mut filtered = IssueCollection::default();
+        if self.issue_filter_hooks.is_empty() {
+            filtered = issues;
+        } else {
+            filtered.reserve(issues.len());
+            for issue in issues {
+                let mut keep = true;
+                for hook in &self.issue_filter_hooks {
+                    if hook.filter_issue(file, &issue)? == IssueFilterDecision::Remove {
+                        keep = false;
+                        break;
+                    }
+                }
+
+                if keep {
+                    filtered.push(issue);
+                }
+            }
+        }
+
+        if filtered.is_empty() || !self.has_external_capability(|capabilities| capabilities.issue_filters) {
+            return Ok(filtered);
+        }
+
+        let Some((analyzer, session)) = self.external_analyzer.as_deref().zip(session) else {
+            return Ok(filtered);
+        };
+
+        analyzer.with(|analyzer| analyzer.filter_issues(file, filtered, codebase, session)).map_err(PluginError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::external::ExternalAnalyzerError;
+    use crate::plugin::provider::Provider;
+    use crate::plugin::provider::ProviderMeta;
+
+    static TEST_META: ProviderMeta = ProviderMeta::new("test::provider", "Test Provider", "A test provider");
+
+    struct TestFunctionProvider;
+
+    impl Provider for TestFunctionProvider {
+        fn meta() -> &'static ProviderMeta {
+            &TEST_META
+        }
+    }
+
+    impl FunctionReturnTypeProvider for TestFunctionProvider {
+        fn targets() -> FunctionTarget {
+            FunctionTarget::Exact(b"test_func")
+        }
+
+        fn get_return_type(
+            &self,
+            _context: &ProviderContext<'_, '_, '_>,
+            _invocation: &InvocationInfo<'_, '_, '_>,
+        ) -> Option<TUnion> {
+            None
+        }
+    }
+
+    #[test]
+    fn test_register_function_provider() {
+        let mut registry = PluginRegistry::new();
+        registry.register_function_provider(TestFunctionProvider);
+
+        assert_eq!(registry.function_provider_count(), 1);
+        let indices = registry.get_function_provider_indices(b"test_func");
+        assert_eq!(indices.len(), 1);
+    }
+
+    #[test]
+    fn test_function_exact_match() {
+        let mut registry = PluginRegistry::new();
+        registry.register_function_provider(TestFunctionProvider);
+
+        let indices = registry.get_function_provider_indices(b"test_func");
+        assert_eq!(indices.len(), 1);
+
+        let indices = registry.get_function_provider_indices(b"TEST_FUNC");
+        assert_eq!(indices.len(), 1);
+
+        let indices = registry.get_function_provider_indices(b"other_func");
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn external_analyzer_errors_remain_structured() {
+        let handle = ExternalAnalyzerHandle::pending(std::thread::spawn(|| {
+            Err(ExternalAnalyzerError::Protocol("broken response".to_string()))
+        }));
+        let mut registry = PluginRegistry::new();
+        registry.set_external_analyzer(Arc::new(handle));
+
+        let result = registry.prepare_external_analyzer();
+        assert!(matches!(
+            result,
+            Err(PluginError::External(source))
+                if matches!(source.as_ref(), ExternalAnalyzerError::Protocol(message) if message == "broken response")
+        ));
+    }
+
+    #[test]
+    fn optional_external_provider_failures_use_native_fallback() {
+        let result: Option<TUnion> = optional_external_hint(
+            "test provider",
+            Err(Arc::new(ExternalAnalyzerError::Protocol("broken response".to_string()))),
+        );
+
+        assert!(result.is_none());
+    }
+}

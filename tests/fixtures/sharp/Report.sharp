@@ -1,0 +1,14 @@
+namespace Demo;
+
+import Lib.Calc;
+
+class Report
+{
+    public static int total(int extra)
+    {
+        let label = "one";
+        const base = 2;
+        const calc = Calc.make();
+        return calc.add(label, base * extra);
+    }
+}

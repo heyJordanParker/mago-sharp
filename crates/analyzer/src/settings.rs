@@ -1,0 +1,525 @@
+use mago_algebra::AlgebraThresholds;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_php_version::PHPVersion;
+use mago_word::Word;
+use mago_word::WordSet;
+use mago_word::ascii_lowercase_word;
+
+/// Default maximum logical formula size during conditional analysis.
+pub const DEFAULT_FORMULA_SIZE_THRESHOLD: u16 = 512;
+
+/// Default cap on the loop assignment-graph depth that the analyzer will
+/// explore when running fixed-point iteration over loop bodies.
+///
+/// The default of `1` means each loop body is re-analyzed at most once after
+/// the initial pass, which is sufficient to stabilise the vast majority of
+/// real-world code and keeps per-file cost bounded. Projects that care about
+/// maximally precise narrowing of long loop-carried dependency chains can
+/// raise this in their config at the cost of analysis time.
+pub const DEFAULT_LOOP_ASSIGNMENT_DEPTH_THRESHOLD: u8 = 1;
+
+/// Configuration settings that control the behavior of the Mago analyzer.
+///
+/// This struct allows you to enable/disable specific checks, suppress categories of issues,
+/// and tune the analyzer's performance and strictness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// The target PHP version for the analysis.
+    pub version: PHPVersion,
+
+    /// Find and report expressions whose results are not used (e.g., `$a + $b;`). Defaults to `false`.
+    pub find_unused_expressions: bool,
+
+    /// Find and report unused definitions (e.g., private methods that are never called). Defaults to `false`.
+    pub find_unused_definitions: bool,
+
+    /// Warn when a function's declared return type contains a branch the body never actually returns
+    /// (e.g. `: string|false` on a function that always returns a string). Defaults to `false`.
+    pub find_overly_wide_return_types: bool,
+
+    /// Analyze code that appears to be unreachable. Defaults to `false`.
+    pub analyze_dead_code: bool,
+
+    /// Track the literal values of class properties when they are assigned.
+    /// This improves type inference but may increase memory usage. Defaults to `true`.
+    pub memoize_properties: bool,
+
+    /// Allow accessing array keys that may not be defined without reporting an issue. Defaults to `true`.
+    pub allow_possibly_undefined_array_keys: bool,
+
+    /// Enable checking for unhandled thrown exceptions.
+    ///
+    /// When `true`, the analyzer will report any exception that is thrown but not caught
+    /// in a `try-catch` block or documented in a `@throws` tag. It skips PHP# files, which declare no thrown exceptions.
+    ///
+    /// This check is disabled by default (`false`) as it can be computationally expensive.
+    pub check_throws: bool,
+
+    /// Exceptions to ignore including all subclasses (hierarchy-aware).
+    ///
+    /// When an exception class is in this set, any exception of that class or any of its
+    /// subclasses will be ignored during `check_throws` analysis.
+    ///
+    /// For example, adding `LogicException` will ignore `LogicException`, `InvalidArgumentException`,
+    /// `OutOfBoundsException`, and all other subclasses.
+    pub unchecked_exceptions: WordSet,
+
+    /// Exceptions to ignore (exact class match only, not subclasses).
+    ///
+    /// When an exception class is in this set, only that exact class will be ignored
+    /// during `check_throws` analysis. Parent classes and subclasses are not affected.
+    pub unchecked_exception_classes: WordSet,
+
+    /// Check for missing `#[Override]` attributes on overriding methods.
+    ///
+    /// When enabled, the analyzer reports methods that override a parent method without
+    /// the `#[Override]` attribute (PHP 8.3+).
+    ///
+    /// Defaults to `true`.
+    pub check_missing_override: bool,
+
+    /// Find and report unused function/method parameters.
+    ///
+    /// When enabled, the analyzer reports parameters that are declared but never used
+    /// within the function body.
+    ///
+    /// Defaults to `true`.
+    pub find_unused_parameters: bool,
+
+    /// Enforce strict checks when accessing list elements by index.
+    ///
+    /// When `true`, the analyzer requires that any integer used to access a `list`
+    /// element is provably non-negative (e.g., of type `int<0, max>`). This helps
+    /// prevent potential runtime errors from using a negative index.
+    ///
+    /// When `false` (the default), any `int` is permitted as an index, offering
+    /// more flexibility at the cost of type safety.
+    pub strict_list_index_checks: bool,
+
+    /// Treat array/list indices that are not provably present as `T|null` and warn on access.
+    ///
+    /// When `true`, reading a key from any array-like type whose presence is not
+    /// guaranteed emits `possibly-undefined-int-array-index` /
+    /// `possibly-undefined-string-array-index` and the resulting type is widened to
+    /// `T|null`. This applies to `list<T>` (non-zero indices), non-required entries of
+    /// `array{...}` shapes, and `array<K, V>` lookups with arbitrary keys. It lets
+    /// `=== null`, `??`, and `??=` checks behave correctly against PHP's runtime
+    /// semantics — PHP turns missing reads into `null` with an `Undefined array key`
+    /// warning.
+    ///
+    /// When `false` (the default), the analyzer keeps the looser behavior: the value is
+    /// flagged as possibly-undefined internally but is not unioned with `null` and no
+    /// warning is emitted. This is friendlier for typical PHP code that destructures or
+    /// reads from arrays/lists by index without first asserting existence.
+    pub strict_array_index_existence: bool,
+
+    /// Allow arrays as operands of logical operators (`&&`, `||`, `xor`).
+    ///
+    /// When `true`, the analyzer accepts an array on either side of a logical operator
+    /// without emitting `invalid-operand`. PHP coerces empty arrays to `false` and
+    /// non-empty arrays to `true`, mirroring the truthiness used by `if ($array)`.
+    ///
+    /// When `false` (the default), the analyzer flags array operands of `&&`/`||`/`xor`
+    /// to call out the implicit `bool` coercion. This matches the long-standing default
+    /// behavior; standalone `if ($array)` is still accepted and never produces this warning.
+    pub allow_array_truthy_operand: bool,
+
+    /// Disable comparisons to boolean literals (`true`/`false`).
+    ///
+    /// When enabled, comparisons to boolean literals will not be reported as issues.
+    ///
+    /// Defaults to `false`.
+    pub no_boolean_literal_comparison: bool,
+
+    /// Enforce that concrete classes are declared `final`.
+    ///
+    /// When enabled, the analyzer reports a warning for any class that is not
+    /// `final`, `abstract`, or annotated with `@api`, provided the class has no children.
+    ///
+    /// Defaults to `false`.
+    pub enforce_class_finality: bool,
+
+    /// Require `@api` or `@internal` annotations on abstract classes, interfaces, and traits.
+    ///
+    /// When enabled, the analyzer reports a warning for any abstract class, interface,
+    /// or trait that is not annotated with either `@api` or `@internal`.
+    ///
+    /// Defaults to `false`.
+    pub require_api_or_internal: bool,
+
+    /// Check for missing type hints on parameters, properties, and return types.
+    ///
+    /// When enabled, the analyzer will report warnings for function parameters, class properties,
+    /// and function return types that lack explicit type declarations. The analyzer uses its
+    /// type system knowledge to avoid false positives - for instance, it won't require a type hint
+    /// on a property if adding one would conflict with a parent class or trait that has no type hint.
+    ///
+    /// Defaults to `false`.
+    pub check_missing_type_hints: bool,
+
+    /// Check for missing type hints (both parameters and return types) in closures when `check_missing_type_hints` is enabled.
+    ///
+    /// When `true`, closures (anonymous functions declared with `function() {}`) will be
+    /// checked for missing type hints. When `false`, closures are ignored, which is useful
+    /// because closures often rely on type inference.
+    ///
+    /// Defaults to `false`.
+    pub check_closure_missing_type_hints: bool,
+
+    /// Check for missing type hints (both parameters and return types) in arrow functions when `check_missing_type_hints` is enabled.
+    ///
+    /// When `true`, arrow functions (declared with `fn() => ...`) will be checked for missing
+    /// type hints. When `false`, arrow functions are ignored, which is useful because arrow
+    /// functions often rely on type inference and are typically short, making types obvious.
+    ///
+    /// Defaults to `false`.
+    pub check_arrow_function_missing_type_hints: bool,
+
+    /// Skip the missing-type-hint checks for closures and arrow functions used
+    /// directly as the right-hand side of the pipe operator (`|>`).
+    ///
+    /// When `true`, an inline pipe callable like
+    /// `$x |> fn($p) => strtoupper($p)` will not warn about its parameter or
+    /// return type being missing, even when `check-closure-missing-type-hints`
+    /// or `check-arrow-function-missing-type-hints` is on. The pipe operand's
+    /// type is enough to derive the parameter type, so requiring a hint here
+    /// is mostly noise.
+    ///
+    /// Defaults to `false`.
+    pub allow_implicit_pipe_callable_types: bool,
+
+    /// Register superglobals (e.g., `$_GET`, `$_POST`, `$_SERVER`) in the analysis context.
+    ///
+    /// If disabled, super globals won't be available unless explicitly imported using
+    /// the `global` keyword.
+    ///
+    /// Defaults to `true`.
+    pub register_super_globals: bool,
+
+    /// Enable colored output in terminal environments that support it. Defaults to `true`.
+    ///
+    /// This setting is primarily used for enabling/disabling colored diffs in
+    /// issue reports.
+    pub use_colors: bool,
+
+    /// **Internal use only.**
+    ///
+    /// Enables a diffing mode for incremental analysis, used by integrations like LSPs.
+    /// This avoids re-analyzing unchanged code in the same session. Defaults to `false`.
+    pub diff: bool,
+
+    /// Trust symbol existence checks to narrow types.
+    ///
+    /// When enabled, conditional checks like `method_exists()`, `property_exists()`,
+    /// `function_exists()`, and `defined()` will narrow the type within the conditional block,
+    /// suppressing errors for symbols that are verified to exist at runtime.
+    ///
+    /// When disabled, these checks are ignored and the analyzer requires explicit type hints,
+    /// which is stricter but may produce more false positives for dynamic code.
+    ///
+    /// Defaults to `true`.
+    pub trust_existence_checks: bool,
+
+    /// Method names treated as class initializers (like `__construct`).
+    ///
+    /// Properties initialized in these methods count as "definitely initialized"
+    /// just like in the constructor. This is useful for frameworks that use
+    /// lifecycle methods like `PHPUnit`'s `setUp()` or framework `boot()` methods.
+    ///
+    /// Entries can be either bare method names (applying to any class that has
+    /// that method) or qualified as `Fully\\Qualified\\Class::method` to scope
+    /// the rule to a specific class hierarchy.
+    ///
+    /// Example: `["setUp", "boot", "PHPUnit\\Framework\\TestCase::setUpBeforeClass"]`
+    ///
+    /// Defaults to empty (no additional initializers).
+    pub class_initializers: Vec<ClassInitializer>,
+
+    /// Enable property initialization checking (`missing-constructor`, `uninitialized-property`).
+    ///
+    /// When `false`, disables both `missing-constructor` and `uninitialized-property` issues
+    /// entirely. This is useful for projects that prefer to rely on runtime errors for
+    /// property initialization.
+    ///
+    /// Defaults to `false`.
+    pub check_property_initialization: bool,
+
+    /// Check for non-existent symbols in use statements.
+    ///
+    /// When enabled, the analyzer will report use statements that import symbols
+    /// (classes, interfaces, traits, enums, functions, or constants) that do not exist
+    /// in the codebase.
+    ///
+    /// Defaults to `false`.
+    pub check_use_statements: bool,
+
+    /// Check for usage of `@experimental` symbols from non-experimental contexts.
+    ///
+    /// When enabled, the analyzer reports warnings when a symbol marked `@experimental`
+    /// is used from a context that is not itself marked `@experimental`.
+    ///
+    /// Defaults to `false`.
+    pub check_experimental: bool,
+
+    /// Check for incorrect casing when referencing classes, interfaces, traits, enums,
+    /// and functions.
+    ///
+    /// When enabled, the analyzer reports warnings when a symbol is referenced with
+    /// different casing than its definition (e.g., `new fooBar()` when defined as `FooBar`).
+    /// This helps prevent autoloading failures on case-sensitive file systems.
+    ///
+    /// Defaults to `false`.
+    pub check_name_casing: bool,
+
+    /// Whether to allow calls to impure functions inside conditions.
+    ///
+    /// When set to `false`, any call to a function not marked `@pure` or
+    /// `@mutation-free` inside an `if`, `while`, `for`, ternary, or `match`
+    /// condition is reported. This helps catch surprising evaluation-order
+    /// bugs where a side effect in one part of a condition silently alters
+    /// a variable used in another part.
+    ///
+    /// Defaults to `true` (impure calls in conditions are allowed).
+    pub allow_side_effects_in_conditions: bool,
+
+    // Performance tuning thresholds
+    // Higher values allow deeper analysis at the cost of performance.
+    // Lower values improve speed but may reduce precision on complex code.
+    /// Maximum number of clauses to process during CNF saturation.
+    ///
+    /// Controls how many clauses the simplification algorithm will work with.
+    /// If exceeded, saturation returns an empty result to avoid performance issues.
+    ///
+    /// Defaults to `8192`.
+    pub saturation_complexity_threshold: u16,
+
+    /// Maximum number of clauses per side in disjunction operations.
+    ///
+    /// Controls the complexity limit for OR operations between clause sets.
+    /// If either side exceeds this, the disjunction returns an empty result.
+    ///
+    /// Defaults to `4096`.
+    pub disjunction_complexity_threshold: u16,
+
+    /// Maximum cumulative complexity during formula negation.
+    ///
+    /// Controls how complex the negation of a formula can become.
+    /// If exceeded, negation gives up to avoid exponential blowup.
+    ///
+    /// Defaults to `4096`.
+    pub negation_complexity_threshold: u16,
+
+    /// Upper limit for consensus optimization during saturation.
+    ///
+    /// Controls when the consensus rule is applied during saturation.
+    /// Only applies when clause count is between 3 and this limit.
+    ///
+    /// Defaults to `256`.
+    pub consensus_limit_threshold: u16,
+
+    /// Maximum logical formula size during conditional analysis.
+    ///
+    /// Limits the size of generated formulas to prevent exponential blowup
+    /// in deeply nested conditionals.
+    ///
+    /// Defaults to `512`.
+    pub formula_size_threshold: u16,
+
+    /// Maximum number of literal strings to track before generalizing.
+    ///
+    /// When combining types with many different literal string values, tracking each
+    /// literal individually causes O(n) memory and O(n²) comparison time.
+    /// Once the threshold is exceeded, we generalize to the base string type.
+    ///
+    /// Defaults to `128`.
+    pub string_combination_threshold: u16,
+
+    /// Maximum number of literal integers to track before generalizing.
+    ///
+    /// When combining types with many different literal integer values, tracking each
+    /// literal individually causes O(n) memory and O(n²) comparison time.
+    /// Once the threshold is exceeded, we generalize to the base int type.
+    ///
+    /// Defaults to `128`.
+    pub integer_combination_threshold: u16,
+
+    /// Maximum number of array elements to track individually.
+    ///
+    /// When building array types through repeated push operations (`$arr[] = ...`),
+    /// this limits how many individual elements are tracked before generalizing
+    /// to a simpler array type. This prevents memory explosion on files with
+    /// thousands of array pushes.
+    ///
+    /// Defaults to `128`.
+    pub array_combination_threshold: u16,
+
+    /// Maximum depth of the loop assignment dependency graph that the fixed-point
+    /// analyzer will explore when re-analysing loop bodies.
+    ///
+    /// The analyzer uses fixed-point iteration to propagate widened types along
+    /// loop-carried dependency chains. A chain of length `N` can require up to
+    /// `N` extra passes for the type at the end of the chain to fully stabilise,
+    /// and each pass re-analyses the entire loop body. On large, complex loops
+    /// (think thousand-line procedural functions with deeply nested conditionals)
+    /// the per-pass cost dominates file analysis time.
+    ///
+    /// The default of `1` means each loop body is re-analysed at most once after
+    /// the initial pass; enough to stabilise virtually all real-world code while
+    /// keeping analysis cost bounded. Projects that require maximally precise
+    /// narrowing of long loop-carried chains can raise this value (typically to
+    /// `2` or `3`) at the cost of significantly slower analysis on complex files.
+    ///
+    /// Setting this to `0` disables fixed-point iteration entirely and analyses
+    /// each loop body exactly once. This is the fastest option but may produce
+    /// less precise types for variables that depend on themselves across
+    /// iterations.
+    ///
+    /// Defaults to `1`.
+    pub loop_assignment_depth_threshold: u8,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new(PHPVersion::LATEST)
+    }
+}
+
+impl Settings {
+    #[must_use]
+    pub fn new(version: PHPVersion) -> Self {
+        let default_thresholds = AlgebraThresholds::default();
+        let default_combiner_options = CombinerOptions::default();
+
+        Self {
+            version,
+            find_unused_expressions: true,
+            find_unused_definitions: true,
+            find_overly_wide_return_types: false,
+            analyze_dead_code: false,
+            memoize_properties: true,
+            allow_possibly_undefined_array_keys: true,
+            check_throws: false,
+            unchecked_exceptions: WordSet::default(),
+            unchecked_exception_classes: WordSet::default(),
+            use_colors: true,
+            check_missing_override: false,
+            find_unused_parameters: false,
+            strict_list_index_checks: false,
+            strict_array_index_existence: false,
+            allow_array_truthy_operand: false,
+            no_boolean_literal_comparison: false,
+            enforce_class_finality: false,
+            require_api_or_internal: false,
+            check_missing_type_hints: false,
+            check_closure_missing_type_hints: false,
+            check_arrow_function_missing_type_hints: false,
+            allow_implicit_pipe_callable_types: false,
+            register_super_globals: true,
+            diff: false,
+            trust_existence_checks: true,
+            class_initializers: Vec::new(),
+            check_property_initialization: false,
+            check_use_statements: false,
+            check_experimental: false,
+            check_name_casing: false,
+            allow_side_effects_in_conditions: true,
+            saturation_complexity_threshold: default_thresholds.saturation_complexity,
+            disjunction_complexity_threshold: default_thresholds.disjunction_complexity,
+            negation_complexity_threshold: default_thresholds.negation_complexity,
+            consensus_limit_threshold: default_thresholds.consensus_limit,
+            formula_size_threshold: DEFAULT_FORMULA_SIZE_THRESHOLD,
+            string_combination_threshold: default_combiner_options.string_combination_threshold,
+            integer_combination_threshold: default_combiner_options.integer_combination_threshold,
+            array_combination_threshold: default_combiner_options.array_combination_threshold,
+            loop_assignment_depth_threshold: DEFAULT_LOOP_ASSIGNMENT_DEPTH_THRESHOLD,
+        }
+    }
+
+    /// Returns the algebra thresholds derived from the settings.
+    #[must_use]
+    pub fn algebra_thresholds(&self) -> AlgebraThresholds {
+        AlgebraThresholds {
+            saturation_complexity: self.saturation_complexity_threshold,
+            disjunction_complexity: self.disjunction_complexity_threshold,
+            negation_complexity: self.negation_complexity_threshold,
+            consensus_limit: self.consensus_limit_threshold,
+        }
+    }
+
+    /// Returns the combiner options derived from the settings.
+    #[must_use]
+    pub fn combiner_options(&self) -> CombinerOptions {
+        CombinerOptions {
+            overwrite_empty_array: false,
+            array_combination_threshold: self.array_combination_threshold,
+            string_combination_threshold: self.string_combination_threshold,
+            integer_combination_threshold: self.integer_combination_threshold,
+        }
+    }
+
+    /// Returns `true` when `method_name` is a configured class initializer
+    /// applicable to `meta` (either an unrestricted entry, or one whose class
+    /// qualifier `meta` is a subclass/implementer of).
+    #[must_use]
+    pub fn is_class_initializer_for(&self, meta: &ClassLikeMetadata, method_name: Word) -> bool {
+        self.class_initializers.iter().any(|init| init.method == method_name && init.applies_to(meta))
+    }
+
+    /// Iterator over initializer method names applicable to `meta`.
+    pub fn applicable_class_initializers<'cfg>(
+        &'cfg self,
+        meta: &'cfg ClassLikeMetadata,
+    ) -> impl Iterator<Item = Word> + 'cfg {
+        self.class_initializers.iter().filter(move |init| init.applies_to(meta)).map(|init| init.method)
+    }
+}
+
+/// A class-initializer entry: a method that, when present on a class, marks
+/// any properties it assigns as definitely initialized.
+///
+/// The optional `class` qualifier restricts the rule to a specific class hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassInitializer {
+    /// Lowercased FQN of the class/interface this entry is scoped to. `None`
+    /// means the entry applies to any class that has the named method.
+    pub class: Option<Word>,
+    /// Lowercased method name.
+    pub method: Word,
+}
+
+impl ClassInitializer {
+    /// Parse `"Class::method"` or `"method"`. Returns `None` for empty input
+    /// or empty halves.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.split_once("::") {
+            Some((class, method)) => {
+                let class = class.trim_start_matches('\\').trim();
+                let method = method.trim();
+                if class.is_empty() || method.is_empty() {
+                    return None;
+                }
+
+                Some(Self {
+                    class: Some(ascii_lowercase_word(class.as_bytes())),
+                    method: ascii_lowercase_word(method.as_bytes()),
+                })
+            }
+            None => {
+                let method = raw.trim();
+                if method.is_empty() {
+                    return None;
+                }
+                Some(Self { class: None, method: ascii_lowercase_word(method.as_bytes()) })
+            }
+        }
+    }
+
+    /// `true` when this entry's class qualifier (if any) covers `meta`.
+    #[must_use]
+    pub fn applies_to(&self, meta: &ClassLikeMetadata) -> bool {
+        let Some(class) = self.class else { return true };
+        meta.name == class || meta.all_parent_classes.contains(&class) || meta.all_parent_interfaces.contains(&class)
+    }
+}

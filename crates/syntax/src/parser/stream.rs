@@ -1,0 +1,350 @@
+use std::fmt::Debug;
+
+use mago_allocator::prelude::*;
+
+use mago_database::file::FileId;
+use mago_database::file::HasFileId;
+use mago_span::Position;
+use mago_span::Span;
+use mago_syntax_core::parser::LookaheadBuf;
+
+use crate::T;
+use crate::cst::sequence::Sequence;
+use crate::cst::trivia::Trivia;
+use crate::cst::trivia::TriviaKind;
+use crate::error::Expected;
+use crate::error::ParseError;
+use crate::error::SyntaxError;
+use crate::lexer::Lexer;
+use crate::token::Token;
+use crate::token::TokenKind;
+
+#[derive(Debug)]
+pub struct TokenStream<'input, 'arena, A>
+where
+    'input: 'arena,
+    A: Arena,
+{
+    arena: &'arena A,
+    lexer: Lexer<'input>,
+    buffer: LookaheadBuf<Token<'input>, 4>,
+    trivia: Vec<'arena, Trivia<'input>, A>,
+    position: Position,
+    file_id: FileId,
+}
+
+impl<'input, 'arena, A> TokenStream<'input, 'arena, A>
+where
+    A: Arena,
+{
+    pub fn new(arena: &'arena A, lexer: Lexer<'input>) -> TokenStream<'input, 'arena, A> {
+        let position = lexer.current_position();
+        let file_id_cached = lexer.file_id();
+
+        TokenStream {
+            arena,
+            lexer,
+            buffer: LookaheadBuf::new(),
+            trivia: Vec::new_in(arena),
+            position,
+            file_id: file_id_cached,
+        }
+    }
+
+    /// Returns the current position of the stream within the source file.
+    ///
+    /// This position represents the end location of the most recently
+    /// consumed significant token via `advance()` or `consume()`.
+    #[inline]
+    #[must_use]
+    pub const fn current_position(&self) -> Position {
+        self.position
+    }
+
+    /// Returns whether the stream has consumed all tokens up to EOF.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SyntaxError`] if the lexer fails to produce the next token.
+    #[inline]
+    pub fn has_reached_eof(&mut self) -> Result<bool, SyntaxError> {
+        Ok(self.fill_buffer(1)?.is_none())
+    }
+
+    /// Consumes and returns the next significant token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if EOF is reached or a lexer error occurs.
+    #[inline]
+    pub fn consume(&mut self) -> Result<Token<'input>, ParseError> {
+        match self.advance() {
+            Some(Ok(token)) => Ok(token),
+            Some(Err(error)) => Err(error.into()),
+            None => Err(self.unexpected(None, &[])),
+        }
+    }
+
+    /// Consumes the next token only if it matches the expected kind.
+    ///
+    /// Returns the token if it matches, otherwise returns an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the next token's kind does not match `kind`, or if EOF is reached.
+    #[inline]
+    pub fn eat(&mut self, kind: TokenKind) -> Result<Token<'input>, ParseError> {
+        // Fast path: head already buffered. Avoids the Result<Option<...>>
+        // round trip from `peek_kind` plus a follow-up `lookahead` on the
+        // happy path.
+        if let Some(token) = self.buffer.get(0) {
+            if token.kind == kind {
+                let _ = self.buffer.pop_front();
+
+                self.position = Position::new(token.start.offset + token.value.len() as u32);
+                return Ok(token);
+            }
+
+            return Err(self.unexpected_kind(Some(token), kind));
+        }
+
+        // Slow path: buffer empty, fill it.
+        let current_kind = self.peek_kind(0)?;
+        match current_kind {
+            Some(k) if k == kind => self.consume(),
+            Some(_) => match self.lookahead(0)? {
+                Some(token) => Err(self.unexpected_kind(Some(token), kind)),
+                None => Err(self.unexpected_kind(None, kind)),
+            },
+            None => Err(self.unexpected_kind(None, kind)),
+        }
+    }
+
+    /// Consumes and returns the span of the next significant token.
+    ///
+    /// This is a convenience method equivalent to `consume()?.span_for(file_id())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if EOF is reached or a lexer error occurs.
+    #[inline]
+    pub fn consume_span(&mut self) -> Result<Span, ParseError> {
+        let file_id = self.file_id();
+        self.consume().map(|t| t.span_for(file_id))
+    }
+
+    /// Consumes the next token only if it matches the expected kind, returning its span.
+    ///
+    /// This is a convenience method equivalent to `eat(kind)?.span_for(file_id())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the next token's kind does not match `kind`, or if EOF is reached.
+    #[inline]
+    pub fn eat_span(&mut self, kind: TokenKind) -> Result<Span, ParseError> {
+        let file_id = self.file_id();
+        self.eat(kind).map(|t| t.span_for(file_id))
+    }
+
+    /// Advances the stream to the next token in the input source code and returns it.
+    ///
+    /// If the stream has already read the entire input source code, this method will return `None`.
+    ///
+    /// # Returns
+    ///
+    /// The next token in the input source code, or `None` if the lexer has reached the end of the input.
+    #[inline]
+    pub fn advance(&mut self) -> Option<Result<Token<'input>, SyntaxError>> {
+        match self.fill_buffer(1) {
+            Ok(Some(_)) => {
+                if let Some(token) = self.buffer.pop_front() {
+                    // Compute end position from start + value length
+                    self.position = Position::new(token.start.offset + token.value.len() as u32);
+                    Some(Ok(token))
+                } else {
+                    None
+                }
+            }
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }
+
+    /// Checks if the next token matches the given kind without consuming it.
+    ///
+    /// Returns `false` if at EOF.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the lexer fails to produce the next token.
+    #[inline]
+    pub fn is_at(&mut self, kind: TokenKind) -> Result<bool, ParseError> {
+        if let Some(token) = self.buffer.get(0) {
+            return Ok(token.kind == kind);
+        }
+
+        Ok(self.peek_kind(0)? == Some(kind))
+    }
+
+    /// Peeks at the nth (0-indexed) significant token ahead without consuming it.
+    ///
+    /// Returns `Ok(None)` if EOF is reached before the nth token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the lexer fails to produce a token while filling the lookahead buffer.
+    #[inline]
+    pub fn lookahead(&mut self, n: usize) -> Result<Option<Token<'input>>, ParseError> {
+        if n < self.buffer.len() {
+            return Ok(self.buffer.get(n));
+        }
+
+        match self.fill_buffer(n + 1) {
+            Ok(Some(_)) => Ok(self.buffer.get(n)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Peeks at the kind of the nth (0-indexed) significant token ahead.
+    ///
+    /// More efficient than `lookahead(n)?.map(|t| t.kind)` as it avoids
+    /// copying the full token when only the kind is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the lexer fails to produce a token while filling the lookahead buffer.
+    #[inline]
+    pub fn peek_kind(&mut self, n: usize) -> Result<Option<TokenKind>, ParseError> {
+        if n < self.buffer.len() {
+            return Ok(self.buffer.get(n).map(|t| t.kind));
+        }
+
+        match self.fill_buffer(n + 1) {
+            Ok(Some(_)) => Ok(self.buffer.get(n).map(|t| t.kind)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Peeks past the `(` at the head of the stream to the `)` that closes it, and returns the kind of the token after
+    /// that `)`, or `None` at the end of the file. It reads ahead with a copy of the lexer, so it consumes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the lexer fails to produce a token.
+    pub fn peek_kind_after_parentheses(&mut self) -> Result<Option<TokenKind>, ParseError> {
+        let mut tokens = self.peek_tokens();
+        let mut depth = 0usize;
+        while let Some(token) = tokens.next() {
+            match token?.kind {
+                T!["("] => depth += 1,
+                T![")"] if depth == 1 => return Ok(tokens.next().transpose()?.map(|token| token.kind)),
+                T![")"] => depth -= 1,
+                _ => {}
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// The significant tokens from the head of the stream to the end of the file, read with a copy of the lexer, so
+    /// it consumes nothing.
+    pub(crate) fn peek_tokens(&self) -> impl Iterator<Item = Result<Token<'input>, SyntaxError>> + '_ {
+        let mut lexer = self.lexer.clone();
+        let buffered = (0..self.buffer.len()).filter_map(|index| self.buffer.get(index)).map(Ok);
+
+        buffered.chain(std::iter::from_fn(move || {
+            loop {
+                match lexer.advance()? {
+                    Ok(token) if token.kind.is_trivia() => {}
+                    result => return Some(result),
+                }
+            }
+        }))
+    }
+
+    /// Creates a `ParseError` for an unexpected token or EOF, given one or more expected kinds.
+    #[inline]
+    #[must_use]
+    pub fn unexpected(&self, found: Option<Token<'_>>, expected: &'static [TokenKind]) -> ParseError {
+        self.unexpected_with(found, Expected::OneOf(expected))
+    }
+
+    /// Creates a `ParseError` for an unexpected token or EOF when a single, runtime-known kind was expected.
+    #[inline]
+    #[must_use]
+    pub fn unexpected_kind(&self, found: Option<Token<'_>>, expected: TokenKind) -> ParseError {
+        self.unexpected_with(found, Expected::Exactly(expected))
+    }
+
+    #[inline]
+    #[must_use]
+    fn unexpected_with(&self, found: Option<Token<'_>>, expected: Expected) -> ParseError {
+        if let Some(token) = found {
+            ParseError::UnexpectedToken(expected, token.kind, token.span_for(self.file_id()))
+        } else {
+            ParseError::UnexpectedEndOfFile(expected, self.file_id(), self.current_position())
+        }
+    }
+
+    /// Consumes the comments collected by the lexer and returns them.
+    #[inline]
+    pub fn get_trivia(&mut self) -> Sequence<'arena, Trivia<'arena>> {
+        let mut trivia = Vec::new_in(self.arena);
+        std::mem::swap(&mut self.trivia, &mut trivia);
+
+        Sequence::new(trivia)
+    }
+
+    /// Fills the token buffer until at least `n` tokens are available, unless the lexer returns EOF.
+    ///
+    /// Trivia tokens are collected separately and are not stored in the main token buffer.
+    #[inline]
+    fn fill_buffer(&mut self, n: usize) -> Result<Option<usize>, SyntaxError> {
+        if self.buffer.len() >= n {
+            return Ok(Some(n));
+        }
+
+        self.fill_buffer_slow(n)
+    }
+
+    #[inline(never)]
+    fn fill_buffer_slow(&mut self, n: usize) -> Result<Option<usize>, SyntaxError> {
+        while self.buffer.len() < n {
+            match self.lexer.advance() {
+                Some(result) => {
+                    let token = result?;
+                    let trivia_kind = match token.kind {
+                        TokenKind::Whitespace => Some(TriviaKind::WhiteSpace),
+                        TokenKind::HashComment => Some(TriviaKind::HashComment),
+                        TokenKind::SingleLineComment => Some(TriviaKind::SingleLineComment),
+                        TokenKind::MultiLineComment => Some(TriviaKind::MultiLineComment),
+                        TokenKind::DocBlockComment => Some(TriviaKind::DocBlockComment),
+                        _ => None,
+                    };
+
+                    if let Some(kind) = trivia_kind {
+                        self.trivia.push(Trivia { kind, span: token.span_for(self.file_id), value: token.value });
+                        continue;
+                    }
+
+                    self.buffer.push_back(token);
+                }
+                None => return Ok(None),
+            }
+        }
+
+        Ok(Some(n))
+    }
+}
+
+impl<A> HasFileId for TokenStream<'_, '_, A>
+where
+    A: Arena,
+{
+    #[inline]
+    fn file_id(&self) -> FileId {
+        self.file_id
+    }
+}

@@ -1,0 +1,475 @@
+name: Continuous Deployment
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "*"
+
+env:
+  CICD_INTERMEDIATES_DIR: "_cd-intermediates"
+
+permissions:
+  contents: write
+  discussions: write
+  id-token: write
+  attestations: write
+  packages: write
+
+jobs:
+  # Every other job needs crate_metadata, which needs ci, so a release builds only from a commit CI passes on.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  crate_metadata:
+    name: extract crate metadata
+    runs-on: ubuntu-latest
+    needs: ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: extract crate information
+        id: crate_metadata
+        run: |
+          rustup update stable
+          cargo metadata --no-deps --format-version 1 | jq -r '
+            .packages[0] |
+            [
+              "version=" + .version,
+              "maintainer=" + (.authors[0] // ""),
+              "homepage=" + (.homepage // ""),
+              "msrv=" + (.rust_version // "")
+            ] |
+            join("\n")
+          ' | tee -a "$GITHUB_OUTPUT"
+    outputs:
+      name: "mago"
+      bin-name: "mago"
+      version: ${{ steps.crate_metadata.outputs.version }}
+      maintainer: ${{ steps.crate_metadata.outputs.maintainer }}
+      homepage: ${{ steps.crate_metadata.outputs.homepage }}
+      msrv: ${{ steps.crate_metadata.outputs.msrv }}
+
+  min_version:
+    name: Minimum supported rust version
+    runs-on: ubuntu-latest
+    needs: crate_metadata
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install rust toolchain (v${{ needs.crate_metadata.outputs.msrv }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.crate_metadata.outputs.msrv }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ needs.crate_metadata.outputs.msrv }}
+          cache-on-failure: true
+
+      - name: Install elan and Lean
+        uses: ./.github/actions/setup-lean
+
+      - name: Run tests
+        run: cargo test --workspace --locked --all-targets
+
+  source_archive:
+    name: Create source code archives
+    runs-on: ubuntu-latest
+    needs: crate_metadata
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set version
+        id: version
+        run: echo "VERSION=${{ needs.crate_metadata.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create source archives
+        id: source_package
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          STAGING="${{ env.CICD_INTERMEDIATES_DIR }}/source"
+          mkdir -p "${STAGING}"
+          rsync -a --exclude='.git' --exclude="${{ env.CICD_INTERMEDIATES_DIR }}" . "${STAGING}/mago-${VERSION}/"
+          TAR_NAME="source-code.tar.gz"
+          tar -czf "${STAGING}/${TAR_NAME}" -C "${STAGING}" "mago-${VERSION}"
+          echo "TAR_NAME=${TAR_NAME}" >> "$GITHUB_OUTPUT"
+          echo "TAR_PATH=${STAGING}/${TAR_NAME}" >> "$GITHUB_OUTPUT"
+          ZIP_NAME="source-code.zip"
+          cd "${STAGING}"
+          zip -r "${ZIP_NAME}" "mago-${VERSION}"
+          cd -
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+          echo "ZIP_PATH=${STAGING}/${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate artifact attestation (source tar.gz)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.source_package.outputs.TAR_PATH }}
+
+      - name: Generate artifact attestation (source zip)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.source_package.outputs.ZIP_PATH }}
+
+      - name: "Artifact upload: source tar.gz"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.source_package.outputs.TAR_NAME }}
+          path: ${{ steps.source_package.outputs.TAR_PATH }}
+          if-no-files-found: error
+
+      - name: "Artifact upload: source zip"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.source_package.outputs.ZIP_NAME }}
+          path: ${{ steps.source_package.outputs.ZIP_PATH }}
+          if-no-files-found: error
+
+  build:
+    name: ${{ matrix.job.target }} (${{ matrix.job.os }})
+    runs-on: ${{ matrix.job.os }}
+    needs: crate_metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          # Each job in this matrix defines a build target. The following custom keys control the pipeline steps:
+          # - `test: true`: Enables the test suite to be run for this build. Only targets ci.yml never tests set it.
+          # - `wasm: true`: Triggers an additional WebAssembly build and packaging for this release.
+
+          ## macOS: aarch64, x86_64
+          - {
+              target: aarch64-apple-darwin,
+              os: macos-latest,
+              test: false,
+              pgo: true,
+            }
+          - {
+              target: x86_64-apple-darwin,
+              os: macos-latest,
+              test: true,
+              pgo: true,
+            }
+          ## Linux: aarch64, x86_64
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, test: false }
+          - {
+              target: aarch64-unknown-linux-musl,
+              os: ubuntu-latest,
+              test: false,
+            }
+          - {
+              target: x86_64-unknown-linux-gnu,
+              os: ubuntu-latest,
+              test: false,
+              wasm: true,
+            }
+          - {
+              target: x86_64-unknown-linux-musl,
+              os: ubuntu-latest,
+              test: true,
+              pgo: true,
+            }
+
+    env:
+      BUILD_CMD: cargo
+
+    steps:
+      - name: checkout source code
+        uses: actions/checkout@v4
+
+      - name: set version env variable
+        id: version
+        shell: bash
+        run: echo "VERSION=${{ needs.crate_metadata.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Prerequisites
+        if: contains(matrix.job.os, 'ubuntu')
+        shell: bash
+        run: |
+          sudo apt-get -y update
+          sudo apt-get remove -y libssl-dev
+          case ${{ matrix.job.target }} in
+            aarch64-unknown-linux-gnu) sudo apt-get -y install gcc-aarch64-linux-gnu ;;
+            x86_64-unknown-linux-musl) sudo apt-get -y install musl-tools ;;
+          esac
+
+      - name: install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ needs.crate_metadata.outputs.msrv }}
+          targets: ${{ matrix.job.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.job.target }}
+          cache-on-failure: true
+
+      - name: Cache cargo-pgo
+        if: matrix.job.pgo
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-pgo
+          key: cargo-pgo-${{ runner.os }}
+
+      - name: install PGO tools
+        if: matrix.job.pgo
+        shell: bash
+        run: |
+          rustup component add llvm-tools-preview
+          if ! command -v cargo-pgo &>/dev/null; then
+            cargo install cargo-pgo
+          fi
+
+      - name: install cross
+        if: startsWith(matrix.job.os, 'ubuntu') && !matrix.job.pgo
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: overwrite build command env variable (for cross)
+        if: startsWith(matrix.job.os, 'ubuntu') && !matrix.job.pgo
+        shell: bash
+        run: echo "BUILD_CMD=cross" >> "$GITHUB_ENV"
+
+      - name: Configure cross-rs container image for glibc 2.17
+        if: contains(matrix.job.target, 'linux-gnu') && !matrix.job.pgo
+        shell: bash
+        run: |
+          IMAGE=""
+          case ${{ matrix.job.target }} in
+            x86_64-unknown-linux-gnu) IMAGE="quay.io/pypa/manylinux2014_x86_64" ;;
+            aarch64-unknown-linux-gnu) IMAGE="quay.io/pypa/manylinux2014_aarch64" ;;
+          esac
+          if [[ -n "$IMAGE" ]]; then
+            echo "Using custom image for glibc 2.17: $IMAGE"
+            echo "CROSS_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          else
+            echo "::warning:: No manylinux2014 image found for target ${{ matrix.job.target }}. Build will use default cross image, which may have a newer glibc."
+          fi
+
+      - name: show version information (Rust, cargo, GCC)
+        shell: bash
+        run: |
+          set -x
+          gcc --version || true
+          ldd --version || true
+          rustup -V
+          rustup toolchain list
+          rustup default
+          cargo -V
+          rustc -V
+
+      - name: setup PHP for PGO profiling
+        if: matrix.job.pgo
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          tools: composer
+
+      - name: Cache composer dependencies for PGO corpus
+        if: matrix.job.pgo
+        uses: actions/cache@v4
+        with:
+          path: corpus/vendor
+          key: composer-corpus-${{ hashFiles('corpus/composer.lock') }}
+
+      - name: setup PHP corpus for PGO profiling
+        if: matrix.job.pgo
+        shell: bash
+        run: |
+          cd corpus
+          composer update --ignore-platform-reqs
+          cd ..
+
+      - name: build
+        shell: bash
+        run: |
+          if [[ "${{ matrix.job.pgo }}" == "true" ]]; then
+            cargo pgo build -- --target=${{ matrix.job.target }}
+            cargo pgo run -- -- --workspace corpus/ analyze --reporting-format count || true
+            cargo pgo optimize build -- --target=${{ matrix.job.target }}
+          else
+            $BUILD_CMD build --locked --release --target=${{ matrix.job.target }}
+          fi
+
+      - name: set binary name
+        id: bin
+        shell: bash
+        run: |
+          BIN_NAME="${{ needs.crate_metadata.outputs.bin-name }}"
+          BIN_PATH="target/${{ matrix.job.target }}/release/${BIN_NAME}"
+
+          echo "BIN_PATH=${BIN_PATH}" >> "$GITHUB_OUTPUT"
+          echo "BIN_NAME=${BIN_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: check GLIBC version requirements
+        if: contains(matrix.job.target, 'linux-gnu')
+        shell: bash
+        run: |
+          echo "binary for target '${{ matrix.job.target }}' requires the following GLIBC versions:"
+          strings "${{ steps.bin.outputs.BIN_PATH }}" | grep GLIBC_ || echo "No GLIBC version strings found."
+
+      - name: Install elan and Lean
+        if: matrix.job.test
+        uses: ./.github/actions/setup-lean
+
+      - name: run tests
+        if: matrix.job.test
+        shell: bash
+        run: $BUILD_CMD test --workspace --locked --target=${{ matrix.job.target }}
+
+      - name: Cache wasm-pack
+        if: matrix.job.wasm
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}
+
+      - name: Install wasm-pack and build WASM
+        if: matrix.job.wasm
+        run: |
+          if ! command -v wasm-pack &>/dev/null; then
+            cargo install wasm-pack --version 0.13.1 --locked
+          fi
+          cd crates/wasm
+          wasm-pack build -d pkg --release
+          cd ../..
+          WASM_STAGING="${{ env.CICD_INTERMEDIATES_DIR }}/wasm"
+          mkdir -p "${WASM_STAGING}"
+          cp -r crates/wasm/pkg/* "${WASM_STAGING}/"
+
+      - name: create tarball (main binary)
+        id: package
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          TARGET="${{ matrix.job.target }}"
+          PKG_NAME="mago-${VERSION}-${TARGET}.tar.gz"
+          echo "PKG_NAME=${PKG_NAME}" >> "$GITHUB_OUTPUT"
+
+          PKG_STAGING="${{ env.CICD_INTERMEDIATES_DIR }}/package"
+          ARCHIVE_DIR="${PKG_STAGING}/mago-${VERSION}-${TARGET}/"
+          mkdir -p "${ARCHIVE_DIR}"
+
+          # Binary
+          cp "${{ steps.bin.outputs.BIN_PATH }}" "$ARCHIVE_DIR"
+
+          # Docs and licenses
+          cp "README.md" "LICENSE-MIT" "LICENSE-APACHE" "$ARCHIVE_DIR" || true
+
+          pushd "${PKG_STAGING}/" >/dev/null
+          tar czf "${PKG_NAME}" "mago-${VERSION}-${TARGET}"/*
+          popd >/dev/null
+
+          echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: create WASM tarball
+        id: wasm_package
+        if: matrix.job.wasm
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # Since WASM is universal, just name it 'mago-{VERSION}-wasm.tar.gz'
+          WASM_PKG_NAME="mago-${VERSION}-wasm.tar.gz"
+          echo "WASM_PKG_NAME=${WASM_PKG_NAME}" >> "$GITHUB_OUTPUT"
+
+          WASM_STAGING="${{ env.CICD_INTERMEDIATES_DIR }}/wasm"
+          pushd "${WASM_STAGING}" >/dev/null
+          tar czf "${WASM_PKG_NAME}" mago_wasm.d.ts mago_wasm.js mago_wasm_bg.js mago_wasm_bg.wasm package.json
+          popd >/dev/null
+
+          echo "WASM_PKG_PATH=${WASM_STAGING}/${WASM_PKG_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate artifact attestation (binary)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.package.outputs.PKG_PATH }}
+
+      - name: Generate artifact attestation (WASM)
+        if: matrix.job.wasm
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.wasm_package.outputs.WASM_PKG_PATH }}
+
+      - name: "Artifact upload: tarball"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.PKG_NAME }}
+          path: ${{ steps.package.outputs.PKG_PATH }}
+          if-no-files-found: error
+
+      - name: "Artifact upload: WASM"
+        if: matrix.job.wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.wasm_package.outputs.WASM_PKG_NAME }}
+          path: ${{ steps.wasm_package.outputs.WASM_PKG_PATH }}
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    needs: [crate_metadata, min_version, source_archive, build]
+    env:
+      VERSION: ${{ needs.crate_metadata.outputs.version }}
+    steps:
+      - name: Download every asset
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Check the downloaded assets are exactly the release's assets
+        shell: bash
+        run: |
+          sort > expected-assets.txt <<EOF
+          source-code.tar.gz
+          source-code.zip
+          mago-${VERSION}-wasm.tar.gz
+          mago-${VERSION}-aarch64-apple-darwin.tar.gz
+          mago-${VERSION}-x86_64-apple-darwin.tar.gz
+          mago-${VERSION}-aarch64-unknown-linux-gnu.tar.gz
+          mago-${VERSION}-aarch64-unknown-linux-musl.tar.gz
+          mago-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
+          mago-${VERSION}-x86_64-unknown-linux-musl.tar.gz
+          EOF
+          find assets -type f -printf '%f\n' | sort > downloaded-assets.txt
+          diff -u expected-assets.txt downloaded-assets.txt || {
+            echo "::error::The downloaded assets differ from the expected release assets."
+            exit 1
+          }
+
+      - name: Upload every asset to the draft release, check it, then publish it
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! $GITHUB_REF =~ ^refs/tags/[0-9] ]]; then
+            echo "$GITHUB_REF is not a release tag, so nothing is published."
+            exit 0
+          fi
+          if ! is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> view-error.txt); then
+            grep -q "release not found" view-error.txt || { cat view-error.txt >&2; exit 1; }
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes ""
+            is_draft=true
+          fi
+          if [[ $is_draft != true ]]; then
+            echo "::error::Release $TAG is already published, so this run changes nothing. Release a new tag."
+            exit 1
+          fi
+          gh release upload "$TAG" assets/* --clobber
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > released-assets.txt
+          diff -u expected-assets.txt released-assets.txt || {
+            echo "::error::Draft release $TAG holds different assets than expected, so it stays a draft."
+            exit 1
+          }
+          gh release edit "$TAG" --draft=false

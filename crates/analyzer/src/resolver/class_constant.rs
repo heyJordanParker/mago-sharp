@@ -1,0 +1,504 @@
+use mago_allocator::Arena;
+use mago_word::Word;
+use mago_word::ascii_lowercase_word;
+
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
+use mago_codex::ttype::expander;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::get_class_string;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::ClassLikeConstantSelector;
+use mago_syntax::cst::Expression;
+
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::resolver::class_name::ResolutionOrigin;
+use crate::resolver::class_name::ResolvedClassname;
+use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::resolver::selector::ResolvedSelector;
+use crate::resolver::selector::resolve_constant_selector;
+use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_member;
+
+/// Represents a successfully resolved class constant or enum case.
+#[derive(Debug)]
+pub struct ResolvedConstant {
+    /// The type of the constant's value or the enum case itself.
+    pub const_type: TUnion,
+}
+
+/// Holds the results of a constant resolution attempt.
+#[derive(Debug, Default)]
+pub struct ConstantResolutionResult {
+    /// A list of successfully resolved constants and their types.
+    pub constants: Vec<ResolvedConstant>,
+    /// Flag indicating if any part of the resolution was ambiguous or dynamic.
+    pub has_ambiguous_path: bool,
+    /// Flag indicating if any part of the resolution was definitively invalid.
+    pub has_invalid_path: bool,
+}
+
+/// Resolves all possible class constants from a class expression and a constant selector.
+pub fn resolve_class_constants<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    class_expr: &'ast Expression<'arena>,
+    constant_selector: &'ast ClassLikeConstantSelector<'arena>,
+    class_expr_is_analyzed: bool,
+) -> Result<ConstantResolutionResult, AnalysisError>
+where
+    A: Arena,
+{
+    let mut result = ConstantResolutionResult::default();
+
+    // 1. Resolve all possible class names from the expression.
+    let classnames =
+        resolve_classnames_from_expression(context, block_context, artifacts, class_expr, class_expr_is_analyzed)?;
+
+    // 2. Resolve all possible constant names from the selector.
+    let selectors = resolve_constant_selector(context, block_context, artifacts, constant_selector)?;
+
+    // 3. Iterate through each combination of class and constant to find valid constants.
+    'resolved_classes: for class_resolution in &classnames {
+        if class_resolution.is_possibly_invalid() {
+            result.has_ambiguous_path = true;
+            if class_resolution.origin == ResolutionOrigin::Invalid {
+                result.has_invalid_path = true;
+            }
+
+            continue;
+        }
+
+        for selector_resolution in &selectors {
+            // Handle `::class` magic constant
+            if let ResolvedSelector::Identifier(const_name) = selector_resolution
+                && const_name.as_bytes().eq_ignore_ascii_case(b"class")
+            {
+                if let Some(const_type) = handle_class_magic_constant(
+                    context,
+                    block_context,
+                    artifacts,
+                    class_resolution,
+                    class_expr,
+                    constant_selector,
+                ) {
+                    result.constants.push(ResolvedConstant { const_type });
+                } else {
+                    result.has_invalid_path = true;
+                }
+
+                continue;
+            }
+
+            let Some(fq_class_id) = class_resolution.fqcn else {
+                result.has_ambiguous_path = true;
+                report_ambiguous_constant_access(context, class_expr);
+                continue 'resolved_classes;
+            };
+
+            if selector_resolution.is_dynamic() {
+                result.has_ambiguous_path = true;
+                continue;
+            }
+
+            let Some(const_name) = selector_resolution.name() else {
+                result.has_invalid_path = true;
+                continue;
+            };
+
+            // Handle regular constants and enum cases
+            let Some(metadata) = context.codebase.get_class_like(fq_class_id.as_bytes()) else {
+                if class_resolution.is_parent()
+                    && block_context.scope.get_class_like().is_some_and(ClassLikeMetadata::has_incomplete_hierarchy)
+                {
+                    result.has_ambiguous_path = true;
+                    continue;
+                }
+
+                result.has_invalid_path = true;
+                report_non_existent_class(context, fq_class_id, class_expr.span());
+                continue;
+            };
+
+            artifacts.symbol_references.add_reference_to_class_member(
+                &block_context.scope,
+                (metadata.name, const_name),
+                false,
+            );
+
+            if let Some(resolved_const) = find_constant_in_class(
+                context,
+                metadata,
+                const_name,
+                class_expr.span(),
+                constant_selector.span(),
+                &class_resolution.origin,
+                block_context.flags.inside_class_like_attribute(),
+            ) {
+                result.constants.push(resolved_const);
+            } else {
+                result.has_invalid_path = true;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Specific handler for the `::class` magic constant.
+fn handle_class_magic_constant<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    class_resolution: &ResolvedClassname,
+    class_expr: &'ast Expression<'arena>,
+    selector: &'ast ClassLikeConstantSelector<'arena>,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    if matches!(class_resolution.origin, ResolutionOrigin::AnyString) {
+        context.collector.report_with_code(
+            IssueCode::InvalidClassConstantOnString,
+            Issue::error("Cannot use `::class` on an expression of type string.")
+                .with_annotation(
+                    Annotation::primary(class_expr.span()).with_message("This expression is a string here"),
+                )
+                .with_annotation(Annotation::secondary(selector.span()).with_message("`::class` used here"))
+                .with_note("The `::class` magic constant requires a direct class name or an object instance."),
+        );
+
+        return None;
+    }
+
+    let generic_class_string = if class_resolution.is_object_instance() || class_resolution.is_from_any_object() {
+        artifacts.get_expression_type(class_expr).and_then(|expression_type| {
+            if !expression_type.is_single() {
+                return None;
+            }
+
+            let TAtomic::GenericParameter(TGenericParameter { parameter_name, defining_entity, constraint, .. }) =
+                expression_type.get_single()
+            else {
+                return None;
+            };
+
+            Some(TUnion::from_vec(
+                constraint
+                    .types
+                    .iter()
+                    .map(|constraint| {
+                        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::generic(
+                            TClassLikeStringKind::Class,
+                            *parameter_name,
+                            *defining_entity,
+                            constraint.clone(),
+                        )))
+                    })
+                    .collect(),
+            ))
+        })
+    } else {
+        None
+    };
+
+    let class_string = match class_resolution.fqcn {
+        Some(fq_class_id) => {
+            if matches!(class_resolution.origin, ResolutionOrigin::Named { is_self: false, is_parent: false })
+                && context.codebase.get_class_like(fq_class_id.as_bytes()).is_none()
+            {
+                report_non_existent_class(context, fq_class_id, class_expr.span());
+            }
+
+            artifacts.symbol_references.add_reference_to_symbol(
+                &block_context.scope,
+                ascii_lowercase_word(fq_class_id.as_bytes()),
+                false,
+            );
+
+            if let Some(generic_class_string) = generic_class_string {
+                return Some(generic_class_string);
+            }
+
+            if class_resolution.is_final
+                || class_resolution.is_from_literal_class_string()
+                || class_resolution.is_named()
+            {
+                TScalar::ClassLikeString(TClassLikeString::literal(fq_class_id))
+            } else {
+                TScalar::ClassLikeString(TClassLikeString::of_type(
+                    TClassLikeStringKind::Class,
+                    class_resolution.get_object_type(context.codebase),
+                ))
+            }
+        }
+        None => {
+            if let Some(generic_class_string) = generic_class_string {
+                return Some(generic_class_string);
+            }
+
+            return Some(get_class_string());
+        }
+    };
+
+    Some(TUnion::from_atomic(TAtomic::Scalar(class_string)))
+}
+
+/// Checks if a trait constant access is valid based on how the trait is referenced.
+/// Valid accesses are via self, static, or $this (which resolve the trait in context).
+/// Direct trait name access (e.g., `TraitName::CONSTANT`) is invalid.
+///
+/// Attribute arguments on the trait declaration are evaluated outside the trait body, so
+/// even `self::CONSTANT` resolves the trait directly there and is rejected at runtime.
+fn is_valid_trait_constant_access(origin: &ResolutionOrigin, inside_class_like_attribute: bool) -> bool {
+    if inside_class_like_attribute {
+        return false;
+    }
+
+    matches!(
+        origin,
+        // self::CONSTANT
+        ResolutionOrigin::Named { is_self: true, .. }
+        // parent::CONSTANT
+        | ResolutionOrigin::Named { is_parent: true, .. }
+        // static::CONSTANT
+        | ResolutionOrigin::Static { .. }
+        // $this::CONSTANT
+        | ResolutionOrigin::Object { is_this: true }
+    )
+}
+
+/// Finds a constant or enum case by name within a class.
+fn find_constant_in_class<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    metadata: &'ctx ClassLikeMetadata,
+    const_name: Word,
+    class_span: Span,
+    const_span: Span,
+    resolution_origin: &ResolutionOrigin,
+    inside_class_like_attribute: bool,
+) -> Option<ResolvedConstant>
+where
+    A: Arena,
+{
+    if metadata.kind.is_trait() && !is_valid_trait_constant_access(resolution_origin, inside_class_like_attribute) {
+        let constant = display_member(context, metadata.original_name, const_name);
+        let trait_name = display_class_like_name(context, metadata.original_name);
+
+        let mut issue = Issue::error(format!("Cannot access trait constant `{constant}` directly."))
+            .with_annotation(Annotation::primary(class_span).with_message(format!("`{trait_name}` is a trait")))
+            .with_annotation(Annotation::secondary(const_span).with_message("Constant accessed here"));
+
+        issue = if inside_class_like_attribute {
+            issue
+                .with_note(
+                    "Attribute arguments are evaluated outside the trait body, so `self` resolves the trait directly here.",
+                )
+                .with_help(format!(
+                    "Spell out a class that uses `{trait_name}`, or inline the value of `{const_name}`."
+                ))
+        } else if context.dialect.is_sharp() {
+            // PHP# writes no `self`, `static` or `$this`, so a class that uses the trait is the one way left.
+            issue
+                .with_note("Trait constants can only be accessed through classes that use the trait.")
+                .with_help(format!("Access this constant through a class that uses `{trait_name}`."))
+        } else {
+            issue
+                .with_note("Trait constants can only be accessed through classes that use the trait, or via self, static, or $this within the trait.")
+                .with_help(format!("Access this constant through a class that uses `{trait_name}`, or use `self::{const_name}`, `static::{const_name}`, or `$this::{const_name}` instead."))
+        };
+
+        context.collector.report_with_code(IssueCode::DirectTraitConstantAccess, issue);
+    }
+
+    // Check for a defined constant
+    if let Some(constant_metadata) = metadata.constants.get(&const_name) {
+        let display = display_member(context, metadata.original_name, const_name);
+        crate::utils::availability::check_class_constant_availability(context, constant_metadata, &display, const_span);
+
+        // Prefer the docblock type (@var) when it exists, as it reflects the user's
+        // intended type. When type_metadata was merely copied from the type declaration
+        // (they are equal), fall back to the more specific inferred type.
+        let mut const_type = if let Some(type_metadata) = &constant_metadata.type_metadata
+            && type_metadata.from_docblock
+        {
+            type_metadata.type_union.clone()
+        } else {
+            constant_metadata
+                .inferred_type
+                .clone()
+                .map(wrap_atomic)
+                .or_else(|| constant_metadata.type_metadata.clone().map(|s| s.type_union))
+                .unwrap_or_else(get_mixed)
+        };
+
+        expander::expand_union(
+            context.codebase,
+            &mut const_type,
+            &TypeExpansionOptions {
+                self_class: Some(metadata.name),
+                static_class_type: StaticClassType::Name(metadata.name),
+                function_is_final: metadata.flags.is_final(),
+                ..Default::default()
+            },
+        );
+
+        return Some(ResolvedConstant { const_type });
+    }
+
+    // Check for an enum case
+    if metadata.kind.is_enum()
+        && let Some(enum_case_metadata) = metadata.enum_cases.get(&const_name)
+    {
+        let display = display_member(context, metadata.original_name, const_name);
+        crate::utils::availability::check_enum_case_availability(context, enum_case_metadata, &display, const_span);
+
+        let const_type =
+            TUnion::from_atomic(TAtomic::Object(TObject::Enum(TEnum::new_case(metadata.original_name, const_name))));
+
+        return Some(ResolvedConstant { const_type });
+    }
+
+    for required_class in metadata.require_extends.iter().chain(metadata.require_implements.iter()) {
+        let Some(required_metadata) = context.codebase.get_class_like(required_class.as_bytes()) else {
+            continue;
+        };
+
+        if let Some(constant_metadata) = required_metadata.constants.get(&const_name) {
+            let mut const_type = if let Some(type_metadata) = &constant_metadata.type_metadata
+                && type_metadata.from_docblock
+            {
+                type_metadata.type_union.clone()
+            } else {
+                constant_metadata
+                    .inferred_type
+                    .clone()
+                    .map(wrap_atomic)
+                    .or_else(|| constant_metadata.type_metadata.clone().map(|s| s.type_union))
+                    .unwrap_or_else(get_mixed)
+            };
+
+            expander::expand_union(
+                context.codebase,
+                &mut const_type,
+                &TypeExpansionOptions {
+                    self_class: Some(required_metadata.name),
+                    static_class_type: StaticClassType::Name(required_metadata.name),
+                    function_is_final: required_metadata.flags.is_final(),
+                    ..Default::default()
+                },
+            );
+
+            return Some(ResolvedConstant { const_type });
+        }
+
+        if required_metadata.kind.is_enum() && required_metadata.enum_cases.contains_key(&const_name) {
+            let const_type = TUnion::from_atomic(TAtomic::Object(TObject::Enum(TEnum::new_case(
+                required_metadata.original_name,
+                const_name,
+            ))));
+
+            return Some(ResolvedConstant { const_type });
+        }
+    }
+
+    if metadata.has_incomplete_hierarchy() {
+        return Some(ResolvedConstant { const_type: get_mixed() });
+    }
+
+    // Not found, report error.
+    report_non_existent_constant(context, metadata, const_name, class_span, const_span);
+    None
+}
+
+/// Reports an error for a class-like that cannot be found in the codebase.
+fn report_non_existent_class<A>(context: &mut Context<'_, '_, A>, classname: Word, class_span: Span)
+where
+    A: Arena,
+{
+    let classname = display_class_like_name(context, classname);
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentClassLike,
+        Issue::error(format!("Class, interface, enum, or trait `{classname}` not found."))
+            .with_annotation(
+                Annotation::primary(class_span)
+                    .with_message(format!("`{classname}` is not defined or cannot be found")),
+            )
+            .with_help(
+                "Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.",
+            ),
+    );
+}
+
+fn report_non_existent_constant<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    metadata: &'ctx ClassLikeMetadata,
+    const_name: Word,
+    class_span: Span,
+    const_span: Span,
+) where
+    A: Arena,
+{
+    let class_kind_str = metadata.kind.as_str();
+    let class_str = display_class_like_name(context, metadata.original_name);
+
+    let (main_message, primary_annotation_message) = if metadata.kind.is_enum() {
+        (
+            format!("Enum constant or case `{const_name}` does not exist."),
+            format!("Constant or case `{const_name}` not found in enum `{class_str}`"),
+        )
+    } else {
+        (
+            format!("Class-like constant `{const_name}` does not exist."),
+            format!("Constant `{const_name}` not found in `{class_str}`"),
+        )
+    };
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentClassConstant,
+        Issue::error(main_message)
+            .with_annotation(Annotation::primary(const_span).with_message(primary_annotation_message))
+            .with_annotation(
+                Annotation::secondary(class_span).with_message(format!("On this {class_kind_str} `{class_str}`")),
+            )
+            .with_help(format!(
+                "Check for typos or ensure `{const_name}` is defined in `{class_str}` or its ancestors/interfaces.",
+            )),
+    );
+}
+
+/// Reports a warning when a constant is accessed on an ambiguous type like `object` or `class-string`.
+fn report_ambiguous_constant_access<'arena, A>(context: &mut Context<'_, 'arena, A>, class_expr: &Expression<'arena>)
+where
+    A: Arena,
+{
+    context.collector.report_with_code(
+        IssueCode::AmbiguousClassLikeConstantAccess,
+        Issue::warning("Cannot reliably determine class for constant access due to an ambiguous type.")
+            .with_annotation(
+                Annotation::primary(class_expr.span())
+                    .with_message("This expression does not specify a concrete class"),
+            )
+            .with_note("To fetch a class constant, the specific class must be known. General types like `object` or a generic `class-string` are too ambiguous for static analysis to verify constant existence.")
+            .with_help("Provide a more specific type for the class expression (e.g., `MyClass`), or use `instanceof` checks to narrow it down before accessing constants."),
+    );
+}

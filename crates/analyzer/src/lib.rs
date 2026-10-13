@@ -1,0 +1,527 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::exhaustive_enums)]
+#![allow(clippy::float_arithmetic)]
+#![allow(clippy::pub_use)]
+#![allow(clippy::match_wildcard_for_single_variants)]
+
+use std::sync::Arc;
+
+use mago_allocator::Arena;
+
+use mago_codex::context::ScopeContext;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::reference::ReferenceOrigin;
+use mago_codex::reference::SymbolReferences;
+use mago_collector::Collector;
+use mago_database::file::File;
+use mago_names::ResolvedNames;
+use mago_span::HasSpan;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+use mago_syntax::cst::Program;
+use mago_word::word;
+
+use crate::analysis_result::AnalysisResult;
+use crate::artifacts::AnalysisArtifacts;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::external::ExternalAnalysisSession;
+use crate::external::NodeAnalysisRequirements;
+use crate::plugin::PluginRegistry;
+use crate::plugin::context::HookContext;
+use crate::plugin::hook::HookAction;
+use crate::settings::Settings;
+use crate::statement::analyze_statements;
+
+pub mod analysis_result;
+pub mod artifacts;
+pub mod code;
+pub mod effects;
+pub mod error;
+pub mod external;
+pub mod graph;
+pub mod plugin;
+pub mod settings;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod telemetry;
+
+mod analyzable;
+mod assertion;
+mod common;
+mod context;
+mod expression;
+mod formula;
+mod invocation;
+mod readonly;
+mod reconciler;
+mod resolver;
+mod statement;
+mod utils;
+mod visibility;
+
+const COLLECTOR_CATEGORIES: &[&str] = &["analysis", "analyzer", "analyser"];
+
+#[derive(Debug)]
+pub struct Analyzer<'ctx, 'ast, 'arena, A>
+where
+    A: Arena,
+{
+    pub arena: &'arena A,
+    pub source_file: &'ctx File,
+    pub resolved_names: &'ast ResolvedNames<'arena>,
+    pub codebase: &'ctx CodebaseMetadata,
+    pub settings: Settings,
+    pub plugin_registry: &'ctx PluginRegistry,
+    pub external_analysis_session: Option<&'ctx ExternalAnalysisSession>,
+    pub additional_symbol_references: Option<&'ctx SymbolReferences>,
+    variable_definedness_targets: Option<Arc<[bool; NodeKind::COUNT]>>,
+    defer_pragmas: bool,
+}
+
+impl<'ctx, 'ast, 'arena, A> Analyzer<'ctx, 'ast, 'arena, A>
+where
+    A: Arena,
+{
+    pub fn new(
+        arena: &'arena A,
+        source_file: &'ctx File,
+        resolved_names: &'ast ResolvedNames<'arena>,
+        codebase: &'ctx CodebaseMetadata,
+        plugin_registry: &'ctx PluginRegistry,
+        settings: Settings,
+    ) -> Self {
+        Self {
+            arena,
+            source_file,
+            resolved_names,
+            codebase,
+            settings,
+            plugin_registry,
+            external_analysis_session: None,
+            additional_symbol_references: None,
+            variable_definedness_targets: None,
+            defer_pragmas: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_external_analysis_session(mut self, session: &'ctx ExternalAnalysisSession) -> Self {
+        self.external_analysis_session = Some(session);
+        self
+    }
+
+    #[must_use]
+    pub fn with_additional_symbol_references(mut self, references: &'ctx SymbolReferences) -> Self {
+        self.additional_symbol_references = Some(references);
+        self
+    }
+
+    #[must_use]
+    pub fn with_node_analysis_requirements(mut self, requirements: &NodeAnalysisRequirements) -> Self {
+        self.variable_definedness_targets = requirements.variable_definedness_targets();
+        self
+    }
+
+    /// Defers unused and unfulfilled pragma reporting until codebase and external lifecycle
+    /// diagnostics have been collected.
+    #[must_use]
+    pub fn with_deferred_pragmas(mut self) -> Self {
+        self.defer_pragmas = true;
+        self
+    }
+
+    /// Runs the analyzer over `program` and accumulates findings into `analysis_result`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnalysisError`] when a plugin hook fails or analysis cannot complete.
+    pub fn analyze(
+        &self,
+        program: &'ast Program<'arena>,
+        analysis_result: &mut AnalysisResult,
+    ) -> Result<(), AnalysisError> {
+        self.analyze_with_artifacts(program, analysis_result).map(|_| ())
+    }
+
+    /// Same as [`Self::analyze`], but returns the [`AnalysisArtifacts`]
+    /// produced during analysis. Used by editor integrations (e.g. the
+    /// LSP server) that need to query per-expression types after analysis
+    /// has finished.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnalysisError`] when a plugin hook fails or analysis cannot complete.
+    pub fn analyze_with_artifacts(
+        &self,
+        program: &'ast Program<'arena>,
+        analysis_result: &mut AnalysisResult,
+    ) -> Result<AnalysisArtifacts, AnalysisError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let start_time = std::time::Instant::now();
+
+        if !program.has_script() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                analysis_result.time_in_analysis = start_time.elapsed();
+            }
+
+            return Ok(
+                AnalysisArtifacts::new().with_variable_definedness_targets(self.variable_definedness_targets.clone())
+            );
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let trace_enabled = tracing::enabled!(tracing::Level::TRACE);
+
+        let statements = program.statements.as_slice();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let setup_start = trace_enabled.then(std::time::Instant::now);
+        let mut collector = Collector::new(self.arena, self.source_file, program, COLLECTOR_CATEGORIES);
+        if self.settings.diff {
+            collector.set_skip_unfulfilled_expect(true);
+        }
+
+        let mut context = Context::new(
+            self.arena,
+            self.codebase,
+            self.source_file,
+            program.dialect,
+            self.resolved_names,
+            &self.settings,
+            statements[0].span(),
+            program.trivia.as_slice(),
+            collector,
+            self.plugin_registry,
+            self.external_analysis_session,
+            self.additional_symbol_references,
+        );
+
+        let mut block_context = BlockContext::new(
+            ScopeContext::new(ReferenceOrigin::File(word(context.source_file.name.as_ref()))),
+            context.settings.register_super_globals,
+        );
+        let mut artifacts =
+            AnalysisArtifacts::new().with_variable_definedness_targets(self.variable_definedness_targets.clone());
+        artifacts.record_variable_definedness(Node::Program(program), &block_context);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(start) = setup_start {
+            telemetry::record_setup(start.elapsed());
+        }
+
+        if self.plugin_registry.has_program_hooks() {
+            let mut hook_context = HookContext::new(&context, &mut block_context, &mut artifacts);
+
+            if self.plugin_registry.before_program(self.source_file, program, &mut hook_context)? == HookAction::Skip {
+                for reported in hook_context.take_issues() {
+                    context.collector.report_with_code(reported.code, reported.issue);
+                }
+
+                analysis_result.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
+                context.finish_collector(analysis_result, self.defer_pragmas);
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    analysis_result.time_in_analysis = start_time.elapsed();
+                }
+
+                return Ok(artifacts);
+            }
+
+            for reported in hook_context.take_issues() {
+                context.collector.report_with_code(reported.code, reported.issue);
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let statements_start = trace_enabled.then(std::time::Instant::now);
+        analyze_statements(statements, &mut context, &mut block_context, &mut artifacts)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(start) = statements_start {
+            telemetry::record_statements(start.elapsed());
+        }
+
+        // Call after_program hooks
+        if self.plugin_registry.has_program_hooks() {
+            let mut hook_context = HookContext::new(&context, &mut block_context, &mut artifacts);
+            self.plugin_registry.after_program(self.source_file, program, &mut hook_context)?;
+            for reported in hook_context.take_issues() {
+                context.collector.report_with_code(reported.code, reported.issue);
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let finish_start = trace_enabled.then(std::time::Instant::now);
+        analysis_result.symbol_references.extend(std::mem::take(&mut artifacts.symbol_references));
+        context.finish_collector(analysis_result, self.defer_pragmas);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(start) = finish_start {
+            telemetry::record_finish(start.elapsed());
+        }
+
+        // Filter issues through registered issue filter hooks
+        if self.plugin_registry.has_issue_filter_hooks() {
+            analysis_result.issues = self.plugin_registry.filter_issues(
+                self.source_file,
+                std::mem::take(&mut analysis_result.issues),
+                self.codebase,
+                self.external_analysis_session,
+            )?;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        telemetry::record_file();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            analysis_result.time_in_analysis = start_time.elapsed();
+        }
+
+        Ok(artifacts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mago_allocator::LocalArena;
+    use std::borrow::Cow;
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+
+    use foldhash::HashSet;
+
+    use mago_codex::metadata::CodebaseMetadata;
+    use mago_codex::populator::populate_codebase;
+    use mago_codex::reference::SymbolReferences;
+    use mago_codex::scanner::scan_program;
+    use mago_database::file::File;
+    use mago_names::resolver::NameResolver;
+    use mago_syntax::parser::parse_file;
+    use mago_word::WordSet;
+
+    use crate::Analyzer;
+    use crate::analysis_result::AnalysisResult;
+    use crate::code::IssueCode;
+    use crate::plugin::PluginRegistry;
+    use crate::settings::Settings;
+
+    #[derive(Debug, Clone)]
+    pub struct TestCase {
+        name: &'static str,
+        content: &'static str,
+        settings: Settings,
+        expected_issues: Vec<IssueCode>,
+        expected_messages: Vec<&'static str>,
+    }
+
+    impl TestCase {
+        pub fn new(name: &'static str, content: &'static str) -> Self {
+            Self {
+                name,
+                content,
+                settings: Settings {
+                    find_unused_expressions: true,
+                    find_unused_definitions: true,
+                    ..Default::default()
+                },
+                expected_issues: vec![],
+                expected_messages: vec![],
+            }
+        }
+
+        pub fn settings(mut self, settings: Settings) -> Self {
+            self.settings = settings;
+            self
+        }
+
+        pub fn expect_success(mut self) -> Self {
+            self.expected_issues = vec![];
+            self
+        }
+
+        pub fn expect_issues(mut self, codes: Vec<IssueCode>) -> Self {
+            self.expected_issues = codes;
+            self
+        }
+
+        pub fn expect_messages(mut self, messages: Vec<&'static str>) -> Self {
+            self.expected_messages = messages;
+            self
+        }
+
+        pub fn run(self) {
+            run_test_case_inner(self);
+        }
+    }
+
+    fn run_test_case_inner(config: TestCase) {
+        let arena = LocalArena::new();
+        let source_file =
+            File::ephemeral(Cow::Borrowed(config.name.as_bytes()), Cow::Borrowed(config.content.as_bytes()));
+
+        let program = parse_file(&arena, &source_file);
+        assert!(!program.has_errors(), "Parse failed: {:?}", program.errors);
+
+        let resolver = NameResolver::new(&arena);
+        let resolved_names = resolver.resolve(program);
+        let mut codebase = scan_program(&arena, &source_file, program, &resolved_names, config.settings.version);
+        let mut symbol_references = SymbolReferences::new();
+
+        populate_codebase(&mut codebase, &mut symbol_references, WordSet::default(), HashSet::default());
+
+        let plugin_registry = PluginRegistry::with_library_providers();
+
+        let mut analysis_result = AnalysisResult::new(symbol_references);
+        let analyzer =
+            Analyzer::new(&arena, &source_file, &resolved_names, &codebase, &plugin_registry, config.settings);
+
+        let analysis_run_result = analyzer.analyze(program, &mut analysis_result);
+
+        if let Err(err) = analysis_run_result {
+            panic!("Test '{}': Expected analysis to succeed, but it failed with an error: {}", config.name, err);
+        }
+
+        verify_reported_issues(
+            config.name,
+            analysis_result,
+            codebase,
+            &config.expected_issues,
+            &config.expected_messages,
+        );
+    }
+
+    fn verify_reported_issues(
+        test_name: &str,
+        mut analysis_result: AnalysisResult,
+        mut codebase: CodebaseMetadata,
+        expected_issue_codes: &[IssueCode],
+        expected_messages: &[&str],
+    ) {
+        let mut actual_issues_collected = std::mem::take(&mut analysis_result.issues);
+
+        actual_issues_collected.extend(codebase.take_issues(true));
+
+        let actual_issues_count = actual_issues_collected.len();
+        let mut expected_issue_counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for kind in expected_issue_codes {
+            *expected_issue_counts.entry(kind.as_str()).or_insert(0) += 1;
+        }
+
+        let mut actual_issue_counts: BTreeMap<String, usize> = BTreeMap::new();
+        for actual_issue in &actual_issues_collected {
+            let Some(issue_code) = actual_issue.code.clone() else {
+                panic!("Analyzer returned an issue with no code: {actual_issue:?}");
+            };
+
+            *actual_issue_counts.entry(issue_code).or_insert(0) += 1;
+        }
+
+        let mut discrepancies = Vec::new();
+
+        for (actual_kind, &actual_count) in &actual_issue_counts {
+            let expected_count = expected_issue_counts.get(actual_kind.as_str()).copied().unwrap_or(0);
+            if actual_count > expected_count {
+                discrepancies.push(format!(
+                    "- Unexpected issue(s) of kind `{}`: found {}, expected {}.",
+                    actual_kind.as_str(),
+                    actual_count,
+                    expected_count
+                ));
+            }
+        }
+
+        for (expected_kind, expected_count) in expected_issue_counts {
+            let actual_count = actual_issue_counts.get(expected_kind).copied().unwrap_or(0);
+            if actual_count < expected_count {
+                discrepancies.push(format!(
+                    "- Missing expected issue(s) of kind `{expected_kind}`: expected {expected_count}, found {actual_count}.",
+                ));
+            }
+        }
+
+        if !discrepancies.is_empty() {
+            let mut panic_message = format!("Test '{test_name}' failed with issue discrepancies:\n");
+            for d in discrepancies {
+                let _ = writeln!(panic_message, "  {d}");
+            }
+
+            panic!("{}", panic_message);
+        }
+
+        for expected_message in expected_messages {
+            assert!(
+                actual_issues_collected.iter().any(|issue| issue.message == *expected_message),
+                "Test '{test_name}': Expected issue message {expected_message:?}, but found: {actual_issues_collected:?}",
+            );
+        }
+
+        if expected_issue_codes.is_empty() && actual_issues_count != 0 {
+            let mut panic_message = format!("Test '{test_name}': Expected no issues, but found:\n");
+            for issue in actual_issues_collected {
+                let _ = writeln!(
+                    panic_message,
+                    "  - Code: `{}`, Message: \"{}\"",
+                    issue.code.unwrap_or_default(),
+                    issue.message
+                );
+            }
+
+            panic!("{}", panic_message);
+        }
+    }
+
+    #[test]
+    fn unused_method_message_preserves_declaration_casing() {
+        TestCase::new(
+            "unused_method_message_preserves_declaration_casing",
+            "<?php
+
+final class Test
+{
+    private function getRandomString(): string
+    {
+        return 'string';
+    }
+}
+",
+        )
+        .expect_issues(vec![IssueCode::UnusedMethod])
+        .expect_messages(vec!["Method `getRandomString()` is never used."])
+        .run();
+    }
+
+    #[macro_export]
+    macro_rules! test_analysis {
+        (name = $test_name:ident, code = $code_str:expr $(,)?) => {
+            #[test]
+            pub fn $test_name() {
+                $crate::tests::TestCase::new(stringify!($test_name), $code_str).expect_success().run();
+            }
+        };
+        (name = $test_name:ident, settings = $settings:expr, code = $code_str:expr $(,)?) => {
+            #[test]
+            pub fn $test_name() {
+                $crate::tests::TestCase::new(stringify!($test_name), $code_str).settings($settings).expect_success().run();
+            }
+        };
+        (name = $test_name:ident, code = $code_str:expr, issues = [$($issue_kind:expr),* $(,)?] $(,)?) => {
+            #[test]
+            pub fn $test_name() {
+                $crate::tests::TestCase::new(stringify!($test_name), $code_str)
+                    .expect_issues(vec![$($issue_kind),*])
+                    .run();
+            }
+        };
+        (name = $test_name:ident, settings = $settings:expr, code = $code_str:expr, issues = [$($issue_kind:expr),* $(,)?] $(,)?) => {
+            #[test]
+            pub fn $test_name() {
+                $crate::tests::TestCase::new(stringify!($test_name), $code_str)
+                    .settings($settings)
+                    .expect_issues(vec![$($issue_kind),*])
+                    .run();
+            }
+        };
+    }
+}

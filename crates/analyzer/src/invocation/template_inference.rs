@@ -1,0 +1,1350 @@
+use mago_allocator::Arena;
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use foldhash::HashMap;
+
+use foldhash::HashSet;
+use mago_word::Word;
+use mago_word::word;
+
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::function_like::MethodMetadata;
+use mago_codex::misc::GenericParent;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::add_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::key::ArrayKey;
+use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::mixed::TMixed;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::cast::cast_atomic_to_callable;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::atomic_comparator;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
+use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_array_value_parameter;
+use mago_codex::ttype::get_backing_key_type;
+use mago_codex::ttype::get_iterable_parameters;
+use mago_codex::ttype::get_specialized_template_type;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::definition_type_replacer::DefinitionReplacementOptions;
+use mago_codex::ttype::template::definition_type_replacer::insert_bound_type;
+use mago_codex::ttype::template::inferred_type_replacer;
+use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::Span;
+
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::invocation::MethodTargetContext;
+use crate::utils::names::display_type;
+
+#[derive(Debug, Clone, Copy)]
+pub struct InferenceOptions {
+    pub infer_only_if_new: bool,
+    pub argument_offset: Option<usize>,
+    pub is_top_level: bool,
+}
+
+impl Default for InferenceOptions {
+    fn default() -> Self {
+        Self { infer_only_if_new: false, argument_offset: None, is_top_level: true }
+    }
+}
+
+#[derive(Debug)]
+pub struct TemplateInferenceViolation {
+    pub template_name: Word,
+    pub inferred_bound: TUnion,
+    pub constraint: TUnion,
+}
+
+fn resolve_self_class(defining_entity: &GenericParent) -> Option<Word> {
+    match defining_entity {
+        GenericParent::ClassLike(name) => Some(*name),
+        GenericParent::FunctionLike((class_name, method_name)) if !method_name.is_empty() => Some(*class_name),
+        GenericParent::FunctionLike(_) => None,
+    }
+}
+
+fn expand_template_constraint<'ty>(
+    codebase: &CodebaseMetadata,
+    constraint: &'ty TUnion,
+    self_class: Option<Word>,
+) -> Cow<'ty, TUnion> {
+    if !constraint.is_expandable() {
+        return Cow::Borrowed(constraint);
+    }
+
+    let mut expanded = constraint.clone();
+    expand_union(codebase, &mut expanded, &TypeExpansionOptions { self_class, ..Default::default() });
+    Cow::Owned(expanded)
+}
+
+/// Whether `input_object` is the very class the container is parameterizing, without carrying
+/// type parameters of its own — in which case it cannot specialize anything.
+fn names_the_same_unspecialized_class(container_constraint: &TAtomic, input_object: &TAtomic) -> bool {
+    let (TAtomic::Object(TObject::Named(container)), TAtomic::Object(TObject::Named(input))) =
+        (container_constraint, input_object)
+    else {
+        return false;
+    };
+
+    input.type_parameters.is_none() && container.name == input.name
+}
+
+/// Turns the class-string-ish members of `input_type` into the object types they name.
+fn collect_class_string_object_types<A>(context: &Context<'_, '_, A>, input_type: &TUnion) -> Vec<TAtomic>
+where
+    A: Arena,
+{
+    let mut input_objects = vec![];
+    for input_atomic in input_type.types.iter() {
+        match input_atomic {
+            TAtomic::Scalar(TScalar::ClassLikeString(class_string)) => {
+                input_objects.push(class_string.get_object_type(context.codebase));
+            }
+            TAtomic::Scalar(TScalar::String(string)) => {
+                // A literal `'Foo'` argument passed where `class-string<T>` is expected
+                // should bind `T = Foo`, mirroring how Psalm/PHPStan coerce literal
+                // strings that name a real class. Only do this when the literal really
+                // names a class-like in the codebase, otherwise leave inference alone.
+                if let Some(literal) = string.get_known_literal_value()
+                    && context.codebase.class_like_exists(literal)
+                {
+                    input_objects.push(TClassLikeString::literal(word(literal)).get_object_type(context.codebase));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    input_objects
+}
+
+fn infer_templates_from_input_and_container_types<A>(
+    context: &Context<'_, '_, A>,
+    container_type: &TUnion,
+    input_type: &TUnion,
+    template_result: &mut TemplateResult,
+    options: InferenceOptions,
+    violations: &mut Vec<TemplateInferenceViolation>,
+) where
+    A: Arena,
+{
+    // Capture the top-level flag for this frame's insertion decisions, then
+    // shadow `options` so every recursive call descends as "nested". A
+    // top-level object specialization (e.g. `Column<T>` matched against
+    // `IntColumn extends Column<int>`) pins T at a shallower depth than the
+    // sibling bare-`T` arg's bound, so the structural inference wins. Any
+    // recursion below this frame is by definition no longer the parameter's
+    // top level: `list<NodeInterface<T>>` is top level, the `NodeInterface<T>`
+    // inside it is not.
+    let top_level = options.is_top_level;
+    let options = InferenceOptions { is_top_level: false, ..options };
+
+    if input_type.is_mixed() && !container_type.is_generic_parameter() {
+        return;
+    }
+
+    let (generic_container_parts, concrete_container_parts) =
+        container_type.types.iter().partition::<Vec<_>, _>(|t| match t {
+            TAtomic::GenericParameter(_)
+            | TAtomic::Array(_)
+            | TAtomic::Iterable(_)
+            | TAtomic::Callable(_)
+            | TAtomic::Scalar(TScalar::ClassLikeString(_)) => true,
+            TAtomic::Object(TObject::Named(named)) => named.type_parameters.as_ref().is_some_and(|p| !p.is_empty()),
+            _ => false,
+        });
+
+    let has_generic_class_string = generic_container_parts
+        .iter()
+        .any(|t| matches!(t, TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { .. }))));
+
+    let has_bare_generic_parameter = generic_container_parts.iter().any(|t| matches!(t, TAtomic::GenericParameter(_)));
+    let residual_input_types = input_type
+        .types
+        .iter()
+        .filter(|argument_atomic| {
+            (!argument_atomic.is_empty_array() || has_bare_generic_parameter)
+                && !concrete_container_parts.iter().any(|container_atomic| {
+                    if has_generic_class_string
+                        && matches!(argument_atomic, TAtomic::Scalar(TScalar::ClassLikeString(_)))
+                        && matches!(container_atomic, TAtomic::Scalar(TScalar::String(_)))
+                    {
+                        return false;
+                    }
+
+                    atomic_comparator::is_contained_by(
+                        context.codebase,
+                        argument_atomic,
+                        container_atomic,
+                        false,
+                        &mut ComparisonResult::default(),
+                    )
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let residual_input_type = if residual_input_types.is_empty() {
+        return;
+    } else {
+        TUnion::from_vec(residual_input_types)
+    };
+
+    let mut potential_template_violations = HashMap::default();
+    let generic_container_parts_len = generic_container_parts.len();
+
+    for container_atomic_part in &generic_container_parts {
+        match container_atomic_part {
+            TAtomic::Array(container_array) => {
+                for input_atomic in residual_input_type.types.as_ref() {
+                    if let TAtomic::Array(input_array) = input_atomic {
+                        match (container_array, input_array) {
+                            (TArray::List(container_list), TArray::List(input_list)) => {
+                                let mut inferred_input_elements = vec![];
+                                if let Some(container_elements) = &container_list.known_elements {
+                                    for (container_index, (_, container_element)) in container_elements {
+                                        let input_element = input_list
+                                            .known_elements
+                                            .as_ref()
+                                            .and_then(|elements| {
+                                                let (_, input_element) = elements.get(container_index)?;
+
+                                                inferred_input_elements.push(container_index);
+
+                                                Some(input_element)
+                                            })
+                                            .or_else(|| {
+                                                if input_list.element_type.is_never() {
+                                                    None
+                                                } else {
+                                                    Some(input_list.element_type.as_ref())
+                                                }
+                                            });
+
+                                        let Some(input_element) = input_element else {
+                                            continue;
+                                        };
+
+                                        infer_templates_from_input_and_container_types(
+                                            context,
+                                            container_element,
+                                            input_element,
+                                            template_result,
+                                            options,
+                                            violations,
+                                        );
+                                    }
+                                }
+
+                                if !container_list.element_type.is_never() {
+                                    let mut input_value_type = Cow::Borrowed(input_list.element_type.as_ref());
+
+                                    if let Some(known_input_elements) = &input_list.known_elements {
+                                        for (input_index, (_, input_element)) in known_input_elements {
+                                            if !inferred_input_elements.contains(&input_index) {
+                                                input_value_type = Cow::Owned(add_union_type(
+                                                    input_element.clone(),
+                                                    input_value_type.as_ref(),
+                                                    context.codebase,
+                                                    CombinerOptions::default(),
+                                                ));
+                                            }
+                                        }
+                                    }
+
+                                    infer_templates_from_input_and_container_types(
+                                        context,
+                                        &container_list.element_type,
+                                        &input_value_type,
+                                        template_result,
+                                        options,
+                                        violations,
+                                    );
+                                }
+                            }
+                            (TArray::Keyed(container_array), TArray::Keyed(input_array)) => {
+                                let mut inferred_input_keys = vec![];
+                                if let Some(known_items) = &container_array.known_items {
+                                    for (container_key, (_, container_item)) in known_items {
+                                        let input_item = input_array
+                                            .known_items
+                                            .as_ref()
+                                            .and_then(|items| {
+                                                let (_, input_item) = items.get(container_key)?;
+
+                                                inferred_input_keys.push(container_key);
+
+                                                Some(input_item)
+                                            })
+                                            .or_else(|| {
+                                                input_array.parameters.as_ref().map(|params| params.1.as_ref())
+                                            });
+
+                                        let Some(input_item) = input_item else {
+                                            continue;
+                                        };
+
+                                        infer_templates_from_input_and_container_types(
+                                            context,
+                                            container_item,
+                                            input_item,
+                                            template_result,
+                                            options,
+                                            violations,
+                                        );
+                                    }
+                                }
+
+                                if let Some(container_parameter) = container_array.parameters.as_ref() {
+                                    let mut input_key_type =
+                                        if let Some(input_parameter) = input_array.parameters.as_ref() {
+                                            Some(Cow::Borrowed(input_parameter.0.as_ref()))
+                                        } else {
+                                            None
+                                        };
+
+                                    let mut input_value_type =
+                                        if let Some(input_parameter) = input_array.parameters.as_ref() {
+                                            Some(Cow::Borrowed(input_parameter.1.as_ref()))
+                                        } else {
+                                            None
+                                        };
+
+                                    if let Some(known_input_items) = &input_array.known_items {
+                                        for (input_key, (_, input_item)) in known_input_items {
+                                            if !inferred_input_keys.contains(&input_key) {
+                                                input_key_type = Some(Cow::Owned(add_optional_union_type(
+                                                    input_key.to_union(),
+                                                    input_key_type.as_deref(),
+                                                    context.codebase,
+                                                )));
+
+                                                input_value_type = Some(Cow::Owned(add_optional_union_type(
+                                                    input_item.clone(),
+                                                    input_value_type.as_deref(),
+                                                    context.codebase,
+                                                )));
+                                            }
+                                        }
+                                    }
+
+                                    // A PHP# `Map` keyed by a backed enum reaches plain PHP as its backing values.
+                                    if let Some(input_key_type) = input_key_type {
+                                        infer_templates_from_input_and_container_types(
+                                            context,
+                                            &container_parameter.0,
+                                            &get_backing_key_type(&input_key_type, context.codebase),
+                                            template_result,
+                                            options,
+                                            violations,
+                                        );
+                                    }
+
+                                    if let Some(input_value_type) = input_value_type {
+                                        infer_templates_from_input_and_container_types(
+                                            context,
+                                            &container_parameter.1,
+                                            &input_value_type,
+                                            template_result,
+                                            options,
+                                            violations,
+                                        );
+                                    }
+                                }
+                            }
+                            (TArray::List(container_list), TArray::Keyed(input_keyed_array)) => {
+                                let mut matched_input_keys: HashSet<ArrayKey> = HashSet::default();
+
+                                if let Some(container_elements) = &container_list.known_elements {
+                                    for (container_index, (_, container_element)) in container_elements {
+                                        if let Some(known_items) = &input_keyed_array.known_items {
+                                            let key = ArrayKey::Integer(*container_index as i64);
+                                            if let Some((_, input_element)) = known_items.get(&key) {
+                                                matched_input_keys.insert(key);
+
+                                                infer_templates_from_input_and_container_types(
+                                                    context,
+                                                    container_element,
+                                                    input_element,
+                                                    template_result,
+                                                    options,
+                                                    violations,
+                                                );
+
+                                                continue;
+                                            }
+                                        }
+
+                                        let input_element = input_keyed_array
+                                            .parameters
+                                            .as_ref()
+                                            .map(|params| params.1.as_ref())
+                                            .map(Cow::Borrowed)
+                                            .unwrap_or_else(|| {
+                                                Cow::Owned(get_array_value_parameter(input_array, context.codebase))
+                                            });
+
+                                        infer_templates_from_input_and_container_types(
+                                            context,
+                                            container_element,
+                                            &input_element,
+                                            template_result,
+                                            options,
+                                            violations,
+                                        );
+                                    }
+                                }
+
+                                if !container_list.element_type.is_never() {
+                                    let mut input_value_type =
+                                        if let Some(params) = input_keyed_array.parameters.as_ref() {
+                                            Cow::Borrowed(params.1.as_ref())
+                                        } else {
+                                            Cow::Owned(get_array_value_parameter(input_array, context.codebase))
+                                        };
+
+                                    if let Some(known_input_items) = &input_keyed_array.known_items {
+                                        for (input_key, (_, input_item)) in known_input_items {
+                                            if !matched_input_keys.contains(input_key) {
+                                                input_value_type = Cow::Owned(add_union_type(
+                                                    input_item.clone(),
+                                                    input_value_type.as_ref(),
+                                                    context.codebase,
+                                                    CombinerOptions::default(),
+                                                ));
+                                            }
+                                        }
+                                    }
+
+                                    infer_templates_from_input_and_container_types(
+                                        context,
+                                        &container_list.element_type,
+                                        &input_value_type,
+                                        template_result,
+                                        options,
+                                        violations,
+                                    );
+                                }
+                            }
+                            (TArray::Keyed(container_array), TArray::List(input_list)) => {
+                                let mut matched_input_indices: HashSet<usize> = HashSet::default();
+
+                                if let Some(known_items) = &container_array.known_items {
+                                    for (container_key, (_, container_item)) in known_items {
+                                        match container_key {
+                                            ArrayKey::Integer(i) if *i >= 0 => {
+                                                let idx = *i as usize;
+                                                if let Some(known_elems) = &input_list.known_elements
+                                                    && let Some((_, input_elem)) = known_elems.get(&idx)
+                                                {
+                                                    matched_input_indices.insert(idx);
+
+                                                    infer_templates_from_input_and_container_types(
+                                                        context,
+                                                        container_item,
+                                                        input_elem,
+                                                        template_result,
+                                                        options,
+                                                        violations,
+                                                    );
+
+                                                    continue;
+                                                }
+
+                                                // no exact element at that index -> fall back to list element_type
+                                                if !input_list.element_type.is_never() {
+                                                    infer_templates_from_input_and_container_types(
+                                                        context,
+                                                        container_item,
+                                                        input_list.element_type.as_ref(),
+                                                        template_result,
+                                                        options,
+                                                        violations,
+                                                    );
+                                                }
+                                            }
+                                            _ => {
+                                                if !input_list.element_type.is_never() {
+                                                    infer_templates_from_input_and_container_types(
+                                                        context,
+                                                        container_item,
+                                                        input_list.element_type.as_ref(),
+                                                        template_result,
+                                                        options,
+                                                        violations,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some(container_parameter) = container_array.parameters.as_ref() {
+                                    let input_params = get_array_parameters(input_array, context.codebase);
+                                    let mut input_key_type = Some(Cow::Owned(input_params.0));
+                                    let mut input_value_type = Some(Cow::Borrowed(&input_params.1));
+
+                                    if let Some(known_input_elements) = &input_list.known_elements {
+                                        for (input_index, (_, input_element)) in known_input_elements {
+                                            if !matched_input_indices.contains(input_index) {
+                                                let int_key = ArrayKey::Integer(*input_index as i64);
+
+                                                input_key_type = Some(Cow::Owned(add_optional_union_type(
+                                                    int_key.to_union(),
+                                                    input_key_type.as_deref(),
+                                                    context.codebase,
+                                                )));
+
+                                                input_value_type = Some(Cow::Owned(add_optional_union_type(
+                                                    input_element.clone(),
+                                                    input_value_type.as_deref(),
+                                                    context.codebase,
+                                                )));
+                                            }
+                                        }
+                                    }
+
+                                    if let Some(input_key_type) = input_key_type {
+                                        infer_templates_from_input_and_container_types(
+                                            context,
+                                            &container_parameter.0,
+                                            &input_key_type,
+                                            template_result,
+                                            options,
+                                            violations,
+                                        );
+                                    }
+
+                                    if let Some(input_value_type) = input_value_type {
+                                        infer_templates_from_input_and_container_types(
+                                            context,
+                                            &container_parameter.1,
+                                            &input_value_type,
+                                            template_result,
+                                            options,
+                                            violations,
+                                        );
+                                    }
+                                }
+                            }
+                            // A `Set` holds its elements as values, so a list passed for it gives its elements too.
+                            (TArray::Set(container_element_type), input_array) => {
+                                let (_, input_value_type) = get_array_parameters(input_array, context.codebase);
+                                infer_templates_from_input_and_container_types(
+                                    context,
+                                    container_element_type,
+                                    &input_value_type,
+                                    template_result,
+                                    options,
+                                    violations,
+                                );
+                            }
+                            // Plain PHP reads a `Set` as the array it runs as, keyed by each element's backing value.
+                            (TArray::Keyed(container_array), TArray::Set(input_element_type)) => {
+                                if let Some((container_key_type, container_value_type)) = &container_array.parameters {
+                                    infer_templates_from_input_and_container_types(
+                                        context,
+                                        container_key_type,
+                                        &get_backing_key_type(input_element_type, context.codebase),
+                                        template_result,
+                                        options,
+                                        violations,
+                                    );
+                                    infer_templates_from_input_and_container_types(
+                                        context,
+                                        container_value_type,
+                                        input_element_type,
+                                        template_result,
+                                        options,
+                                        violations,
+                                    );
+                                }
+                            }
+                            (TArray::List(_), TArray::Set(_)) => {}
+                        }
+                    }
+                }
+            }
+            TAtomic::Iterable(container_iterable) => {
+                for input_atomic in residual_input_type.types.as_ref() {
+                    let Some(input_params) = get_iterable_parameters(input_atomic, context.codebase) else {
+                        return;
+                    };
+
+                    infer_templates_from_input_and_container_types(
+                        context,
+                        container_iterable.get_key_type(),
+                        &get_backing_key_type(&input_params.0, context.codebase),
+                        template_result,
+                        options,
+                        violations,
+                    );
+
+                    infer_templates_from_input_and_container_types(
+                        context,
+                        container_iterable.get_value_type(),
+                        &input_params.1,
+                        template_result,
+                        options,
+                        violations,
+                    );
+                }
+            }
+            TAtomic::Callable(container_callable) => {
+                let container_signature = match container_callable {
+                    TCallable::Signature(signature) => Cow::Borrowed(signature),
+                    TCallable::Alias(id) => {
+                        let Some(signature) = get_signature_of_function_like_identifier(id, context.codebase) else {
+                            continue;
+                        };
+
+                        Cow::Owned(signature)
+                    }
+                };
+
+                let has_callable_alternatives =
+                    generic_container_parts.iter().filter(|t| matches!(t, TAtomic::Callable(_))).count() > 1;
+
+                let mut sandboxed_violations: Vec<TemplateInferenceViolation> = Vec::new();
+                let arm_violations: &mut Vec<TemplateInferenceViolation> =
+                    if has_callable_alternatives { &mut sandboxed_violations } else { violations };
+
+                for input_atomic in residual_input_type.types.as_ref() {
+                    let (input_signature, is_cast_from_non_callable) = match input_atomic {
+                        TAtomic::Callable(TCallable::Signature(argument_signature)) => {
+                            (Cow::Borrowed(argument_signature), false)
+                        }
+                        TAtomic::Callable(TCallable::Alias(id)) => {
+                            let Some(signature) = get_signature_of_function_like_identifier(id, context.codebase)
+                            else {
+                                continue;
+                            };
+
+                            (Cow::Owned(signature), false)
+                        }
+                        other => {
+                            let Some(callable) = cast_atomic_to_callable(other, context.codebase, None) else {
+                                continue;
+                            };
+
+                            let signature = match callable.into_owned() {
+                                TCallable::Signature(sig) => sig,
+                                TCallable::Alias(id) => {
+                                    let Some(signature) =
+                                        get_signature_of_function_like_identifier(&id, context.codebase)
+                                    else {
+                                        continue;
+                                    };
+
+                                    signature
+                                }
+                            };
+
+                            (Cow::Owned(signature), true)
+                        }
+                    };
+
+                    let container_parameters = container_signature.get_parameters();
+                    let input_parameters = input_signature.get_parameters();
+
+                    let container_count = container_parameters.len();
+                    let input_count = input_parameters.iter().filter(|s| !s.has_default()).count();
+                    let minimum_count = std::cmp::min(container_count, input_count);
+                    for i in 0..minimum_count {
+                        let Some(container_parameter) = container_parameters.get(i) else {
+                            continue;
+                        };
+
+                        let Some(input_parameter) = input_parameters.get(i) else {
+                            continue;
+                        };
+
+                        let Some(container_parameter_type) = container_parameter.get_type_signature() else {
+                            continue;
+                        };
+
+                        let Some(input_parameter_type) = input_parameter.get_type_signature() else {
+                            continue;
+                        };
+
+                        let input_param_for_inference = if is_cast_from_non_callable {
+                            Cow::Owned(resolve_unbound_templates_to_constraints(input_parameter_type))
+                        } else {
+                            Cow::Borrowed(input_parameter_type)
+                        };
+
+                        infer_templates_from_input_and_container_types(
+                            context,
+                            container_parameter_type,
+                            &input_param_for_inference,
+                            template_result,
+                            InferenceOptions { infer_only_if_new: true, ..options },
+                            arm_violations,
+                        );
+                    }
+
+                    let Some(container_return) = container_signature.get_return_type() else {
+                        continue;
+                    };
+
+                    let Some(input_return) = input_signature.get_return_type() else {
+                        continue;
+                    };
+
+                    let input_return_for_inference = if is_cast_from_non_callable {
+                        Cow::Owned(resolve_unbound_templates_to_constraints(input_return))
+                    } else {
+                        Cow::Borrowed(input_return)
+                    };
+
+                    infer_templates_from_input_and_container_types(
+                        context,
+                        container_return,
+                        &input_return_for_inference,
+                        template_result,
+                        InferenceOptions { infer_only_if_new: false, ..options },
+                        arm_violations,
+                    );
+                }
+            }
+            TAtomic::Object(TObject::Named(container_obj)) => {
+                let Some(container_params) = container_obj.get_type_parameters() else {
+                    continue;
+                };
+
+                let Some(container_meta) = context.codebase.get_class_like(container_obj.name.as_bytes()) else {
+                    continue;
+                };
+
+                for input_atomic in residual_input_type.types.as_ref() {
+                    let TAtomic::Object(TObject::Named(input_obj)) = input_atomic else {
+                        continue;
+                    };
+
+                    let Some(input_meta) = context.codebase.get_class_like(input_obj.name.as_bytes()) else {
+                        continue;
+                    };
+
+                    if !context.codebase.is_instance_of(input_obj.name.as_bytes(), container_obj.name.as_bytes()) {
+                        continue;
+                    }
+
+                    for (index, parameter_template_union) in container_params.iter().enumerate() {
+                        let generic_parameters =
+                            parameter_template_union.types.iter().filter_map(|atomic| match atomic {
+                                TAtomic::GenericParameter(generic_parameter) => Some(generic_parameter),
+                                _ => None,
+                            });
+
+                        let mut has_direct_generic = false;
+                        for generic_parameter in generic_parameters {
+                            has_direct_generic = true;
+
+                            let Some((template_name, _)) = container_meta.template_types.get_index(index) else {
+                                continue;
+                            };
+
+                            if let Some(inferred_bound) = get_specialized_template_type(
+                                context.codebase,
+                                *template_name,
+                                container_meta.name,
+                                input_meta,
+                                input_obj.get_type_parameters(),
+                            ) {
+                                let constraint = expand_template_constraint(
+                                    context.codebase,
+                                    &generic_parameter.constraint,
+                                    resolve_self_class(&generic_parameter.defining_entity),
+                                );
+
+                                if !union_comparator::is_contained_by(
+                                    context.codebase,
+                                    &inferred_bound,
+                                    &constraint,
+                                    false,
+                                    false,
+                                    false,
+                                    &mut ComparisonResult::default(),
+                                ) {
+                                    violations.push(TemplateInferenceViolation {
+                                        template_name: *template_name,
+                                        inferred_bound: inferred_bound.clone(),
+                                        constraint: constraint.into_owned(),
+                                    });
+                                }
+
+                                let appearance_depth = usize::from(!top_level);
+                                insert_bound_type(
+                                    template_result,
+                                    generic_parameter.parameter_name,
+                                    &generic_parameter.defining_entity,
+                                    inferred_bound,
+                                    DefinitionReplacementOptions { appearance_depth, ..Default::default() },
+                                    options.argument_offset,
+                                );
+                            }
+                        }
+
+                        if has_direct_generic {
+                            continue;
+                        }
+
+                        if !parameter_template_union.has_template_types() {
+                            continue;
+                        }
+
+                        let input_params = input_obj.get_type_parameters();
+                        let Some(input_param_at_index) = input_params.and_then(|params| params.get(index)) else {
+                            continue;
+                        };
+
+                        infer_templates_from_input_and_container_types(
+                            context,
+                            parameter_template_union,
+                            input_param_at_index,
+                            template_result,
+                            options,
+                            violations,
+                        );
+                    }
+                }
+            }
+            // `class-string<Repo<T>>`: the templates live inside the constraint, not in the
+            // class-string itself, so unwrap both sides to objects and let the regular object
+            // inference specialize `T` through the argument's `@extends`.
+            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
+                let container_object_type = wrap_atomic(constraint.as_ref().clone());
+                if !container_object_type.has_template_types() {
+                    continue;
+                }
+
+                // Only a name that actually specializes the container's parameters tells us
+                // anything. `class-string<It>` against `class-string<It<K, V>>` would otherwise
+                // bind `K` and `V` to their bare constraints and wipe out the bounds that other
+                // arguments already pinned.
+                let input_objects = collect_class_string_object_types(context, &residual_input_type)
+                    .into_iter()
+                    .filter(|input_object| !names_the_same_unspecialized_class(constraint, input_object))
+                    .collect::<Vec<_>>();
+
+                if input_objects.is_empty() {
+                    continue;
+                }
+
+                infer_templates_from_input_and_container_types(
+                    context,
+                    &container_object_type,
+                    &TUnion::from_vec(input_objects),
+                    template_result,
+                    options,
+                    violations,
+                );
+            }
+            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic {
+                parameter_name,
+                defining_entity,
+                constraint: class_string_constraint,
+                ..
+            })) => {
+                let should_add_bound = !options.infer_only_if_new
+                    || template_result
+                        .lower_bounds
+                        .get(parameter_name)
+                        .and_then(|map| map.get(defining_entity))
+                        .is_none_or(std::vec::Vec::is_empty);
+
+                let input_objects = collect_class_string_object_types(context, &residual_input_type);
+                if input_objects.is_empty() || !should_add_bound {
+                    continue;
+                }
+
+                let lower_bound_type = TUnion::from_vec(input_objects);
+
+                let has_generic_parameter =
+                    lower_bound_type.types.iter().any(|t| matches!(t, TAtomic::GenericParameter(_)));
+
+                let constraint_union = wrap_atomic(class_string_constraint.as_ref().clone());
+                if !has_generic_parameter
+                    && !union_comparator::is_contained_by(
+                        context.codebase,
+                        &lower_bound_type,
+                        &constraint_union,
+                        false,
+                        false,
+                        false,
+                        &mut ComparisonResult::default(),
+                    )
+                {
+                    continue;
+                }
+
+                if !has_generic_parameter
+                    && let Some(template_types) = template_result.template_types.get(parameter_name)
+                {
+                    for template in template_types {
+                        if !union_comparator::is_contained_by(
+                            context.codebase,
+                            &lower_bound_type,
+                            &template.constraint,
+                            false,
+                            false,
+                            false,
+                            &mut ComparisonResult::default(),
+                        ) {
+                            violations.push(TemplateInferenceViolation {
+                                template_name: *parameter_name,
+                                inferred_bound: lower_bound_type.clone(),
+                                constraint: template.constraint.clone(),
+                            });
+                        }
+                    }
+                }
+
+                insert_bound_type(
+                    template_result,
+                    *parameter_name,
+                    defining_entity,
+                    lower_bound_type,
+                    DefinitionReplacementOptions { appearance_depth: 1, ..Default::default() },
+                    options.argument_offset,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    for container_atomic_part in generic_container_parts {
+        let TAtomic::GenericParameter(container_generic) = container_atomic_part else {
+            continue;
+        };
+
+        let template_parameter_name = &container_generic.parameter_name;
+
+        let should_add_bound = !options.infer_only_if_new
+            || template_result
+                .lower_bounds
+                .get(template_parameter_name)
+                .and_then(|map| map.get(&container_generic.defining_entity))
+                .is_none_or(std::vec::Vec::is_empty);
+
+        if !should_add_bound {
+            continue;
+        }
+
+        let expanded_constraint = expand_template_constraint(
+            context.codebase,
+            &container_generic.constraint,
+            resolve_self_class(&container_generic.defining_entity),
+        );
+
+        if !expanded_constraint.has_template_types()
+            && !union_comparator::is_contained_by(
+                context.codebase,
+                &residual_input_type,
+                &expanded_constraint,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::default(),
+            )
+        {
+            // when the input type doesn't satisfy the template constraint and this is the only
+            // generic container part that could accept it, report a constraint violation.
+            //
+            // skip when:
+            // - there are other generic parts (e.g., in `class-string<T>|T`) that might match
+            // - the constraint is mixed (accepts anything)
+            // - the input is a generic parameter (constraint will be checked at the call site)
+            if generic_container_parts_len == 1
+                && !expanded_constraint.is_mixed()
+                && !residual_input_type.is_generic_parameter()
+            {
+                violations.push(TemplateInferenceViolation {
+                    template_name: *template_parameter_name,
+                    inferred_bound: residual_input_type.clone(),
+                    constraint: expanded_constraint.into_owned(),
+                });
+            }
+
+            continue;
+        }
+
+        let mut has_violation = false;
+        let mut constraint_has_unresolved_templates = false;
+
+        if let Some(template_types) = template_result.template_types.get(template_parameter_name) {
+            for template in template_types {
+                let replaced_template_type =
+                    inferred_type_replacer::replace(&template.constraint, template_result, context.codebase);
+
+                if replaced_template_type.has_template_types() {
+                    constraint_has_unresolved_templates = true;
+                    continue;
+                }
+
+                let resolved_template_type = expand_template_constraint(
+                    context.codebase,
+                    &replaced_template_type,
+                    resolve_self_class(&template.defining_entity),
+                );
+
+                if !union_comparator::is_contained_by(
+                    context.codebase,
+                    &residual_input_type,
+                    &resolved_template_type,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::default(),
+                ) {
+                    potential_template_violations
+                        .entry((*template_parameter_name, container_generic.defining_entity))
+                        .or_insert_with(|| {
+                            (
+                                residual_input_type.clone(),
+                                resolved_template_type.into_owned(),
+                                container_generic.clone(),
+                            )
+                        });
+
+                    has_violation = true;
+                    break;
+                }
+            }
+        }
+
+        if has_violation && !constraint_has_unresolved_templates {
+            continue;
+        }
+
+        if container_generic.constraint.has_template_types() {
+            infer_templates_from_input_and_container_types(
+                context,
+                &container_generic.constraint,
+                &residual_input_type,
+                template_result,
+                InferenceOptions { infer_only_if_new: true, ..options },
+                violations,
+            );
+        }
+
+        insert_bound_type(
+            template_result,
+            *template_parameter_name,
+            &container_generic.defining_entity,
+            residual_input_type.clone(),
+            DefinitionReplacementOptions { appearance_depth: 1, ..Default::default() },
+            options.argument_offset,
+        );
+    }
+
+    for ((template_parameter_name, defining_entity), (inferred_type, constraint, _container_generic)) in
+        potential_template_violations
+    {
+        let re_resolved_constraint = inferred_type_replacer::replace(&constraint, template_result, context.codebase);
+        if re_resolved_constraint.has_template_types() {
+            continue;
+        }
+
+        if re_resolved_constraint != constraint
+            && union_comparator::is_contained_by(
+                context.codebase,
+                &inferred_type,
+                &re_resolved_constraint,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::default(),
+            )
+        {
+            continue;
+        }
+
+        let is_unresolved = template_result
+            .lower_bounds
+            .get(&template_parameter_name)
+            .and_then(|map| map.get(&defining_entity))
+            .is_none_or(std::vec::Vec::is_empty);
+
+        if is_unresolved {
+            violations.push(TemplateInferenceViolation {
+                template_name: template_parameter_name,
+                inferred_bound: inferred_type,
+                constraint: re_resolved_constraint.clone(),
+            });
+
+            insert_bound_type(
+                template_result,
+                template_parameter_name,
+                &defining_entity,
+                re_resolved_constraint,
+                DefinitionReplacementOptions { appearance_depth: 1, ..Default::default() },
+                options.argument_offset,
+            );
+        }
+    }
+}
+
+pub fn infer_templates_for_method_call<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    object_type: &TNamedObject,
+    method_target_context: &MethodTargetContext<'ctx>,
+    method_metadata: &'ctx MethodMetadata,
+    declaring_class_like_metadata: &'ctx ClassLikeMetadata,
+    template_result: &mut TemplateResult,
+) where
+    A: Arena,
+{
+    if declaring_class_like_metadata.name != method_target_context.class_like_metadata.name {
+        for (template_name, _) in &declaring_class_like_metadata.template_types {
+            let template_type = get_specialized_template_type(
+                context.codebase,
+                *template_name,
+                declaring_class_like_metadata.name,
+                method_target_context.class_like_metadata,
+                object_type.get_type_parameters(),
+            );
+
+            if let Some(template_type) = template_type {
+                template_result.add_lower_bound(
+                    *template_name,
+                    GenericParent::ClassLike(declaring_class_like_metadata.name),
+                    template_type,
+                );
+            }
+        }
+    }
+
+    for (template_name, where_constraint) in &method_metadata.where_constraints {
+        let Some(actual_type) = get_specialized_template_type(
+            context.codebase,
+            *template_name,
+            declaring_class_like_metadata.name,
+            method_target_context.class_like_metadata,
+            object_type.get_type_parameters(),
+        ) else {
+            continue;
+        };
+
+        if !union_comparator::is_contained_by(
+            context.codebase,
+            &actual_type,
+            &where_constraint.type_union,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::default(),
+        ) {
+            continue;
+        }
+
+        infer_templates_from_input_and_container_types(
+            context,
+            &where_constraint.type_union,
+            &actual_type,
+            template_result,
+            InferenceOptions::default(),
+            &mut Vec::default(),
+        );
+    }
+}
+
+/// Infers template types for a parameter based on a **passed argument**.
+///
+/// This function is the primary mechanism for generic type inference. It compares a
+/// parameter's declared type with the type of the actual argument passed to it to
+/// determine what the template types should be for the function call.
+///
+/// It also validates that the inferred argument type satisfies any template
+/// constraints (e.g., `<T as SomeInterface>`), reporting an error if it does not.
+///
+/// # Arguments
+///
+/// * `context`: The analysis context.
+/// * `parameter_type`: The declared type of the parameter (the "container").
+/// * `argument_type`: The type of the argument that was passed (the "input").
+/// * `template_result`: The map where inferred template types are stored.
+/// * `argument_offset`: The numerical position of the argument in the call.
+/// * `argument_span`: The source code location of the argument, for error reporting.
+/// * `is_callable_argument`: A flag indicating if the argument is a callable, which
+///   can influence inference strategy.
+pub fn infer_parameter_templates_from_argument<A>(
+    context: &mut Context<'_, '_, A>,
+    parameter_type: &TUnion,
+    argument_type: &TUnion,
+    template_result: &mut TemplateResult,
+    argument_offset: usize,
+    argument_span: Span,
+    is_callable_argument: bool,
+) where
+    A: Arena,
+{
+    let mut violations = vec![];
+    infer_templates_from_input_and_container_types(
+        context,
+        parameter_type,
+        argument_type,
+        template_result,
+        InferenceOptions {
+            infer_only_if_new: is_callable_argument,
+            argument_offset: Some(argument_offset),
+            ..Default::default()
+        },
+        &mut violations,
+    );
+
+    for violation in violations {
+        let inferred_bound = display_type(context, &violation.inferred_bound);
+        let constraint = display_type(context, &violation.constraint);
+
+        context.collector.report_with_code(
+            IssueCode::TemplateConstraintViolation,
+            Issue::error(format!("Argument type mismatch for template `{}`.", violation.template_name,))
+                .with_annotation(Annotation::primary(argument_span).with_message(format!(
+                    "This argument has type `{inferred_bound}`, which is not compatible with the required template constraint `{constraint}`."
+                )))
+                .with_note(format!(
+                    "Template parameter `{}` is constrained with `{constraint}`.",
+                    violation.template_name
+                ))
+                .with_help("Ensure the argument's type satisfies the template constraint."),
+        );
+    }
+}
+
+/// Infers template types for a parameter based on its **default value**.
+///
+/// This function is used when an argument for a generic parameter is omitted in a
+/// function call. It reconciles the parameter's declared type (which contains
+/// templates) with the known type of its default value to determine what the
+/// templates should resolve to.
+///
+/// For example, if a function `add<A, B>(A $a, B $b = 1): A|B` is called as `add(2)`,
+/// this function would be used on parameter `$b` to infer that `T` is `int`.
+///
+/// # Arguments
+///
+/// * `context`: The analysis context.
+/// * `parameter_type`: The declared type of the parameter (the "container").
+/// * `default_type`: The type of the parameter's default value (the "input").
+/// * `template_result`: The map where inferred template types are stored.
+pub fn infer_parameter_templates_from_default<A>(
+    context: &Context<'_, '_, A>,
+    parameter_type: &TUnion,
+    default_type: &TUnion,
+    template_result: &mut TemplateResult,
+) where
+    A: Arena,
+{
+    infer_templates_from_input_and_container_types(
+        context,
+        parameter_type,
+        default_type,
+        template_result,
+        InferenceOptions { infer_only_if_new: true, ..Default::default() },
+        &mut Vec::new(),
+    );
+}
+
+/// Replaces unbound `GenericParameter` types with their constraint types.
+///
+/// When a callable signature has template parameters that aren't bound to concrete types,
+/// this function replaces them with their declared constraints. This is useful when using
+/// function signatures for template inference, where unbound templates should resolve to
+/// their upper bounds.
+///
+/// # Example
+///
+/// For `array_merge` with signature `(array<K, V>...): array<K, V>` where `K extends array-key`
+/// and `V extends mixed`, this function would transform the return type to `array<array-key, mixed>`.
+fn resolve_unbound_templates_to_constraints(union: &TUnion) -> TUnion {
+    let new_types: Vec<TAtomic> = union.types.iter().map(resolve_atomic_unbound_templates).collect();
+
+    TUnion::from_vec(new_types)
+}
+
+fn resolve_atomic_unbound_templates(atomic: &TAtomic) -> TAtomic {
+    match atomic {
+        TAtomic::GenericParameter(generic) => {
+            // Replace unbound template with its constraint
+            let resolved_constraint = resolve_unbound_templates_to_constraints(&generic.constraint);
+
+            if resolved_constraint.is_array_key() {
+                TAtomic::Scalar(TScalar::ArrayKey)
+            } else if resolved_constraint.is_single() {
+                resolved_constraint.get_single().clone()
+            } else {
+                TAtomic::Mixed(TMixed::new())
+            }
+        }
+        TAtomic::Array(array) => {
+            let new_array = match array {
+                TArray::List(list) => {
+                    let mut new_list = list.clone();
+                    new_list.element_type = Arc::new(resolve_unbound_templates_to_constraints(&list.element_type));
+                    if let Some(known_elements) = &list.known_elements {
+                        let new_elements: BTreeMap<usize, (bool, TUnion)> = known_elements
+                            .iter()
+                            .map(|(k, (optional, v))| (*k, (*optional, resolve_unbound_templates_to_constraints(v))))
+                            .collect();
+                        new_list.known_elements = Some(new_elements);
+                    }
+                    TArray::List(new_list)
+                }
+                TArray::Keyed(keyed) => {
+                    let mut new_keyed = keyed.clone();
+                    if let Some(params) = &keyed.parameters {
+                        new_keyed.parameters = Some((
+                            Arc::new(resolve_unbound_templates_to_constraints(&params.0)),
+                            Arc::new(resolve_unbound_templates_to_constraints(&params.1)),
+                        ));
+                    }
+                    if let Some(known_items) = &keyed.known_items {
+                        let new_items: BTreeMap<ArrayKey, (bool, TUnion)> = known_items
+                            .iter()
+                            .map(|(k, (optional, v))| (*k, (*optional, resolve_unbound_templates_to_constraints(v))))
+                            .collect();
+                        new_keyed.known_items = Some(new_items);
+                    }
+                    TArray::Keyed(new_keyed)
+                }
+                TArray::Set(element_type) => {
+                    TArray::Set(Arc::new(resolve_unbound_templates_to_constraints(element_type)))
+                }
+            };
+            TAtomic::Array(new_array)
+        }
+        TAtomic::Callable(callable) => {
+            let new_callable = match callable {
+                TCallable::Signature(sig) => {
+                    let mut new_sig = sig.clone();
+                    if let Some(return_type) = &sig.return_type {
+                        new_sig.return_type = Some(Arc::new(resolve_unbound_templates_to_constraints(return_type)));
+                    }
+                    TCallable::Signature(new_sig)
+                }
+                TCallable::Alias(alias) => TCallable::Alias(*alias),
+            };
+            TAtomic::Callable(new_callable)
+        }
+        _ => atomic.clone(),
+    }
+}

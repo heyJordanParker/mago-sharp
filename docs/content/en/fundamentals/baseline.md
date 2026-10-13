@@ -1,0 +1,198 @@
++++
+title = "Baseline"
+description = "Snapshot existing issues so Mago only flags new ones, with two variants for different precision-vs-resilience trade-offs."
+nav_order = 20
+nav_section = "Fundamentals"
++++
+# Baseline
+
+A baseline file records the issues that exist in your codebase right now and tells Mago to ignore them on future runs. New issues introduced after the baseline still get flagged. Useful when adopting Mago in a project that already has hundreds or thousands of issues, or when staging a tightening of rules over multiple PRs.
+
+## One file per tool
+
+The linter and analyzer each carry their own baseline because the issues they report are different. Conventional names:
+
+- Linter: `lint-baseline.toml`
+- Analyzer: `analysis-baseline.toml`
+
+The `mago cst` command reports parse errors and does not support a baseline.
+
+## Generating a baseline
+
+```sh
+mago lint --generate-baseline --baseline lint-baseline.toml
+mago analyze --generate-baseline --baseline analysis-baseline.toml
+```
+
+The command runs the tool, collects every issue it finds, and serialises them into the specified TOML file.
+
+## Using a baseline
+
+```sh
+mago lint --baseline lint-baseline.toml
+mago analyze --baseline analysis-baseline.toml
+```
+
+When a baseline is in use, Mago:
+
+1. Finds every issue in the current code.
+2. Compares them against the baseline.
+3. Suppresses matches.
+4. Reports only what is left.
+
+A baseline entry can't hide an error in a PHP# file: the error stays reported, with an `unsuppressible-error` warning on it.
+
+You can also set the baseline path in `mago.toml` so you don't have to pass `--baseline` every time:
+
+```toml
+[linter]
+baseline = "lint-baseline.toml"
+
+[analyzer]
+baseline = "analysis-baseline.toml"
+```
+
+## Two variants
+
+Mago supports two baseline shapes with different precision-vs-resilience trade-offs.
+
+### Loose (default)
+
+Groups issues by `(file, code, message)` and stores a count. Resilient to line-number shifts: if you reformat or insert code above an issue, the baseline still matches as long as the same kind of issue still occurs.
+
+```toml
+variant = "loose"
+
+[[issues]]
+file    = "src/Service/PaymentProcessor.php"
+code    = "possibly-null-argument"
+message = "Argument #1 of `process` expects `Order`, but `?Order` was given."
+count   = 2
+```
+
+### Strict
+
+Stores exact line ranges per issue. Precise, but the baseline goes stale every time line numbers shift, so you regenerate often.
+
+```toml
+variant = "strict"
+
+[[entries."src/Service/PaymentProcessor.php".issues]]
+code = "possibly-null-argument"
+start_line = 42
+end_line   = 42
+
+[[entries."src/Service/PaymentProcessor.php".issues]]
+code = "possibly-null-argument"
+start_line = 87
+end_line   = 90
+```
+
+### When to pick which
+
+| Variant | Best for | Trade-off |
+| :--- | :--- | :--- |
+| Loose | Most projects, CI pipelines | Resilient to refactoring, less precise. |
+| Strict | When exact line tracking matters | Precise, but requires frequent regeneration. |
+
+Set the variant for new baseline files in `mago.toml`:
+
+```toml
+[linter]
+baseline = "lint-baseline.toml"
+baseline-variant = "loose"   # or "strict"
+
+[analyzer]
+baseline = "analysis-baseline.toml"
+baseline-variant = "loose"
+```
+
+The setting only affects generation. When reading an existing baseline, Mago detects the variant from the file's `variant` header.
+
+### Backwards compatibility
+
+Baseline files written by older Mago releases (before variant support) have no `variant` header. Mago treats those as strict and prints a warning recommending you regenerate the file so it gains the header.
+
+## Skipping the baseline temporarily
+
+```sh
+mago lint --ignore-baseline
+mago analyze --ignore-baseline
+```
+
+Useful when you want to see issues currently suppressed by the baseline, for example to clean some of them up.
+
+## Inspecting a baseline
+
+A large baseline is thousands of entries across thousands of lines - tedious to read by hand. `mago inspect-baseline` summarises one so you can see, at a glance, which issue codes and which files dominate it.
+
+```sh
+mago inspect-baseline lint-baseline.toml
+```
+
+With no flags it prints a ranked bar chart of issue codes, most frequent first - the quickest way to see what dominates the baseline:
+
+```
+359670 issues across 221 codes
+
+  49543  ██████████████████████████████  mixed-return-statement
+  32167  ███████████████████             mixed-argument
+  31707  ███████████████████             non-existent-property
+  …
+```
+
+The baseline path is optional: when omitted, the one configured in `mago.toml` is used. If several sections configure different baselines, pass the path explicitly.
+
+### Grouping
+
+Use `--group` to expand the summary into per-group charts. Group by `code` to list the files under each code, or by `file` to list the codes under each file:
+
+```sh
+mago inspect-baseline lint-baseline.toml --group code
+mago inspect-baseline lint-baseline.toml --group file
+```
+
+### Drilling into a single code or file
+
+Pass a code or file as a second argument to drill into it. When the argument matches an issue code, the files containing it are listed; otherwise it is treated as a file path (matched as a suffix) and the codes recorded for that file are listed:
+
+```sh
+mago inspect-baseline lint-baseline.toml mixed-argument
+mago inspect-baseline lint-baseline.toml src/Service/PaymentProcessor.php
+```
+
+### Other options
+
+- `--limit N` caps how many entries are shown, both top-level groups and members within each group.
+
+In an interactive terminal, file names are rendered as clickable hyperlinks. The link target follows the [`editor-url`](/guide/configuration/#editor-integration) setting in `mago.toml`, falling back to `file://` so paths open in most editors and terminals.
+
+## Keeping the baseline tidy
+
+When you fix an issue that was part of the baseline, its entry becomes dead. Mago detects this and warns about stale entries.
+
+To prune just the dead entries, run:
+
+```sh
+mago lint --remove-outdated-baseline-entries --baseline lint-baseline.toml
+```
+
+This rewrites the baseline with stale entries removed. Unlike `--generate-baseline`, it never adds new entries, so issues introduced since the baseline was created stay reportable instead of being silently suppressed. That makes it safe to run while you are working through existing issues.
+
+To rebuild the baseline from scratch instead, capturing every current issue:
+
+```sh
+mago lint --generate-baseline --baseline lint-baseline.toml
+```
+
+Pass `--backup-baseline` with either command to keep the previous file as `lint-baseline.toml.bkp` before overwriting.
+
+## JSON Schema
+
+If you build tooling or IDE integration that needs to parse or generate baseline files, get the schema:
+
+```sh
+mago config --schema --show baseline
+```
+
+The output is a JSON Schema (draft 2020-12) covering both variants.

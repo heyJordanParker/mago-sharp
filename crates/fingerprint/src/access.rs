@@ -1,0 +1,210 @@
+use std::hash::Hash;
+
+use mago_names::ResolvedNames;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::ClassConstantAccess;
+use mago_syntax::cst::ClassLikeConstantSelector;
+use mago_syntax::cst::ClassLikeMemberExpressionSelector;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::NullSafePropertyAccess;
+use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::StaticPropertyAccess;
+
+use crate::FingerprintOptions;
+use crate::Fingerprintable;
+
+impl Fingerprintable for ConstantAccess<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for Access<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        match self {
+            Access::Property(access) => access.fingerprint_with_hasher(hasher, resolved_names, options),
+            Access::NullSafeProperty(access) => access.fingerprint_with_hasher(hasher, resolved_names, options),
+            Access::StaticProperty(access) => access.fingerprint_with_hasher(hasher, resolved_names, options),
+            Access::ClassConstant(access) => access.fingerprint_with_hasher(hasher, resolved_names, options),
+        }
+    }
+}
+
+impl Fingerprintable for PropertyAccess<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "prop_access".hash(hasher);
+        self.object.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.property.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for NullSafePropertyAccess<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "null_safe_prop_access".hash(hasher);
+        self.object.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.property.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for StaticPropertyAccess<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "static_prop_access".hash(hasher);
+        self.class.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.property.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for ClassConstantAccess<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "class_const_access".hash(hasher);
+        self.class.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.constant.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for ClassLikeMemberSelector<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        match self {
+            ClassLikeMemberSelector::Identifier(id) => id.fingerprint_with_hasher(hasher, resolved_names, options),
+            ClassLikeMemberSelector::Variable(var) => var.fingerprint_with_hasher(hasher, resolved_names, options),
+            ClassLikeMemberSelector::Expression(expr) => expr.fingerprint_with_hasher(hasher, resolved_names, options),
+            ClassLikeMemberSelector::Missing(_) => {
+                hasher.write(b"__missing__");
+            }
+        }
+    }
+}
+
+impl Fingerprintable for ClassLikeConstantSelector<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        match self {
+            ClassLikeConstantSelector::Identifier(id) => id.fingerprint_with_hasher(hasher, resolved_names, options),
+            ClassLikeConstantSelector::Expression(expr) => {
+                expr.fingerprint_with_hasher(hasher, resolved_names, options);
+            }
+            ClassLikeConstantSelector::Missing(_) => {
+                hasher.write(b"__missing__");
+            }
+        }
+    }
+}
+
+impl Fingerprintable for ClassLikeMemberExpressionSelector<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "expr_selector".hash(hasher);
+        self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tests::fingerprint_code;
+
+    #[test]
+    fn test_property_access_vs_null_safe() {
+        let regular = fingerprint_code("<?php $obj->prop;");
+        let null_safe = fingerprint_code("<?php $obj?->prop;");
+
+        assert_ne!(regular, null_safe);
+    }
+
+    #[test]
+    fn test_property_names_case_insensitive() {
+        let lower = fingerprint_code("<?php $obj->prop;");
+        let upper = fingerprint_code("<?php $obj->PROP;");
+
+        assert_ne!(lower, upper);
+    }
+
+    #[test]
+    fn test_class_constant_case_sensitive() {
+        let lower = fingerprint_code("<?php Foo::const;");
+        let upper = fingerprint_code("<?php Foo::CONST;");
+
+        assert_ne!(lower, upper);
+    }
+
+    #[test]
+    fn test_different_access_types() {
+        let prop = fingerprint_code("<?php $obj->prop;");
+        let static_prop = fingerprint_code("<?php Foo::$prop;");
+        let const_access = fingerprint_code("<?php Foo::CONST;");
+
+        assert_ne!(prop, static_prop);
+        assert_ne!(prop, const_access);
+        assert_ne!(static_prop, const_access);
+    }
+}

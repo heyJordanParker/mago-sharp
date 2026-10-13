@@ -1,0 +1,175 @@
+//! Provides a configurable, high-performance formatter for PHP code.
+//!
+//! This crate defines the main [`Formatter`] entry point, which orchestrates the process
+//! of parsing source code, converting it into an intermediate document model, and
+//! printing it as a well-formatted string according to customizable settings.
+
+#![allow(clippy::exhaustive_enums)]
+#![allow(clippy::else_if_without_else)]
+#![allow(clippy::match_wildcard_for_single_variants)]
+#![allow(clippy::needless_pass_by_ref_mut)]
+#![allow(clippy::float_arithmetic)]
+
+use std::borrow::Cow;
+
+use mago_allocator::Arena;
+
+use mago_database::file::File;
+use mago_php_version::PHPVersion;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::TriviaSequenceExt;
+use mago_syntax::error::ParseError;
+use mago_syntax::parser::parse_file_with_settings;
+use mago_syntax::settings::ParserSettings;
+
+use crate::document::Document;
+use crate::internal::FormatterState;
+use crate::internal::format::Format;
+use crate::internal::printer::Printer;
+use crate::settings::FormatSettings;
+
+pub mod document;
+pub mod presets;
+pub mod settings;
+
+mod internal;
+
+/// Markers that indicate a file should not be formatted.
+const FORMAT_IGNORE_MARKERS: [&[u8]; 2] = [b"@mago-format-ignore", b"@mago-formatter-ignore"];
+
+/// The main entry point for formatting PHP code.
+///
+/// The `Formatter` orchestrates the entire formatting process, from parsing
+/// the source code into an Concrete Syntax Tree (CST) to printing a well-formatted
+/// string representation. It is configured with a specific PHP version, formatting
+/// settings, and a string interner.
+#[derive(Debug)]
+pub struct Formatter<'arena, A>
+where
+    A: Arena,
+{
+    arena: &'arena A,
+    php_version: PHPVersion,
+    settings: FormatSettings,
+    parser_settings: ParserSettings,
+}
+
+impl<'arena, A> Formatter<'arena, A>
+where
+    A: Arena,
+{
+    /// Creates a new `Formatter` with the specified configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `arena` - A reference to an arena for memory allocation.
+    /// * `php_version` - The target PHP version for formatting.
+    /// * `settings` - The formatting settings to use.
+    pub fn new(arena: &'arena A, php_version: PHPVersion, settings: FormatSettings) -> Self {
+        Self { arena, php_version, settings, parser_settings: ParserSettings::default() }
+    }
+
+    /// Sets custom parser settings for the formatter.
+    ///
+    /// This allows customization of parsing behavior, such as enabling or disabling
+    /// certain PHP syntax features.
+    #[must_use]
+    pub fn with_parser_settings(mut self, parser_settings: ParserSettings) -> Self {
+        self.parser_settings = parser_settings;
+        self
+    }
+
+    /// Formats a string of PHP code.
+    ///
+    /// This is a high-level convenience method that handles the creation of an ephemeral
+    /// [`File`] internally. It is ideal for formatting code snippets or sources that
+    /// do not exist on the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the input code contains syntax errors.
+    pub fn format_code(&self, name: Cow<'static, [u8]>, code: Cow<'static, [u8]>) -> Result<&'arena [u8], ParseError> {
+        let file = File::ephemeral(name, code);
+
+        self.format_file(&file)
+    }
+
+    /// Formats the contents of a [`File`].
+    ///
+    /// This method will first parse the file's content into an CST and then format it.
+    /// It should be used when you already have a `File` instance, for example, from
+    /// a `mago_database::Database`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ParseError`] if the file's content contains syntax errors.
+    pub fn format_file<'ctx>(&self, file: &'ctx File) -> Result<&'arena [u8], ParseError> {
+        let program = parse_file_with_settings(self.arena, file, self.parser_settings);
+        if let Some(error) = program.errors.first() {
+            return Err(error.clone());
+        }
+
+        Ok(self.format(file, program))
+    }
+
+    /// Formats a pre-parsed [`Program`] (CST).
+    ///
+    /// This is the lowest-level formatting method that operates directly on the CST.
+    /// It first builds an intermediate [`Document`] representation and then prints it.
+    /// This is useful if you have already parsed the code and want to avoid re-parsing.
+    #[must_use]
+    pub fn format<'ctx>(&self, file: &'ctx File, program: &'arena Program<'arena>) -> &'arena [u8] {
+        let document = self.build(file, program);
+
+        self.print(document, Some(file.size as usize))
+    }
+
+    /// Converts a program's CST into a structured [`Document`] model.
+    ///
+    /// The document model is an intermediate representation that describes the
+    /// layout of the code with elements like groups, indentation, and line breaks.
+    /// This is a separate step from printing, allowing for potential inspection or
+    /// manipulation of the layout before rendering.
+    #[must_use]
+    pub fn build(&self, file: &File, program: &'arena Program<'arena>) -> Document<'arena, A> {
+        // Check for format-ignore directive in comments
+        if has_format_ignore_comment(program) {
+            return Document::String(program.source_text);
+        }
+
+        program.format(&mut FormatterState::new(self.arena, program, file, self.php_version, self.settings))
+    }
+
+    /// Renders a [`Document`] model into a formatted string.
+    ///
+    /// The printer traverses the document model and generates the final text output
+    /// according to the configured format settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `document` - The document model to print.
+    /// * `capacity_hint` - An optional hint for pre-allocating the output string's
+    ///   capacity, which can improve performance for large documents.
+    ///
+    /// # Returns
+    ///
+    /// A formatted string representation of the document.
+    pub fn print(&self, document: Document<'arena, A>, capacity_hint: Option<usize>) -> &'arena [u8] {
+        Printer::new(self.arena, document, capacity_hint.unwrap_or(0), self.settings).build()
+    }
+}
+
+/// Checks if any comment in the program contains a file-level format-ignore directive.
+///
+/// This only matches `@mago-format-ignore` and `@mago-formatter-ignore` (without `-start`, `-end`, or `-next` suffix).
+fn has_format_ignore_comment(program: &Program<'_>) -> bool {
+    program.trivia.comments().any(|comment| {
+        FORMAT_IGNORE_MARKERS.iter().any(|marker| {
+            if let Some(pos) = memchr::memmem::find(comment.value, marker) {
+                !comment.value[pos + marker.len()..].starts_with(b"-")
+            } else {
+                false
+            }
+        })
+    })
+}

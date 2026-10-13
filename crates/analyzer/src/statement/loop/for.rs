@@ -1,0 +1,82 @@
+use mago_allocator::Arena;
+use mago_span::HasSpan;
+use mago_syntax::cst::For;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::statement::r#loop;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for For<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        // A PHP# counter is a local declared before the loop runs, so it takes its written type as any local does.
+        if let Some(declaration) = &self.declaration {
+            declaration.analyze(context, block_context, artifacts)?;
+        }
+
+        let infinite_loop = self.declaration.is_none()
+            && self.initializations.is_empty()
+            && self.conditions.is_empty()
+            && self.increments.is_empty();
+
+        r#loop::analyze_for_or_while_loop(
+            context,
+            block_context,
+            artifacts,
+            self.initializations.as_slice(),
+            self.conditions.as_slice(),
+            self.increments.as_slice(),
+            self.body.statements(),
+            self.span(),
+            infinite_loop,
+        )?;
+
+        // The last condition decides whether the loop runs again, and any before it runs only for its effect.
+        if let Some(condition) = self.conditions.last() {
+            context.report_non_bool_condition(condition, artifacts.get_expression_type(condition), "for");
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = for_loop_is_entered_al_least_once,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @template T
+             *
+             * @param int<1, max> $size
+             * @param (Closure(int): T) $factory
+             *
+             * @return non-empty-list<T>
+             */
+            function reproduce(int $size, Closure $factory): array {
+                $result = [];
+                for ($i = 1; $i <= $size; $i++) {
+                    $result[] = $factory($i);
+                }
+
+                return $result;
+            }
+        "},
+    }
+}

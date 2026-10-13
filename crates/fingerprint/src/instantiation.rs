@@ -1,0 +1,22 @@
+use mago_names::ResolvedNames;
+use mago_syntax::cst::Instantiation;
+
+use crate::FingerprintOptions;
+use crate::Fingerprintable;
+use std::hash::Hash;
+
+impl Fingerprintable for Instantiation<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "new".hash(hasher);
+        self.class.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}

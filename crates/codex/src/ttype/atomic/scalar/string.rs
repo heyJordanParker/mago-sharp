@@ -1,0 +1,506 @@
+use mago_word::Word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::ttype::TType;
+use crate::utils::str_is_numeric;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TStringCasing {
+    Unspecified,
+    Lowercase,
+    Uppercase,
+}
+
+/// Represents the state of a string known to originate from a literal.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TStringLiteral {
+    /// The string originates from a literal, but its specific value isn't tracked here.
+    Unspecified,
+    /// The string originates from a literal, and its value is known.
+    Value(Word),
+}
+
+/// Represents a PHP string type, tracking literal origin and guaranteed properties.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TString {
+    /// Describes the literal nature, if known. `None` means not known to be literal (general string).
+    pub literal: Option<TStringLiteral>,
+    /// Is this string *guaranteed* (by analysis or literal value) to be numeric according to PHP rules?
+    pub is_numeric: bool,
+    /// Is this string *guaranteed* (by analysis or literal value) to be truthy (non-empty and not "0")?
+    pub is_truthy: bool,
+    /// Is this string *guaranteed* (by analysis or literal value) to be non-empty?
+    pub is_non_empty: bool,
+    /// Is this string known to be callable (a valid function/method name)?
+    pub is_callable: bool,
+    /// What is the casing of this string? This is tracked separately from literal value to allow for non-literal strings that are known to be lowercase or uppercase.
+    pub casing: TStringCasing,
+}
+
+impl TStringLiteral {
+    /// Creates the 'Unspecified' literal state.
+    #[inline]
+    #[must_use]
+    pub const fn unspecified() -> Self {
+        TStringLiteral::Unspecified
+    }
+
+    /// Creates the 'Value' literal state with a specific string value.
+    #[inline]
+    #[must_use]
+    pub fn value(value: &str) -> Self {
+        TStringLiteral::Value(word(value))
+    }
+
+    /// Checks if this represents an unspecified literal value.
+    #[inline]
+    #[must_use]
+    pub const fn is_unspecified(&self) -> bool {
+        matches!(self, TStringLiteral::Unspecified)
+    }
+
+    /// Returns the known literal string value, if available.
+    #[inline]
+    #[must_use]
+    pub fn get_value(&self) -> Option<&[u8]> {
+        match self {
+            TStringLiteral::Value(s) => Some(s.as_bytes()),
+            TStringLiteral::Unspecified => None,
+        }
+    }
+}
+
+impl TString {
+    /// Creates a new instance of `TString` with the specified properties.
+    #[must_use]
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub const fn new(
+        literal: Option<TStringLiteral>,
+        is_numeric: bool,
+        is_truthy: bool,
+        mut is_non_empty: bool,
+        is_callable: bool,
+        casing: TStringCasing,
+    ) -> Self {
+        is_non_empty |= is_numeric || is_truthy || is_callable;
+
+        Self { literal, is_numeric, is_truthy, is_non_empty, is_callable, casing }
+    }
+
+    /// Creates an instance representing the general `string` type (not known literal, no guaranteed props).
+    #[inline]
+    #[must_use]
+    pub const fn general() -> Self {
+        Self::new(None, false, false, false, false, TStringCasing::Unspecified)
+    }
+
+    /// Creates a non-empty string instance with no additional properties.
+    #[inline]
+    #[must_use]
+    pub const fn non_empty() -> Self {
+        Self::new(None, false, false, true, false, TStringCasing::Unspecified)
+    }
+
+    /// Creates a numeric string instance.
+    #[inline]
+    #[must_use]
+    pub const fn numeric() -> Self {
+        Self::new(None, true, false, true, false, TStringCasing::Unspecified)
+    }
+
+    /// Creates a lowercase string instance.
+    #[inline]
+    #[must_use]
+    pub const fn lowercase() -> Self {
+        Self::new(None, false, false, false, false, TStringCasing::Lowercase)
+    }
+
+    /// Creates a uppercase string instance.
+    #[inline]
+    #[must_use]
+    pub const fn uppercase() -> Self {
+        Self::new(None, false, false, false, false, TStringCasing::Uppercase)
+    }
+
+    /// Creates a truthy string instance.
+    #[inline]
+    #[must_use]
+    pub const fn truthy() -> Self {
+        Self::new(None, false, true, true, false, TStringCasing::Unspecified)
+    }
+
+    /// Creates a callable-string instance (a string known to be a valid callable name).
+    #[inline]
+    #[must_use]
+    pub const fn callable() -> Self {
+        Self::callable_with_casing(TStringCasing::Unspecified)
+    }
+
+    /// Creates a callable-string instance with a specific casing.
+    #[inline]
+    #[must_use]
+    pub const fn callable_with_casing(casing: TStringCasing) -> Self {
+        Self::new(None, false, true, true, true, casing)
+    }
+
+    /// Returns a copy with the `is_callable` flag set.
+    #[inline]
+    #[must_use]
+    pub fn as_callable(mut self) -> Self {
+        self.is_callable = true;
+        self.is_non_empty = true;
+        self.is_truthy = true;
+        self
+    }
+
+    /// Creates a general string instance with explicitly set guaranteed properties (from analysis).
+    #[inline]
+    #[must_use]
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub const fn general_with_props(
+        is_numeric: bool,
+        is_truthy: bool,
+        is_non_empty: bool,
+        is_callable: bool,
+        casing: TStringCasing,
+    ) -> Self {
+        Self::new(None, is_numeric, is_truthy, is_non_empty, is_callable, casing)
+    }
+
+    /// Creates an instance representing an unspecified literal string (origin known, value unknown).
+    /// Assumes no guaranteed properties unless specified otherwise via `_with_props`.
+    #[inline]
+    #[must_use]
+    pub const fn unspecified_literal(non_empty: bool) -> Self {
+        Self::new(Some(TStringLiteral::Unspecified), false, false, non_empty, false, TStringCasing::Unspecified)
+    }
+
+    /// Creates an unspecified literal string instance with explicitly set guaranteed properties (from analysis).
+    #[inline]
+    #[must_use]
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub const fn unspecified_literal_with_props(
+        is_numeric: bool,
+        is_truthy: bool,
+        is_non_empty: bool,
+        is_callable: bool,
+        casing: TStringCasing,
+    ) -> Self {
+        Self::new(Some(TStringLiteral::Unspecified), is_numeric, is_truthy, is_non_empty, is_callable, casing)
+    }
+
+    /// Creates an instance representing a known literal string type (e.g., `"hello"`).
+    /// Properties (`is_numeric`, `is_truthy`, `is_non_empty`) are derived from the value.
+    #[inline]
+    #[must_use]
+    pub fn known_literal(value: Word) -> Self {
+        let bytes = value.as_bytes();
+        let is_numeric = str_is_numeric(bytes);
+        let is_non_empty = is_numeric || !value.is_empty();
+        let is_truthy = is_non_empty && bytes != b"0";
+        let has_lowercase = bytes.iter().any(u8::is_ascii_lowercase);
+        let has_uppercase = bytes.iter().any(u8::is_ascii_uppercase);
+        let casing = if has_lowercase && !has_uppercase {
+            TStringCasing::Lowercase
+        } else if has_uppercase && !has_lowercase {
+            TStringCasing::Uppercase
+        } else {
+            TStringCasing::Unspecified
+        };
+
+        Self::new(Some(TStringLiteral::Value(value)), is_numeric, is_truthy, is_non_empty, false, casing)
+    }
+
+    /// Checks if this represents a general `string` (origin not known to be literal).
+    #[inline]
+    #[must_use]
+    pub const fn is_general(&self) -> bool {
+        self.literal.is_none()
+    }
+
+    /// Checks if this string is known to originate from a literal (value known or unspecified).
+    #[inline]
+    #[must_use]
+    pub const fn is_literal_origin(&self) -> bool {
+        self.literal.is_some()
+    }
+
+    /// Checks if this represents an unspecified literal string (origin known, value unknown).
+    #[inline]
+    #[must_use]
+    pub const fn is_unspecified_literal(&self) -> bool {
+        matches!(self.literal, Some(TStringLiteral::Unspecified))
+    }
+
+    /// Checks if this represents a known literal string (origin known, value known).
+    #[inline]
+    #[must_use]
+    pub const fn is_known_literal(&self) -> bool {
+        matches!(self.literal, Some(TStringLiteral::Value(_)))
+    }
+
+    /// Returns the known literal string value, if available.
+    #[inline]
+    #[must_use]
+    pub fn get_known_literal_value(&self) -> Option<&[u8]> {
+        match &self.literal {
+            Some(TStringLiteral::Value(s)) => Some(s.as_bytes()),
+            _ => None,
+        }
+    }
+
+    /// Returns the known literal string value as an Word, if available.
+    /// This is more efficient than `get_known_literal_value()` when the Word is needed,
+    /// as it avoids re-interning the string.
+    #[inline]
+    #[must_use]
+    pub fn get_known_literal_atom(&self) -> Option<Word> {
+        match &self.literal {
+            Some(TStringLiteral::Value(s)) => Some(*s),
+            _ => None,
+        }
+    }
+
+    /// Checks if the string is guaranteed to be numeric.
+    #[inline]
+    #[must_use]
+    pub const fn is_known_numeric(&self) -> bool {
+        self.is_numeric
+    }
+
+    /// Checks if the string is guaranteed to be truthy (non-empty and not "0").
+    #[inline]
+    #[must_use]
+    pub const fn is_truthy(&self) -> bool {
+        self.is_truthy
+    }
+
+    /// Checks if the string is guaranteed to be non-empty.
+    #[inline]
+    #[must_use]
+    pub const fn is_non_empty(&self) -> bool {
+        self.is_non_empty
+    }
+
+    /// Checks if the string is guaranteed to be empty.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self.literal {
+            Some(TStringLiteral::Value(s)) => s.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Checks if the string is guaranteed to be lowercase (e.g., from a literal like "hello").
+    #[inline]
+    #[must_use]
+    pub fn is_lowercase(&self) -> bool {
+        match self.casing {
+            TStringCasing::Lowercase => true,
+            TStringCasing::Uppercase => false,
+            TStringCasing::Unspecified => {
+                if let Some(TStringLiteral::Value(s)) = &self.literal {
+                    s.as_bytes().iter().all(|b| !b.is_ascii_uppercase())
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Checks if the string is guaranteed to be uppercase (e.g., from a literal like "HELLO").
+    #[inline]
+    #[must_use]
+    pub fn is_uppercase(&self) -> bool {
+        match self.casing {
+            TStringCasing::Uppercase => true,
+            TStringCasing::Lowercase => false,
+            TStringCasing::Unspecified => {
+                if let Some(TStringLiteral::Value(s)) = &self.literal {
+                    s.as_bytes().iter().all(|b| !b.is_ascii_lowercase())
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Checks if the string is guaranteed to be boring (no interesting properties).
+    #[inline]
+    #[must_use]
+    pub const fn is_boring(&self) -> bool {
+        match &self.literal {
+            Some(_) => false,
+            _ => {
+                !self.is_numeric
+                    && !self.is_truthy
+                    && !self.is_non_empty
+                    && matches!(self.casing, TStringCasing::Unspecified)
+            }
+        }
+    }
+
+    // Returns a new instance with the same properties but without the literal value.
+    #[inline]
+    #[must_use]
+    pub fn without_literal(&self) -> Self {
+        Self { literal: None, ..*self }
+    }
+
+    /// Returns a new instance with the same properties but with the literal value set to `Unspecified`.
+    #[inline]
+    #[must_use]
+    pub fn with_unspecified_literal(&self) -> Self {
+        Self { literal: Some(TStringLiteral::Unspecified), ..*self }
+    }
+
+    /// Intersects two string types, combining their guaranteed properties.
+    /// Returns `None` if no string can satisfy both, e.g. `lowercase-string & uppercase-string`.
+    #[must_use]
+    pub fn intersect(&self, other: &Self) -> Option<Self> {
+        match (self.get_known_literal_atom(), other.get_known_literal_atom()) {
+            (Some(left), Some(right)) => return (left == right).then_some(*self),
+            (Some(_), None) => return self.satisfies_guarantees_of(other).then_some(*self),
+            (None, Some(_)) => return other.satisfies_guarantees_of(self).then_some(*other),
+            (None, None) => {}
+        }
+
+        let casing = match (self.casing, other.casing) {
+            (TStringCasing::Unspecified, casing) | (casing, TStringCasing::Unspecified) => casing,
+            (left, right) if left == right => left,
+            _ => return None,
+        };
+
+        let literal = if self.is_literal_origin() || other.is_literal_origin() {
+            Some(TStringLiteral::Unspecified)
+        } else {
+            None
+        };
+
+        Some(Self::new(
+            literal,
+            self.is_numeric || other.is_numeric,
+            self.is_truthy || other.is_truthy,
+            self.is_non_empty || other.is_non_empty,
+            self.is_callable || other.is_callable,
+            casing,
+        ))
+    }
+
+    fn satisfies_guarantees_of(&self, other: &Self) -> bool {
+        (!other.is_numeric || self.is_numeric)
+            && (!other.is_truthy || self.is_truthy)
+            && (!other.is_non_empty || self.is_non_empty)
+            && (!other.is_callable || self.is_callable)
+            && match other.casing {
+                TStringCasing::Unspecified => true,
+                TStringCasing::Lowercase => self.is_lowercase(),
+                TStringCasing::Uppercase => self.is_uppercase(),
+            }
+    }
+
+    #[must_use]
+    pub fn as_numeric(&self, retain_literal: bool) -> Self {
+        Self {
+            literal: if retain_literal { self.literal } else { None },
+            is_numeric: true,
+            is_truthy: self.is_truthy,
+            is_non_empty: true, // Numeric strings are always non-empty
+            is_callable: self.is_callable,
+            casing: self.casing,
+        }
+    }
+}
+
+impl TType for TString {
+    #[inline]
+    fn get_id(&self) -> Word {
+        let literal_infix: &[u8] = match &self.literal {
+            Some(TStringLiteral::Value(s)) => return concat_word!(b"string('", s, b"')"),
+            Some(_) => b"literal-",
+            None => b"",
+        };
+
+        if self.is_callable && literal_infix.is_empty() {
+            return word(match self.casing {
+                TStringCasing::Lowercase => "lowercase-callable-string",
+                TStringCasing::Uppercase => "uppercase-callable-string",
+                TStringCasing::Unspecified => "callable-string",
+            });
+        }
+
+        let stem: &[u8] = if self.is_truthy {
+            if self.is_numeric {
+                b"truthy-numeric-"
+            } else {
+                match self.casing {
+                    TStringCasing::Lowercase => b"truthy-lowercase-",
+                    TStringCasing::Uppercase => b"truthy-uppercase-",
+                    TStringCasing::Unspecified => b"truthy-",
+                }
+            }
+        } else if self.is_numeric {
+            b"numeric-"
+        } else if self.is_non_empty {
+            match self.casing {
+                TStringCasing::Lowercase => b"lowercase-non-empty-",
+                TStringCasing::Uppercase => b"uppercase-non-empty-",
+                TStringCasing::Unspecified => b"non-empty-",
+            }
+        } else {
+            match self.casing {
+                TStringCasing::Lowercase => b"lowercase-",
+                TStringCasing::Uppercase => b"uppercase-",
+                TStringCasing::Unspecified => b"",
+            }
+        };
+
+        concat_word!(stem, literal_infix, b"string")
+    }
+}
+
+impl TStringCasing {
+    /// Checks if the casing is unspecified.
+    #[inline]
+    #[must_use]
+    pub const fn is_unspecified(&self) -> bool {
+        matches!(self, TStringCasing::Unspecified)
+    }
+}
+
+impl Default for TStringCasing {
+    /// Defaults to `Unspecified`.
+    fn default() -> Self {
+        TStringCasing::Unspecified
+    }
+}
+
+impl Default for TStringLiteral {
+    /// Defaults to `Unspecified`.
+    fn default() -> Self {
+        TStringLiteral::Unspecified
+    }
+}
+
+impl Default for TString {
+    /// Defaults to a general string with no guaranteed properties.
+    fn default() -> Self {
+        Self::general()
+    }
+}
+
+impl<T> From<T> for TString
+where
+    T: AsRef<str>,
+{
+    /// Converts any type that can be referenced as a string slice into a `known_literal` `StringScalar`.
+    /// Derives properties from the literal value.
+    fn from(value: T) -> Self {
+        Self::known_literal(word(value.as_ref()))
+    }
+}

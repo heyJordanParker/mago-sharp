@@ -1,0 +1,867 @@
+use mago_allocator::Arena;
+use std::rc::Rc;
+
+use foldhash::HashSet;
+
+use mago_algebra::find_satisfying_assignments;
+use mago_algebra::saturate_clauses;
+use mago_bytes::BytesDisplay;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combine_union_types_rc;
+use mago_codex::ttype::get_bool;
+use mago_codex::ttype::get_false;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_true;
+use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Expression;
+use mago_text_edit::Safety;
+use mago_text_edit::TextEdit;
+use mago_word::WordMap;
+use mago_word::WordSet;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::get_expression_range;
+use crate::assertion::get_class_type_relations;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::context::scope::if_scope::IfScope;
+use crate::error::AnalysisError;
+use crate::formula::get_formula;
+use crate::formula::negate_or_synthesize;
+use crate::reconciler;
+use crate::utils::conditional;
+use crate::utils::expression::expression_has_observable_side_effect;
+use crate::utils::names::display_bool;
+use crate::utils::names::display_truth;
+use crate::utils::symbol_existence::extract_function_constant_existence;
+
+/// Merges variables assigned by a short-circuiting right-hand side back into the
+/// enclosing context.
+pub(crate) fn merge_short_circuited_assignments<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    block_context: &mut BlockContext<'ctx>,
+    left_locals: &WordMap<Rc<TUnion>>,
+    right_locals: &WordMap<Rc<TUnion>>,
+    right_assigned_var_ids: &WordMap<u32>,
+) where
+    A: Arena,
+{
+    for (var_id, right_type) in right_locals {
+        if !right_assigned_var_ids.contains_key(var_id) {
+            continue;
+        }
+
+        let Some(left_type) = left_locals.get(var_id) else {
+            block_context.locals.insert(*var_id, Rc::clone(right_type));
+
+            continue;
+        };
+
+        block_context.locals.insert(
+            *var_id,
+            combine_union_types_rc(left_type, right_type, context.codebase, context.settings.combiner_options()),
+        );
+    }
+}
+
+#[inline]
+pub fn analyze_logical_and_operation<'ctx, 'arena, A>(
+    binary: &Binary<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let mut left_block_context = block_context.clone();
+    let pre_referenced_var_ids = left_block_context.conditionally_referenced_variable_ids.clone();
+    let pre_assigned_var_ids = left_block_context.assigned_variable_ids.clone();
+    let pre_conflicting_clause_vars = left_block_context.parent_conflicting_clause_variables.clone();
+    left_block_context.conditionally_referenced_variable_ids.clear();
+    left_block_context.assigned_variable_ids.clear();
+    left_block_context.parent_conflicting_clause_variables.clear();
+    left_block_context.reconciled_expression_clauses = Vec::new();
+
+    let left_was_inside_general_use = left_block_context.flags.inside_general_use();
+    left_block_context.flags.set_inside_general_use(true);
+    binary.lhs.analyze(context, &mut left_block_context, artifacts)?;
+    left_block_context.flags.set_inside_general_use(left_was_inside_general_use);
+
+    extract_function_constant_existence(binary.lhs, artifacts, &mut left_block_context, false);
+
+    let lhs_type = match artifacts.get_rc_expression_type(&binary.lhs).cloned() {
+        Some(lhs_type) => {
+            check_logical_operand(context, binary.lhs, &lhs_type, "Left", &operator_name(binary));
+
+            lhs_type
+        }
+        None => Rc::new(get_mixed()),
+    };
+
+    let left_clauses = get_formula(
+        binary.lhs.span(),
+        binary.lhs.span(),
+        binary.lhs,
+        context.get_assertion_context_from_block(block_context),
+        artifacts,
+        &context.settings.algebra_thresholds(),
+        context.settings.formula_size_threshold,
+    )
+    .unwrap_or_default();
+
+    for (var_id, var_type) in &left_block_context.locals {
+        if left_block_context.assigned_variable_ids.contains_key(var_id) {
+            block_context.locals.insert(*var_id, Rc::clone(var_type));
+        }
+    }
+
+    let mut left_referenced_var_ids = left_block_context.conditionally_referenced_variable_ids.clone();
+    let mut context_clauses = left_block_context.clauses.iter().map(|v| &**v).collect::<Vec<_>>();
+    block_context.conditionally_referenced_variable_ids.extend(pre_referenced_var_ids);
+    block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
+    context_clauses.extend(left_clauses.iter());
+    if !left_block_context.reconciled_expression_clauses.is_empty() {
+        let left_reconciled_clauses_hashed =
+            left_block_context.reconciled_expression_clauses.iter().map(|v| &**v).collect::<HashSet<_>>();
+
+        context_clauses.retain(|c| !left_reconciled_clauses_hashed.contains(c));
+        if context_clauses.len() == 1 {
+            let first = &context_clauses[0];
+            if first.wedge && first.possibilities.is_empty() {
+                context_clauses = Vec::new();
+            }
+        }
+    }
+
+    let simplified_clauses = saturate_clauses(context_clauses, &context.settings.algebra_thresholds());
+    let (mut left_assertions, active_left_assertions) = find_satisfying_assignments(
+        simplified_clauses.as_slice(),
+        Some(binary.lhs.span()),
+        &mut left_referenced_var_ids,
+    );
+
+    if !left_block_context.parent_conflicting_clause_variables.is_empty() {
+        left_assertions.retain(|var_id, _| !left_block_context.parent_conflicting_clause_variables.contains(var_id));
+    }
+
+    let mut changed_var_ids = WordSet::default();
+    let mut right_block_context;
+    if left_assertions.is_empty() {
+        right_block_context = left_block_context.clone();
+    } else {
+        right_block_context = block_context.clone();
+
+        right_block_context.known_functions.extend(left_block_context.known_functions.iter().copied());
+        right_block_context.known_constants.extend(left_block_context.known_constants.iter().copied());
+
+        for variable_id in left_assertions.keys() {
+            if let Some(variable_type) = left_block_context.locals.get(variable_id) {
+                right_block_context.locals.entry(*variable_id).or_insert_with(|| Rc::clone(variable_type));
+            }
+        }
+
+        let empty_referenced_vars = WordSet::default();
+
+        reconciler::reconcile_keyed_types(
+            context,
+            &left_assertions,
+            active_left_assertions,
+            &mut right_block_context,
+            &mut changed_var_ids,
+            &empty_referenced_vars,
+            &binary.rhs.span(),
+            !binary.operator.span().is_zero(),
+            !block_context.flags.inside_negation(),
+        );
+    }
+
+    let partitioned_clauses = BlockContext::remove_reconciled_clause_refs(
+        &{
+            let mut c = left_block_context.clauses.clone();
+            c.extend(left_clauses.into_iter().map(Rc::new));
+            c
+        },
+        &changed_var_ids,
+    );
+    right_block_context.clauses = partitioned_clauses.0;
+
+    for (source, target) in
+        get_class_type_relations(binary.lhs, context.get_assertion_context_from_block(&right_block_context))
+    {
+        right_block_context.add_class_type_relation(source, target);
+    }
+
+    let result_type: TUnion;
+    if lhs_type.is_always_falsy() {
+        if !block_context.flags.inside_loop_expressions() {
+            let left = format!("always {}", display_truth(context, false));
+            report_redundant_logical_operation(context, binary, &left, "not evaluated", "`false`", None);
+        }
+
+        result_type = get_false();
+        let mut dead_rhs_context = right_block_context.clone();
+        dead_rhs_context.flags.set_has_returned(true);
+        binary.rhs.analyze(context, &mut dead_rhs_context, artifacts)?;
+    } else {
+        binary.rhs.analyze(context, &mut right_block_context, artifacts)?;
+        let rhs_type = match artifacts.get_rc_expression_type(&binary.rhs).cloned() {
+            Some(rhs_type) => {
+                check_logical_operand(context, binary.rhs, &rhs_type, "Right", &operator_name(binary));
+
+                rhs_type
+            }
+            None => Rc::new(get_mixed()),
+        };
+
+        let left_is_truthy = lhs_type.is_always_truthy();
+        if left_is_truthy && !block_context.flags.inside_loop_expressions() {
+            // true && x → x (remove left, keep right)
+            let left = format!("always {}", display_truth(context, true));
+            report_redundant_logical_operation(
+                context,
+                binary,
+                &left,
+                "evaluated",
+                "the boolean value of the right-hand side",
+                Some(false), // remove left
+            );
+        }
+
+        if rhs_type.is_always_falsy() {
+            // x && false → false (no fix)
+            if !block_context.flags.inside_loop_expressions() {
+                let right = format!("always {}", display_truth(context, false));
+                report_redundant_logical_operation(context, binary, "evaluated", &right, "`false`", None);
+            }
+
+            result_type = get_false();
+        } else if rhs_type.is_always_truthy() {
+            // x && true → x (remove right, keep left)
+            if !block_context.flags.inside_loop_expressions() {
+                let right = format!("always {}", display_truth(context, true));
+                report_redundant_logical_operation(
+                    context,
+                    binary,
+                    "evaluated",
+                    &right,
+                    "the boolean value of the left-hand side",
+                    Some(true), // remove right
+                );
+            }
+
+            if left_is_truthy {
+                result_type = get_true();
+            } else {
+                result_type = get_bool();
+            }
+        } else {
+            result_type = get_bool();
+        }
+    }
+
+    artifacts.set_expression_type(binary, result_type);
+
+    block_context.conditionally_referenced_variable_ids = left_block_context.conditionally_referenced_variable_ids;
+    block_context
+        .conditionally_referenced_variable_ids
+        .extend(right_block_context.conditionally_referenced_variable_ids);
+
+    let right_assigned_var_ids = right_block_context.assigned_variable_ids.clone();
+    if block_context.flags.inside_conditional() {
+        block_context.assigned_variable_ids = left_block_context.assigned_variable_ids;
+        block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids);
+    }
+
+    // Propagate clause invalidations from both sides, plus restore pre-existing
+    // ones, so parent expressions know which variables had their narrowing voided.
+    block_context.parent_conflicting_clause_variables.extend(pre_conflicting_clause_vars);
+    block_context
+        .parent_conflicting_clause_variables
+        .extend(left_block_context.parent_conflicting_clause_variables.iter().copied());
+    block_context
+        .parent_conflicting_clause_variables
+        .extend(right_block_context.parent_conflicting_clause_variables.iter().copied());
+
+    if let Some(if_body_context) = &block_context.if_body_context {
+        let mut if_body_context_inner = if_body_context.borrow_mut();
+
+        if block_context.flags.inside_negation() {
+            block_context.locals = left_block_context.locals;
+        } else {
+            block_context.locals = right_block_context.locals;
+
+            if_body_context_inner.locals.extend(block_context.locals.iter().map(|(k, v)| (*k, Rc::clone(v))));
+            if_body_context_inner
+                .conditionally_referenced_variable_ids
+                .extend(block_context.conditionally_referenced_variable_ids.iter().copied());
+            if_body_context_inner
+                .assigned_variable_ids
+                .extend(block_context.assigned_variable_ids.iter().map(|(k, v)| (*k, *v)));
+            if_body_context_inner.reconciled_expression_clauses.extend(partitioned_clauses.1);
+        }
+    } else {
+        let left_locals = left_block_context.locals;
+        block_context.locals.extend(left_locals.iter().map(|(var_id, var_type)| (*var_id, Rc::clone(var_type))));
+
+        merge_short_circuited_assignments(
+            context,
+            block_context,
+            &left_locals,
+            &right_block_context.locals,
+            &right_assigned_var_ids,
+        );
+    }
+
+    Ok(())
+}
+
+#[inline]
+pub fn analyze_logical_or_operation<'ctx, 'arena, A>(
+    binary: &Binary<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let mut left_block_context;
+    let mut left_referenced_var_ids;
+    let left_assigned_var_ids;
+
+    if is_logical_or_operation(binary.lhs, 3) {
+        let pre_referenced_var_ids = block_context.conditionally_referenced_variable_ids.clone();
+        block_context.conditionally_referenced_variable_ids.clear();
+
+        let pre_assigned_var_ids = block_context.assigned_variable_ids.clone();
+
+        left_block_context = block_context.clone();
+        left_block_context.assigned_variable_ids.clear();
+
+        let tmp_if_body_block_context = left_block_context.if_body_context;
+        left_block_context.if_body_context = None;
+
+        binary.lhs.analyze(context, &mut left_block_context, artifacts)?;
+
+        left_block_context.if_body_context = tmp_if_body_block_context;
+
+        for var_id in &left_block_context.parent_conflicting_clause_variables {
+            block_context.remove_variable_from_conflicting_clauses(context, *var_id, None);
+        }
+
+        let cloned_vars = block_context.locals.clone();
+        for (var_id, left_type) in &left_block_context.locals {
+            if let Some(context_type) = cloned_vars.get(var_id) {
+                block_context.locals.insert(
+                    *var_id,
+                    Rc::new(combine_union_types(
+                        context_type,
+                        left_type,
+                        context.codebase,
+                        context.settings.combiner_options(),
+                    )),
+                );
+            } else if left_block_context.assigned_variable_ids.contains_key(var_id) {
+                block_context.locals.insert(*var_id, Rc::clone(left_type));
+            }
+        }
+
+        left_referenced_var_ids = left_block_context.conditionally_referenced_variable_ids.clone();
+        left_block_context.conditionally_referenced_variable_ids.extend(pre_referenced_var_ids);
+
+        left_assigned_var_ids = left_block_context.assigned_variable_ids.clone();
+        left_block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
+
+        left_referenced_var_ids.retain(|id| !left_assigned_var_ids.contains_key(id));
+    } else {
+        let mut if_scope = IfScope::default();
+
+        let (if_conditional_scope, applied_block_context) =
+            conditional::analyze(context, block_context.clone(), artifacts, &mut if_scope, binary.lhs, false)?;
+        *block_context = applied_block_context;
+
+        left_block_context = if_conditional_scope.if_body_context;
+        left_referenced_var_ids = if_conditional_scope.conditionally_referenced_variable_ids;
+    }
+
+    let lhs_type = match artifacts.get_rc_expression_type(&binary.lhs).cloned() {
+        Some(lhs_type) => {
+            check_logical_operand(context, binary.lhs, &lhs_type, "Left", &operator_name(binary));
+
+            lhs_type
+        }
+        None => Rc::new(get_mixed()),
+    };
+
+    let left_clauses = get_formula(
+        binary.lhs.span(),
+        binary.lhs.span(),
+        binary.lhs,
+        context.get_assertion_context_from_block(block_context),
+        artifacts,
+        &context.settings.algebra_thresholds(),
+        context.settings.formula_size_threshold,
+    )
+    .unwrap_or_default();
+
+    let mut negated_left_clauses = negate_or_synthesize(
+        left_clauses,
+        binary.lhs,
+        context.get_assertion_context_from_block(block_context),
+        artifacts,
+        &context.settings.algebra_thresholds(),
+        context.settings.formula_size_threshold,
+    );
+
+    if !left_block_context.reconciled_expression_clauses.is_empty() {
+        let left_reconciled_clauses_hashed =
+            left_block_context.reconciled_expression_clauses.iter().map(|v| &**v).collect::<HashSet<_>>();
+
+        negated_left_clauses.retain(|c| !left_reconciled_clauses_hashed.contains(c));
+
+        if negated_left_clauses.len() == 1 {
+            let first = &negated_left_clauses[0];
+            if first.wedge && first.possibilities.is_empty() {
+                negated_left_clauses = Vec::new();
+            }
+        }
+    }
+
+    let clauses_for_right_analysis = saturate_clauses(
+        block_context.clauses.iter().map(|v| &**v).chain(negated_left_clauses.iter()),
+        &context.settings.algebra_thresholds(),
+    );
+
+    let (negated_type_assertions, active_negated_type_assertions) = find_satisfying_assignments(
+        clauses_for_right_analysis.as_slice(),
+        Some(binary.lhs.span()),
+        &mut left_referenced_var_ids,
+    );
+
+    let mut changed_var_ids = WordSet::default();
+    let mut right_block_context = block_context.clone();
+
+    let result_type: TUnion;
+
+    if lhs_type.is_always_truthy() {
+        // true || x → true (no fix)
+        let left = format!("always {}", display_bool(context, true));
+        report_redundant_logical_operation(context, binary, &left, "not evaluated", "`true`", None);
+        result_type = get_true();
+        right_block_context.flags.set_has_returned(true);
+        binary.rhs.analyze(context, &mut right_block_context, artifacts)?;
+    } else {
+        if !negated_type_assertions.is_empty() {
+            reconciler::reconcile_keyed_types(
+                context,
+                &negated_type_assertions,
+                active_negated_type_assertions,
+                &mut right_block_context,
+                &mut changed_var_ids,
+                &left_referenced_var_ids,
+                &binary.lhs.span(),
+                true,
+                !block_context.flags.inside_negation(),
+            );
+        }
+
+        right_block_context.clauses = clauses_for_right_analysis.iter().map(|v| Rc::new(v.clone())).collect();
+
+        if !changed_var_ids.is_empty() {
+            let partiioned_clauses =
+                BlockContext::remove_reconciled_clause_refs(&right_block_context.clauses, &changed_var_ids);
+            right_block_context.clauses = partiioned_clauses.0;
+            right_block_context.reconciled_expression_clauses.extend(partiioned_clauses.1);
+        }
+
+        let pre_referenced_var_ids = right_block_context.conditionally_referenced_variable_ids.clone();
+        right_block_context.conditionally_referenced_variable_ids.clear();
+
+        let pre_assigned_var_ids = right_block_context.assigned_variable_ids.clone();
+        right_block_context.assigned_variable_ids.clear();
+
+        let tmp_if_body_context = right_block_context.if_body_context;
+        right_block_context.if_body_context = None;
+
+        binary.rhs.analyze(context, &mut right_block_context, artifacts)?;
+
+        right_block_context.if_body_context = tmp_if_body_context;
+
+        let rhs_type = match artifacts.get_rc_expression_type(&binary.rhs).cloned() {
+            Some(rhs_type) => {
+                check_logical_operand(context, binary.rhs, &rhs_type, "Right", &operator_name(binary));
+
+                rhs_type
+            }
+            None => Rc::new(get_mixed()),
+        };
+
+        if lhs_type.is_always_falsy() {
+            if rhs_type.is_always_falsy() {
+                // false || false → false (no fix)
+                let both = format!("always {}", display_truth(context, false));
+                report_redundant_logical_operation(context, binary, &both, &both, "`false`", None);
+                result_type = get_false();
+            } else if rhs_type.is_always_truthy() {
+                // false || true → true (no fix)
+                let left = format!("always {}", display_truth(context, false));
+                let right = format!("always {}", display_truth(context, true));
+                report_redundant_logical_operation(context, binary, &left, &right, "`true`", None);
+                result_type = get_true();
+            } else {
+                // false || x → x (remove left, keep right)
+                let left = format!("always {}", display_bool(context, false));
+                report_redundant_logical_operation(
+                    context,
+                    binary,
+                    &left,
+                    "evaluated",
+                    "the boolean value of the right-hand side",
+                    Some(false), // remove left
+                );
+
+                result_type = get_bool();
+            }
+        } else if rhs_type.is_always_falsy() {
+            // x || false → x (remove right, keep left)
+            let right = format!("always {}", display_truth(context, false));
+            report_redundant_logical_operation(
+                context,
+                binary,
+                "evaluated",
+                &right,
+                "the boolean value of the left-hand side",
+                Some(true), // remove right
+            );
+
+            result_type = get_bool();
+        } else if rhs_type.is_always_truthy() {
+            // x || true → true (no fix)
+            let right = format!("always {}", display_truth(context, true));
+            report_redundant_logical_operation(context, binary, "evaluated", &right, "`true`", None);
+
+            result_type = get_true();
+        } else {
+            result_type = get_bool();
+        }
+
+        let mut right_referenced_var_ids = right_block_context.conditionally_referenced_variable_ids.clone();
+        right_block_context.conditionally_referenced_variable_ids.extend(pre_referenced_var_ids);
+
+        let right_assigned_var_ids = right_block_context.assigned_variable_ids.clone();
+        right_block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
+
+        let right_clauses = get_formula(
+            binary.rhs.span(),
+            binary.rhs.span(),
+            binary.rhs,
+            context.get_assertion_context_from_block(block_context),
+            artifacts,
+            &context.settings.algebra_thresholds(),
+            context.settings.formula_size_threshold,
+        )
+        .unwrap_or_default();
+
+        let mut clauses_for_right_analysis = BlockContext::remove_reconciled_clauses(
+            &clauses_for_right_analysis,
+            &right_assigned_var_ids.into_keys().collect::<WordSet>(),
+        )
+        .0;
+
+        clauses_for_right_analysis.extend(right_clauses);
+
+        let combined_right_clauses =
+            saturate_clauses(clauses_for_right_analysis.iter(), &context.settings.algebra_thresholds());
+
+        let (right_type_assertions, active_right_type_assertions) = find_satisfying_assignments(
+            combined_right_clauses.as_slice(),
+            Some(binary.rhs.span()),
+            &mut right_referenced_var_ids,
+        );
+
+        if !right_type_assertions.is_empty() {
+            let mut right_changed_var_ids = WordSet::default();
+
+            reconciler::reconcile_keyed_types(
+                context,
+                &right_type_assertions,
+                active_right_type_assertions,
+                &mut right_block_context.clone(),
+                &mut right_changed_var_ids,
+                &right_referenced_var_ids,
+                &binary.rhs.span(),
+                !binary.operator.span().is_zero(),
+                block_context.flags.inside_negation(),
+            );
+        }
+
+        block_context
+            .conditionally_referenced_variable_ids
+            .extend(right_block_context.conditionally_referenced_variable_ids);
+        block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids.clone());
+    }
+
+    if let Some(if_body_context) = &block_context.if_body_context {
+        let mut if_body_context_inner = if_body_context.borrow_mut();
+        let left_vars = left_block_context.locals.clone();
+        let if_vars = if_body_context_inner.locals.clone();
+        for (var_id, right_type) in right_block_context.locals.clone() {
+            if let Some(if_type) = if_vars.get(&var_id) {
+                if_body_context_inner.locals.insert(
+                    var_id,
+                    combine_union_types_rc(&right_type, if_type, context.codebase, context.settings.combiner_options()),
+                );
+            } else if let Some(left_type) = left_vars.get(&var_id) {
+                if_body_context_inner.locals.insert(
+                    var_id,
+                    combine_union_types_rc(
+                        &right_type,
+                        left_type,
+                        context.codebase,
+                        context.settings.combiner_options(),
+                    ),
+                );
+            }
+        }
+
+        if_body_context_inner
+            .conditionally_referenced_variable_ids
+            .extend(block_context.conditionally_referenced_variable_ids.iter().copied());
+        if_body_context_inner
+            .assigned_variable_ids
+            .extend(block_context.assigned_variable_ids.iter().map(|(k, v)| (*k, *v)));
+    } else {
+        merge_short_circuited_assignments(
+            context,
+            block_context,
+            &left_block_context.locals,
+            &right_block_context.locals,
+            &right_block_context.assigned_variable_ids,
+        );
+    }
+
+    artifacts.set_expression_type(binary, result_type);
+
+    Ok(())
+}
+
+/// Analyzes the logical XOR operator (`xor`).
+///
+/// The `xor` operator evaluates both operands and returns `true` if exactly one of them is truthy,
+/// and `false` otherwise. The result type is always `bool`.
+/// This function analyzes both operands, checks for problematic types in a boolean context,
+/// determines if the result can be statically known, and sets up data flow.
+pub fn analyze_logical_xor_operation<'ctx, 'arena, A>(
+    binary: &Binary<'arena>,
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    binary.lhs.analyze(context, block_context, artifacts)?;
+    binary.rhs.analyze(context, block_context, artifacts)?;
+
+    let fallback_type = Rc::new(get_mixed());
+    let lhs_type = artifacts.get_rc_expression_type(&binary.lhs).unwrap_or(&fallback_type);
+    let rhs_type = artifacts.get_rc_expression_type(&binary.rhs).unwrap_or(&fallback_type);
+
+    check_logical_operand(context, binary.lhs, lhs_type, "Left", "xor");
+    check_logical_operand(context, binary.rhs, rhs_type, "Right", "xor");
+
+    let known_truthiness = |operand_type: &TUnion| {
+        if operand_type.is_always_truthy() {
+            Some(true)
+        } else if operand_type.is_always_falsy() {
+            Some(false)
+        } else {
+            None
+        }
+    };
+
+    let result_type = match (known_truthiness(lhs_type), known_truthiness(rhs_type)) {
+        (Some(lhs_known), Some(rhs_known)) => {
+            let result = lhs_known != rhs_known;
+            if !block_context.flags.inside_loop_expressions() {
+                let describe = |known: bool| if known { "always true" } else { "always false" };
+                report_redundant_logical_operation(
+                    context,
+                    binary,
+                    describe(lhs_known),
+                    describe(rhs_known),
+                    if result { "`true`" } else { "`false`" },
+                    None,
+                );
+            }
+
+            if result { get_true() } else { get_false() }
+        }
+        _ => get_bool(),
+    };
+
+    artifacts.expression_types.insert(get_expression_range(binary), Rc::new(result_type));
+
+    Ok(())
+}
+
+/// The operator as its source writes it: `and` for PHP's `and`, and `when` for the `when` of a PHP# `match` arm, which
+/// runs as PHP's `and`.
+fn operator_name(binary: &Binary<'_>) -> String {
+    String::from_utf8_lossy(binary.operator.as_bytes()).into_owned()
+}
+
+/// Checks a single operand of a logical operation (like AND, OR, XOR) for problematic types.
+/// Reports errors for `mixed` and warnings for types that PHP coerces to boolean
+/// (e.g., `null`, `array`, `resource`, `object`). A PHP# operand must be `bool`, so no coercion applies.
+fn check_logical_operand<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    operand: &Expression<'arena>,
+    operand_type: &TUnion,
+    side: &'static str,
+    operator_name: &str,
+) where
+    A: Arena,
+{
+    if context.dialect.is_sharp() {
+        context.report_non_bool_condition(operand, Some(operand_type), operator_name);
+    } else if operand_type.is_mixed() {
+        context.collector.report_with_code(
+            IssueCode::MixedOperand,
+            Issue::error(format!("{side} operand in `{operator_name}` operation has `mixed` type."))
+                .with_annotation(Annotation::primary(operand.span()).with_message("This has type `mixed`"))
+                .with_note(format!(
+                    "Using `mixed` in a boolean context like `{operator_name}` is unsafe as its truthiness is unknown."
+                ))
+                .with_help("Ensure this operand has a known type or explicitly cast to `bool`."),
+        );
+    } else if operand_type.is_null() {
+        context.collector.report_with_code(
+            IssueCode::NullOperand,
+            Issue::warning(format!(
+                "{side} operand in `{operator_name}` operation is `null`, which coerces to `false`."
+            ))
+            .with_annotation(Annotation::primary(operand.span()).with_message("This is `null` (coerces to `false`)"))
+            .with_help("Explicitly check for `null` or cast to `bool` if this coercion is not intended."),
+        );
+    } else if operand_type.is_array() {
+        if !context.settings.allow_array_truthy_operand {
+            context.collector.report_with_code(
+                IssueCode::InvalidOperand,
+                Issue::warning(format!("{side} operand in `{operator_name}` operation is an `array`."))
+                    .with_annotation(Annotation::primary(operand.span()).with_message("This is an `array`"))
+                    .with_note(
+                        "Arrays coerce to `false` if empty, `true` if non-empty. This implicit conversion can be unclear.",
+                    )
+                    .with_help("Consider using `empty()` or `count()` for explicit checks, or cast to `bool`."),
+            );
+        }
+    } else if operand_type.is_objecty() {
+        context.collector.report_with_code(
+            IssueCode::InvalidOperand,
+            Issue::warning(format!("{side} operand in `{operator_name}` operation is an `object`."))
+                .with_annotation(Annotation::primary(operand.span()).with_message("This is an `object`"))
+                .with_note(
+                    "Objects generally coerce to `true` in boolean contexts. Ensure this is the intended behavior.",
+                )
+                .with_help("If specific truthiness is required, implement a method on the object or cast explicitly."),
+        );
+    } else if operand_type.is_resource() {
+        context.collector.report_with_code(
+            IssueCode::InvalidOperand,
+            Issue::warning(format!("{side} operand in `{operator_name}` operation is a `resource`."))
+                .with_annotation(Annotation::primary(operand.span()).with_message("This is a `resource`"))
+                .with_note("Resources generally coerce to `true`. This implicit conversion can be unclear.")
+                .with_help("Explicitly check the state of the resource or cast to `bool` if necessary."),
+        );
+    }
+}
+
+/// Helper to report redundant logical operation issues.
+///
+/// * `side_to_remove`: Controls fix generation:
+///   - `None`: No fix offered (just report the issue)
+///   - `Some(false)`: Remove left operand, keep right operand
+///   - `Some(true)`: Remove right operand, keep left operand
+fn report_redundant_logical_operation<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    binary: &Binary<'arena>,
+    lhs_description: &str,
+    rhs_description: &str,
+    result_value_str: &str,
+    side_to_remove: Option<bool>,
+) where
+    A: Arena,
+{
+    let operator_span = binary.operator.span();
+    if operator_span.is_zero() {
+        // Do not report issues for synthetic nodes.
+        return;
+    }
+
+    if let Some(remove_right) = side_to_remove
+        && expression_has_observable_side_effect(if remove_right { binary.rhs } else { binary.lhs })
+    {
+        return;
+    }
+
+    let issue = Issue::help(format!(
+        "Redundant `{}` operation: left operand is {} and right operand is {}.",
+        BytesDisplay(binary.operator.as_bytes()),
+        lhs_description,
+        rhs_description
+    ))
+    .with_annotation(Annotation::primary(binary.lhs.span()).with_message(format!("Left operand is {lhs_description}")))
+    .with_annotation(
+        Annotation::secondary(binary.rhs.span()).with_message(format!("Right operand is {rhs_description}")),
+    )
+    .with_note(format!(
+        "The `{}` operator will always return {} in this case.",
+        BytesDisplay(binary.operator.as_bytes()),
+        result_value_str
+    ))
+    .with_help(if side_to_remove.is_some() {
+        let kept_side = if side_to_remove == Some(true) { "left" } else { "right" };
+        format!("Consider simplifying this expression to just the {kept_side} operand.")
+    } else {
+        format!("Consider simplifying this expression to {result_value_str}.")
+    });
+
+    if let Some(remove_right) = side_to_remove {
+        let to_remove = if remove_right {
+            binary.operator.span().join(binary.rhs.span())
+        } else {
+            binary.lhs.span().join(binary.operator.span())
+        };
+
+        context.collector.propose_with_code(IssueCode::RedundantLogicalOperation, issue, |edits| {
+            edits.push(TextEdit::delete(to_remove).with_safety(Safety::PotentiallyUnsafe));
+        });
+    } else {
+        context.collector.report_with_code(IssueCode::RedundantLogicalOperation, issue);
+    }
+}
+
+#[inline]
+const fn is_logical_or_operation(expression: &Expression<'_>, max_nesting: usize) -> bool {
+    if max_nesting == 0 {
+        return true;
+    }
+
+    match expression {
+        Expression::Parenthesized(p) => is_logical_or_operation(p.expression, max_nesting),
+        Expression::Binary(b) => match b.operator {
+            BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => is_logical_or_operation(b.lhs, max_nesting - 1),
+            _ => false,
+        },
+        _ => false,
+    }
+}

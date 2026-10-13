@@ -1,0 +1,402 @@
+use std::borrow::Cow;
+
+use foldhash::HashMap;
+
+use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Use;
+use mago_syntax::cst::UseItems;
+use mago_syntax::cst::UseType;
+
+use crate::kind::NameKind;
+
+#[inline]
+pub(crate) fn trim_start_byte(s: &[u8], byte: u8) -> &[u8] {
+    let mut i = 0;
+    while i < s.len() && s[i] == byte {
+        i += 1;
+    }
+
+    &s[i..]
+}
+
+#[inline]
+pub(crate) fn rfind_byte(s: &[u8], byte: u8) -> Option<usize> {
+    memchr::memrchr(byte, s)
+}
+
+/// Returns the name PHP writes for the given identifier.
+///
+/// A PHP# dotted name, such as `App.Tenant.Store`, becomes `App\Tenant\Store`. Every other identifier is returned
+/// as written.
+#[must_use]
+pub fn php_name<'arena>(identifier: &Identifier<'arena>) -> Cow<'arena, [u8]> {
+    match identifier {
+        Identifier::Dotted(dotted) => {
+            Cow::Owned(dotted.value.iter().map(|&byte| if byte == b'.' { b'\\' } else { byte }).collect())
+        }
+        _ => Cow::Borrowed(identifier.value()),
+    }
+}
+
+pub(crate) fn concat_with_sep(parts: &[&[u8]], sep: u8) -> Vec<u8> {
+    let total: usize = parts.iter().map(|p| p.len()).sum::<usize>() + parts.len().saturating_sub(1);
+    let mut out = Vec::with_capacity(total);
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(sep);
+        }
+
+        out.extend_from_slice(part);
+    }
+
+    out
+}
+
+/// Represents the scope for resolving PHP names, holding the current namespace
+/// and any 'use' aliases defined within it.
+///
+/// This struct keeps track of the current namespace and the different types
+/// of aliases (`use`, `use function`, `use const`). It provides methods to
+/// manage aliases and resolve names according to PHP's rules (handling FQNs,
+/// aliases, the `namespace` keyword, and namespace relativity).
+///
+/// Aliases are stored case-insensitively (keys in the maps are lowercase)
+/// but resolve to the original case-sensitive FQN.
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct NamespaceScope {
+    /// The fully qualified name of the current namespace context (e.g., "App\\Http\\Controllers").
+    /// `None` indicates the global namespace.
+    namespace_name: Option<Vec<u8>>,
+
+    /// Stores aliases for classes, interfaces, traits, and namespaces.
+    /// Key: Lowercase alias name. Value: FQN.
+    default_aliases: HashMap<Vec<u8>, Vec<u8>>,
+
+    /// Stores aliases for functions.
+    /// Key: Lowercase alias name. Value: FQN.
+    function_aliases: HashMap<Vec<u8>, Vec<u8>>,
+
+    /// Stores aliases for constants.
+    /// Key: Lowercase alias name. Value: FQN.
+    constant_aliases: HashMap<Vec<u8>, Vec<u8>>,
+}
+
+impl NamespaceScope {
+    /// Creates a new, empty scope, optionally associated with a namespace.
+    #[must_use]
+    pub fn new(namespace_name: Option<Vec<u8>>) -> Self {
+        NamespaceScope {
+            namespace_name,
+            default_aliases: HashMap::default(),
+            function_aliases: HashMap::default(),
+            constant_aliases: HashMap::default(),
+        }
+    }
+
+    /// Creates a new, empty scope representing the global namespace.
+    #[must_use]
+    pub fn global() -> Self {
+        NamespaceScope {
+            namespace_name: None,
+            default_aliases: HashMap::default(),
+            function_aliases: HashMap::default(),
+            constant_aliases: HashMap::default(),
+        }
+    }
+
+    /// Creates a new, empty scope representing the given namespace.
+    #[inline]
+    pub fn for_namespace(namespace: impl Into<Vec<u8>>) -> Self {
+        NamespaceScope {
+            namespace_name: Some(namespace.into()),
+            default_aliases: HashMap::default(),
+            function_aliases: HashMap::default(),
+            constant_aliases: HashMap::default(),
+        }
+    }
+
+    /// Checks if any aliases have been defined in this scope.
+    #[must_use]
+    pub fn has_aliases(&self) -> bool {
+        // Corrected implementation for checking if *any* alias map is non-empty
+        !self.default_aliases.is_empty() || !self.function_aliases.is_empty() || !self.constant_aliases.is_empty()
+    }
+
+    /// Returns the name of the current namespace, if this scope represents one.
+    #[must_use]
+    pub fn namespace_name(&self) -> Option<&[u8]> {
+        self.namespace_name.as_deref()
+    }
+
+    /// Returns a reference to the map of default (class/namespace) aliases.
+    #[must_use]
+    pub fn default_aliases(&self) -> &HashMap<Vec<u8>, Vec<u8>> {
+        &self.default_aliases
+    }
+
+    /// Returns a reference to the map of function aliases.
+    #[must_use]
+    pub fn function_aliases(&self) -> &HashMap<Vec<u8>, Vec<u8>> {
+        &self.function_aliases
+    }
+
+    /// Returns a reference to the map of constant aliases.
+    #[must_use]
+    pub fn constant_aliases(&self) -> &HashMap<Vec<u8>, Vec<u8>> {
+        &self.constant_aliases
+    }
+
+    /// Populates the scope's alias tables based on a PHP `use` statement CST node.
+    ///
+    /// This method processes the different forms of `use` statements (simple, function/const,
+    /// grouped) and registers the corresponding aliases within this `NamespaceScope`.
+    /// It iterates through the items declared in the `use` statement and calls `self.add`
+    /// for each one with the appropriate kind, fully qualified name, and optional alias.
+    ///
+    /// # Arguments
+    ///
+    /// * `interner` - A string interner used to resolve identifiers/names from the CST nodes
+    ///   into actual string (`&[u8]`) representations.
+    /// * `r#use` - A reference to the `Use` CST node representing the `use` statement.
+    ///   (Parameter is named `r#use` because `use` is a Rust keyword).
+    pub fn populate_from_use(&mut self, r#use: &Use<'_>) {
+        match &r#use.items {
+            UseItems::Sequence(use_item_sequence) => {
+                for use_item in &use_item_sequence.items {
+                    let name = php_name(&use_item.name);
+                    let alias = use_item.alias.as_ref().map(|alias_node| alias_node.identifier.value);
+
+                    // Add as a default (class/namespace) alias
+                    self.add(NameKind::Default, trim_start_byte(&name, b'\\'), &alias);
+                }
+            }
+            UseItems::TypedSequence(typed_use_item_sequence) => {
+                // Determine if it's a function or const import based on the type node
+                let name_kind = match &typed_use_item_sequence.r#type {
+                    UseType::Function(_) => NameKind::Function,
+                    UseType::Const(_) => NameKind::Constant,
+                };
+
+                for use_item in &typed_use_item_sequence.items {
+                    let name = trim_start_byte(use_item.name.value(), b'\\');
+                    let alias = use_item.alias.as_ref().map(|alias_node| alias_node.identifier.value);
+
+                    // Add with the determined kind (Function or Constant)
+                    self.add(name_kind, name, &alias);
+                }
+            }
+            UseItems::TypedList(typed_use_item_list) => {
+                // Determine the kind for the entire group
+                let name_kind = match &typed_use_item_list.r#type {
+                    UseType::Function(_) => NameKind::Function,
+                    UseType::Const(_) => NameKind::Constant,
+                };
+
+                // Get the common namespace prefix for the group
+                let prefix = trim_start_byte(typed_use_item_list.namespace.value(), b'\\');
+
+                for use_item in &typed_use_item_list.items {
+                    let name_part = use_item.name.value();
+                    let alias = use_item.alias.as_ref().map(|alias_node| alias_node.identifier.value);
+
+                    // Construct the full FQN by combining prefix and name part
+                    let fully_qualified_name = concat_with_sep(&[prefix, name_part], b'\\');
+
+                    // Add the alias for the fully constructed name
+                    self.add(name_kind, fully_qualified_name, &alias);
+                }
+            }
+            UseItems::MixedList(mixed_use_item_list) => {
+                // Get the common namespace prefix for the group
+                let prefix = trim_start_byte(mixed_use_item_list.namespace.value(), b'\\');
+
+                for mixed_use_item in &mixed_use_item_list.items {
+                    // Determine the kind for *this specific item* within the mixed list
+                    let name_kind = match &mixed_use_item.r#type {
+                        None => NameKind::Default, // No type specified, defaults to class/namespace
+                        Some(UseType::Function(_)) => NameKind::Function,
+                        Some(UseType::Const(_)) => NameKind::Constant,
+                    };
+
+                    // Extract name/alias from the nested item structure (assuming `item` field)
+                    let name_part = mixed_use_item.item.name.value();
+                    let alias = mixed_use_item.item.alias.as_ref().map(|alias_node| alias_node.identifier.value);
+
+                    // Construct the full FQN: prefix\name_part
+                    let fully_qualified_name = concat_with_sep(&[prefix, name_part], b'\\');
+
+                    // Add the alias with its specific kind
+                    self.add(name_kind, fully_qualified_name, &alias);
+                }
+            }
+        }
+    }
+
+    /// Adds a new alias based on a 'use' statement to this scope.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The type of alias (`NameKind::Default`, `NameKind::Function`, `NameKind::Constant`).
+    /// * `name` - The fully qualified name being imported (e.g., "App\\Models\\User").
+    /// * `alias` - An optional explicit alias name (e.g., "`UserModel`"). If `None`, the alias
+    ///   is derived from the last part of the `name` (e.g., "User" from "App\\Models\\User").
+    ///
+    /// The alias name (explicit or derived) is stored lowercase as the key.
+    #[inline]
+    pub fn add(&mut self, kind: NameKind, name: impl AsRef<[u8]>, alias: &Option<impl AsRef<[u8]>>) {
+        self.add_str(kind, name.as_ref(), alias.as_ref().map(std::convert::AsRef::as_ref));
+    }
+
+    /// non-generic version of `add` that takes a string slice.
+    fn add_str(&mut self, kind: NameKind, name_ref: &[u8], alias: Option<&[u8]>) {
+        let alias_key = match alias {
+            Some(alias) => alias.to_ascii_lowercase(),
+            None => {
+                if let Some(last_backslash_pos) = rfind_byte(name_ref, b'\\') {
+                    name_ref[last_backslash_pos + 1..].to_ascii_lowercase()
+                } else {
+                    name_ref.to_ascii_lowercase()
+                }
+            }
+        };
+
+        match kind {
+            NameKind::Default => self.default_aliases.insert(alias_key, name_ref.to_owned()),
+            NameKind::Function => self.function_aliases.insert(alias_key, name_ref.to_owned()),
+            NameKind::Constant => self.constant_aliases.insert(alias_key, name_ref.to_owned()),
+        };
+    }
+
+    /// Qualifies a simple name by prepending the current namespace, if applicable.
+    ///
+    /// This method is intended for simple names (containing no `\`) that are
+    /// *not* explicitly aliased or handled by `\` or `namespace\` prefixes.
+    /// If the current scope has a non-empty namespace name, it will be prepended.
+    /// Otherwise, the original name is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The simple name to qualify (e.g., "User").
+    ///
+    /// # Returns
+    ///
+    /// The qualified name (e.g., "App\\Models\\User") or the original name if
+    /// in the global scope, the namespace is empty, or the input name was not simple.
+    #[inline]
+    pub fn qualify_name(&self, name: impl AsRef<[u8]>) -> Vec<u8> {
+        self.qualify_name_str(name.as_ref()).into_owned()
+    }
+
+    /// non-generic version of `qualify_name` that takes a Vec<u8> slice.
+    fn qualify_name_str<'name>(&self, name_ref: &'name [u8]) -> Cow<'name, [u8]> {
+        match &self.namespace_name {
+            // If we have a non-empty namespace, prepend it.
+            Some(ns) if !ns.is_empty() => Cow::Owned(concat_with_sep(&[ns, name_ref], b'\\')),
+            // Otherwise (no namespace, or empty namespace), return the name as is.
+            _ => Cow::Borrowed(name_ref),
+        }
+    }
+
+    /// Resolves a name fully according to PHP's rules within this scope.
+    ///
+    /// # Arguments
+    /// * `kind` - The context (`Default`, `Function`, `Constant`).
+    /// * `name` - The name string to resolve.
+    ///
+    /// # Returns
+    ///
+    /// A tuple `(String, bool)`:
+    ///  - The resolved or qualified name.
+    ///  - `true` if resolved via explicit alias/construct (step 1), `false` otherwise.
+    #[inline]
+    pub fn resolve(&self, kind: NameKind, name: impl AsRef<[u8]>) -> (Vec<u8>, bool) {
+        let (cow, imported) = self.resolve_str(kind, name.as_ref());
+
+        (cow.into_owned(), imported)
+    }
+
+    /// non-generic version of `resolve` that takes a string slice.
+    #[inline]
+    #[must_use]
+    pub fn resolve_str<'name>(&self, kind: NameKind, name_ref: &'name [u8]) -> (Cow<'name, [u8]>, bool) {
+        // Try resolving using explicit aliases and constructs
+        if let Some(resolved_name) = self.resolve_alias_bytes(kind, name_ref) {
+            return (resolved_name, true); // Resolved via alias or explicit construct
+        }
+
+        // Qualify it using the current namespace.
+        (self.qualify_name_str(name_ref), false)
+    }
+
+    /// Attempts to resolve a name using *only* explicit aliases and constructs.
+    ///
+    /// Does *not* attempt to qualify simple names relative to the current namespace if they aren't aliased.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The context (`Default`, `Function`, `Constant`).
+    /// * `name` - The name bytes to resolve.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Vec<u8>)` containing the resolved FQN if an explicit rule applies.
+    /// * `None` if no explicit rule resolves the name.
+    #[inline]
+    pub fn resolve_alias(&self, kind: NameKind, name: impl AsRef<[u8]>) -> Option<Vec<u8>> {
+        self.resolve_alias_bytes(kind, name.as_ref()).map(std::borrow::Cow::into_owned)
+    }
+
+    /// non-generic version of `resolve_alias` that takes a string slice.
+    fn resolve_alias_bytes<'name>(&self, kind: NameKind, name_ref: &'name [u8]) -> Option<Cow<'name, [u8]>> {
+        if name_ref.is_empty() {
+            return None;
+        }
+
+        // Handle `\FQN`
+        if let Some(fqn) = name_ref.strip_prefix(b"\\") {
+            return Some(Cow::Borrowed(fqn));
+        }
+
+        // Split into `first_part` and `suffix` at the first backslash (memchr).
+        let (first_part, suffix) = match memchr::memchr(b'\\', name_ref) {
+            Some(i) => (&name_ref[..i], Some(&name_ref[i + 1..])),
+            None => (name_ref, None),
+        };
+        let first_part_lower = first_part.to_ascii_lowercase();
+
+        if let Some(suffix) = suffix {
+            // Handle `namespace\Suffix`
+            if first_part_lower == b"namespace" {
+                match &self.namespace_name {
+                    Some(namespace_prefix) => {
+                        let mut resolved = namespace_prefix.clone();
+                        resolved.push(b'\\');
+                        resolved.extend_from_slice(suffix);
+                        Some(Cow::Owned(resolved))
+                    }
+                    None => Some(Cow::Owned(suffix.to_vec())), // Relative to global "" namespace
+                }
+            } else {
+                // Handle `Alias\Suffix`
+                match self.default_aliases.get(first_part_lower.as_slice()) {
+                    Some(resolved_alias_fqn) => {
+                        let mut resolved = resolved_alias_fqn.clone();
+                        resolved.push(b'\\');
+                        resolved.extend_from_slice(suffix);
+                        Some(Cow::Owned(resolved))
+                    }
+                    None => None, // Alias not found
+                }
+            }
+        } else {
+            // Handle single-part alias lookup
+            (match kind {
+                NameKind::Default => self.default_aliases.get(first_part_lower.as_slice()).cloned(),
+                NameKind::Function => self.function_aliases.get(first_part_lower.as_slice()).cloned(),
+                NameKind::Constant => self.constant_aliases.get(first_part_lower.as_slice()).cloned(),
+            })
+            .map(Cow::Owned)
+        }
+    }
+}

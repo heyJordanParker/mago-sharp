@@ -1,0 +1,1033 @@
+use foldhash::HashMap;
+use foldhash::fast::RandomState;
+use indexmap::IndexMap;
+
+use mago_allocator::Arena;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_object;
+use mago_codex::ttype::template::GenericTemplate;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
+use mago_codex::ttype::template::variance::Variance;
+use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::Instantiation;
+use mago_syntax::cst::PartialArgumentList;
+use mago_word::WordMap;
+use mago_word::word;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::invocation::Invocation;
+use crate::invocation::InvocationArgumentsSource;
+use crate::invocation::InvocationTarget;
+use crate::invocation::MethodInvocationKind;
+use crate::invocation::MethodTargetContext;
+use crate::invocation::analyzer::analyze_invocation;
+use crate::invocation::post_process::post_invocation_process;
+use crate::resolver::class_name::ResolutionOrigin;
+use crate::resolver::class_name::ResolvedClassname;
+use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_code_member;
+use crate::utils::names::display_member;
+use crate::utils::template::get_generic_parameter_for_offset;
+use crate::visibility::check_method_visibility;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let classnames = resolve_classnames_from_expression(context, block_context, artifacts, self.class, false)?;
+        if classnames.is_empty() {
+            return Ok(());
+        }
+
+        if classnames.len() > 1 {
+            let possible_class_names_str = classnames
+                .iter()
+                .map(|classname| match classname.fqcn {
+                    Some(id) => id.to_string(),
+                    None => "<unknown>".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let class_expression_type_str = artifacts
+                .get_expression_type(&self.class)
+                .map_or_else(|| "<unknown>".to_string(), |u| u.get_id().to_string());
+
+            context.collector.report_with_code(
+                IssueCode::AmbiguousInstantiationTarget,
+                Issue::warning("Ambiguous instantiation: the expression used with `new` can resolve to multiple different classes.".to_string())
+                .with_annotation(
+                    Annotation::primary(self.class.span())
+                        .with_message(format!(
+                            "This expression (type `{class_expression_type_str}`) can instantiate one of: [{possible_class_names_str}]"
+                        )),
+                )
+                .with_note(
+                    "Instantiating from an expression with a union of different class types is a risky practice."
+                )
+                .with_note(
+                    "The resolved classes may have different constructor signatures, distinct type parameters, or incompatible behaviors, leading to potential runtime errors or unexpected outcomes."
+                )
+                .with_help(
+                    "To ensure type safety and predictability, refine the type of the expression used with `new` to a single specific `class-string<T>` or use conditional logic to instantiate explicitly based on the desired class.",
+                ),
+            );
+        }
+
+        let mut resulting_type = None;
+        for classname in classnames {
+            let instantiation_span = self.span();
+            let class_expression_span = self.class.span();
+
+            let argument_list = if let Some(arg_list) = &self.argument_list { Some(arg_list) } else { None };
+
+            let type_candidate = analyze_class_instantiation(
+                context,
+                block_context,
+                artifacts,
+                &classname,
+                instantiation_span,
+                class_expression_span,
+                argument_list,
+            )?;
+
+            resulting_type = Some(add_optional_union_type(type_candidate, resulting_type.as_ref(), context.codebase));
+        }
+
+        if let Some(resulting_type) = resulting_type {
+            artifacts.set_expression_type(self, resulting_type);
+        } else {
+            artifacts.set_expression_type(self, get_object()); // Fallback to object if no valid instantiation was found
+        }
+
+        Ok(())
+    }
+}
+
+fn analyze_class_instantiation<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    classname: &ResolvedClassname,
+    instantiation_span: Span,
+    class_expression_span: Span,
+    argument_list: Option<&ArgumentList<'arena>>,
+) -> Result<TUnion, AnalysisError>
+where
+    A: Arena,
+{
+    if classname.is_invalid() {
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(get_never());
+    }
+
+    let Some(fq_classname) = classname.fqcn else {
+        context.collector.report_with_code(
+            IssueCode::UnknownClassInstantiation,
+            Issue::error("Cannot determine the concrete class for instantiation.")
+                .with_annotation(Annotation::primary(class_expression_span).with_message("This expression resolves to an unknown or non-specific class type"))
+                .with_note("This can happen if instantiating from a variable with a general type like `object`, `class-string` (without a specific class), or `mixed`.")
+                .with_note("Without a known class, constructor arguments and type parameters cannot be validated accurately.")
+                .with_help("Use a more specific type hint for the variable (e.g., `class-string<MyClass>`, `MyClass`), or ensure it always holds a known instantiable class name."),
+        );
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(wrap_atomic(classname.get_object_type(context.codebase)));
+    };
+
+    let Some(metadata) = context.codebase.get_class_like(fq_classname.as_bytes()) else {
+        let missing_class = display_class_like_name(context, fq_classname);
+
+        context.collector.report_with_code(
+            IssueCode::NonExistentClass,
+            Issue::error(format!("Class `{missing_class}` not found."))
+            .with_annotation(
+                Annotation::primary(class_expression_span)
+                    .with_message(format!("`{missing_class}` is not defined or cannot be autoloaded")),
+            )
+            .with_help(
+                "Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.",
+            ),
+        );
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(get_never());
+    };
+
+    let classname_str = display_class_like_name(context, metadata.original_name);
+
+    crate::utils::availability::check_class_like_availability(context, metadata, &classname_str, class_expression_span);
+
+    if metadata.kind.is_interface() && !classname.is_from_class_string() {
+        context.collector.report_with_code(
+             IssueCode::InterfaceInstantiation,
+             Issue::error(format!("Interface `{classname_str}` cannot be instantiated with `new`."))
+                 .with_annotation(
+                     Annotation::primary(class_expression_span)
+                         .with_message("Attempting to instantiate an interface"),
+                 )
+                 .with_note("Interfaces are contracts and cannot be directly instantiated. You need to instantiate a class that implements the interface.")
+                 .with_help(format!("Instantiate a concrete class that implements `{classname_str}` instead.")),
+         );
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(get_never());
+    } else if metadata.kind.is_trait() && !classname.is_static() && !classname.is_self() {
+        context.collector.report_with_code(
+            IssueCode::TraitInstantiation,
+            Issue::error(format!("Trait `{classname_str}` cannot be instantiated with `new`."))
+                .with_annotation(
+                    Annotation::primary(class_expression_span).with_message("Attempting to instantiate a trait"),
+                )
+                .with_note("Traits are designed for code reuse and cannot be instantiated directly.")
+                .with_help(format!(
+                    "Use the trait `{classname_str}` within a class definition using the `use` keyword."
+                )),
+        );
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(get_never());
+    } else if metadata.kind.is_enum() {
+        let case = display_code_member(context, metadata.original_name, "CASE_NAME");
+        let cases = display_code_member(context, metadata.original_name, "cases()");
+        context.collector.report_with_code(
+            IssueCode::EnumInstantiation,
+            Issue::error(format!("Enum `{classname_str}` cannot be instantiated with `new`."))
+                .with_annotation(
+                    Annotation::primary(class_expression_span)
+                        .with_message("Attempting to instantiate an enum with `new`"),
+                )
+                .with_note(format!(
+                    "Enum instances are created by accessing their cases directly (e.g., `{}`).",
+                    display_member(context, word("MyEnum"), "CaseName")
+                ))
+                .with_help(format!("Use `{case}` to get an enum case instance, or `{cases}` to get all cases.")),
+        );
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(get_never());
+    } else if metadata.flags.is_static() {
+        let name = display_class_like_name(context, metadata.original_name);
+        context.collector.report_with_code(
+            IssueCode::AbstractInstantiation,
+            Issue::error(format!("`{name}` is a static class, so it has no instances: call its members on the class."))
+                .with_annotation(
+                    Annotation::primary(class_expression_span).with_message("A static class has no instances."),
+                ),
+        );
+
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(get_never());
+    }
+    // class kind is a regular class; no kind-specific instantiation diagnostic to emit
+
+    if classname.is_from_class_string() && (metadata.kind.is_interface() || metadata.kind.is_trait()) {
+        let kind_name = if metadata.kind.is_interface() { "interface" } else { "trait" };
+
+        context.collector.report_with_code(
+            IssueCode::UnsafeInstantiation,
+            Issue::warning(format!(
+                "Potentially unsafe instantiation: `class-string<{classname_str}>` may contain the {kind_name} `{classname_str}` itself, which cannot be instantiated.",
+            ))
+            .with_annotation(
+                Annotation::primary(class_expression_span)
+                    .with_message(format!(
+                        "This expression is `class-string<{classname_str}>` where `{classname_str}` is {article} {kind_name}",
+                        article = if metadata.kind.is_interface() { "an" } else { "a" }
+                    )),
+            )
+            .with_note(format!(
+                "While `class-string<{classname_str}>` usually contains a concrete class implementing the {kind_name}, it could technically be `{classname_str}::class` itself.",
+            ))
+            .with_help("Consider using a more specific type or adding runtime validation."),
+        );
+    }
+
+    let mut is_impossible = false;
+    if metadata.flags.is_abstract() && !classname.can_extend_static() && !classname.is_from_class_string() {
+        context.collector.report_with_code(
+            IssueCode::AbstractInstantiation,
+            Issue::error(format!("Cannot instantiate abstract class `{classname_str}`."))
+                .with_annotation(
+                    Annotation::primary(class_expression_span)
+                        .with_message("Attempting to instantiate an abstract class"),
+                )
+                .with_help(if classname.is_static() {
+                    "Use `new static()` in a non-final child class, or instantiate a concrete subclass."
+                } else {
+                    "Instantiate a concrete subclass of this abstract class."
+                }),
+        );
+
+        is_impossible = true;
+    }
+
+    if metadata.flags.is_deprecated()
+        && block_context.scope.get_class_like_name().is_none_or(|self_id| self_id != metadata.original_name)
+    {
+        context.collector.report_with_code(
+            IssueCode::DeprecatedClass,
+            Issue::warning(format!("Class `{classname_str}` is deprecated and should no longer be used."))
+                .with_annotation(
+                    Annotation::primary(class_expression_span).with_message("Instantiation of deprecated class"),
+                )
+                .with_help(
+                    "Consult the documentation for this class to find its replacement or an alternative approach.",
+                ),
+        );
+    }
+
+    let mut type_parameters = None;
+
+    let constructor_id = MethodIdentifier::new(metadata.original_name, word("__construct"));
+    let constructor_declraing_id = context.codebase.get_declaring_method_identifier(&constructor_id);
+
+    artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_id);
+
+    let mut has_inconsistent_constructor =
+        !metadata.flags.is_final() && metadata.name_span.is_some() && !metadata.flags.has_consistent_constructor();
+    let mut constructor_span = None;
+
+    let mut template_result = TemplateResult::new(IndexMap::with_hasher(RandomState::default()), HashMap::default());
+
+    let is_spl_object_storage = metadata.original_name.as_bytes().eq_ignore_ascii_case(b"splobjectstorage");
+
+    if let Some(constructor) = context.codebase.get_method_by_id(&constructor_declraing_id) {
+        has_inconsistent_constructor =
+            has_inconsistent_constructor && !constructor.method_metadata.as_ref().is_some_and(|meta| meta.is_final);
+        constructor_span = Some(constructor.name_span.unwrap_or(constructor.span));
+
+        artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_declraing_id);
+
+        let mut constructor_call = Invocation {
+            target: InvocationTarget::FunctionLike {
+                identifier: FunctionLikeIdentifier::Method(
+                    constructor_declraing_id.get_class_name(),
+                    constructor_declraing_id.get_method_name(),
+                ),
+                metadata: constructor,
+                inferred_return_type: None,
+                effective_signature: None,
+                method_context: Some(MethodTargetContext {
+                    invocation_kind: MethodInvocationKind::Instance,
+                    declaring_method_id: Some(constructor_declraing_id),
+                    class_like_metadata: metadata,
+                    class_type: StaticClassType::Exact(metadata.original_name),
+                    declaring_object_type: None,
+                }),
+                span: instantiation_span,
+            },
+            arguments_source: match argument_list.as_ref() {
+                Some(arg_list) => InvocationArgumentsSource::ArgumentList(arg_list),
+                None => InvocationArgumentsSource::None(instantiation_span),
+            },
+            span: instantiation_span,
+        };
+
+        let mut argument_types = WordMap::default();
+        analyze_invocation(
+            context,
+            block_context,
+            artifacts,
+            &mut constructor_call,
+            Some((metadata.name, None)),
+            None,
+            &mut template_result,
+            &mut argument_types,
+        )?;
+
+        post_invocation_process(
+            context,
+            block_context,
+            artifacts,
+            &constructor_call,
+            None,
+            &template_result,
+            &argument_types,
+            true,
+        )?;
+
+        if !check_method_visibility(
+            context,
+            block_context.scope.get_class_like_name(),
+            constructor_declraing_id.get_class_name().as_bytes(),
+            constructor_declraing_id.get_method_name().as_bytes(),
+            instantiation_span,
+            None,
+        ) {
+            is_impossible = true;
+        }
+
+        let mut resolved_template_types = vec![];
+        let mut recorded_type_arguments = vec![];
+        for (offset, (template_name, _)) in metadata.template_types.iter().enumerate() {
+            let mut is_bound = true;
+            let mut template_type = if let Some(lower_bounds) =
+                template_result.get_lower_bounds_for_class_like(*template_name, metadata.name)
+            {
+                get_most_specific_type_from_bounds(lower_bounds, context.codebase)
+            } else if !metadata.template_extended_parameters.is_empty() && !template_result.lower_bounds.is_empty() {
+                let found_generic_parameters = template_result
+                    .lower_bounds
+                    .iter()
+                    .map(|(template_name, lower_bounds_map)| {
+                        (
+                            *template_name,
+                            lower_bounds_map
+                                .iter()
+                                .map(|(generic_parent, lower_bounds)| {
+                                    GenericTemplate::new(
+                                        *generic_parent,
+                                        get_most_specific_type_from_bounds(lower_bounds, context.codebase),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<WordMap<_>>();
+
+                get_generic_parameter_for_offset(
+                    metadata.name,
+                    *template_name,
+                    &metadata.template_extended_parameters,
+                    &found_generic_parameters,
+                )
+            } else {
+                is_bound = false;
+
+                if is_spl_object_storage { get_never() } else { wrap_atomic(TAtomic::Placeholder) }
+            };
+
+            let variance = metadata.template_variance.get(offset).copied().unwrap_or(Variance::Invariant);
+            if matches!(variance, Variance::Invariant) {
+                template_type.widen_scalars();
+            }
+
+            recorded_type_arguments.push(is_bound.then(|| template_type.clone()));
+            resolved_template_types.push(template_type);
+        }
+
+        if !resolved_template_types.is_empty() {
+            artifacts.record_type_arguments(instantiation_span, recorded_type_arguments.into_iter(), context.codebase);
+            type_parameters = Some(resolved_template_types);
+        }
+    } else if let Some(argument_list) = &argument_list
+        && !argument_list.arguments.is_empty()
+    {
+        if !metadata.has_incomplete_hierarchy() {
+            context.collector.report_with_code(
+                IssueCode::TooManyArguments,
+                Issue::error(format!(
+                    "Class `{classname_str}` has no `__construct` method, but arguments were provided to `new`."
+                ))
+                .with_annotation(Annotation::primary(argument_list.span()).with_message("Arguments provided here"))
+                .with_annotation(
+                    Annotation::secondary(class_expression_span)
+                        .with_message(format!("For class `{classname_str}` which has no constructor")),
+                )
+                .with_help("Remove the arguments, or define a `__construct` method in the class if arguments are needed for initialization."),
+            );
+        }
+
+        argument_list.analyze(context, block_context, artifacts)?;
+    } else if !metadata.template_types.is_empty() {
+        artifacts.record_type_arguments(
+            instantiation_span,
+            metadata.template_types.iter().map(|_| None),
+            context.codebase,
+        );
+        type_parameters = Some(
+            metadata
+                .template_types
+                .iter()
+                .map(|(_, _)| if is_spl_object_storage { get_never() } else { wrap_atomic(TAtomic::Placeholder) })
+                .collect(),
+        );
+    }
+
+    let skip_constructor_warning =
+        classname.is_from_class_string() && (metadata.kind.is_interface() || metadata.kind.is_trait());
+
+    if has_inconsistent_constructor
+        && !skip_constructor_warning
+        && (classname.is_static() || classname.is_from_class_string() || classname.is_object_instance())
+    {
+        let mut issue = if classname.is_static() {
+            Issue::warning(format!(
+                "Unsafe `new static()`: constructor of `{classname_str}` is not final and its signature might change in child classes, potentially leading to runtime errors.",
+            ))
+            .with_annotation(Annotation::primary(class_expression_span).with_message("`new static()` used here"))
+        } else if classname.is_from_class_string() {
+            Issue::warning(format!(
+                "Unsafe `new $class_name`: constructor of `{classname_str}` is not final and its signature might change in child classes, potentially leading to runtime errors.",
+            ))
+            .with_annotation(Annotation::primary(class_expression_span).with_message("`new $class_name()` used here"))
+        } else {
+            Issue::warning(format!(
+                "Unsafe `new $object`: constructor of `{classname_str}` is not final and its signature might change in child classes, potentially leading to runtime errors.",
+            ))
+            .with_annotation(Annotation::primary(class_expression_span).with_message("`new $object` used here"))
+        };
+
+        if let Some(constructor_span) = constructor_span {
+            issue = issue.with_annotation(
+                Annotation::secondary(constructor_span)
+                    .with_message("Constructor defined here could be overridden with an incompatible signature"),
+            );
+        }
+
+        context.collector.report_with_code(
+            IssueCode::UnsafeInstantiation,
+            issue
+                .with_help("Ensure constructor signature consistency across inheritance (e.g., using `@consistent-constructor` if applicable) or mark the class/constructor as final.")
+        );
+    }
+
+    if classname.is_from_class_string() || classname.is_from_any_object() {
+        let descendants = context.codebase.get_all_descendants(metadata.name.as_bytes());
+
+        for descendant_class in descendants {
+            artifacts.symbol_references.add_reference_to_overridden_class_member(
+                &block_context.scope,
+                (descendant_class, constructor_id.get_method_name()),
+            );
+        }
+    }
+
+    if is_impossible {
+        return Ok(get_never());
+    }
+
+    let constraint_object = TAtomic::Object(TObject::Named(TNamedObject {
+        name: metadata.original_name,
+        type_parameters,
+        variances: None,
+        is_static: classname.is_static() || (classname.is_self() && metadata.flags.is_final()),
+        is_this: false,
+        intersection_types: None,
+        remapped_parameters: false,
+    }));
+
+    // `new $className()` where `$className: class-string<T>` produces a `T`, not the constraint.
+    // Preserve the template parameter so the function's `@return T` keeps narrowing on the call site.
+    let result_atomic =
+        if let ResolutionOrigin::SpecificClassLikeString(class_string @ TClassLikeString::Generic { .. }) =
+            &classname.origin
+        {
+            class_string.get_object_type(context.codebase)
+        } else {
+            constraint_object
+        };
+
+    Ok(wrap_atomic(result_atomic))
+}
+
+/// Analyzes the constructor invocation for an anonymous class.
+///
+/// This function validates that the arguments passed to an anonymous class instantiation
+/// match the constructor signature, similar to how regular class instantiation is validated.
+pub fn analyze_anonymous_class_constructor<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    class_like_metadata: &'ctx ClassLikeMetadata,
+    argument_list: Option<&PartialArgumentList<'arena>>,
+    instantiation_span: Span,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let classlike_name = class_like_metadata.name;
+
+    let constructor_id = MethodIdentifier::new(classlike_name, word("__construct"));
+    let constructor_declaring_id = context.codebase.get_declaring_method_identifier(&constructor_id);
+
+    artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_id);
+
+    if let Some(constructor) = context.codebase.get_method_by_id(&constructor_declaring_id) {
+        artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_declaring_id);
+
+        let mut constructor_call = Invocation {
+            target: InvocationTarget::FunctionLike {
+                identifier: FunctionLikeIdentifier::Method(
+                    constructor_declaring_id.get_class_name(),
+                    constructor_declaring_id.get_method_name(),
+                ),
+                metadata: constructor,
+                inferred_return_type: None,
+                effective_signature: None,
+                method_context: Some(MethodTargetContext {
+                    invocation_kind: MethodInvocationKind::Instance,
+                    declaring_method_id: Some(constructor_declaring_id),
+                    class_like_metadata,
+                    class_type: StaticClassType::Exact(class_like_metadata.original_name),
+                    declaring_object_type: None,
+                }),
+                span: instantiation_span,
+            },
+            arguments_source: match argument_list {
+                Some(arg_list) => InvocationArgumentsSource::PartialArgumentList(arg_list),
+                None => InvocationArgumentsSource::None(instantiation_span),
+            },
+            span: instantiation_span,
+        };
+
+        let mut template_result =
+            TemplateResult::new(IndexMap::with_hasher(RandomState::default()), HashMap::default());
+        let mut argument_types = WordMap::default();
+
+        analyze_invocation(
+            context,
+            block_context,
+            artifacts,
+            &mut constructor_call,
+            Some((class_like_metadata.name, None)),
+            None,
+            &mut template_result,
+            &mut argument_types,
+        )?;
+
+        post_invocation_process(
+            context,
+            block_context,
+            artifacts,
+            &constructor_call,
+            None,
+            &template_result,
+            &argument_types,
+            true,
+        )?;
+    } else if let Some(argument_list) = argument_list
+        && !argument_list.arguments.is_empty()
+    {
+        if !class_like_metadata.has_incomplete_hierarchy() {
+            context.collector.report_with_code(
+                IssueCode::TooManyArguments,
+                Issue::error("Anonymous class has no `__construct` method, but arguments were provided.")
+                    .with_annotation(Annotation::primary(argument_list.span()).with_message("Arguments provided here"))
+                    .with_help("Remove the arguments, or define a `__construct` method in the anonymous class."),
+            );
+        }
+
+        argument_list.analyze(context, block_context, artifacts)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::code::IssueCode;
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = templated_class_instantiation,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @phpstan-template K as string|int
+             * @phpstan-template V
+             */
+            class Collection
+            {
+                /**
+                 * @var array<K, V>
+                 */
+                public $items = [];
+
+                /**
+                 * @param array<K, V> $items
+                 */
+                public function __construct(array $items = [])
+                {
+                    foreach ($items as $key => $value) {
+                        $this->items[$key] = $value;
+                    }
+                }
+            }
+
+            /**
+             * @param Collection<string, string> $collection
+             *
+             * @return Collection<string, string>
+             */
+            function i_take_string_collection(Collection $collection): Collection
+            {
+                return $collection;
+            }
+
+            $collection = new Collection(['name' => 'John Doe']);
+            i_take_string_collection($collection); // ok
+
+            $collection = new Collection(['age' => 30]);
+            i_take_string_collection($collection); // error
+        "},
+        issues = [
+            IssueCode::InvalidArgument, // expected Collection<string, string>, got Collection<string, int>
+        ],
+    }
+
+    test_analysis! {
+        name = ambiguous_instantiation_target,
+        code = indoc! {"
+            <?php
+
+            class A {}
+            class B {}
+            class C {}
+
+            /**
+             * @param A|class-string<B>|class-string<C> $instance
+             */
+            function foo(A|string $instance): A|B|C {
+                $instance = new $instance;
+
+                return $instance;
+            }
+        "},
+        issues = [
+            IssueCode::AmbiguousInstantiationTarget, // `new $instance` could be A, B, C, or <unknown>
+            IssueCode::UnsafeInstantiation, // `A` is not final
+            IssueCode::UnsafeInstantiation, // `B` is not final
+            IssueCode::UnsafeInstantiation, // `C` is not final
+        ],
+    }
+
+    test_analysis! {
+        name = instantiation_of_interface,
+        code = indoc! {"
+            <?php
+
+            interface MyInterface {}
+
+            $a = new MyInterface();
+        "},
+        issues = [
+            IssueCode::InterfaceInstantiation,
+            IssueCode::ImpossibleAssignment, // $a becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_of_trait,
+        code = indoc! {"
+            <?php
+
+            trait MyTrait {}
+
+            $a = new MyTrait();
+        "},
+        issues = [
+            IssueCode::TraitInstantiation,
+            IssueCode::ImpossibleAssignment, // $a becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_of_enum,
+        code = indoc! {"
+            <?php
+
+            enum MyEnum {}
+
+            $a = new MyEnum();
+        "},
+        issues = [
+            IssueCode::EnumInstantiation,
+            IssueCode::ImpossibleAssignment, // $a becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_of_abstract_class,
+        code = indoc! {"
+            <?php
+
+            abstract class MyAbstractClass {}
+
+            $a = new MyAbstractClass();
+        "},
+        issues = [
+            IssueCode::AbstractInstantiation,
+            IssueCode::ImpossibleAssignment, // $a becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_self_outside_class,
+        code = indoc! {"
+            <?php
+
+            $a = new self();
+        "},
+        issues = [
+            IssueCode::SelfOutsideClassScope,
+            IssueCode::ImpossibleAssignment, // $a becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_static_outside_class,
+        code = indoc! {"
+            <?php
+
+            $a = new static();
+        "},
+        issues = [
+            IssueCode::StaticOutsideClassScope,
+            IssueCode::ImpossibleAssignment, // $a becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_parent_outside_class,
+        code = indoc! {"
+            <?php
+
+            $a = new parent();
+        "},
+        issues = [
+            IssueCode::ParentOutsideClassScope,
+            IssueCode::ImpossibleAssignment, // $a becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_of_undefined_class,
+        code = indoc! {"
+            <?php
+
+            $a = new NonExistentClass();
+        "},
+        issues = [
+            IssueCode::NonExistentClass,
+            IssueCode::ImpossibleAssignment, // $a becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_from_invalid_expression_type,
+        code = indoc! {"
+            <?php
+
+            $className = 123; // Not a class string
+
+            $a = new $className();
+        "},
+        issues = [
+            IssueCode::InvalidClassStringExpression,
+            IssueCode::ImpossibleAssignment, // `$a` becomes never
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_from_general_string_variable,
+        code = indoc! {"
+            <?php
+
+            /** @param string $className */
+            function create_instance(string $className) {
+                return new $className();
+            }
+        "},
+        issues = [
+            IssueCode::UnknownClassInstantiation, // `new $className()` could be any object
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_from_mixed_variable,
+        code = indoc! {"
+            <?php
+            /** @param mixed $className */
+            function create_instance_mixed($className) {
+                return new $className();
+            }
+        "},
+        issues = [
+            IssueCode::UnknownClassInstantiation, // `new $className()` could be any object
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_too_many_args_no_constructor,
+        code = indoc! {"
+            <?php
+            class NoConstructor {}
+            $a = new NoConstructor(1, 2, 3);
+        "},
+        issues = [IssueCode::TooManyArguments]
+    }
+
+    test_analysis! {
+        name = instantiation_too_many_args_with_constructor,
+        code = indoc! {"
+            <?php
+            class WithConstructor {
+                public function __construct(int $a, int $b) {}
+            }
+            $a = new WithConstructor(1, 2, 3);
+        "},
+        issues = [IssueCode::TooManyArguments]
+    }
+
+    test_analysis! {
+        name = instantiation_with_child_constructor,
+        code = indoc! {"
+            <?php
+
+            class Base {
+                public function __construct(int $a) {}
+            }
+
+            class Child extends Base {
+                public function __construct(string $b) {}
+            }
+
+            $a = new Child(1);
+        "},
+        issues = [
+            IssueCode::InvalidArgument,
+        ]
+    }
+
+    test_analysis! {
+        name = instantiation_with_parent_constructor,
+        code = indoc! {"
+            <?php
+
+            class Base {
+                public function __construct(int $a) {}
+            }
+
+            final class Child extends Base {
+            }
+
+            $a = new Child(1);
+        "}
+    }
+
+    test_analysis! {
+        name = resolve_nested_type_parameters,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @template-covariant T
+             */
+            final readonly class Box
+            {
+                /**
+                 * @param T $value
+                 */
+                public function __construct(
+                    private mixed $value,
+                ) {}
+
+                /**
+                 * @return T
+                 */
+                public function get(): mixed {
+                    return $this->value;
+                }
+            }
+
+            /**
+             * @return Box<Box<Box<42>>>
+             */
+            function get_box_of_box_of_box(): Box {
+                return new Box(new Box(new Box(42)));
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = handles_recursive_type,
+        code = indoc! {"
+            <?php
+
+            /** @template T */
+            final readonly class Example {
+                /** @return Example<Example<T>> */
+                public function return_something(): Example {
+                    /** @var Example<Example<T>> */
+                    return new Example();
+                }
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = self_is_static_in_final_class,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @template Tk of array-key
+             * @template Tv
+             */
+            final class Map {
+                /**
+                 * @var array<Tk, Tv> $elements
+                 */
+                private array $elements;
+
+                /**
+                 * @param array<Tk, Tv> $elements
+                 */
+                public function __construct(array $elements = []) {
+                    $this->elements = $elements;
+                }
+
+                /** @return array<Tk, Tv> */
+                public function getElements(): array { return $this->elements; }
+
+                /**
+                 * @return static
+                 */
+                public static function getStatic(): static {
+                    return new self(); // `self` is same as `static` since the class is final
+                }
+            }
+        "},
+    }
+}

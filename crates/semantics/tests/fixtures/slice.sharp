@@ -1,0 +1,424 @@
+namespace App.Tenant;
+
+import Lib.Calc;
+import Lib.Field;
+import Lib.Entity;
+import Lib.HasLabel;
+
+[Entity(label: "Reports", order: 2 * 3), Searchable]
+[Entity(null), Access(typeof(Report))]
+public class Report
+{
+    public const int MAX = 3;
+    protected const LIMIT = PHP_INT_MAX - 1;
+    protected const int NEXT = Calc.MAX + 1;
+    private const string? NAME = "report";
+    private static int made = 0;
+    public static string? last { get; private set; } = "none";
+    [Field] private int count = 0;
+    protected float rate = 2.5 * -PHP_INT_MAX;
+    private string label;
+    [Field(label: "Views", limit: PHP_INT_MAX)] public int views { get; private set; } = 0;
+    public string name { get; set; }
+    public int id { get; }
+    private Calc calc = new Calc(Calc.make(), rate: 2);
+    public string slug => strtolower(this.name);
+    private int|Calc|string key = 1;
+    private (int|string)? code;
+    public Calc? owner { get; set; }
+    public int? limit { get; } = null;
+    private Map<string, int> sizes = [:];
+    public List<Calc> lines { get; private set; } = [];
+    public string title { get => field; set => field = trim(value); } = "";
+    public int stock { get; private set { if (value < 0) { return; } field = value; } } = 0;
+    public int half { get { return this.stock / 2; } }
+
+    [Entity(true)]
+    public Report(int start, private Calc helper, [Field(-1.5)] public int total { get; private set; })
+    {
+        this.count = start;
+        this.id = start;
+        this.name = "report";
+    }
+
+    public int run([Field] [Entity(false)] int extra, float rate = 1.5, string label = "\u{41}\n", bool strict = !false)
+    {
+        let total = extra * 2 + 1;
+        const base = (total - 3) % 4;
+        total += base;
+        total -= 1;
+        total *= 2;
+        total /= 2;
+        total **= base ** 2;
+        total++;
+        total--;
+        ++total;
+        --total;
+        extra = total;
+        {
+            let inner = -total + +base;
+            inner = inner / 2;
+        }
+        let same = total == base || total != base && this.helper === this.owner;
+        same = this.helper !== this.owner && !strict;
+        const order = total < base || total > base || total <= base || total >= base;
+        const nothing = null;
+        this.count += extra;
+        return Report.part(first: extra, second: 2) + this.scale(rate) + this.count;
+    }
+
+    public static int part(int first, int second = 2 * 3 - -1, int limit = PHP_INT_MAX)
+    {
+        return first * second;
+    }
+
+    protected int scale(float rate = 0.5)
+    {
+        return 1;
+    }
+
+    private string text(string text = 'none')
+    {
+        const plain = "${text} {$text} $text";
+        const line = `${text}: ${strlen(text) + 1} \u{41}\`
+`;
+        const constant = `v${1}${""}${`x`}`;
+        return `${sprintf("%s: %d", text, strlen(text))}${plain}${line}${constant}`;
+    }
+
+    private string constantTemplate()
+    {
+        return `v${1}`;
+    }
+
+    private bool flag(bool on = true)
+    {
+        return on;
+    }
+
+    public void touch(Calc calc)
+    {
+        calc.rate = 2.0;
+        calc.rate += 1;
+        calc.rate++;
+        this.count += 1;
+        calc.add(1, 2);
+        const made = Calc.make();
+        const read = calc.rate;
+        const fresh = new Calc(1, rate: 2);
+        const chained = Calc.make().add(1).rate;
+        const sum = Calc.make().add(1, 2);
+        const big = 0xFFFFFFFFFFFFFFFF;
+        const kind = typeof(Calc);
+        Report.made = 1;
+        Report.made++;
+        --Report.made;
+        Report.made += 2;
+        Report.last ??= "touched";
+        const limit = Report.MAX;
+        const rate = Calc.standard.cents;
+        const label = Status.Active.label();
+        const active = Status.Default == Status.Active;
+        return;
+    }
+
+    public Report same()
+    {
+        return this;
+    }
+
+    public Any? hold(Any value, Any? maybe = null)
+    {
+        Any? kept = maybe;
+        const Any same = value;
+        return kept ?? same;
+    }
+
+    private float ratio()
+    {
+        return 0.5;
+    }
+
+    public Calc? find(int? id, Calc? fallback = null, string? label = "none", float? rate = null, bool? on = null ?? true)
+    {
+        const first = id ?? 0;
+        let second = id;
+        second ??= first;
+        id ??= 1;
+        this.calc.rate ??= rate;
+        Calc? kept = fallback;
+        int count = 2;
+        const float? share = rate;
+        const Calc made = Calc.make();
+        kept = null;
+        const sum = fallback?.add(1, 2) ?? fallback?.rate;
+        const again = this.find(id)?.price.cents;
+        return label == null ? null : (fallback ?? throw new Calc(0));
+    }
+
+    public int branch(int value)
+    {
+        if (value > 100) {
+            throw new Calc(value);
+        }
+        if (value < -100) {
+            exit(value);
+        }
+        if (value > 10) {
+            return 1;
+        } else if (value < 0) {
+            return 2;
+        } else {
+            value += 1;
+        }
+        return value;
+    }
+
+    private string choose(int value, bool on)
+    {
+        const sign = value > 0 ? 1 : (value < 0 ? -1 : 0);
+        return (on ? sign > 0 : false) ? "positive" : "other";
+    }
+
+    private string convert(float price, int count)
+    {
+        const cents = (int)(price * 100);
+        return (string)cents + (string)(float)count;
+    }
+
+    private int doubled() => this.count * 2;
+
+    private void reset() => this.count = 0;
+
+    private float parse(string quantity, string? price)
+    {
+        return Int.parse(quantity) * (Float.tryParse(price) ?? Float.parse("0.5")) + (Int.tryParse(price) ?? 0);
+    }
+
+    public int attempt(int value)
+    {
+        try {
+            value += 1;
+        } catch (Calc | Missing failure) {
+            throw failure;
+        } catch (Broken) {
+            value = 0;
+        } finally {
+            value -= 1;
+        }
+        return value;
+    }
+
+    public int repeat(int times)
+    {
+        let total = 0;
+        while (times > 0) {
+            total += times;
+            times--;
+            if (total > 50) {
+                break;
+            }
+            if (times % 2 == 0) {
+                continue;
+            }
+        }
+        do {
+            total -= 1;
+        } while (total > 100);
+        for (let step = 0; step < times; step++) {
+            total += step;
+        }
+        for (total = 0; total < 3; total++, times--) {
+        }
+        for (int count = 0; count < times; count++) {
+            total += count;
+        }
+        for (const Calc? none = null; none === null; ) {
+            break;
+        }
+        for (const value of Calc.values()) {
+            total += value;
+        }
+        for (let [key, value] of Calc.values()) {
+            total += key * value;
+        }
+        return total;
+    }
+
+    public (int|string)? spread(int|float first, (Calc|string)? label, int ...values)
+    {
+        int|bool flag = true;
+        (int|string)? found = null;
+        const made = new Calc(first, ...values);
+        made.add(...values);
+        return label == null ? null : Report.part(2, ...values) + max(1, ...values);
+    }
+
+    [Entity(["a", "b"], ["x": 1])]
+    public Map<string, List<int>>? collect(List<Calc> items, Map<string, int> sizes = ["a": 1], List<int> none = [])
+    {
+        List<int> numbers = [1, 2];
+        const named = ["a": 1, 2: numbers[0]];
+        const Map<string, int> empty = [:];
+        Map<int, string>? labels = null;
+        sizes["a"] = (sizes["a"] ?? 0) + numbers[1];
+        this.sizes["b"] = array_sum(numbers);
+        const nested = ["x": ["a": items[1].rate]];
+        nested["x"]["a"] = items[0]?.rate ?? items[1].rate;
+        for (const [string name, size] of sizes) {
+            this.sizes[name] = size;
+        }
+        return items[0]?.rate == null ? null : ["all": numbers];
+    }
+
+    public Function<int(int)> lambdas(int extra, Function<bool(string, int)> check)
+    {
+        let count = 0;
+        Function<int(int)> twice = a => a * extra;
+        const half = (int b) => b / 2;
+        const add = (int step, int by = 1) => {
+            count += step * by;
+            const inner = () => count + extra;
+            return inner();
+        };
+        const bump = () => count++;
+        while (extra > 0) {
+            let seen = extra;
+            const mark = () => {
+                seen += 1;
+            };
+            mark();
+            extra -= 1;
+        }
+        count += twice(half(4)) + add(1, by: 2) + bump() + array_sum(array_map(x => x * 2, [1, 2]));
+        return n => check("n", n) ? n + count : n;
+    }
+
+    public Function<(int|string)?(int|string, List<int>|Calc)> mixed(List<int>|string items, int ...values)
+    {
+        (List<int>|string)? maybe = items;
+        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => array_sum(rest) + values[0];
+        const total = pick(1, null, ...values) + pick(key: "a", fallback: null);
+        return (a, b) => total > 0 ? a : null;
+    }
+}
+
+[Entity("status"), Searchable]
+public enum Status : string, HasLabel
+{
+    public const Status Default = Status.Active;
+    public const int|string Key = 1;
+    protected const (int|string)? Code = null;
+
+    case Active = "active";
+    [Field("archived")]
+    case Archived = "archived";
+
+    public string title()
+    {
+        return this.value;
+    }
+
+    public string label()
+    {
+        return this == Status.Active ? "Active" : this.title();
+    }
+
+    public static Status parse(string value)
+    {
+        const all = Status.cases();
+        const fallback = Status.from("active");
+        return Status.tryFrom(value) ?? fallback;
+    }
+
+    public static Self first() => Status.Active;
+
+    public static List<Self> all() => Self.cases();
+}
+
+enum Suit
+{
+    case Hearts;
+    case Spades;
+
+    public string label() => this.name;
+
+    public static int size() => count(Suit.cases());
+}
+
+enum Rank : int
+{
+    case Ace = 1;
+    case Two = 1 + 1;
+    case Top = PHP_INT_MAX;
+}
+
+abstract class Shape
+{
+    public abstract float area();
+
+    protected abstract string name(int digits);
+}
+
+class Square : Shape, Measured
+{
+    public override float area()
+    {
+        return 1.0;
+    }
+
+    protected override string name(int digits)
+    {
+        return "square";
+    }
+
+    public virtual int sides()
+    {
+        return 4;
+    }
+}
+
+final class Unit : Square
+{
+    public override int sides()
+    {
+        return super.sides();
+    }
+}
+
+public interface Measured : Sized
+{
+    float area();
+}
+
+interface Sized
+{
+}
+
+abstract class Record
+{
+    public const int|string KEY = 1;
+    protected const (int|string)? CODE = null;
+
+    public required Record(int id)
+    {
+    }
+
+    public static Self make(int id)
+    {
+        return new Self(id);
+    }
+
+    public static Self? find(int id) => id > 0 ? Self.make(id) : null;
+
+    public static (Self|int)? either(int id) => Self.find(id);
+}
+
+public static class Slug
+{
+    public const string SEPARATOR = "-";
+    private static int made = 0;
+    public static int calls { get; private set; } = 0;
+
+    public static string join(string title) => title + Slug.SEPARATOR;
+}

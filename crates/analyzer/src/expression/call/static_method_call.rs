@@ -1,0 +1,349 @@
+use mago_allocator::Arena;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_span::HasSpan;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::StaticMethodCall;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::expression::call::analyze_invocation_targets;
+use crate::expression::call::method_call::analyze_undocumented_method_return_type;
+use crate::expression::call::method_call::prepare_unresolved_method_targets;
+use crate::expression::call::record_external_method_call;
+use crate::expression::call::record_external_method_call_targets;
+use crate::invocation::InvocationArgumentsSource;
+use crate::invocation::InvocationTarget;
+use crate::invocation::MethodInvocationKind;
+use crate::invocation::MethodTargetContext;
+use crate::plugin::ExpressionHookResult;
+use crate::plugin::context::HookContext;
+use crate::plugin::hook::StaticCall;
+use crate::resolver::static_method::resolve_static_method_targets;
+use crate::utils::expression::expression_is_nullsafe;
+use crate::utils::names::display_member;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for StaticMethodCall<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let call = StaticCall {
+            class: self.class,
+            method: &self.method,
+            argument_list: &self.argument_list,
+            span: self.span(),
+        };
+
+        analyze_static_method_call(context, block_context, artifacts, call)
+    }
+}
+
+/// Analyzes a static method call from its parts, whether PHP wrote it as `Class::m()` or PHP# as `Class.m()`.
+#[allow(clippy::expect_used)]
+pub(super) fn analyze_static_method_call<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    call: StaticCall<'_, 'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    if context.plugin_registry.has_static_method_call_hooks() {
+        let mut hook_context = HookContext::new(context, block_context, artifacts);
+        let result = context.plugin_registry.before_static_method_call(&call, &mut hook_context)?;
+        for reported in hook_context.take_issues() {
+            context.collector.report_with_code(reported.code, reported.issue);
+        }
+
+        match result {
+            ExpressionHookResult::Continue => {}
+            ExpressionHookResult::Skip => {
+                return Ok(());
+            }
+            ExpressionHookResult::SkipWithType(ty) => {
+                artifacts.set_expression_type(&call.span, ty);
+                return Ok(());
+            }
+        }
+    }
+
+    if block_context.flags.collect_initializations()
+        && let Expression::Parent(_) = call.class
+        && let ClassLikeMemberSelector::Identifier(method_ident) = call.method
+    {
+        if method_ident.value.eq_ignore_ascii_case(b"__construct") {
+            block_context.flags.set_calls_parent_constructor(true);
+        } else {
+            let method_name = mago_word::ascii_lowercase_word(method_ident.value);
+            let parent_meta = block_context
+                .scope
+                .get_class_like()
+                .and_then(|m| m.direct_parent_class)
+                .and_then(|p| context.codebase.get_class_like(p.as_bytes()));
+            if let Some(parent_meta) = parent_meta
+                && context.is_class_initializer_for(parent_meta, method_name)
+            {
+                block_context.calls_parent_initializer = Some(method_name);
+            }
+        }
+    }
+
+    let mut method_resolution =
+        resolve_static_method_targets(context, block_context, artifacts, call.class, call.method, call.span)?;
+    let undocumented_template_result =
+        (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
+
+    let mut invocation_targets = vec![];
+    for resolved_method in method_resolution.resolved_methods {
+        let metadata = context
+            .codebase
+            .get_class_like(resolved_method.classname.as_bytes())
+            .expect("class-like metadata should exist for resolved method");
+
+        let method_metadata = context
+            .codebase
+            .get_method_by_id(&resolved_method.method_identifier)
+            .expect("method metadata should exist for resolved method");
+
+        let method_display = display_member(
+            context,
+            resolved_method.method_identifier.get_class_name(),
+            resolved_method.method_identifier.get_method_name(),
+        );
+        crate::utils::availability::check_method_availability(context, method_metadata, &method_display, call.span);
+
+        let method_target_context = MethodTargetContext {
+            invocation_kind: MethodInvocationKind::Static,
+            declaring_method_id: Some(resolved_method.method_identifier),
+            class_like_metadata: metadata,
+            class_type: resolved_method.static_class_type,
+            declaring_object_type: resolved_method.declaring_object,
+        };
+
+        invocation_targets.push(InvocationTarget::FunctionLike {
+            identifier: FunctionLikeIdentifier::Method(
+                resolved_method.method_identifier.get_class_name(),
+                resolved_method.method_identifier.get_method_name(),
+            ),
+            metadata: method_metadata,
+            inferred_return_type: None,
+            effective_signature: None,
+            method_context: Some(method_target_context),
+            span: call.span,
+        });
+    }
+
+    if !method_resolution.unresolved_methods.is_empty() {
+        method_resolution.has_invalid_target |= prepare_unresolved_method_targets(
+            context,
+            artifacts,
+            std::mem::take(&mut method_resolution.unresolved_methods),
+            InvocationArgumentsSource::ArgumentList(call.argument_list),
+            call.span,
+            MethodInvocationKind::Static,
+            &mut invocation_targets,
+        )?;
+    }
+
+    let has_resolved_methods = !invocation_targets.is_empty();
+
+    record_external_method_call(context, artifacts, &invocation_targets, call.span);
+    if !method_resolution.undocumented_methods.is_empty() {
+        record_external_method_call_targets(
+            context,
+            artifacts,
+            method_resolution.undocumented_methods.iter().map(|method| (method.classname, method.method_name)),
+            call.span,
+        );
+    }
+
+    let class_has_nullsafe_null = artifacts.get_expression_type(call.class).is_some_and(|t| t.has_nullsafe_null());
+
+    if has_resolved_methods || method_resolution.undocumented_methods.is_empty() {
+        analyze_invocation_targets(
+            context,
+            block_context,
+            artifacts,
+            method_resolution.template_result,
+            invocation_targets,
+            InvocationArgumentsSource::ArgumentList(call.argument_list),
+            call.span,
+            None,
+            method_resolution.has_invalid_target,
+            method_resolution.encountered_mixed,
+            expression_is_nullsafe(call.class) || method_resolution.encountered_null,
+            class_has_nullsafe_null,
+        )?;
+    }
+
+    if !method_resolution.undocumented_methods.is_empty() {
+        analyze_undocumented_method_return_type(
+            context,
+            block_context,
+            artifacts,
+            method_resolution.undocumented_methods,
+            undocumented_template_result.as_ref().expect("undocumented calls have a template result"),
+            call.argument_list,
+            call.span,
+            MethodInvocationKind::Static,
+            !has_resolved_methods,
+        )?;
+    }
+
+    if context.plugin_registry.has_static_method_call_hooks() {
+        let mut hook_context = HookContext::new(context, block_context, artifacts);
+        context.plugin_registry.after_static_method_call(&call, &mut hook_context)?;
+        for reported in hook_context.take_issues() {
+            context.collector.report_with_code(reported.code, reported.issue);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::code::IssueCode;
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = calling_non_static_method_statically_is_ok,
+        code = indoc! {"
+            <?php
+
+            class Example {
+                private string $value = '';
+
+                function doWork(): void {
+                    $something = self::getSomething(); // Ok
+                    $something .= $this->getSomething(); // Ok
+                    $something .= Example::getSomething(); // Ok
+                    $something .= static::getSomething(); // Ok
+
+                    echo 'Doing work with: ' . $something;
+                }
+
+                function getSomething(): string {
+                    return $this->value;
+                }
+            }
+
+            class SubExample extends Example {
+                function doWork(): void {
+                    $something = self::getSomething(); // Ok
+                    $something .= $this->getSomething(); // Ok
+                    $something .= Example::getSomething(); // Ok
+                    $something .= SubExample::getSomething(); // Ok
+                    $something .= static::getSomething(); // Ok
+                    $something .= parent::getSomething(); // Ok
+
+                    echo 'Doing work with: ' . $something;
+                }
+            }
+
+            trait TraitExample {
+                function doWork(): void {
+                    $something = self::getSomething(); // Ok
+                    $something .= $this->getSomething(); // Ok
+                    $something .= static::getSomething(); // Ok
+
+                    echo 'Doing work with: ' . $something;
+                }
+
+                function getSomething(): string {
+                    return 'Trait value';
+                }
+            }
+
+            class TraitUser {
+                use TraitExample;
+
+                function doWorkToo(): void {
+                    $something = self::getSomething(); // Ok
+                    $something .= $this->getSomething(); // Ok
+                    $something .= TraitUser::getSomething(); // Ok
+                    $something .= static::getSomething(); // Ok
+
+                    echo 'Doing work with: ' . $something;
+                }
+            }
+
+            $e = new Example();
+            $s = new SubExample();
+            $t = new TraitUser();
+
+            $e->doWork();
+            $s->doWork();
+            $t->doWork();
+            $t->doWorkToo();
+        "}
+    }
+
+    test_analysis! {
+        name = calling_static_method_on_interface_string,
+        code = indoc! {"
+            <?php
+
+            interface Example {
+                public static function doTheThing(): void;
+
+                public static function getSomeValue(): int;
+            }
+
+            /**
+             * @param array<class-string<Example>> $examples
+             *
+             * @return array<string, int>
+             */
+            function process(array $examples): array {
+                $result = [];
+                foreach ($examples as $example) {
+                    $example::doTheThing();
+                    $value = $example::getSomeValue();
+
+                    $result[$example] = $value;
+                }
+
+                return $result;
+            }
+        "},
+        issues = [
+            IssueCode::PossiblyStaticAccessOnInterface,
+            IssueCode::PossiblyStaticAccessOnInterface,
+        ]
+    }
+
+    test_analysis! {
+        name = calling_static_method_on_interface_name,
+        code = indoc! {"
+            <?php
+
+            interface Example {
+                public static function doTheThing(): void;
+
+                public static function getSomeValue(): int;
+            }
+
+            Example::doTheThing();
+
+            echo Example::getSomeValue();
+        "},
+        issues = [
+            IssueCode::StaticAccessOnInterface,
+            IssueCode::StaticAccessOnInterface,
+            IssueCode::MixedArgument,
+        ]
+    }
+}

@@ -1,0 +1,452 @@
+use std::rc::Rc;
+
+use foldhash::HashMap;
+
+use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
+use mago_codex::context::ScopeContext;
+use mago_codex::ttype::get_mixed;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_syntax::cst::Closure;
+use mago_word::word;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::statement::function_like::FunctionLikeBody;
+use crate::statement::function_like::analyze_function_like;
+use crate::statement::function_like::capture_lambda_locals;
+use crate::statement::function_like::merge_captured_references;
+use crate::statement::function_like::receiver_class;
+use crate::statement::function_like::resolve_closure_like_type;
+use crate::statement::function_like::unused_parameter;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Closure<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let s = self.span();
+
+        let Some(function_metadata) = context.codebase.get_closure_at(context.source_file, s) else {
+            return Err(AnalysisError::InternalError(
+                format!(
+                    "Metadata for closure defined in `{}` at offset {} not found.",
+                    BytesDisplay(&context.source_file.name),
+                    s.start.offset
+                ),
+                s,
+            ));
+        };
+
+        let mut scope = ScopeContext::new(block_context.scope.get_reference_origin());
+        scope.set_function_like(Some(function_metadata));
+        if let Some(receiver) = &function_metadata.refined_this_type {
+            scope.set_class_like(receiver_class(context, &receiver.type_union));
+            scope.set_static(false);
+        } else if let Some(bind_scope) = &artifacts.closure_bind_scope {
+            if let Some(class_name) = bind_scope.class_name {
+                scope.set_class_like(context.codebase.get_class_like(class_name.as_bytes()));
+            } else {
+                scope.set_class_like(block_context.scope.get_class_like());
+            }
+            scope.set_static(!bind_scope.has_this);
+        } else {
+            scope.set_class_like(block_context.scope.get_class_like());
+            scope.set_static(self.r#static.is_some());
+        }
+
+        let mut inner_block_context = BlockContext::new(scope, context.settings.register_super_globals);
+
+        let mut variable_spans = HashMap::default();
+        if let Some(use_clause) = self.use_clause.as_ref() {
+            for use_variable in &use_clause.variables {
+                let variable_bytes = use_variable.variable.name;
+                let variable = BytesDisplay(variable_bytes);
+                let is_by_reference = use_variable.ampersand.is_some();
+
+                // has_variable() has side effects, so use contains_key() directly.
+                if !is_by_reference || block_context.locals.contains_key(&word(variable_bytes)) {
+                    let was_inside_general_use = block_context.flags.inside_general_use();
+                    block_context.flags.set_inside_general_use(true);
+                    use_variable.variable.analyze(context, block_context, artifacts)?;
+                    block_context.flags.set_inside_general_use(was_inside_general_use);
+                }
+
+                let variable_span = use_variable.variable.span;
+
+                if let Some(previous_span) = variable_spans.get(&variable_bytes) {
+                    context.collector.report_with_code(
+                        IssueCode::DuplicateClosureUseVariable,
+                        Issue::error(format!("Variable `{variable}` is imported multiple times into the closure.",))
+                            .with_annotation(
+                                Annotation::primary(variable_span)
+                                    .with_message(format!("Duplicate import of `{variable}`")),
+                            )
+                            .with_annotation(
+                                Annotation::secondary(*previous_span)
+                                    .with_message(format!("Variable `{variable}` was already imported here")),
+                            )
+                            .with_note(
+                                "A variable can only be imported into a closure's scope once via the `use` clause.",
+                            )
+                            .with_help(format!("Remove the redundant import of `{variable}`.")),
+                    );
+                }
+
+                if !is_by_reference && !block_context.has_variable(variable_bytes) {
+                    context.collector.report_with_code(
+                        IssueCode::UndefinedVariableInClosureUse,
+                        Issue::error(format!(
+                            "Cannot import undefined variable `{variable}` into closure.",
+                        ))
+                        .with_annotation(
+                            Annotation::primary(use_variable.variable.span)
+                                .with_message(format!("Variable `{variable}` is not defined in the parent scope")),
+                        )
+                        .with_note(
+                            "Only variables that exist in the scope where the closure is defined can be captured using the `use` keyword."
+                        )
+                        .with_help(format!(
+                            "Ensure `{variable}` is defined and assigned a value in the parent scope before the closure definition, or remove it from the `use` clause.",
+                        )),
+                    );
+                }
+
+                variable_spans.insert(variable_bytes, variable_span);
+
+                let variable_atom = word(variable_bytes);
+                let mut variable_type =
+                    block_context.locals.get(&variable_atom).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
+
+                if is_by_reference {
+                    let inner_variable_type = Rc::make_mut(&mut variable_type);
+                    inner_variable_type.set_by_reference(true);
+
+                    inner_block_context.references_to_external_scope.insert(variable_atom);
+                }
+
+                inner_block_context.locals.insert(variable_atom, Rc::clone(&variable_type));
+                inner_block_context.variables_possibly_in_scope.insert(variable_atom);
+
+                for (variable_id, variable_type) in &block_context.locals {
+                    let Some(stripped_variable_id) = variable_id.as_bytes().strip_prefix(variable_bytes) else {
+                        continue;
+                    };
+
+                    if stripped_variable_id.starts_with(b"[") || stripped_variable_id.starts_with(b"-") {
+                        inner_block_context.locals.insert(*variable_id, Rc::clone(variable_type));
+                        inner_block_context.variables_possibly_in_scope.insert(*variable_id);
+                    }
+                }
+            }
+        }
+
+        if context.dialect.is_sharp() {
+            capture_lambda_locals(context, s, block_context, &mut inner_block_context);
+        }
+
+        if !context.settings.allow_implicit_pipe_callable_types || !block_context.flags.inside_pipe_callable() {
+            for parameter in &self.parameter_list.parameters {
+                crate::utils::missing_type_hints::check_parameter_type_hint(
+                    context,
+                    block_context.scope.get_class_like(),
+                    function_metadata,
+                    parameter,
+                );
+            }
+
+            crate::utils::missing_type_hints::check_return_type_hint(
+                context,
+                block_context.scope.get_class_like(),
+                function_metadata,
+                b"closure",
+                self.return_type_hint.as_ref(),
+                self.span(),
+            );
+        }
+
+        // Check for imprecise type hints (bare `array` or `iterable`)
+        for (i, parameter) in self.parameter_list.parameters.iter().enumerate() {
+            crate::utils::missing_type_hints::check_imprecise_parameter_type_hint(
+                context,
+                function_metadata,
+                parameter,
+                i,
+            );
+        }
+
+        crate::utils::missing_type_hints::check_imprecise_return_type_hint(
+            context,
+            function_metadata,
+            b"closure",
+            self.return_type_hint.as_ref(),
+        );
+
+        let inferred_parameter_types = artifacts.inferred_parameter_types.take();
+        let inner_artifacts = analyze_function_like(
+            context,
+            artifacts,
+            &mut inner_block_context,
+            function_metadata,
+            &self.parameter_list,
+            FunctionLikeBody::Statements(self.body.statements.as_slice(), self.body.span()),
+            inferred_parameter_types,
+        )?;
+
+        let has_returned = inner_block_context.flags.has_returned();
+        merge_captured_references(context, block_context, inner_block_context);
+
+        let resulting_closure = resolve_closure_like_type(context, s, function_metadata, has_returned, inner_artifacts);
+
+        artifacts.set_expression_type(self, resulting_closure);
+
+        if context.settings.find_unused_parameters {
+            unused_parameter::check_unused_params(
+                function_metadata,
+                self.parameter_list.parameters.as_slice(),
+                FunctionLikeBody::Statements(self.body.statements.as_slice(), self.body.span()),
+                context,
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::code::IssueCode;
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = inferred_closure_return_type,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @param (Closure(): 'Hello, World!') $fn
+             */
+            function x(Closure $fn)
+            {
+                echo $fn();
+            }
+
+            x(function (): string { return 'Hello, World!'; });
+            x(function () { return 'Hello, World!'; });
+        "}
+    }
+
+    test_analysis! {
+        name = closure_use,
+        code = indoc! {"
+            <?php
+
+            /**
+             * Converts the given value into a tuple.
+             *
+             * @template T
+             *
+             * @param T $value
+             *
+             * @return array{0: T, 1: T}
+             */
+            function to_tuple(mixed $value): array
+            {
+                return [$value, $value];
+            }
+
+            /**
+             * @template T
+             * @template U
+             *
+             * @param list<T> $list
+             * @param (Closure(T): U) $callback
+             *
+             * @return list<U>
+             */
+            function map_list(array $list, Closure $callback): array
+            {
+                $result = [];
+                foreach ($list as $item) {
+                    $result[] = $callback($item);
+                }
+
+                return $result;
+            }
+
+            function i_take_int(int $_i): void
+            {
+            }
+
+            $integers = [1, 2, 3, 4, 5];
+            $tuples = map_list(
+                $integers,
+                /**
+                 * @param int $value
+                 *
+                 * @return array{0: int, 1: int}
+                 */
+                function (mixed $value, $_f = null) use ($integers): array {
+                    return [$value, $value];
+                },
+            );
+
+            foreach ($tuples as $tuple) {
+                i_take_int($tuple[0]);
+                i_take_int($tuple[1]);
+                i_take_int($tuple); // error.
+            }
+        "},
+        issues = [
+            IssueCode::InvalidArgument,
+        ]
+    }
+
+    test_analysis! {
+        name = get_current_closure,
+        code = indoc! {"
+            <?php
+
+            class Closure {
+                public static function getCurrent(): Closure
+                {
+                    exit(0);
+                }
+            }
+
+            $fibaonacci =
+                function (int $n): int {
+                    if ($n <= 1) {
+                        return $n;
+                    }
+
+                    $fibaonacci = Closure::getCurrent();
+
+                    return $fibaonacci($n - 1) + $fibaonacci($n - 2);
+                };
+
+            echo $fibaonacci(10);
+        "}
+    }
+
+    test_analysis! {
+        name = get_current_closure_inside_function,
+        code = indoc! {"
+            <?php
+
+            class Closure {
+                public static function getCurrent(): Closure
+                {
+                    exit(0);
+                }
+            }
+
+            function fibaonacci(int $n): int {
+                if ($n <= 1) {
+                    return $n;
+                }
+
+                $fibaonacci = Closure::getCurrent();
+
+                return $fibaonacci($n - 1) + $fibaonacci($n - 2);
+            }
+
+            echo fibaonacci(10);
+        "},
+        issues = [
+            IssueCode::InvalidStaticMethodCall,
+            IssueCode::ImpossibleAssignment,
+            IssueCode::UnevaluatedCode,
+        ]
+    }
+
+    test_analysis! {
+        name = get_current_closure_inside_method,
+        code = indoc! {"
+            <?php
+
+            class Closure {
+                public static function getCurrent(): Closure
+                {
+                    exit(0);
+                }
+            }
+
+            class Foo {
+                public function fibaonacci(int $n): int {
+                    if ($n <= 1) {
+                        return $n;
+                    }
+
+                    $fibaonacci = Closure::getCurrent();
+
+                    return $fibaonacci($n - 1) + $fibaonacci($n - 2);
+                }
+            }
+
+            echo (new Foo())->fibaonacci(10);
+        "},
+        issues = [
+            IssueCode::InvalidStaticMethodCall,
+            IssueCode::ImpossibleAssignment,
+            IssueCode::UnevaluatedCode,
+        ]
+    }
+
+    test_analysis! {
+        name = get_current_closure_in_global_scope,
+        code = indoc! {"
+            <?php
+
+            class Closure {
+                public static function getCurrent(): Closure
+                {
+                    exit(0);
+                }
+            }
+
+            $_fn = Closure::getCurrent();
+        "},
+        issues = [
+            IssueCode::InvalidStaticMethodCall,
+            IssueCode::ImpossibleAssignment,
+        ]
+    }
+
+    test_analysis! {
+        name = undefined_reference_capture,
+        code = indoc! {"
+            <?php
+
+            $fn = function () use (&$value) { $value = 1; };
+            $fn();
+            echo $value;
+        "},
+    }
+
+    test_analysis! {
+        name = undefined_value_capture,
+        code = indoc! {"
+            <?php
+
+            $fn = function () use ($value) { $value = 1; };
+        "},
+        issues = [
+            IssueCode::UndefinedVariable,
+            IssueCode::UndefinedVariableInClosureUse,
+        ]
+    }
+}

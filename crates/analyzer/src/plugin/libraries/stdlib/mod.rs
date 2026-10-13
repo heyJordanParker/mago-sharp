@@ -1,0 +1,80 @@
+//! PHP standard library providers.
+
+pub mod array;
+pub mod closure;
+pub mod cookie;
+pub mod r#enum;
+pub mod filter;
+pub mod json;
+pub mod math;
+pub mod object;
+pub mod pcre;
+pub mod random;
+pub mod reflection;
+pub mod session;
+pub mod spl;
+pub mod string;
+pub mod url;
+
+use crate::plugin::Plugin;
+use crate::plugin::PluginMeta;
+use crate::plugin::PluginRegistry;
+
+/// Plugin providing type inference for PHP standard library functions.
+pub struct StdlibPlugin;
+
+static META: PluginMeta = PluginMeta::new(
+    "stdlib",
+    "PHP Standard Library",
+    "Type providers for PHP built-in functions (strlen, array_*, json_*, etc.)",
+    &["standard", "std", "php-stdlib"],
+    true,
+);
+
+impl Plugin for StdlibPlugin {
+    fn meta(&self) -> &'static PluginMeta {
+        &META
+    }
+
+    fn register(&self, registry: &mut PluginRegistry) {
+        registry.register_function_provider(string::StrlenProvider);
+        registry.register_function_provider(string::SprintfProvider);
+        registry.register_function_provider(json::JsonEncodeProvider);
+        registry.register_function_provider(random::RandProvider);
+        registry.register_function_provider(random::RandomIntProvider);
+        registry.register_function_provider(random::RandomBytesProvider);
+        registry.register_function_provider(spl::IteratorToArrayProvider);
+        registry.register_function_provider(array::ArrayColumnProvider);
+        registry.register_function_provider(array::ArrayFilterProvider);
+        registry.register_function_provider(array::ArrayFlipProvider);
+        registry.register_function_provider(array::ArrayIsListProvider);
+        registry.register_function_provider(array::ArrayKeyExistsProvider);
+        registry.register_function_provider(array::ArrayMapProvider);
+        registry.register_function_provider(array::ArrayMergeProvider);
+        registry.register_function_provider(array::ArrayPadProvider);
+        registry.register_function_provider(array::CompactProvider);
+        registry.register_function_provider(object::GetObjectVarsProvider);
+        registry.register_function_provider(url::ParseUrlProvider);
+        registry.register_function_provider(filter::FilterVarProvider);
+        registry.register_function_provider(filter::FilterInputProvider);
+        registry.register_function_provider(math::MinProvider);
+        registry.register_function_provider(math::MaxProvider);
+        registry.register_function_provider(math::AbsProvider);
+        registry.register_function_provider(array::RangeProvider);
+        registry.register_function_provider(pcre::PregMatchPatternProvider);
+
+        registry.register_function_assertion_provider(array::ArrayAllAssertionProvider);
+
+        registry.register_function_call_hook(cookie::SetCookieHook);
+        registry.register_function_call_hook(session::SessionSetSaveHandlerHook);
+        registry.register_function_call_hook(session::SessionSetCookieParamsHook);
+        registry.register_function_call_hook(math::IntdivHook);
+
+        registry.register_method_provider(closure::ClosureGetCurrentProvider);
+        registry.register_method_provider(r#enum::EnumCasesProvider);
+        registry.register_method_provider(reflection::ReflectionMethodGetNameProvider);
+        registry.register_method_provider(reflection::ReflectionMethodInvokeProvider);
+
+        registry.register_method_assertion_provider(reflection::ReflectionClassHasMethodAssertionProvider);
+    }
+}

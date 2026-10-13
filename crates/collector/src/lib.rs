@@ -1,0 +1,846 @@
+use foldhash::HashMap;
+use foldhash::HashSet;
+use mago_allocator::prelude::*;
+
+use mago_database::file::File;
+use mago_database::file::FileId;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::IssueCollection;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Program;
+use mago_text_edit::TextEdit;
+use mago_text_edit::TextRange;
+
+use crate::pragma::Pragma;
+use crate::pragma::PragmaKind;
+use crate::walk::attach_pragma_scopes;
+
+pub mod pragma;
+
+mod walk;
+
+#[inline]
+fn trim_start_byte(s: &[u8], byte: u8) -> &[u8] {
+    let mut i = 0;
+    while i < s.len() && s[i] == byte {
+        i += 1;
+    }
+    &s[i..]
+}
+
+#[inline]
+fn check_non_pragma_line(line: &[u8]) -> bool {
+    let trimmed = line.trim_ascii();
+    let without_marker = trim_start_byte(trimmed, b'*').trim_ascii();
+    if without_marker.is_empty() {
+        return false;
+    }
+    if without_marker.starts_with(b"@mago-ignore") || without_marker.starts_with(b"@mago-expect") {
+        return false;
+    }
+    true
+}
+
+/// A stateful collector for diagnostics (`Issue`s) within a specific category (e.g., "lint", "analysis").
+///
+/// It is responsible for:
+///
+/// - Collecting issues reported by various tools.
+/// - Filtering issues based on configuration or suppression pragmas (`@mago-ignore`, `@mago-expect`).
+/// - Reporting unused or unfulfilled pragmas.
+#[derive(Debug)]
+pub struct Collector<'ctx, 'arena, A>
+where
+    A: Arena,
+{
+    /// The arena used for allocation of issues and pragmas.
+    arena: &'arena A,
+    /// The source file from which this collector was created.
+    file: &'ctx File,
+    /// All pragmas that have not yet been applied to a node.
+    pragmas: Vec<'arena, Pragma<'arena>, A>,
+    /// The collection of issues that have been reported and not suppressed.
+    issues: IssueCollection,
+    /// A stack of issue collections for recording issues speculatively.
+    recordings: Vec<'arena, IssueCollection, A>,
+    /// A list of issue codes that should be silently ignored.
+    disabled_codes: Vec<'arena, &'static str, A>,
+    /// An optional list of issue codes that are currently active (e.g., from `--only` flag).
+    /// If set, unfulfilled pragmas for codes not in this list will not be reported.
+    active_codes: Option<Vec<'arena, &'arena str, A>>,
+    /// A map of legacy issue codes to their new, canonical counterparts.
+    aliases: HashMap<&'static str, &'static str>,
+    /// An optional URL template for generating links to issue documentation.
+    link_template: Option<&'static str>,
+    /// If true, skip reporting unfulfilled-expect warnings.
+    /// Used during incremental/diff analysis where some symbols are skipped.
+    skip_unfulfilled_expect: bool,
+}
+
+/// Owned pragma state retained while diagnostics may still arrive after a file's
+/// primary analysis has completed.
+#[derive(Debug, Clone)]
+pub struct DeferredPragmas {
+    file_id: FileId,
+    pragmas: std::vec::Vec<OwnedPragma>,
+    disabled_codes: std::vec::Vec<&'static str>,
+    active_codes: Option<std::vec::Vec<String>>,
+    aliases: HashMap<&'static str, &'static str>,
+    link_template: Option<&'static str>,
+    skip_unfulfilled_expect: bool,
+}
+
+#[derive(Debug, Clone)]
+struct OwnedPragma {
+    kind: PragmaKind,
+    span: Span,
+    trivia_span: Span,
+    scope_span: Option<Span>,
+    start_line: u32,
+    end_line: u32,
+    own_line: bool,
+    category: String,
+    code: String,
+    code_span: Span,
+    count_span: Option<Span>,
+    expected_matches: u16,
+    matches: u16,
+    description: String,
+}
+
+impl<'ctx, 'arena, A> Collector<'ctx, 'arena, A>
+where
+    A: Arena,
+{
+    /// Creates a new `Collector` from a slice of trivia.
+    ///
+    /// This is the primary constructor. It pre-parses the given trivia to find pragmas
+    /// relevant to the specified category. This is useful when the full program CST is not
+    /// needed or available.
+    ///
+    /// # Parameters
+    ///
+    /// - `arena`: The memory arena for allocations.
+    /// - `file`: The source file associated with this collector.
+    /// - `program`: The CST of the entire program, used to attach pragma scopes.
+    /// - `categories`: The categories of pragmas to extract (e.g., "lint", "analysis").
+    #[inline]
+    pub fn new<'ast>(
+        arena: &'arena A,
+        file: &'ctx File,
+        program: &'ast Program<'arena>,
+        categories: &'static [&'static str],
+    ) -> Self {
+        let mut collector = Self {
+            arena,
+            file,
+            pragmas: Pragma::extract(arena, file, program.trivia.as_slice(), categories),
+            issues: IssueCollection::new(),
+            recordings: Vec::new_in(arena),
+            disabled_codes: Vec::new_in(arena),
+            active_codes: None,
+            aliases: HashMap::default(),
+            link_template: None,
+            skip_unfulfilled_expect: false,
+        };
+
+        attach_pragma_scopes(&mut collector, program);
+
+        collector
+    }
+
+    /// Sets the issue code aliases.
+    ///
+    /// This allows old issue codes used in pragmas to be mapped to their new,
+    /// canonical counterparts. The map should be from `alias -> canonical_code`.
+    #[inline]
+    pub fn set_aliases<'aliases>(&mut self, aliases: impl IntoIterator<Item = &'aliases (&'static str, &'static str)>) {
+        self.aliases = aliases.into_iter().copied().collect();
+    }
+
+    /// Sets the link template for generating documentation URLs for issues.
+    ///
+    /// The template should contain a `{code}` placeholder which will be replaced
+    /// by the issue's code.
+    #[inline]
+    pub fn set_link_template(&mut self, template: &'static str) {
+        self.link_template = Some(template);
+    }
+
+    /// Disables unfulfilled-expect warnings.
+    ///
+    /// Use this during incremental/diff analysis where some symbols may be
+    /// skipped, causing their expected pragmas to appear unfulfilled.
+    #[inline]
+    pub fn set_skip_unfulfilled_expect(&mut self, skip: bool) {
+        self.skip_unfulfilled_expect = skip;
+    }
+
+    /// Overwrites the list of disabled issue codes.
+    #[inline]
+    pub fn set_disabled_codes(&mut self, codes: impl IntoIterator<Item = &'static str>) {
+        self.disabled_codes = codes.into_iter().collect_in(self.arena);
+    }
+
+    /// Adds new codes to the list of disabled issue codes.
+    #[inline]
+    pub fn add_disabled_codes(&mut self, codes: impl IntoIterator<Item = &'static str>) {
+        self.disabled_codes.extend(codes);
+    }
+
+    /// Sets the list of active issue codes.
+    ///
+    /// When set, only pragmas for codes in this list will be required to be fulfilled.
+    /// Pragmas for codes not in this list will not trigger "unfulfilled" warnings.
+    /// This is useful when using filters like `--only` to check specific rules.
+    ///
+    #[inline]
+    pub fn set_active_codes(&mut self, codes: &[String]) {
+        self.active_codes = Some(
+            codes
+                .iter()
+                .map(|s| {
+                    let bytes = self.arena.alloc_slice_copy(s.as_bytes());
+
+                    // SAFETY: `bytes` was just copied from `s.as_bytes()`, so it carries the same
+                    // valid UTF-8 byte sequence as the source `&str`.
+                    unsafe { std::str::from_utf8_unchecked(bytes) }
+                })
+                .collect_in(self.arena),
+        );
+    }
+
+    /// Reports an issue without checking for suppression pragmas.
+    ///
+    /// This should be used for issues that must always be reported, such as internal errors
+    /// or issues related to pragmas themselves.
+    ///
+    /// If a recording is active (see `start_recording`), the issue is added to the
+    /// current recording. Otherwise, it is added to the main issue collection.
+    #[inline]
+    pub fn force_report(&mut self, mut issue: Issue) {
+        issue.annotations.retain(|annotation| !annotation.span.file_id.is_zero());
+
+        if let (Some(template), Some(code)) = (self.link_template, issue.code.as_deref()) {
+            let link = template.replace("{code}", code);
+
+            issue = issue.with_link(link);
+        }
+
+        if let Some(recording) = self.recordings.last_mut() {
+            recording.push(issue);
+        } else {
+            self.issues.push(issue);
+        }
+    }
+
+    /// Reports an issue, returning `true` if it was added or `false` if it was suppressed.
+    #[inline]
+    pub fn report(&mut self, issue: Issue) -> bool {
+        let primary_span = issue.annotations.iter().find(|ann| ann.kind.is_primary()).map(|ann| ann.span);
+
+        if let Some(code) = issue.code.as_deref() {
+            if self.disabled_codes.contains(&code) {
+                // This code is disabled, do not report it.
+                return false;
+            }
+            // Code is enabled; fall through to the suppression checks below.
+        } else if cfg!(debug_assertions) {
+            let mut missing_code_issue = Issue::error("Internal: Diagnostic is missing a code.")
+                .with_code("missing-code")
+                .with_note("This diagnostic was reported without a unique code, which is required by the collector.")
+                .with_help("Please report this issue to the Mago team.")
+                .with_link("https://github.com/heyJordanParker/mago-sharp");
+
+            if let Some(span) = primary_span {
+                missing_code_issue = missing_code_issue.with_annotation(
+                    Annotation::primary(span).with_message("This diagnostic was reported without a unique code."),
+                );
+            }
+
+            self.force_report(missing_code_issue);
+
+            return false;
+        } else {
+            // Issue has no code and we're in release mode; allow it through to the suppression checks.
+        }
+
+        if let Some(span) = primary_span
+            && let Some(code) = &issue.code
+            && !self.is_recording()
+            && let Some(pragma) = self.suppressing_pragma(span, code)
+        {
+            if issue.can_be_suppressed_in(&self.file.name) {
+                return false;
+            }
+
+            self.force_report(Issue::unsuppressible_error([
+                Annotation::primary(pragma).with_message("This pragma can't hide the error."),
+                Annotation::secondary(span).with_message("This error stays reported."),
+            ]));
+        }
+
+        self.force_report(issue);
+        true
+    }
+
+    /// Reports an issue with a specific code, returning `true` if it was added.
+    ///
+    /// This is a convenience method that is equivalent to `report(issue.with_code(code))`.
+    #[inline]
+    pub fn report_with_code(&mut self, code: impl Into<String>, issue: Issue) -> bool {
+        self.report(issue.with_code(code))
+    }
+
+    /// Extends the collector with issues from an issue iterator.
+    ///
+    /// Each issue from the provided iterator is passed through the `report` method,
+    /// which means they will be subject to the same suppression and filtering logic
+    /// as individually reported issues.
+    #[inline]
+    pub fn extend(&mut self, issues: impl IntoIterator<Item = Issue>) {
+        for issue in issues {
+            self.report(issue);
+        }
+    }
+
+    /// Reports an issue with suggested edits, returning `true` if it was added.
+    ///
+    /// This is a convenience method that builds a vector of `TextEdit` from the provided closure
+    /// and attaches it to the issue before calling `report`.
+    #[inline]
+    pub fn propose<F>(&mut self, mut issue: Issue, f: F) -> bool
+    where
+        F: FnOnce(&mut std::vec::Vec<TextEdit>),
+    {
+        let mut edits = std::vec::Vec::new();
+        f(&mut edits);
+        if !edits.is_empty() {
+            issue = issue.with_file_edits(self.file.id, edits);
+        }
+
+        self.report(issue)
+    }
+
+    /// Reports an issue with a specific code and suggested edits, returning `true` if it was added.
+    ///
+    /// This is a convenience method that is equivalent to `propose(issue.with_code(code), f)`.
+    #[inline]
+    pub fn propose_with_code<F>(&mut self, code: impl Into<String>, issue: Issue, f: F) -> bool
+    where
+        F: FnOnce(&mut std::vec::Vec<TextEdit>),
+    {
+        self.propose(issue.with_code(code), f)
+    }
+
+    /// Records all issues generated by a callback without modifying the collector's state.
+    ///
+    /// This method allows you to run a closure that reports issues and capture them
+    /// in a `IssueCollection` without consuming pragmas or permanently adding the issues
+    /// to the main collector. This is useful for speculative analysis.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let issues = collector.record(|c| {
+    ///     c.report(Issue::error("speculative error"));
+    /// });
+    ///
+    /// // `issues` contains the speculative error, but the main collector is unchanged.
+    /// ```
+    #[inline]
+    pub fn record<F, T>(&mut self, f: F) -> (T, IssueCollection)
+    where
+        F: FnOnce(&mut Self) -> T,
+    {
+        self.start_recording();
+        let result = f(self);
+        let recorded_issues = self.finish_recording().unwrap_or_default();
+
+        // Return the captured issues.
+        (result, recorded_issues)
+    }
+
+    /// Starts a new recording session for speculative analysis.
+    ///
+    /// Any issues reported after this call will be captured in a separate collection
+    /// instead of the main one. This is useful for temporarily capturing diagnostics
+    /// without affecting the final report. Recordings can be nested.
+    ///
+    /// Each call to `start_recording` should be paired with a call to `stop_recording`.
+    #[inline]
+    pub fn start_recording(&mut self) {
+        self.recordings.push(IssueCollection::new());
+    }
+
+    /// Checks if a recording session is currently active.
+    ///
+    /// Returns `true` if there is at least one recording in progress.
+    /// This is useful to determine if you can safely call `stop_recording`.
+    #[inline]
+    #[must_use]
+    pub fn is_recording(&self) -> bool {
+        !self.recordings.is_empty()
+    }
+
+    /// Finish the current recording session and returns the captured issues.
+    ///
+    /// Returns `None` if no recording session is active.
+    #[inline]
+    pub fn finish_recording(&mut self) -> Option<IssueCollection> {
+        self.recordings.pop()
+    }
+
+    /// Finalizes the collection process and returns an iterator over all generated issues.
+    ///
+    /// This method consumes the collector and performs final checks, generating new issues for:
+    ///
+    /// - Unfulfilled `@mago-expect` pragmas.
+    /// - Unused pragmas of any kind.
+    ///
+    /// Each issue includes a suggested `TextEdit` fix to remove the unused pragma text.
+    #[inline]
+    #[must_use]
+    pub fn finish(mut self) -> IssueCollection {
+        let mut issues = std::mem::take(&mut self.issues);
+
+        if self.skip_unfulfilled_expect {
+            self.pragmas.clear();
+
+            return issues;
+        }
+
+        let mut directive_has_used: HashMap<Span, bool> = HashMap::default();
+        let mut trivia_has_used: HashMap<Span, bool> = HashMap::default();
+        for pragma in self.pragmas.iter() {
+            let has_match = pragma.matches > 0 || self.is_pragma_skipped(pragma);
+
+            let entry = directive_has_used.entry(pragma.span).or_insert(false);
+            if has_match {
+                *entry = true;
+            }
+
+            let entry = trivia_has_used.entry(pragma.trivia_span).or_insert(false);
+            if has_match {
+                *entry = true;
+            }
+        }
+
+        let mut handled_directives: HashSet<Span> = HashSet::default();
+        let mut handled_trivias: HashSet<Span> = HashSet::default();
+
+        let pragmas = std::mem::replace(&mut self.pragmas, Vec::new_in(self.arena));
+        for pragma in pragmas {
+            if pragma.is_fulfilled() || self.is_pragma_skipped(&pragma) {
+                continue;
+            }
+
+            let has_used_sibling_codes = directive_has_used.get(&pragma.span).copied().unwrap_or(false);
+            let has_used_sibling_pragmas = trivia_has_used.get(&pragma.trivia_span).copied().unwrap_or(false);
+
+            let partial_count_edit = if pragma.matches > 0
+                && pragma.expected_matches > 1
+                && let Some(count_span) = pragma.count_span
+            {
+                Some(TextEdit::replace(
+                    TextRange::new(count_span.start_offset(), count_span.end_offset()),
+                    if pragma.matches == 1 { String::new() } else { format!("({})", pragma.matches) },
+                ))
+            } else {
+                None
+            };
+
+            let edit = if let Some(partial) = partial_count_edit {
+                Some(partial)
+            } else if has_used_sibling_codes {
+                Some(self.compute_code_deletion(&pragma))
+            } else if !has_used_sibling_pragmas
+                && !handled_trivias.contains(&pragma.trivia_span)
+                && !self.trivia_has_non_pragma_content(&pragma)
+            {
+                handled_trivias.insert(pragma.trivia_span);
+                handled_directives.insert(pragma.span);
+                Some(self.compute_comment_deletion(&pragma))
+            } else if !handled_directives.contains(&pragma.span) && !handled_trivias.contains(&pragma.trivia_span) {
+                handled_directives.insert(pragma.span);
+                Some(self.compute_directive_deletion(&pragma))
+            } else {
+                None
+            };
+
+            let primary_message = if pragma.expected_matches > 1 {
+                format!("This expect pragma was fulfilled {} of {} times.", pragma.matches, pragma.expected_matches,)
+            } else {
+                match pragma.kind {
+                    PragmaKind::Ignore => "This ignore pragma does not match any reported issue.".to_string(),
+                    PragmaKind::Expect => "This expect pragma was not fulfilled.".to_string(),
+                }
+            };
+
+            let mut issue = match pragma.kind {
+                PragmaKind::Ignore => Issue::note("This pragma was not used and may be removed.")
+                    .with_code("unused-pragma")
+                    .with_annotation(Annotation::primary(pragma.span).with_message(primary_message))
+                    .with_annotation(Annotation::secondary(pragma.code_span).with_message("...for this code"))
+                    .with_annotation(Annotation::secondary(pragma.trivia_span).with_message("...within this comment.")),
+                PragmaKind::Expect => {
+                    let title = if pragma.expected_matches > 1 {
+                        "This expect pragma was only partially fulfilled."
+                    } else {
+                        "This pragma was not used and may be removed."
+                    };
+
+                    Issue::warning(title)
+                        .with_code("unfulfilled-expect")
+                        .with_annotation(Annotation::primary(pragma.span).with_message(primary_message))
+                        .with_annotation(Annotation::secondary(pragma.code_span).with_message("...for this code"))
+                        .with_annotation(
+                            Annotation::secondary(pragma.trivia_span).with_message("...within this comment."),
+                        )
+                }
+            };
+
+            if let Some(edit) = edit {
+                issue = issue.with_edit(self.file.id, edit);
+            }
+
+            issues.push(issue);
+        }
+
+        issues
+    }
+
+    /// Defers unused and unfulfilled pragma diagnostics while preserving every
+    /// match already consumed by this collector.
+    ///
+    /// The returned state can reconcile diagnostics produced by project-wide
+    /// phases without reparsing the source file or losing counted pragma matches.
+    #[inline]
+    #[must_use]
+    pub fn defer(mut self) -> (IssueCollection, Option<DeferredPragmas>) {
+        let issues = std::mem::take(&mut self.issues);
+        if self.pragmas.is_empty() {
+            return (issues, None);
+        }
+
+        let pragmas = self.pragmas.iter().map(OwnedPragma::from).collect();
+        let disabled_codes = self.disabled_codes.iter().copied().collect();
+        let active_codes =
+            self.active_codes.as_ref().map(|codes| codes.iter().map(|code| (*code).to_owned()).collect());
+
+        (
+            issues,
+            Some(DeferredPragmas {
+                file_id: self.file.id,
+                pragmas,
+                disabled_codes,
+                active_codes,
+                aliases: self.aliases,
+                link_template: self.link_template,
+                skip_unfulfilled_expect: self.skip_unfulfilled_expect,
+            }),
+        )
+    }
+
+    /// Returns `true` if this pragma should be skipped (not reported) due to inactive codes.
+    fn is_pragma_skipped(&self, pragma: &Pragma<'arena>) -> bool {
+        pragma.kind == PragmaKind::Expect
+            && pragma.code != "all"
+            && self.active_codes.as_ref().is_some_and(|codes| !codes.contains(&pragma.code))
+    }
+
+    /// Computes a `TextEdit` to delete a single code from a comma-separated list
+    /// within a pragma directive (e.g., remove `bar` from `@mago-expect lint:foo,bar,baz`).
+    fn compute_code_deletion(&self, pragma: &Pragma<'arena>) -> TextEdit {
+        let contents = self.file.contents.as_ref();
+        let code_start = pragma.code_span.start_offset() as usize;
+        let code_end = pragma.code_span.end_offset() as usize;
+
+        let mut scan = code_start;
+        while scan > 0 {
+            scan -= 1;
+            match contents[scan] {
+                b',' => {
+                    return TextEdit::delete(TextRange::new(scan as u32, code_end as u32));
+                }
+                b' ' | b'\t' => {}
+                _ => break,
+            }
+        }
+
+        // No leading comma found → this is the first code. Try trailing comma.
+        let mut scan = code_end;
+        while scan < contents.len() {
+            match contents[scan] {
+                b',' => {
+                    scan += 1;
+                    while scan < contents.len() && matches!(contents[scan], b' ' | b'\t') {
+                        scan += 1;
+                    }
+
+                    let next_code = contents[scan..]
+                        .split(|byte| byte.is_ascii_whitespace() || *byte == b',')
+                        .next()
+                        .unwrap_or_default();
+                    let replacement =
+                        if next_code.contains(&b':') { String::new() } else { format!("{}:", pragma.category) };
+
+                    return TextEdit::replace(TextRange::new(code_start as u32, scan as u32), replacement);
+                }
+                b' ' | b'\t' => {
+                    scan += 1;
+                }
+                _ => break,
+            }
+        }
+
+        TextEdit::delete(TextRange::new(code_start as u32, code_end as u32))
+    }
+
+    /// Computes a `TextEdit` to delete an entire comment (trivia) and its surrounding whitespace.
+    ///
+    /// For own-line comments, this deletes the entire line(s). For inline comments, this deletes
+    /// the trivia and any preceding horizontal whitespace.
+    fn compute_comment_deletion(&self, pragma: &Pragma<'arena>) -> TextEdit {
+        if pragma.own_line {
+            let line_start =
+                self.file.get_line_start_offset(pragma.start_line).unwrap_or(pragma.trivia_span.start_offset());
+            let delete_end =
+                self.file.get_line_start_offset(pragma.end_line + 1).unwrap_or(pragma.trivia_span.end_offset());
+
+            TextEdit::delete(TextRange::new(line_start, delete_end))
+        } else {
+            let mut start = pragma.trivia_span.start_offset() as usize;
+            while start > 0 && matches!(self.file.contents[start - 1], b' ' | b'\t') {
+                start -= 1;
+            }
+
+            TextEdit::delete(TextRange::new(start as u32, pragma.trivia_span.end_offset()))
+        }
+    }
+
+    /// Returns `true` if the trivia containing `pragma` has any content beyond pragma directives
+    /// and PHPDoc structural markers.
+    ///
+    /// Used to decide whether an unfulfilled pragma's auto-fix should delete the whole comment
+    /// (safe when the comment exists only for the pragma) or just the pragma's line (needed when
+    /// the comment also carries documentation or other tags).
+    fn trivia_has_non_pragma_content(&self, pragma: &Pragma<'arena>) -> bool {
+        let trivia_text =
+            &self.file.contents[pragma.trivia_span.start_offset() as usize..pragma.trivia_span.end_offset() as usize];
+
+        let inner = trivia_text
+            .strip_prefix(b"/**")
+            .or_else(|| trivia_text.strip_prefix(b"/*"))
+            .or_else(|| trivia_text.strip_prefix(b"//"))
+            .or_else(|| trivia_text.strip_prefix(b"#"))
+            .unwrap_or(trivia_text);
+
+        let inner = inner.strip_suffix(b"*/").unwrap_or(inner);
+
+        let mut cursor = 0usize;
+        for nl in memchr::memchr_iter(b'\n', inner) {
+            let line = &inner[cursor..nl];
+            cursor = nl + 1;
+            if check_non_pragma_line(line) {
+                return true;
+            }
+        }
+        cursor < inner.len() && check_non_pragma_line(&inner[cursor..])
+    }
+
+    /// Computes a `TextEdit` to delete a single pragma directive line from within a multi-line comment.
+    fn compute_directive_deletion(&self, pragma: &Pragma<'arena>) -> TextEdit {
+        let pragma_line = self.file.line_number(pragma.span.start_offset());
+        let line_start = self.file.get_line_start_offset(pragma_line).unwrap_or(pragma.span.start_offset());
+        let delete_end = self.file.get_line_start_offset(pragma_line + 1).unwrap_or(pragma.span.end_offset());
+
+        TextEdit::delete(TextRange::new(line_start, delete_end))
+    }
+
+    /// Returns the span of the pragma that targets an issue: the nearest applicable `@mago-ignore` pragma, else the
+    /// nearest applicable `@mago-expect` pragma. Increments that pragma's match counter.
+    #[inline]
+    fn suppressing_pragma(&mut self, issue_span: Span, issue_code: &str) -> Option<Span> {
+        let kind = if self.find_best_applicable_pragma_mut(issue_span, PragmaKind::Ignore, issue_code).is_some() {
+            PragmaKind::Ignore
+        } else {
+            PragmaKind::Expect
+        };
+        let pragma = self.find_best_applicable_pragma_mut(issue_span, kind, issue_code)?;
+        pragma.matches = pragma.matches.saturating_add(1);
+
+        Some(pragma.span)
+    }
+
+    /// Finds the *nearest* pragma that applies to a given issue and returns a mutable reference to it.
+    ///
+    /// This method does **not** consume the pragma, allowing a single scoped pragma to be used
+    /// multiple times. It determines applicability and proximity to find the single best match.
+    #[inline]
+    fn find_best_applicable_pragma_mut(
+        &mut self,
+        issue_span: Span,
+        kind: PragmaKind,
+        issue_code: &str,
+    ) -> Option<&mut Pragma<'arena>> {
+        if self.pragmas.is_empty() {
+            return None;
+        }
+
+        let issue_start_line = self.file.line_number(issue_span.start_offset());
+
+        let mut best_match_index = None;
+
+        for (i, pragma) in self.pragmas.iter().enumerate() {
+            if pragma.kind != kind {
+                continue;
+            }
+
+            let resolved_pragma_code = self.aliases.get(pragma.code).copied().unwrap_or(pragma.code);
+            if resolved_pragma_code != "all" && resolved_pragma_code != issue_code {
+                continue;
+            }
+
+            let is_applicable = if pragma.is_consumed() && resolved_pragma_code != "all" {
+                false
+            } else if let Some(scope_span) = pragma.scope_span {
+                scope_span.contains(&issue_span) || issue_span.contains(&scope_span)
+            } else if pragma.trivia_span.contains(&issue_span) || issue_span.contains(&pragma.trivia_span) {
+                // The issue is inside the same comment as the pragma!
+                true
+            } else if pragma.own_line {
+                pragma.start_line < issue_start_line
+            } else {
+                self.file.line_number(pragma.span.start_offset()) == issue_start_line
+            };
+
+            if !is_applicable {
+                continue;
+            }
+
+            if let Some(current_best_index) = best_match_index {
+                let current_best: &Pragma<'_> = &self.pragmas[current_best_index];
+                if !current_best.own_line && pragma.own_line {
+                    // Current best is inline, new one is docblock. Keep current.
+                } else if current_best.own_line && !pragma.own_line {
+                    // Current best is docblock, new one is inline. New one is better.
+                    best_match_index = Some(i);
+                } else if pragma.start_line > current_best.start_line {
+                    // Both are same type, the one on a later line is better.
+                    best_match_index = Some(i);
+                } else {
+                    // Same type and earlier line; keep the current best.
+                }
+            } else {
+                best_match_index = Some(i);
+            }
+        }
+
+        best_match_index.map(|i| &mut self.pragmas[i])
+    }
+}
+
+impl DeferredPragmas {
+    /// Returns the file whose analysis pragmas are represented by this state.
+    #[inline]
+    #[must_use]
+    pub const fn file_id(&self) -> FileId {
+        self.file_id
+    }
+
+    /// Reconciles late diagnostics while retaining the updated pragma state for
+    /// another project-wide phase.
+    #[must_use]
+    pub fn reconcile(&mut self, file: &File, issues: IssueCollection) -> IssueCollection {
+        debug_assert_eq!(file.id, self.file_id, "deferred pragmas must be reconciled against their source file");
+
+        let arena = LocalArena::new();
+        let mut collector = self.clone().into_collector(&arena, file);
+        collector.extend(issues);
+        let (issues, state) = collector.defer();
+        if let Some(state) = state {
+            *self = state;
+        }
+
+        issues
+    }
+
+    /// Finalizes the retained state and reports genuinely unused or unfulfilled pragmas.
+    #[must_use]
+    pub fn finish(self, file: &File) -> IssueCollection {
+        debug_assert_eq!(file.id, self.file_id, "deferred pragmas must be finalized against their source file");
+
+        let arena = LocalArena::new();
+        self.into_collector(&arena, file).finish()
+    }
+
+    fn into_collector<'ctx, 'arena>(
+        self,
+        arena: &'arena LocalArena,
+        file: &'ctx File,
+    ) -> Collector<'ctx, 'arena, LocalArena> {
+        let pragmas = self.pragmas.into_iter().map(|pragma| pragma.allocate(arena)).collect_in(arena);
+        let disabled_codes = self.disabled_codes.into_iter().collect_in(arena);
+        let active_codes = self
+            .active_codes
+            .map(|codes| codes.into_iter().map(|code| arena.alloc_str(&code) as &str).collect_in(arena));
+
+        Collector {
+            arena,
+            file,
+            pragmas,
+            issues: IssueCollection::new(),
+            recordings: Vec::new_in(arena),
+            disabled_codes,
+            active_codes,
+            aliases: self.aliases,
+            link_template: self.link_template,
+            skip_unfulfilled_expect: self.skip_unfulfilled_expect,
+        }
+    }
+}
+
+impl From<&Pragma<'_>> for OwnedPragma {
+    fn from(pragma: &Pragma<'_>) -> Self {
+        Self {
+            kind: pragma.kind,
+            span: pragma.span,
+            trivia_span: pragma.trivia_span,
+            scope_span: pragma.scope_span,
+            start_line: pragma.start_line,
+            end_line: pragma.end_line,
+            own_line: pragma.own_line,
+            category: pragma.category.to_owned(),
+            code: pragma.code.to_owned(),
+            code_span: pragma.code_span,
+            count_span: pragma.count_span,
+            expected_matches: pragma.expected_matches,
+            matches: pragma.matches,
+            description: pragma.description.to_owned(),
+        }
+    }
+}
+
+impl OwnedPragma {
+    fn allocate(self, arena: &LocalArena) -> Pragma<'_> {
+        Pragma {
+            kind: self.kind,
+            span: self.span,
+            trivia_span: self.trivia_span,
+            scope_span: self.scope_span,
+            start_line: self.start_line,
+            end_line: self.end_line,
+            own_line: self.own_line,
+            category: arena.alloc_str(&self.category),
+            code: arena.alloc_str(&self.code),
+            code_span: self.code_span,
+            count_span: self.count_span,
+            expected_matches: self.expected_matches,
+            matches: self.matches,
+            description: arena.alloc_str(&self.description),
+        }
+    }
+}

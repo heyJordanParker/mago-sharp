@@ -1,0 +1,124 @@
+use mago_allocator::prelude::*;
+use mago_database::file::HasFileId;
+use mago_span::Span;
+
+use crate::T;
+use crate::cst::cst::AttributeList;
+use crate::cst::cst::ClassLikeMember;
+use crate::cst::cst::ClassLikeMemberExpressionSelector;
+use crate::cst::cst::ClassLikeMemberSelector;
+use crate::cst::cst::Modifier;
+use crate::cst::sequence::Sequence;
+use crate::error::ParseError;
+use crate::parser::Parser;
+
+impl<'arena, A> Parser<'_, 'arena, A>
+where
+    A: Arena,
+{
+    pub(crate) fn parse_classlike_member(&mut self) -> Result<ClassLikeMember<'arena>, ParseError> {
+        let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+        Ok(match token.kind {
+            T!["#["] | T!["["] if token.kind == T!["#["] || self.dialect.is_sharp() => {
+                let attributes = self.parse_attribute_list_sequence()?;
+
+                self.parse_classlike_member_with_attributes(attributes)?
+            }
+            k if k.is_modifier() => {
+                let modifiers = self.parse_modifier_sequence()?;
+
+                self.parse_classlike_member_with_attributes_and_modifiers(Sequence::empty(), modifiers)?
+            }
+            T!["const"] => ClassLikeMember::Constant(
+                self.parse_class_like_constant_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?,
+            ),
+            T!["function"] if !self.is_at_function_hint()? => ClassLikeMember::Method(
+                self.parse_method_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?,
+            ),
+            T!["case"] => ClassLikeMember::EnumCase(self.parse_enum_case_with_attributes(Sequence::empty())?),
+            T!["use"] => ClassLikeMember::TraitUse(self.parse_trait_use()?),
+            _ if self.dialect.is_sharp() && self.is_at_law()? => ClassLikeMember::Law(self.parse_law()?),
+            _ if self.dialect.is_sharp() => {
+                self.parse_sharp_member_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?
+            }
+            _ => ClassLikeMember::Property(
+                self.parse_property_with_attributes_and_modifiers(Sequence::empty(), Sequence::empty())?,
+            ),
+        })
+    }
+
+    fn parse_classlike_member_with_attributes(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+    ) -> Result<ClassLikeMember<'arena>, ParseError> {
+        let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+        Ok(match token.kind {
+            k if k.is_modifier() => {
+                let modifiers = self.parse_modifier_sequence()?;
+
+                self.parse_classlike_member_with_attributes_and_modifiers(attributes, modifiers)?
+            }
+            T!["case"] => ClassLikeMember::EnumCase(self.parse_enum_case_with_attributes(attributes)?),
+            T!["const"] => ClassLikeMember::Constant(
+                self.parse_class_like_constant_with_attributes_and_modifiers(attributes, Sequence::empty())?,
+            ),
+            T!["function"] if !self.is_at_function_hint()? => {
+                ClassLikeMember::Method(self.parse_method_with_attributes_and_modifiers(attributes, Sequence::empty())?)
+            }
+            _ if self.dialect.is_sharp() => {
+                self.parse_sharp_member_with_attributes_and_modifiers(attributes, Sequence::empty())?
+            }
+            _ => ClassLikeMember::Property(
+                self.parse_property_with_attributes_and_modifiers(attributes, Sequence::empty())?,
+            ),
+        })
+    }
+
+    fn parse_classlike_member_with_attributes_and_modifiers(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+    ) -> Result<ClassLikeMember<'arena>, ParseError> {
+        let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+        Ok(match token.kind {
+            T!["const"] => ClassLikeMember::Constant(
+                self.parse_class_like_constant_with_attributes_and_modifiers(attributes, modifiers)?,
+            ),
+            // PHP#'s `Function<…>` starts a member's type, not PHP's `function` keyword.
+            T!["function"] if !self.is_at_function_hint()? => {
+                ClassLikeMember::Method(self.parse_method_with_attributes_and_modifiers(attributes, modifiers)?)
+            }
+            _ if self.dialect.is_sharp() => {
+                self.parse_sharp_member_with_attributes_and_modifiers(attributes, modifiers)?
+            }
+            _ => ClassLikeMember::Property(self.parse_property_with_attributes_and_modifiers(attributes, modifiers)?),
+        })
+    }
+
+    pub(crate) fn parse_classlike_member_selector(&mut self) -> Result<ClassLikeMemberSelector<'arena>, ParseError> {
+        let Some(token) = self.stream.lookahead(0)? else {
+            let pos = self.stream.current_position();
+            let span = Span::new(self.stream.file_id(), pos, pos);
+            return Ok(ClassLikeMemberSelector::Missing(span));
+        };
+
+        Ok(match token.kind {
+            T!["$"] | T!["${"] | T!["$variable"] => ClassLikeMemberSelector::Variable(self.parse_variable()?),
+            T!["{"] => ClassLikeMemberSelector::Expression(ClassLikeMemberExpressionSelector {
+                left_brace: self.stream.eat_span(T!["{"])?,
+                expression: self.parse_expression()?,
+                right_brace: self.stream.eat_span(T!["}"])?,
+            }),
+            kind if kind.is_identifier_maybe_reserved() => {
+                ClassLikeMemberSelector::Identifier(self.parse_local_identifier()?)
+            }
+            _ => {
+                let pos = self.stream.current_position();
+                let span = Span::new(self.stream.file_id(), pos, pos);
+                let err = self.stream.unexpected(Some(token), T!["$variable", "${", "$", "{", Identifier]);
+                self.errors.push(err);
+                ClassLikeMemberSelector::Missing(span)
+            }
+        })
+    }
+}

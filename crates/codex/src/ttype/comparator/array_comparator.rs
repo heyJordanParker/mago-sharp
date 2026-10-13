@@ -1,0 +1,597 @@
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+
+use crate::metadata::CodebaseMetadata;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::array::key::ArrayKey;
+use crate::ttype::atomic::scalar::TScalar;
+use crate::ttype::atomic::scalar::int::TInteger;
+use crate::ttype::comparator::ComparisonResult;
+use crate::ttype::comparator::union_comparator;
+use crate::ttype::get_backing_key_type;
+use crate::ttype::get_never;
+use crate::ttype::union::TUnion;
+use crate::ttype::wrap_atomic;
+
+fn has_required_known_entry(array: &TArray) -> bool {
+    match array {
+        TArray::List(list) => {
+            list.known_elements.as_ref().is_some_and(|elements| elements.values().any(|(is_optional, _)| !*is_optional))
+        }
+        TArray::Keyed(keyed_array) => {
+            keyed_array.known_items.as_ref().is_some_and(|items| items.values().any(|(is_optional, _)| !*is_optional))
+        }
+        TArray::Set(_) => false,
+    }
+}
+
+fn key_and_value_types(array: &TArray) -> (Option<Cow<'_, TUnion>>, Cow<'_, TUnion>) {
+    match array {
+        TArray::List(list) => (
+            Some(Cow::Owned(wrap_atomic(TAtomic::Scalar(TScalar::Integer(TInteger::non_negative()))))),
+            Cow::Borrowed(list.element_type.as_ref()),
+        ),
+        TArray::Keyed(keyed_array) => match &keyed_array.parameters {
+            Some((key_type, value_type)) => {
+                (Some(Cow::Borrowed(key_type.as_ref())), Cow::Borrowed(value_type.as_ref()))
+            }
+            None => (None, Cow::Owned(get_never())),
+        },
+        TArray::Set(element_type) => (Some(Cow::Borrowed(element_type.as_ref())), Cow::Borrowed(element_type.as_ref())),
+    }
+}
+
+fn known_items_view(array: &TArray) -> Option<Cow<'_, BTreeMap<ArrayKey, (bool, TUnion)>>> {
+    match array {
+        TArray::Keyed(keyed_array) => keyed_array.known_items.as_ref().map(Cow::Borrowed),
+        TArray::List(list) => list.known_elements.as_ref().map(|elements| {
+            Cow::Owned(
+                elements
+                    .iter()
+                    .map(|(index, value_tuple)| (ArrayKey::Integer(*index as i64), value_tuple.clone()))
+                    .collect(),
+            )
+        }),
+        TArray::Set(_) => None,
+    }
+}
+
+/// Whether a collection's element or key type fits, as [`union_comparator::is_contained_by`] decides. A type of
+/// elements is no single value, so its refusal never sets `int_for_float`. Only an element a literal writes does.
+fn is_element_type_contained_by(
+    codebase: &CodebaseMetadata,
+    input_type: &TUnion,
+    container_type: &TUnion,
+    ignore_false: bool,
+    inside_assertion: bool,
+    atomic_comparison_result: &mut ComparisonResult,
+) -> bool {
+    let fits = union_comparator::is_contained_by(
+        codebase,
+        input_type,
+        container_type,
+        false,
+        ignore_false,
+        inside_assertion,
+        atomic_comparison_result,
+    );
+
+    if !fits {
+        atomic_comparison_result.int_for_float = false;
+    }
+
+    fits
+}
+
+pub(crate) fn is_array_contained_by_array(
+    codebase: &CodebaseMetadata,
+    input_array: &TArray,
+    container_array: &TArray,
+    inside_assertion: bool,
+    atomic_comparison_result: &mut ComparisonResult,
+) -> bool {
+    if container_array.is_sealed() && !input_array.is_sealed() {
+        return false;
+    }
+
+    if container_array.is_non_empty() && !input_array.is_non_empty() && !has_required_known_entry(input_array) {
+        return false;
+    }
+
+    if input_array.is_empty() {
+        return !container_array.is_non_empty() && !has_required_known_entry(container_array);
+    }
+
+    // A PHP# `Set` is its own collection: only a `Set` is one, and a `Set` is no `List` or `Map`. It passes where
+    // plain PHP takes an array of any key, which it runs as.
+    match (input_array, container_array) {
+        (TArray::Set(input_element_type), TArray::Set(container_element_type)) => {
+            return is_element_type_contained_by(
+                codebase,
+                input_element_type,
+                container_element_type,
+                input_element_type.ignore_falsable_issues(),
+                inside_assertion,
+                atomic_comparison_result,
+            );
+        }
+        (TArray::Set(input_element_type), TArray::Keyed(keyed_array)) => {
+            return keyed_array.known_items.is_none()
+                && keyed_array.parameters.as_ref().is_some_and(|(key_type, value_type)| {
+                    key_type.is_array_key()
+                        && is_element_type_contained_by(
+                            codebase,
+                            input_element_type,
+                            value_type,
+                            input_element_type.ignore_falsable_issues(),
+                            inside_assertion,
+                            atomic_comparison_result,
+                        )
+                });
+        }
+        (TArray::Set(_), TArray::List(_)) | (TArray::List(_) | TArray::Keyed(_), TArray::Set(_)) => return false,
+        (TArray::List(_) | TArray::Keyed(_), TArray::List(_) | TArray::Keyed(_)) => {}
+    }
+
+    if container_array.is_list()
+        && matches!(
+            input_array,
+            TArray::Keyed(keyed_array) if keyed_array.parameters.is_some() || keyed_array.known_non_list
+        )
+    {
+        return false;
+    }
+
+    let (container_key_type, container_value_type) = key_and_value_types(container_array);
+    let (input_key_type, input_value_type) = key_and_value_types(input_array);
+
+    let input_known_items_cow = known_items_view(input_array);
+    let container_known_items = known_items_view(container_array);
+
+    // A known item refused only for an `int` where a `float` is expected does not end the comparison, so the items
+    // after it are still compared. The array is refused for an `int` only when everything else fits, as
+    // `are_parts_contained_by` decides for a union's parts.
+    let mut refused_for_int = false;
+
+    if let Some(input_known_items) = &input_known_items_cow {
+        for (input_key, (input_is_optional, input_item_value_type)) in input_known_items.iter() {
+            if let Some((container_is_optional, container_item_value_type)) =
+                container_known_items.as_ref().and_then(|items| items.get(input_key))
+            {
+                if *input_is_optional && !*container_is_optional {
+                    return false;
+                }
+
+                if !union_comparator::is_contained_by(
+                    codebase,
+                    input_item_value_type,
+                    container_item_value_type,
+                    false,
+                    false,
+                    inside_assertion,
+                    atomic_comparison_result,
+                ) {
+                    if !std::mem::take(&mut atomic_comparison_result.int_for_float) {
+                        return false;
+                    }
+
+                    refused_for_int = true;
+                }
+            } else if let (Some(ck_type), cv_type) = (&container_key_type, &container_value_type) {
+                if !union_comparator::is_contained_by(
+                    codebase,
+                    &input_key.to_union(),
+                    ck_type,
+                    false,
+                    false,
+                    inside_assertion,
+                    atomic_comparison_result,
+                ) {
+                    atomic_comparison_result.int_for_float = false;
+
+                    return false;
+                }
+
+                if !union_comparator::is_contained_by(
+                    codebase,
+                    input_item_value_type,
+                    cv_type,
+                    false,
+                    false,
+                    inside_assertion,
+                    atomic_comparison_result,
+                ) {
+                    if !std::mem::take(&mut atomic_comparison_result.int_for_float) {
+                        return false;
+                    }
+
+                    refused_for_int = true;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+
+    if let Some(container_known_items) = &container_known_items {
+        for (container_key, (container_is_optional, container_item_value_type)) in container_known_items.iter() {
+            let input_has_key = input_known_items_cow.as_ref().is_some_and(|items| items.contains_key(container_key));
+
+            if !*container_is_optional {
+                if !input_has_key {
+                    if input_value_type.is_never() {
+                        return false;
+                    }
+
+                    if !is_element_type_contained_by(
+                        codebase,
+                        &input_value_type,
+                        container_item_value_type,
+                        false,
+                        inside_assertion,
+                        atomic_comparison_result,
+                    ) {
+                        return false;
+                    }
+                }
+            } else if !input_has_key
+                && !input_value_type.is_never()
+                && !is_element_type_contained_by(
+                    codebase,
+                    &input_value_type,
+                    container_item_value_type,
+                    false,
+                    inside_assertion,
+                    atomic_comparison_result,
+                )
+            {
+                return false;
+            }
+        }
+    }
+
+    if let (Some(input_key_type), Some(container_key_type)) = (input_key_type, container_key_type) {
+        // A PHP# `Map` keyed by a backed enum is also an array of the backing values, which plain PHP receives.
+        let backing_key_type = match get_backing_key_type(&input_key_type, codebase) {
+            Cow::Owned(backing_key_type)
+                if !union_comparator::is_contained_by(
+                    codebase,
+                    &input_key_type,
+                    &container_key_type,
+                    false,
+                    input_key_type.ignore_falsable_issues(),
+                    inside_assertion,
+                    &mut ComparisonResult::with_sharp_rules(atomic_comparison_result.sharp_rules),
+                ) =>
+            {
+                Some(backing_key_type)
+            }
+            _ => None,
+        };
+        let input_key_type = backing_key_type.map_or(input_key_type, Cow::Owned);
+
+        if !is_element_type_contained_by(
+            codebase,
+            &input_key_type,
+            &container_key_type,
+            input_key_type.ignore_falsable_issues(),
+            inside_assertion,
+            atomic_comparison_result,
+        ) {
+            return false;
+        }
+    }
+
+    if !input_value_type.is_never()
+        && !is_element_type_contained_by(
+            codebase,
+            &input_value_type,
+            &container_value_type,
+            input_value_type.ignore_falsable_issues(),
+            inside_assertion,
+            atomic_comparison_result,
+        )
+    {
+        return false;
+    }
+
+    atomic_comparison_result.int_for_float = refused_for_int;
+
+    !refused_for_int
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use mago_word::word;
+
+    use crate::ttype::atomic::TAtomic;
+    use crate::ttype::atomic::array::TArray;
+    use crate::ttype::atomic::array::key::ArrayKey;
+    use crate::ttype::atomic::array::keyed::TKeyedArray;
+    use crate::ttype::comparator::ComparisonResult;
+    use crate::ttype::comparator::tests::assert_is_contained_by;
+    use crate::ttype::comparator::tests::create_test_codebase;
+    use crate::ttype::get_arraykey;
+    use crate::ttype::get_int;
+    use crate::ttype::get_literal_string;
+    use crate::ttype::get_mixed;
+    use crate::ttype::get_string;
+    use crate::ttype::union::TUnion;
+
+    fn t_keyed(arr: TKeyedArray) -> TUnion {
+        TUnion::from_atomic(TAtomic::Array(TArray::Keyed(arr)))
+    }
+
+    #[test]
+    fn test_sealed_array_missing_required_key_in_unsealed_container() {
+        let codebase = create_test_codebase("<?php");
+
+        // array{'foo': 'bar'}
+        let input = t_keyed(TKeyedArray::new().with_known_items(BTreeMap::from([(
+            ArrayKey::String(word("foo")),
+            (false, get_literal_string(word("bar"))),
+        )])));
+
+        // array{'required_field': string, ...<array-key, mixed>}
+        let container = t_keyed(
+            TKeyedArray::new()
+                .with_known_items(BTreeMap::from([(ArrayKey::String(word("required_field")), (false, get_string()))]))
+                .with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())),
+        );
+
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_sealed_subset_contained_in_superset_with_optional() {
+        let codebase = create_test_codebase("<?php");
+        // array{'a': string}
+        let input = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
+        );
+        // array{'a': string, 'b'?: int}
+        let container = t_keyed(TKeyedArray::new().with_known_items(BTreeMap::from([
+            (ArrayKey::String(word("a")), (false, get_string())),
+            (ArrayKey::String(word("b")), (true, get_int())),
+        ])));
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_sealed_superset_not_contained_in_subset() {
+        let codebase = create_test_codebase("<?php");
+        // array{'a': string, 'b'?: int}
+        let input = t_keyed(TKeyedArray::new().with_known_items(BTreeMap::from([
+            (ArrayKey::String(word("a")), (false, get_string())),
+            (ArrayKey::String(word("b")), (true, get_int())),
+        ])));
+        // array{'a': string}
+        let container = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
+        );
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_empty_sealed_array_contained_in_optional_shape() {
+        let codebase = create_test_codebase("<?php");
+        // array{}
+        let input = t_keyed(TKeyedArray::new());
+        // array{'a'?: string}
+        let container = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (true, get_string()))])),
+        );
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_empty_sealed_array_not_contained_in_required_shape() {
+        let codebase = create_test_codebase("<?php");
+        // array{}
+        let input = t_keyed(TKeyedArray::new());
+        // array{'a': string}
+        let container = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
+        );
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_optional_property_does_not_satisfy_required() {
+        let codebase = create_test_codebase("<?php");
+        // array{'a'?: string}
+        let input = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (true, get_string()))])),
+        );
+        // array{'a': string}
+        let container = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
+        );
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_unsealed_compatible_generics() {
+        let codebase = create_test_codebase("<?php");
+        // array<string, int>
+        let input = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_string()), Arc::new(get_int())));
+        // array<array-key, mixed>
+        let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())));
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_unsealed_incompatible_value_generic() {
+        let codebase = create_test_codebase("<?php");
+        // array<string, int>
+        let input = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_string()), Arc::new(get_int())));
+        // array<array-key, string>
+        let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_string())));
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_unsealed_incompatible_key_generic() {
+        let codebase = create_test_codebase("<?php");
+        // array<array-key, int>
+        let input = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_int())));
+        // array<string, int>
+        let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_string()), Arc::new(get_int())));
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_sealed_contained_in_compatible_unsealed() {
+        let codebase = create_test_codebase("<?php");
+        // array{'a': string}
+        let input = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
+        );
+        // array<array-key, mixed>
+        let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())));
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_sealed_not_contained_in_incompatible_unsealed() {
+        let codebase = create_test_codebase("<?php");
+        // array{'a': string}
+        let input = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
+        );
+        // array<array-key, int>
+        let container = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_int())));
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_sealed_contained_in_compatible_mixed() {
+        let codebase = create_test_codebase("<?php");
+        // array{'a': string, 'b': int}
+        let input = t_keyed(TKeyedArray::new().with_known_items(BTreeMap::from([
+            (ArrayKey::String(word("a")), (false, get_string())),
+            (ArrayKey::String(word("b")), (false, get_int())),
+        ])));
+        // array{'a': string, ...<array-key, int>}
+        let container = t_keyed(
+            TKeyedArray::new()
+                .with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))]))
+                .with_parameters(Arc::new(get_arraykey()), Arc::new(get_int())),
+        );
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_sealed_not_contained_in_incompatible_mixed() {
+        let codebase = create_test_codebase("<?php");
+        // array{'a': string, 'b': string}
+        let input = t_keyed(TKeyedArray::new().with_known_items(BTreeMap::from([
+            (ArrayKey::String(word("a")), (false, get_string())),
+            (ArrayKey::String(word("b")), (false, get_string())),
+        ])));
+        // array{'a': string, ...<array-key, int>}
+        let container = t_keyed(
+            TKeyedArray::new()
+                .with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))]))
+                .with_parameters(Arc::new(get_arraykey()), Arc::new(get_int())),
+        );
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_unsealed_does_not_satisfy_required_sealed() {
+        let codebase = create_test_codebase("<?php");
+        // array<array-key, string>
+        let input = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_string())));
+        // array{'a': string}
+        let container = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
+        );
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_unsealed_does_not_satisfy_incompatible_sealed() {
+        let codebase = create_test_codebase("<?php");
+        // array<array-key, string>
+        let input = t_keyed(TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_string())));
+        // array{'a': int}
+        let container = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_int()))])),
+        );
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_non_empty_array_is_subtype_of_array() {
+        let codebase = create_test_codebase("<?php");
+        // non-empty-array<array-key, mixed>
+        let input = t_keyed(
+            TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())).with_non_empty(true),
+        );
+        // array<array-key, mixed>
+        let container = t_keyed(
+            TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())).with_non_empty(false),
+        );
+        assert_is_contained_by(&codebase, &input, &container, true, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_array_is_not_subtype_of_non_empty_array() {
+        let codebase = create_test_codebase("<?php");
+        // array<array-key, mixed>
+        let input = t_keyed(
+            TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())).with_non_empty(false),
+        );
+        // non-empty-array<array-key, mixed>
+        let container = t_keyed(
+            TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())).with_non_empty(true),
+        );
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_potentially_empty_array_not_contained_in_definitely_non_empty() {
+        let codebase = create_test_codebase("<?php");
+        // array<array-key, mixed>
+        let input = t_keyed(
+            TKeyedArray::new_with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())).with_non_empty(false),
+        );
+        // array{'a': string}
+        let container = t_keyed(
+            TKeyedArray::new().with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))])),
+        );
+
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+
+    #[test]
+    fn test_unsealed_input_with_conflicting_optional_key_in_container() {
+        let codebase = create_test_codebase("<?php");
+
+        // input: array{'a': string, ...<array-key, string>}
+        let input = t_keyed(
+            TKeyedArray::new()
+                .with_known_items(BTreeMap::from([(ArrayKey::String(word("a")), (false, get_string()))]))
+                .with_parameters(Arc::new(get_arraykey()), Arc::new(get_string())),
+        );
+
+        // container: array{'a': string, 'b'?: int, ...<array-key, mixed>}
+        let container = t_keyed(
+            TKeyedArray::new()
+                .with_known_items(BTreeMap::from([
+                    (ArrayKey::String(word("a")), (false, get_string())),
+                    (ArrayKey::String(word("b")), (true, get_int())),
+                ]))
+                .with_parameters(Arc::new(get_arraykey()), Arc::new(get_mixed())),
+        );
+
+        // This should be false, because input could have a key 'b' which would be a string,
+        // but the container requires 'b' to be an int.
+        assert_is_contained_by(&codebase, &input, &container, false, &mut ComparisonResult::default());
+    }
+}

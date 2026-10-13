@@ -1,0 +1,339 @@
+use crate::T;
+use crate::cst::cst::AnonymousClass;
+use crate::cst::cst::AttributeList;
+use crate::cst::cst::Class;
+use crate::cst::cst::Enum;
+use crate::cst::cst::EnumBackingTypeHint;
+use crate::cst::cst::Hint;
+use crate::cst::cst::Inheritance;
+use crate::cst::cst::Interface;
+use crate::cst::cst::Modifier;
+use crate::cst::cst::Statement;
+use crate::cst::cst::Trait;
+use crate::cst::sequence::Sequence;
+use crate::error::ParseError;
+use crate::parser::Parser;
+use mago_allocator::prelude::*;
+
+pub mod constant;
+pub mod enum_case;
+pub mod inheritance;
+pub mod law;
+pub mod member;
+pub mod method;
+pub mod property;
+pub mod trait_use;
+
+impl<'arena, A> Parser<'_, 'arena, A>
+where
+    A: Arena,
+{
+    pub(crate) fn parse_interface_with_attributes(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+    ) -> Result<Interface<'arena>, ParseError> {
+        self.parse_interface_with_attributes_and_modifiers(attributes, Sequence::empty())
+    }
+
+    /// A class, or in PHP# an interface, an enum or a trait, whose declaration starts with modifiers, as in
+    /// `public interface Foo {}`.
+    pub(crate) fn parse_modified_class_like_with_attributes(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+    ) -> Result<Statement<'arena>, ParseError> {
+        let modifiers = self.parse_modifier_sequence()?;
+        if self.dialect.is_sharp() {
+            match self.stream.peek_kind(0)? {
+                Some(T!["interface"]) => {
+                    return Ok(Statement::Interface(
+                        self.parse_interface_with_attributes_and_modifiers(attributes, modifiers)?,
+                    ));
+                }
+                Some(T!["enum"]) => {
+                    return Ok(Statement::Enum(self.parse_enum_with_attributes_and_modifiers(attributes, modifiers)?));
+                }
+                Some(T!["trait"]) => {
+                    return Ok(Statement::Trait(
+                        self.parse_trait_with_attributes_and_modifiers(attributes, modifiers)?,
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Statement::Class(self.parse_class_with_attributes_and_modifiers(attributes, modifiers)?))
+    }
+
+    fn parse_interface_with_attributes_and_modifiers(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+    ) -> Result<Interface<'arena>, ParseError> {
+        Ok(Interface {
+            attribute_lists: attributes,
+            modifiers,
+            interface: self.expect_keyword(T!["interface"])?,
+            name: self.parse_local_identifier()?,
+            extends: self.parse_optional_extends()?,
+            inheritance: self.parse_optional_inheritance()?,
+            left_brace: self.stream.eat_span(T!["{"])?,
+            members: {
+                let mut members = self.new_vec();
+                loop {
+                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
+                        break;
+                    }
+
+                    let position_before = self.stream.current_position();
+                    match self.parse_classlike_member() {
+                        Ok(member) => members.push(member),
+                        Err(err) => self.errors.push(err),
+                    }
+                    if self.stream.current_position() == position_before {
+                        if let Ok(Some(token)) = self.stream.lookahead(0) {
+                            if token.kind == T!["}"] {
+                                break;
+                            }
+                            self.errors.push(self.stream.unexpected(Some(token), &[]));
+                            let _ = self.stream.consume();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                Sequence::new(members)
+            },
+            right_brace: self.stream.eat_span(T!["}"])?,
+        })
+    }
+
+    pub(crate) fn parse_class_with_attributes(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+    ) -> Result<Class<'arena>, ParseError> {
+        let modifiers = self.parse_modifier_sequence()?;
+
+        self.parse_class_with_attributes_and_modifiers(attributes, modifiers)
+    }
+
+    fn parse_class_with_attributes_and_modifiers(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+    ) -> Result<Class<'arena>, ParseError> {
+        Ok(Class {
+            attribute_lists: attributes,
+            modifiers,
+            class: self.expect_keyword(T!["class"])?,
+            name: self.parse_local_identifier()?,
+            extends: self.parse_optional_extends()?,
+            implements: self.parse_optional_implements()?,
+            inheritance: self.parse_optional_inheritance()?,
+            left_brace: self.stream.eat_span(T!["{"])?,
+            members: {
+                let mut members = self.new_vec();
+                loop {
+                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
+                        break;
+                    }
+
+                    let position_before = self.stream.current_position();
+                    match self.parse_classlike_member() {
+                        Ok(member) => members.push(member),
+                        Err(err) => self.errors.push(err),
+                    }
+                    if self.stream.current_position() == position_before {
+                        if let Ok(Some(token)) = self.stream.lookahead(0) {
+                            if token.kind == T!["}"] {
+                                break;
+                            }
+                            self.errors.push(self.stream.unexpected(Some(token), &[]));
+                            let _ = self.stream.consume();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                Sequence::new(members)
+            },
+            right_brace: self.stream.eat_span(T!["}"])?,
+        })
+    }
+
+    pub(crate) fn parse_anonymous_class(&mut self) -> Result<AnonymousClass<'arena>, ParseError> {
+        Ok(AnonymousClass {
+            new: self.expect_keyword(T!["new"])?,
+            attribute_lists: self.parse_attribute_list_sequence()?,
+            modifiers: self.parse_modifier_sequence()?,
+            class: self.expect_keyword(T!["class"])?,
+            argument_list: self.parse_optional_partial_argument_list()?,
+            extends: self.parse_optional_extends()?,
+            implements: self.parse_optional_implements()?,
+            left_brace: self.stream.eat_span(T!["{"])?,
+            members: {
+                let mut members = self.new_vec();
+                loop {
+                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
+                        break;
+                    }
+
+                    let position_before = self.stream.current_position();
+                    match self.parse_classlike_member() {
+                        Ok(member) => members.push(member),
+                        Err(err) => self.errors.push(err),
+                    }
+                    if self.stream.current_position() == position_before {
+                        if let Ok(Some(token)) = self.stream.lookahead(0) {
+                            if token.kind == T!["}"] {
+                                break;
+                            }
+                            self.errors.push(self.stream.unexpected(Some(token), &[]));
+                            let _ = self.stream.consume();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                Sequence::new(members)
+            },
+            right_brace: self.stream.eat_span(T!["}"])?,
+        })
+    }
+
+    pub(crate) fn parse_trait_with_attributes(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+    ) -> Result<Trait<'arena>, ParseError> {
+        self.parse_trait_with_attributes_and_modifiers(attributes, Sequence::empty())
+    }
+
+    fn parse_trait_with_attributes_and_modifiers(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+    ) -> Result<Trait<'arena>, ParseError> {
+        Ok(Trait {
+            attribute_lists: attributes,
+            modifiers,
+            r#trait: self.expect_keyword(T!["trait"])?,
+            name: self.parse_local_identifier()?,
+            left_brace: self.stream.eat_span(T!["{"])?,
+            members: {
+                let mut members = self.new_vec();
+                loop {
+                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
+                        break;
+                    }
+
+                    let position_before = self.stream.current_position();
+                    match self.parse_classlike_member() {
+                        Ok(member) => members.push(member),
+                        Err(err) => self.errors.push(err),
+                    }
+                    if self.stream.current_position() == position_before {
+                        if let Ok(Some(token)) = self.stream.lookahead(0) {
+                            if token.kind == T!["}"] {
+                                break;
+                            }
+                            self.errors.push(self.stream.unexpected(Some(token), &[]));
+                            let _ = self.stream.consume();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Sequence::new(members)
+            },
+            right_brace: self.stream.eat_span(T!["}"])?,
+        })
+    }
+
+    pub(crate) fn parse_enum_with_attributes(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+    ) -> Result<Enum<'arena>, ParseError> {
+        self.parse_enum_with_attributes_and_modifiers(attributes, Sequence::empty())
+    }
+
+    fn parse_enum_with_attributes_and_modifiers(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+    ) -> Result<Enum<'arena>, ParseError> {
+        let r#enum = self.expect_keyword(T!["enum"])?;
+        let name = self.parse_local_identifier()?;
+        let (backing_type_hint, inheritance) = self.parse_enum_header()?;
+
+        Ok(Enum {
+            attribute_lists: attributes,
+            modifiers,
+            r#enum,
+            name,
+            backing_type_hint,
+            inheritance,
+            implements: self.parse_optional_implements()?,
+            left_brace: self.stream.eat_span(T!["{"])?,
+            members: {
+                let mut members = self.new_vec();
+                loop {
+                    if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
+                        break;
+                    }
+
+                    let position_before = self.stream.current_position();
+                    match self.parse_classlike_member() {
+                        Ok(member) => members.push(member),
+                        Err(err) => self.errors.push(err),
+                    }
+                    if self.stream.current_position() == position_before {
+                        if let Ok(Some(token)) = self.stream.lookahead(0) {
+                            if token.kind == T!["}"] {
+                                break;
+                            }
+                            self.errors.push(self.stream.unexpected(Some(token), &[]));
+                            let _ = self.stream.consume();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Sequence::new(members)
+            },
+            right_brace: self.stream.eat_span(T!["}"])?,
+        })
+    }
+
+    /// The backing type after `:`, as PHP writes `: string`, and in PHP# the interfaces, as in `: string, HasLabel` or
+    /// `: HasLabel`. A leading class name opens the interfaces, and any other type is the backing type, which
+    /// `check_enum` holds to `int` or `string`.
+    fn parse_enum_header(
+        &mut self,
+    ) -> Result<(Option<EnumBackingTypeHint<'arena>>, Option<Inheritance<'arena>>), ParseError> {
+        if !matches!(self.stream.peek_kind(0)?, Some(T![":"])) {
+            return Ok((None, None));
+        }
+
+        let colon = self.stream.consume_span()?;
+        let hint = self.parse_type_hint()?;
+        if !self.dialect.is_sharp() {
+            return Ok((Some(EnumBackingTypeHint { colon, hint }), None));
+        }
+
+        if let Hint::Identifier(first) = hint {
+            return Ok((None, Some(self.parse_inheritance_from(colon, first)?)));
+        }
+
+        let backing_type_hint = Some(EnumBackingTypeHint { colon, hint });
+        if !matches!(self.stream.peek_kind(0)?, Some(T![","])) {
+            return Ok((backing_type_hint, None));
+        }
+
+        let comma = self.stream.consume_span()?;
+        let first = self.parse_identifier()?;
+
+        Ok((backing_type_hint, Some(self.parse_inheritance_from(comma, first)?)))
+    }
+}

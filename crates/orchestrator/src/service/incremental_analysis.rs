@@ -1,0 +1,5596 @@
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicU64;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::Ordering::Relaxed;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+use foldhash::HashMap;
+use foldhash::HashSet;
+use rayon::prelude::*;
+
+use mago_allocator::LocalArena;
+use mago_analyzer::Analyzer;
+use mago_analyzer::analysis_result::AnalysisResult;
+use mago_analyzer::analysis_result::LateSymbolReferenceIssueReconciler;
+use mago_analyzer::artifacts::AnalysisArtifacts;
+use mago_analyzer::effects::EffectSummary;
+use mago_analyzer::effects::Effects;
+use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
+use mago_analyzer::external::CodebaseScanFile;
+use mago_analyzer::external::CodebaseScanPlan;
+use mago_analyzer::external::ExternalAnalysisSession;
+use mago_analyzer::external::FileAnalysisSnapshot;
+use mago_analyzer::external::FileReads;
+use mago_analyzer::external::Listing;
+use mago_analyzer::external::apply_refinements;
+use mago_analyzer::plugin::PluginRegistry;
+use mago_analyzer::settings::Settings;
+#[cfg(not(target_arch = "wasm32"))]
+use mago_analyzer::telemetry as analyzer_telemetry;
+use mago_codex::diff::CodebaseDiff;
+use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::CodebaseEntryKeys;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::r#extern::ExternMetadata;
+use mago_codex::populator::populate_codebase;
+use mago_codex::populator::populate_codebase_targeted;
+use mago_codex::reference::SymbolReferences;
+use mago_codex::scanner::scan_program;
+use mago_codex::signature_builder;
+use mago_codex::symbol::SymbolIdentifier;
+use mago_collector::DeferredPragmas;
+use mago_database::DatabaseReader;
+use mago_database::ReadDatabase;
+use mago_database::file::File;
+use mago_database::file::FileId;
+use mago_database::file::FileType;
+use mago_names::ResolvedNames;
+use mago_names::resolver::NameResolver;
+use mago_reporting::Issue;
+use mago_reporting::IssueCollection;
+use mago_semantics::SemanticsChecker;
+use mago_syntax::parser::parse_file_with_settings;
+use mago_syntax::settings::ParserSettings;
+use mago_word::Word;
+use mago_word::WordSet;
+
+use crate::error::OrchestratorError;
+use crate::progress::ProgressBarTheme;
+use crate::progress::create_progress_bar;
+use crate::progress::remove_progress_bar;
+use crate::service::body_return::resolve_body_returns;
+use crate::service::issue_reconciliation::DeferredIssueReconciler;
+use crate::service::issue_reconciliation::drop_follow_on_issues;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::service::telemetry::HangWatcher;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::service::telemetry::SlowestFiles;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod compile;
+
+/// Per-file cached state for incremental analysis.
+#[derive(Debug, Clone)]
+struct FileState {
+    content_hash: u64,
+    entry_keys: CodebaseEntryKeys,
+    unreconciled_analysis_issues: IssueCollection,
+    analysis_issues: IssueCollection,
+    codebase_issues: IssueCollection,
+    deferred_pragmas: Option<DeferredPragmas>,
+    late_symbol_references: SymbolReferences,
+    /// What the file's extension hooks and providers read from the codebase, kept apart from the references they
+    /// contribute: a read only decides when the file is analyzed again.
+    reads: FileReads,
+    /// What each PHP# body of the file does by itself. Every run solves the summaries of all files again, so an
+    /// unchanged file's getter sees a changed callee without being analyzed again.
+    effect_summaries: Vec<EffectSummary>,
+    /// The effect rules' issues in the file, from the last run's solve.
+    effect_issues: IssueCollection,
+}
+
+struct SelectiveAnalysisOutput {
+    result: AnalysisResult,
+    native_symbol_references: SymbolReferences,
+    external_symbol_references: SymbolReferences,
+    late_symbol_references: SymbolReferences,
+    late_symbol_references_by_file: HashMap<FileId, SymbolReferences>,
+    reads_by_file: HashMap<FileId, FileReads>,
+    per_file_issues: HashMap<FileId, IssueCollection>,
+    per_file_pragmas: HashMap<FileId, DeferredPragmas>,
+    snapshots: Vec<Arc<FileAnalysisSnapshot>>,
+    codebase_issues: IssueCollection,
+    per_file_effect_summaries: HashMap<FileId, Vec<EffectSummary>>,
+    /// The effect rules' issues of every file, analyzed or skipped.
+    per_file_effect_issues: HashMap<FileId, IssueCollection>,
+}
+
+/// A self-contained incremental analysis service.
+///
+/// This service manages all the state needed for incremental analysis:
+///
+/// - The prelude (builtins only), decoded afresh for each analysis from scratch
+/// - Current fully-populated codebase
+/// - File content hashes and cached per-file scan results
+/// - Symbol reference graph
+/// - Incremental diff/invalidation state
+///
+/// It provides two analysis modes:
+///
+/// - [`analyze()`](Self::analyze): Full analysis from scratch (used for initial run)
+/// - [`analyze_incremental()`](Self::analyze_incremental): Incremental analysis that only re-scans changed files and skips analysis of unchanged symbols
+pub struct IncrementalAnalysisService {
+    database: ReadDatabase,
+    codebase: CodebaseMetadata,
+    symbol_references: SymbolReferences,
+    native_symbol_references: SymbolReferences,
+    external_symbol_references: SymbolReferences,
+    late_symbol_references: SymbolReferences,
+    prelude: fn() -> (CodebaseMetadata, SymbolReferences),
+    settings: Settings,
+    parser_settings: ParserSettings,
+    file_states: HashMap<FileId, FileState>,
+    plugin_registry: Arc<PluginRegistry>,
+    initialized: bool,
+    codebase_issues: IssueCollection,
+    lifecycle_issues: IssueCollection,
+    analysis_snapshots: HashMap<FileId, Arc<FileAnalysisSnapshot>>,
+    codebase_scan_plan: Option<Arc<CodebaseScanPlan>>,
+    codebase_scan_files: HashMap<FileId, CodebaseScanFile>,
+    use_progress_bars: bool,
+    scan_only: bool,
+    node_analysis_files: Option<HashSet<FileId>>,
+    /// The files the last analysis analyzed, which the fanout tests compare with the inputs.
+    #[cfg(test)]
+    analyzed_files: HashSet<FileId>,
+}
+
+#[cfg_attr(test, allow(clippy::missing_fields_in_debug))]
+impl std::fmt::Debug for IncrementalAnalysisService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncrementalAnalysisService")
+            .field("database", &"<ReadDatabase>")
+            .field("codebase", &"<CodebaseMetadata>")
+            .field("symbol_references", &"<SymbolReferences>")
+            .field("native_symbol_references", &"<SymbolReferences>")
+            .field("external_symbol_references", &"<SymbolReferences>")
+            .field("late_symbol_references", &"<SymbolReferences>")
+            .field("prelude", &"<fn() -> (CodebaseMetadata, SymbolReferences)>")
+            .field("settings", &self.settings)
+            .field("parser_settings", &self.parser_settings)
+            .field("file_states", &format_args!("{} tracked files", self.file_states.len()))
+            .field("plugin_registry", &"<Arc<PluginRegistry>>")
+            .field("initialized", &self.initialized)
+            .field("codebase_issues", &self.codebase_issues.len())
+            .field("lifecycle_issues", &self.lifecycle_issues.len())
+            .field("analysis_snapshots", &self.analysis_snapshots.len())
+            .field("codebase_scan_plan", &self.codebase_scan_plan.is_some())
+            .field("codebase_scan_files", &self.codebase_scan_files.len())
+            .field("use_progress_bars", &self.use_progress_bars)
+            .field("scan_only", &self.scan_only)
+            .field("node_analysis_files", &self.node_analysis_files.as_ref().map(HashSet::len))
+            .finish()
+    }
+}
+
+impl IncrementalAnalysisService {
+    /// Creates a new incremental analysis service with the given database, prelude, and settings.
+    ///
+    /// `prelude` returns the codebase and symbol references of the builtins only (no user
+    /// symbols). Each analysis from scratch calls it for a fresh base, so the service never
+    /// keeps a copy of the prelude besides the codebase it analyzes.
+    ///
+    /// # Arguments
+    ///
+    /// * `database` - Read-only file database
+    /// * `prelude` - Decodes the prelude's codebase metadata and symbol references
+    /// * `settings` - Analyzer settings
+    /// * `parser_settings` - Parser settings
+    /// * `plugin_registry` - Analyzer plugin registry
+    #[must_use]
+    pub fn new(
+        database: ReadDatabase,
+        prelude: fn() -> (CodebaseMetadata, SymbolReferences),
+        settings: Settings,
+        parser_settings: ParserSettings,
+        plugin_registry: Arc<PluginRegistry>,
+    ) -> Self {
+        Self {
+            database,
+            codebase: CodebaseMetadata::new(),
+            symbol_references: SymbolReferences::new(),
+            native_symbol_references: SymbolReferences::new(),
+            external_symbol_references: SymbolReferences::new(),
+            late_symbol_references: SymbolReferences::new(),
+            prelude,
+            settings,
+            parser_settings,
+            file_states: HashMap::default(),
+            plugin_registry,
+            initialized: false,
+            codebase_issues: IssueCollection::default(),
+            lifecycle_issues: IssueCollection::default(),
+            analysis_snapshots: HashMap::default(),
+            codebase_scan_plan: None,
+            codebase_scan_files: HashMap::default(),
+            use_progress_bars: false,
+            scan_only: false,
+            node_analysis_files: None,
+            #[cfg(test)]
+            analyzed_files: HashSet::default(),
+        }
+    }
+
+    /// Draws a progress bar for each file pass when `use_progress_bars` is set.
+    #[must_use]
+    pub fn with_progress_bars(mut self, use_progress_bars: bool) -> Self {
+        self.use_progress_bars = use_progress_bars;
+        self
+    }
+
+    /// Builds the codebase and runs the before-analysis hooks, then analyzes no file.
+    ///
+    /// Each analysis then reports only the issues those hooks raise.
+    #[must_use]
+    pub fn scan_only(mut self) -> Self {
+        self.scan_only = true;
+        self
+    }
+
+    /// Discards every result of past analyses, so the next analysis must be [`analyze()`](Self::analyze).
+    ///
+    /// Call this after an analysis fails: a failed analysis leaves its state half updated.
+    pub fn reset(&mut self) {
+        self.codebase = CodebaseMetadata::new();
+        self.symbol_references = SymbolReferences::new();
+        self.native_symbol_references = SymbolReferences::new();
+        self.external_symbol_references = SymbolReferences::new();
+        self.late_symbol_references = SymbolReferences::new();
+        self.file_states.clear();
+        self.initialized = false;
+        self.codebase_issues = IssueCollection::default();
+        self.lifecycle_issues = IssueCollection::default();
+        self.analysis_snapshots.clear();
+        self.codebase_scan_plan = None;
+        self.codebase_scan_files.clear();
+    }
+
+    /// Updates the database for a new analysis run.
+    ///
+    /// Call this before [`analyze_incremental()`](Self::analyze_incremental) with the
+    /// updated database that reflects file changes.
+    pub fn update_database(&mut self, database: ReadDatabase) {
+        self.database = database;
+    }
+
+    /// Runs the external node-analysis hooks only in `files` from the next analysis on, or in every
+    /// file with `None`. A node-analysis hook reports issues in the file it inspects, so a caller that
+    /// reports only some files' issues skips the hooks everywhere else.
+    pub fn set_node_analysis_files(&mut self, files: Option<HashSet<FileId>>) {
+        self.node_analysis_files = files;
+    }
+
+    /// Returns whether the service has been initialized (initial full analysis completed).
+    #[must_use]
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// Returns a reference to the current codebase metadata, which stays empty until the first analysis.
+    #[must_use]
+    pub fn codebase(&self) -> &CodebaseMetadata {
+        &self.codebase
+    }
+
+    /// Returns a reference to the current symbol references.
+    #[must_use]
+    pub fn symbol_references(&self) -> &SymbolReferences {
+        &self.symbol_references
+    }
+
+    /// Returns a reference to the current database.
+    #[must_use]
+    pub fn database(&self) -> &ReadDatabase {
+        &self.database
+    }
+
+    /// Reconstructs the full issue list from cached per-file issues and codebase-level issues.
+    ///
+    /// Returns `None` if no analysis has been run yet.
+    #[must_use]
+    pub fn last_issues(&self) -> Option<IssueCollection> {
+        if !self.initialized {
+            return None;
+        }
+
+        Some(self.collect_all_issues())
+    }
+
+    /// Returns cached per-file diagnostics for a specific file.
+    ///
+    /// This returns the issues from the last completed analysis run for the given file,
+    /// without re-analyzing. Returns `None` if the file is not tracked or no analysis
+    /// has been run yet.
+    #[must_use]
+    pub fn get_file_diagnostics(&self, file_id: &FileId) -> Option<&IssueCollection> {
+        self.file_states.get(file_id).map(|state| &state.analysis_issues)
+    }
+
+    /// Returns the number of tracked source files.
+    #[must_use]
+    pub fn tracked_file_count(&self) -> usize {
+        self.file_states.len()
+    }
+
+    /// Merges `new_file_scans` into `merged_codebase` and re-applies patches so member
+    /// updates survive the remove/re-add of changed vendor entries.
+    ///
+    /// The apply pass only runs when at least one patch file is present in `new_file_scans`.
+    /// In the incremental body-only path, that is true exactly when a vendor file changed
+    /// this round (the `any_vendor_changed` force-rescan adds every patch into
+    /// `changed_files`) or when a patch file's content itself changed (handled by a full
+    /// reanalyze). When neither happens, the merged codebase already has every patch's
+    /// contributions from a previous round; re-running the pass would only regenerate
+    /// validation diagnostics that already live in `file_states` and let them accumulate.
+    fn apply_scan_results(
+        &self,
+        merged_codebase: &mut CodebaseMetadata,
+        new_file_scans: &[(FileId, CodebaseMetadata)],
+    ) {
+        let mut has_patch_in_scans = false;
+        for (fid, codebase) in new_file_scans {
+            merged_codebase.extend_ref(codebase);
+            if !has_patch_in_scans && self.database.get(fid).is_ok_and(|f| f.file_type.is_patch()) {
+                has_patch_in_scans = true;
+            }
+        }
+        if has_patch_in_scans {
+            merged_codebase.apply_patches_pass();
+        }
+    }
+
+    /// Distributes codebase-level issues into per-file caches based on their primary annotation's file ID.
+    ///
+    /// Issues that cannot be attributed to a tracked file (no primary annotation, zero file ID,
+    /// or file not in `file_states`) are stored in `self.codebase_issues` as orphans.
+    fn distribute_codebase_issues(&mut self, issues: IssueCollection) {
+        for issue in issues {
+            let file_id = issue
+                .annotations
+                .iter()
+                .find(|a| a.kind.is_primary())
+                .map(|a| a.span.file_id)
+                .filter(|fid| !fid.is_zero());
+
+            if let Some(fid) = file_id
+                && let Some(state) = self.file_states.get_mut(&fid)
+            {
+                state.codebase_issues.push(issue);
+                continue;
+            }
+
+            self.codebase_issues.push(issue);
+        }
+    }
+
+    /// Assembles the full issue list from codebase-level issues + all per-file cached issues.
+    ///
+    /// This avoids storing a separate snapshot by reconstructing on demand.
+    fn collect_all_issues(&self) -> IssueCollection {
+        let total: usize = self.codebase_issues.len()
+            + self.lifecycle_issues.len()
+            + self
+                .file_states
+                .values()
+                .map(|s| s.analysis_issues.len() + s.effect_issues.len() + s.codebase_issues.len())
+                .sum::<usize>();
+
+        let mut states = self.file_states.iter().collect::<Vec<_>>();
+        states.sort_unstable_by_key(|(file_id, _)| **file_id);
+
+        let mut issues = IssueCollection::default();
+        issues.reserve(total);
+        issues.extend(self.codebase_issues.iter().cloned());
+        issues.extend(self.lifecycle_issues.iter().cloned());
+        for (_, state) in states {
+            if !state.analysis_issues.is_empty() {
+                issues.extend(state.analysis_issues.iter().cloned());
+            }
+
+            if !state.effect_issues.is_empty() {
+                issues.extend(state.effect_issues.iter().cloned());
+            }
+
+            if !state.codebase_issues.is_empty() {
+                issues.extend(state.codebase_issues.iter().cloned());
+            }
+        }
+
+        issues
+    }
+
+    /// Caches each analyzed file's effect summaries, and gives every file the effect issues of this run's solve.
+    fn store_effects(
+        &mut self,
+        mut summaries: HashMap<FileId, Vec<EffectSummary>>,
+        mut issues: HashMap<FileId, IssueCollection>,
+    ) {
+        for (file_id, state) in &mut self.file_states {
+            if let Some(file_summaries) = summaries.remove(file_id) {
+                state.effect_summaries = file_summaries;
+            }
+            state.effect_issues = issues.remove(file_id).unwrap_or_default();
+        }
+    }
+
+    fn refresh_late_reference_issues(&mut self) {
+        if self.late_symbol_references.is_empty() {
+            for state in self.file_states.values_mut() {
+                state.analysis_issues = state.unreconciled_analysis_issues.clone();
+            }
+            return;
+        }
+
+        let reconciler = LateSymbolReferenceIssueReconciler::new(&self.codebase, &self.symbol_references);
+        for state in self.file_states.values_mut() {
+            state.analysis_issues = reconciler.reconcile(state.unreconciled_analysis_issues.clone());
+        }
+    }
+
+    /// Runs a full analysis from scratch.
+    ///
+    /// After this call, [`analyze_incremental()`](Self::analyze_incremental) can be used
+    /// for subsequent runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when source scanning, codebase population, or per-file
+    /// analysis fails.
+    pub fn analyze(&mut self) -> Result<AnalysisResult, OrchestratorError> {
+        self.codebase_scan_plan = self
+            .plugin_registry
+            .external_codebase_scan_plan()
+            .map_err(mago_analyzer::error::AnalysisError::from)?
+            .map(Arc::new);
+        let source_files: Vec<_> = self.database.files().filter(|f| f.file_type != FileType::Builtin).collect();
+
+        if source_files.is_empty() {
+            tracing::info!("No source files found for analysis.");
+            self.codebase_scan_files.clear();
+            self.plugin_registry
+                .run_external_codebase_scan(Vec::new())
+                .map_err(mago_analyzer::error::AnalysisError::from)?;
+            (self.codebase, self.symbol_references) = (self.prelude)();
+            self.native_symbol_references = self.symbol_references.clone();
+            self.initialized = true;
+            return Ok(AnalysisResult::new(SymbolReferences::new()));
+        }
+
+        let parser_settings = self.parser_settings;
+        let php_version = self.settings.version;
+        let codebase_scan_plan = self.codebase_scan_plan.clone();
+        let compiling_bar = self
+            .use_progress_bars
+            .then(|| create_progress_bar(source_files.len(), "📚 Compiling", ProgressBarTheme::Blue));
+        // The prelude decodes while the files scan, so no copy of it outlives an analysis.
+        let ((mut merged_codebase, mut symbol_references), per_file_results) = rayon::join(self.prelude, || {
+            source_files
+                .into_par_iter()
+                .map_init(LocalArena::new, |arena, file| {
+                    let content_hash = xxhash_rust::xxh3::xxh3_64(file.contents.as_ref());
+
+                    let program = parse_file_with_settings(arena, &file, parser_settings);
+                    if program.has_errors() {
+                        tracing::warn!(
+                            "Encountered {} parsing error(s) in '{}'. Codebase analysis may be incomplete.",
+                            program.errors.len(),
+                            mago_bytes::BytesDisplay(&file.name),
+                        );
+                    }
+
+                    let resolver = NameResolver::new(arena);
+                    let resolved_names = resolver.resolve(program);
+                    let file_signature = signature_builder::build_file_signature(program, &resolved_names);
+                    let mut metadata = scan_program(arena, &file, program, &resolved_names, php_version);
+                    metadata.set_file_signature(file.id, file_signature);
+                    if file.file_type.is_patch() {
+                        metadata.convert_partial_to_patch();
+                    }
+                    let codebase_scan =
+                        codebase_scan_plan.as_deref().map(|plan| plan.capture(&file, &metadata)).transpose()?.flatten();
+
+                    arena.reset();
+                    if let Some(compiling_bar) = &compiling_bar {
+                        compiling_bar.inc(1);
+                    }
+
+                    Ok((file.id, content_hash, metadata, codebase_scan))
+                })
+                .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
+        });
+        let mut per_file_results: Vec<(FileId, u64, CodebaseMetadata, Option<CodebaseScanFile>)> = per_file_results?;
+        if let Some(compiling_bar) = compiling_bar {
+            remove_progress_bar(&compiling_bar);
+        }
+
+        self.codebase_scan_files = per_file_results
+            .iter_mut()
+            .filter_map(|(file_id, _, _, codebase_scan)| codebase_scan.take().map(|scan| (*file_id, scan)))
+            .collect();
+        let refinements = self
+            .plugin_registry
+            .run_external_codebase_scan(self.codebase_scan_files.values().cloned().collect())
+            .map_err(mago_analyzer::error::AnalysisError::from)?;
+        apply_refinements(
+            refinements,
+            per_file_results.iter_mut().map(|(file_id, _, metadata, _)| (*file_id, metadata)),
+        )
+        .map_err(mago_analyzer::error::AnalysisError::from)?;
+
+        let staged: Vec<(FileId, u64, CodebaseEntryKeys)> = per_file_results
+            .into_iter()
+            .map(|(file_id, content_hash, metadata, _)| {
+                let declared_keys = metadata.extract_owned_keys(&metadata);
+                merged_codebase.extend(metadata);
+                (file_id, content_hash, declared_keys)
+            })
+            .collect();
+        merged_codebase.apply_patches_pass();
+
+        populate_codebase(&mut merged_codebase, &mut symbol_references, WordSet::default(), HashSet::default());
+        let merged_aliases =
+            merged_codebase.class_like_alias_declarations().map(|(alias, _, span)| (alias, span.file_id)).collect();
+        let mut file_states: HashMap<FileId, FileState> = HashMap::default();
+        for (file_id, content_hash, mut entry_keys) in staged {
+            retain_owned_keys(&mut entry_keys, file_id, &merged_codebase, &merged_aliases);
+            file_states.insert(
+                file_id,
+                FileState {
+                    content_hash,
+                    entry_keys,
+                    unreconciled_analysis_issues: IssueCollection::default(),
+                    analysis_issues: IssueCollection::default(),
+                    codebase_issues: IssueCollection::default(),
+                    deferred_pragmas: None,
+                    late_symbol_references: SymbolReferences::new(),
+                    reads: FileReads::default(),
+                    effect_summaries: Vec::new(),
+                    effect_issues: IssueCollection::default(),
+                },
+            );
+        }
+
+        let SelectiveAnalysisOutput {
+            result: mut analysis_result,
+            native_symbol_references,
+            external_symbol_references,
+            late_symbol_references,
+            late_symbol_references_by_file,
+            mut reads_by_file,
+            per_file_issues,
+            per_file_pragmas,
+            snapshots,
+            codebase_issues: all_codebase_issues,
+            per_file_effect_summaries,
+            per_file_effect_issues,
+        } =
+            self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &HashSet::default())?;
+        #[cfg(test)]
+        {
+            self.analyzed_files = per_file_issues.keys().copied().collect();
+        }
+        self.external_symbol_references = external_symbol_references;
+        self.late_symbol_references = late_symbol_references;
+        self.native_symbol_references = native_symbol_references;
+        self.lifecycle_issues = analysis_result.issues.clone();
+        self.analysis_snapshots = snapshots.into_iter().map(|snapshot| (snapshot.file_id(), snapshot)).collect();
+
+        // Distribute codebase issues to per-file caches.
+        self.file_states = file_states;
+        self.codebase_issues = IssueCollection::default();
+        self.distribute_codebase_issues(all_codebase_issues);
+
+        for (file_id, issues) in per_file_issues {
+            if let Some(state) = self.file_states.get_mut(&file_id) {
+                state.unreconciled_analysis_issues = issues.clone();
+                state.analysis_issues = issues;
+                state.deferred_pragmas = per_file_pragmas.get(&file_id).cloned();
+                state.late_symbol_references =
+                    late_symbol_references_by_file.get(&file_id).cloned().unwrap_or_default();
+                state.reads = reads_by_file.remove(&file_id).unwrap_or_default();
+            }
+        }
+        self.store_effects(per_file_effect_summaries, per_file_effect_issues);
+
+        self.codebase = merged_codebase;
+        self.symbol_references = std::mem::take(&mut analysis_result.symbol_references);
+        self.refresh_late_reference_issues();
+        analysis_result.issues = self.collect_all_issues();
+        tracing::debug!(
+            "Initial analysis: {} total issues ({} codebase-level)",
+            analysis_result.issues.len(),
+            self.codebase_issues.len(),
+        );
+        self.initialized = true;
+
+        Ok(analysis_result)
+    }
+
+    /// Runs incremental analysis optimized for subsequent runs after file changes.
+    ///
+    /// # Arguments
+    ///
+    /// * `changed_hint` - Optional set of file IDs known to have changed (e.g. from
+    ///   a file watcher). When provided, only these files are hashed to detect changes.
+    ///   Files not in this set are assumed unchanged, avoiding O(all files) hashing.
+    ///   Pass `None` to hash all files (correct but slower).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError::General`] if `analyze()` has not been called yet, or when
+    /// re-scanning, populator updates, or per-file analysis fails for the changed subset.
+    pub fn analyze_incremental(
+        &mut self,
+        changed_hint: Option<&[FileId]>,
+    ) -> Result<AnalysisResult, OrchestratorError> {
+        if !self.initialized {
+            return Err(OrchestratorError::General(
+                "analyze() must be called before analyze_incremental()".to_string(),
+            ));
+        }
+
+        let source_files: Vec<_> = self.database.files().filter(|f| f.file_type != FileType::Builtin).collect();
+
+        if source_files.is_empty() {
+            tracing::info!("No source files found for analysis.");
+            return Ok(AnalysisResult::new(SymbolReferences::new()));
+        }
+
+        let current_file_names: WordSet = source_files.iter().map(|file| mago_word::word(file.name.as_ref())).collect();
+
+        let mut changed_files = Vec::new();
+        let mut unchanged_file_ids = Vec::with_capacity(source_files.len());
+        let mut file_hashes: HashMap<FileId, u64> = HashMap::default();
+
+        // Detect deleted files (present in cache but no longer in database)
+        let current_file_ids: HashSet<FileId> = source_files.iter().map(|f| f.id).collect();
+        let deleted_count = self.file_states.keys().filter(|id| !current_file_ids.contains(id)).count();
+        if deleted_count > 0 {
+            tracing::debug!("{} file(s) deleted since last run", deleted_count);
+
+            // A deleted patch leaves its refinements already folded into the vendor / built-in
+            // baseline with nothing left to undo them: the apply pass only runs for patches present
+            // in the new scans, and the vendor file it targeted is untouched. Fall back to a full
+            // reanalyze so the affected baselines are rebuilt without the patch — the same policy the
+            // patch-content-change path below uses.
+            let patch_deleted = self
+                .codebase
+                .patch_class_likes
+                .values()
+                .map(|meta| meta.span.file_id)
+                .chain(self.codebase.patch_function_likes.values().map(|meta| meta.span.file_id))
+                .chain(self.codebase.patch_constants.values().map(|meta| meta.span.file_id))
+                .any(|file_id| !current_file_ids.contains(&file_id));
+            if patch_deleted {
+                return self.analyze();
+            }
+        }
+
+        if let Some(hint) = changed_hint {
+            let hint_set: HashSet<FileId> = hint.iter().copied().collect();
+
+            for file in &source_files {
+                if hint_set.contains(&file.id) || !self.file_states.contains_key(&file.id) {
+                    let hash = xxhash_rust::xxh3::xxh3_64(file.contents.as_ref());
+                    file_hashes.insert(file.id, hash);
+
+                    if let Some(prev_state) = self.file_states.get(&file.id) {
+                        if prev_state.content_hash == hash {
+                            unchanged_file_ids.push(file.id);
+                            tracing::trace!(
+                                "File unchanged (hash match despite watcher hint): {}",
+                                mago_bytes::BytesDisplay(&file.name)
+                            );
+                        } else {
+                            changed_files.push(file);
+                            tracing::debug!("File changed: {}", mago_bytes::BytesDisplay(&file.name));
+                        }
+                    } else {
+                        changed_files.push(file);
+                        tracing::debug!("New file: {}", mago_bytes::BytesDisplay(&file.name));
+                    }
+                } else {
+                    if let Some(prev_state) = self.file_states.get(&file.id) {
+                        file_hashes.insert(file.id, prev_state.content_hash);
+                    }
+
+                    unchanged_file_ids.push(file.id);
+                }
+            }
+        } else {
+            let all_hashes: HashMap<FileId, u64> = source_files
+                .par_iter()
+                .map(|file| {
+                    let hash = xxhash_rust::xxh3::xxh3_64(file.contents.as_ref());
+                    (file.id, hash)
+                })
+                .collect();
+
+            for file in &source_files {
+                let current_hash = all_hashes[&file.id];
+                file_hashes.insert(file.id, current_hash);
+
+                if let Some(prev_state) = self.file_states.get(&file.id) {
+                    if prev_state.content_hash == current_hash {
+                        unchanged_file_ids.push(file.id);
+                        tracing::trace!("File unchanged (cached): {}", mago_bytes::BytesDisplay(&file.name));
+                    } else {
+                        changed_files.push(file);
+                        tracing::debug!("File changed (hash mismatch): {}", mago_bytes::BytesDisplay(&file.name));
+                    }
+                } else {
+                    changed_files.push(file);
+                    tracing::debug!("New file (not in cache): {}", mago_bytes::BytesDisplay(&file.name));
+                }
+            }
+        }
+
+        if changed_files.is_empty() && deleted_count == 0 {
+            tracing::debug!("No files changed, reconstructing cached issues");
+            let mut result = AnalysisResult::new(SymbolReferences::new());
+            result.issues = self.collect_all_issues();
+            return Ok(result);
+        }
+
+        // When a vendor file changes, patch files that were unchanged by content must still be
+        // re-scanned so `apply_patches_pass` runs against the updated vendor state. This
+        // handles both class-method and free-function cases: a method (or function) removed from
+        // the vendor makes the corresponding patch entry an orphan, which `apply_patches_pass`
+        // already detects and reports.
+        let any_vendor_changed = changed_files.iter().any(|f| f.file_type == FileType::Vendored);
+        if any_vendor_changed {
+            let source_files_by_id: HashMap<FileId, &_> = source_files.iter().map(|f| (f.id, f)).collect();
+            let mut i = 0;
+            while i < unchanged_file_ids.len() {
+                if self.database.get(&unchanged_file_ids[i]).is_ok_and(|f| f.file_type.is_patch()) {
+                    let fid = unchanged_file_ids.swap_remove(i);
+                    if let Some(&file) = source_files_by_id.get(&fid) {
+                        changed_files.push(file);
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        let parser_settings = self.parser_settings;
+        let php_version = self.settings.version;
+        let codebase_scan_plan = self.codebase_scan_plan.clone();
+        let scanned_files: Vec<(FileId, CodebaseMetadata, Option<CodebaseScanFile>)> = changed_files
+            .into_par_iter()
+            .map_init(LocalArena::new, |arena, file| {
+                let program = parse_file_with_settings(arena, file, parser_settings);
+                if program.has_errors() {
+                    tracing::warn!(
+                        "Encountered {} parsing error(s) in '{}'. Codebase analysis may be incomplete.",
+                        program.errors.len(),
+                        mago_bytes::BytesDisplay(&file.name),
+                    );
+                }
+
+                let resolver = NameResolver::new(arena);
+                let resolved_names = resolver.resolve(program);
+                let mut metadata = scan_program(arena, file, program, &resolved_names, php_version);
+                metadata.set_file_signature(file.id, signature_builder::build_file_signature(program, &resolved_names));
+                if file.file_type.is_patch() {
+                    metadata.convert_partial_to_patch();
+                }
+                let codebase_scan =
+                    codebase_scan_plan.as_deref().map(|plan| plan.capture(file, &metadata)).transpose()?.flatten();
+
+                arena.reset();
+
+                Ok((file.id, metadata, codebase_scan))
+            })
+            .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
+            .map_err(mago_analyzer::error::AnalysisError::from)?;
+
+        // A patch whose content actually changed requires rebuilding the merged codebase from
+        // scratch. Patches that were force-rescanned due to a vendor change (same hash) go
+        // through the normal incremental path: `apply_patches_pass` re-applies them to the
+        // freshly-updated vendor entries and generates the correct diagnostics.
+        let any_patch_content_changed = scanned_files.iter().any(|(fid, _, _)| {
+            self.database.get(fid).is_ok_and(|f| f.file_type.is_patch())
+                && self.file_states.get(fid).is_none_or(|s| s.content_hash != file_hashes[fid])
+        });
+        if any_patch_content_changed {
+            return self.analyze();
+        }
+
+        let scan_state_changed = self.codebase_scan_files.keys().any(|file_id| !current_file_ids.contains(file_id))
+            || scanned_files
+                .iter()
+                .any(|(file_id, _, snapshot)| snapshot.is_some() || self.codebase_scan_files.contains_key(file_id));
+        if scan_state_changed {
+            self.codebase_scan_files.retain(|file_id, _| current_file_ids.contains(file_id));
+        }
+        let mut new_file_scans = Vec::with_capacity(scanned_files.len());
+        for (file_id, metadata, snapshot) in scanned_files {
+            if scan_state_changed {
+                self.codebase_scan_files.remove(&file_id);
+                if let Some(snapshot) = snapshot {
+                    self.codebase_scan_files.insert(file_id, snapshot);
+                }
+            }
+            new_file_scans.push((file_id, metadata));
+        }
+        if scan_state_changed {
+            // Every selected file is rescanned so workers keep complete state, but refinements are
+            // installed only into files that changed: an unchanged file's refinement is already part
+            // of the merged codebase, and a refinement reads nothing outside its own file.
+            let refinements = self
+                .plugin_registry
+                .run_external_codebase_scan(self.codebase_scan_files.values().cloned().collect())
+                .map_err(mago_analyzer::error::AnalysisError::from)?;
+            apply_refinements(refinements, new_file_scans.iter_mut().map(|(file_id, metadata)| (*file_id, metadata)))
+                .map_err(mago_analyzer::error::AnalysisError::from)?;
+        }
+
+        // A return taken from a method body changes with that body, and the signature diff cannot
+        // see it, so its callers in unchanged files would keep the old return.
+        let returns_from_bodies = std::iter::once(&self.codebase)
+            .chain(new_file_scans.iter().map(|(_, metadata)| metadata))
+            .any(|metadata| metadata.function_likes.values().any(|method| method.return_from_body.is_some()));
+        if returns_from_bodies {
+            return self.analyze();
+        }
+
+        let mut diff = {
+            let mut diff = CodebaseDiff::new();
+            let mut old_sigs = CodebaseMetadata::new();
+            let mut new_sigs = CodebaseMetadata::new();
+
+            for (file_id, metadata) in &new_file_scans {
+                if let Some(old_sig) = self.codebase.get_file_signature(file_id) {
+                    old_sigs.set_file_signature(*file_id, old_sig.clone());
+                }
+                if let Some(new_sig) = metadata.file_signatures.get(file_id) {
+                    new_sigs.set_file_signature(*file_id, new_sig.clone());
+                }
+            }
+
+            for &file_id in self.file_states.keys() {
+                if !current_file_ids.contains(&file_id)
+                    && let Some(sig) = self.codebase.get_file_signature(&file_id)
+                {
+                    old_sigs.set_file_signature(file_id, sig.clone());
+                }
+            }
+
+            diff.extend(CodebaseDiff::between(&old_sigs, &new_sigs));
+            diff
+        };
+
+        let aliases_changed = new_file_scans.iter().any(|(file_id, metadata)| {
+            let current: HashSet<_> =
+                metadata.class_like_alias_declarations().map(|(alias, target, _)| (alias, target)).collect();
+            let previous: HashSet<_> = self
+                .file_states
+                .get(file_id)
+                .map(|state| {
+                    state.entry_keys.class_like_aliases.iter().map(|(alias, target, _)| (*alias, *target)).collect()
+                })
+                .unwrap_or_default();
+
+            current != previous
+        }) || self.file_states.iter().any(|(file_id, state)| {
+            !current_file_ids.contains(file_id) && !state.entry_keys.class_like_aliases.is_empty()
+        });
+
+        if aliases_changed {
+            return self.analyze();
+        }
+
+        let wrapped_functions_changed = new_file_scans
+            .iter()
+            .any(|(file_id, metadata)| wrappers_in(metadata, *file_id) != wrappers_in(&self.codebase, *file_id))
+            || self.file_states.keys().any(|file_id| {
+                !current_file_ids.contains(file_id) && !wrappers_in(&self.codebase, *file_id).is_empty()
+            });
+
+        if wrapped_functions_changed {
+            return self.analyze();
+        }
+
+        let externs_changed = new_file_scans
+            .iter()
+            .any(|(file_id, metadata)| externs_in(metadata, *file_id) != externs_in(&self.codebase, *file_id))
+            || self
+                .file_states
+                .keys()
+                .any(|file_id| !current_file_ids.contains(file_id) && !externs_in(&self.codebase, *file_id).is_empty());
+
+        if externs_changed {
+            return self.analyze();
+        }
+
+        let body_only = diff.get_changed().is_empty() && deleted_count == 0;
+
+        if !body_only {
+            for &file_id in &unchanged_file_ids {
+                let Some(sig) = self.codebase.get_file_signature(&file_id) else {
+                    continue;
+                };
+
+                for node in &sig.ast_nodes {
+                    diff.add_keep_entry((node.name, mago_word::empty_word()));
+
+                    for child in &node.children {
+                        diff.add_keep_entry((node.name, child.name));
+                    }
+                }
+            }
+        }
+
+        if body_only {
+            let mut merged_codebase = std::mem::take(&mut self.codebase);
+            // Two-pass update: remove all old entries first, then add all new entries.
+            for (file_id, _new_metadata) in &new_file_scans {
+                if let Some(prev_state) = self.file_states.get(file_id) {
+                    merged_codebase.remove_entries_by_keys(&prev_state.entry_keys);
+                }
+            }
+            self.apply_scan_results(&mut merged_codebase, &new_file_scans);
+
+            let files_to_skip: HashSet<FileId> = unchanged_file_ids.iter().copied().collect();
+            let mut symbol_references = std::mem::take(&mut self.native_symbol_references);
+            symbol_references.retain_references_from_files(&current_file_names);
+
+            let mut changed_symbols: HashSet<(mago_word::Word, mago_word::Word)> = HashSet::default();
+            let mut changed_file_names: Vec<mago_word::Word> = Vec::new();
+
+            for (file_id, metadata) in &new_file_scans {
+                for &key in metadata.function_likes.keys() {
+                    changed_symbols.insert(key);
+                }
+
+                for &name in metadata.class_likes.keys() {
+                    changed_symbols.insert((name, mago_word::empty_word()));
+                }
+
+                for &name in metadata.constants.keys() {
+                    changed_symbols.insert((name, mago_word::empty_word()));
+                }
+
+                if let Some(sig) = metadata.file_signatures.values().next() {
+                    for node in &sig.ast_nodes {
+                        for child in &node.children {
+                            changed_symbols.insert((node.name, child.name));
+                        }
+                    }
+                }
+
+                // Collect file names for file-level reference cleanup
+                if let Ok(file) = self.database.get(file_id) {
+                    changed_file_names.push(mago_word::word(&file.name));
+                }
+            }
+
+            symbol_references.remove_body_references_for_symbols(&changed_symbols, &changed_file_names);
+
+            // Collect class_like names from changed files so we exclude them from safe_symbols.
+            // Changed classes had their old metadata removed and fresh (unpopulated) metadata added,
+            // so the populator must repopulate them to rebuild parent resolution, overridden_method_ids, etc.
+            let changed_class_like_names: WordSet =
+                new_file_scans.iter().flat_map(|(_, metadata)| metadata.class_likes.keys().copied()).collect();
+            let safe_symbols: WordSet = merged_codebase
+                .class_likes
+                .keys()
+                .copied()
+                .filter(|name| !changed_class_like_names.contains(name))
+                .collect();
+            populate_codebase_targeted(
+                &mut merged_codebase,
+                &mut symbol_references,
+                safe_symbols,
+                HashSet::default(),
+                changed_symbols,
+            );
+            let SelectiveAnalysisOutput {
+                result: mut analysis_result,
+                native_symbol_references,
+                external_symbol_references,
+                late_symbol_references,
+                mut late_symbol_references_by_file,
+                mut reads_by_file,
+                mut per_file_issues,
+                per_file_pragmas,
+                snapshots,
+                codebase_issues: new_codebase_issues,
+                per_file_effect_summaries,
+                per_file_effect_issues,
+            } = self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
+            #[cfg(test)]
+            {
+                self.analyzed_files = per_file_issues.keys().copied().collect();
+            }
+            self.external_symbol_references = external_symbol_references;
+            self.late_symbol_references = late_symbol_references;
+            self.native_symbol_references = native_symbol_references;
+            self.lifecycle_issues = std::mem::take(&mut analysis_result.issues);
+            self.analysis_snapshots.retain(|file_id, _| current_file_ids.contains(file_id));
+            for snapshot in snapshots {
+                self.analysis_snapshots.insert(snapshot.file_id(), snapshot);
+            }
+
+            // Drain codebase issues from metadata and distribute to changed files only.
+            // Unchanged files keep their cached codebase_issues from previous runs.
+            let changed_file_ids: HashSet<FileId> = new_file_scans.iter().map(|(fid, _)| *fid).collect();
+            let re_analyzed_unchanged: Vec<FileId> = per_file_issues
+                .keys()
+                .filter(|file_id| self.file_states.contains_key(file_id) && !changed_file_ids.contains(file_id))
+                .copied()
+                .collect();
+
+            // Clear codebase issues for every file analyzed in this generation.
+            for (file_id, state) in self.file_states.iter_mut() {
+                if !files_to_skip.contains(file_id) {
+                    state.codebase_issues = IssueCollection::default();
+                }
+            }
+
+            // Keep orphan codebase issues; distribute file-attributable ones.
+            self.codebase_issues = IssueCollection::default();
+            self.distribute_codebase_issues(new_codebase_issues);
+
+            for file_id in re_analyzed_unchanged {
+                if let Some(issues) = per_file_issues.remove(&file_id)
+                    && let Some(state) = self.file_states.get_mut(&file_id)
+                {
+                    state.unreconciled_analysis_issues = issues.clone();
+                    state.analysis_issues = issues;
+                    state.deferred_pragmas = per_file_pragmas.get(&file_id).cloned();
+                    state.late_symbol_references = late_symbol_references_by_file.remove(&file_id).unwrap_or_default();
+                    state.reads = reads_by_file.remove(&file_id).unwrap_or_default();
+                }
+            }
+
+            for (file_id, metadata) in new_file_scans {
+                let content_hash = file_hashes[&file_id];
+                let analysis_issues = per_file_issues.remove(&file_id).unwrap_or_default();
+                // Owned keys (spans match merged) so a future touch of this file does
+                // not clobber a rival file that won the tiebreak over this one.
+                let entry_keys = metadata.extract_owned_keys(&merged_codebase);
+                let codebase_issues =
+                    self.file_states.get(&file_id).map(|s| s.codebase_issues.clone()).unwrap_or_default();
+                let deferred_pragmas = per_file_pragmas.get(&file_id).cloned();
+                let late_symbol_references = late_symbol_references_by_file.remove(&file_id).unwrap_or_default();
+                self.file_states.insert(
+                    file_id,
+                    FileState {
+                        content_hash,
+                        entry_keys,
+                        unreconciled_analysis_issues: analysis_issues.clone(),
+                        analysis_issues,
+                        codebase_issues,
+                        deferred_pragmas,
+                        late_symbol_references,
+                        reads: reads_by_file.remove(&file_id).unwrap_or_default(),
+                        effect_summaries: Vec::new(),
+                        effect_issues: IssueCollection::default(),
+                    },
+                );
+            }
+            self.store_effects(per_file_effect_summaries, per_file_effect_issues);
+
+            self.codebase = merged_codebase;
+            self.symbol_references = std::mem::take(&mut analysis_result.symbol_references);
+            self.refresh_late_reference_issues();
+            analysis_result.issues = self.collect_all_issues();
+
+            return Ok(analysis_result);
+        }
+
+        let listings_before: HashMap<Listing, u64> = unchanged_file_ids
+            .iter()
+            .filter_map(|file_id| self.file_states.get(file_id))
+            .flat_map(|state| state.reads.listings.iter().copied())
+            .map(|listing| (listing, listing.answer(&self.codebase)))
+            .collect();
+
+        let mut merged_codebase = std::mem::take(&mut self.codebase);
+
+        for (file_id, prev_state) in &self.file_states {
+            if !current_file_ids.contains(file_id) {
+                merged_codebase.remove_entries_by_keys(&prev_state.entry_keys);
+            }
+        }
+
+        // Two-pass update: remove all old entries first, then add all new entries.
+        // This prevents ordering issues where adding a class from a new file and then
+        // removing old entries from a different file could accidentally remove the
+        // newly-added class (when a class moves between files).
+        for (file_id, _new_metadata) in &new_file_scans {
+            if let Some(prev_state) = self.file_states.get(file_id) {
+                merged_codebase.remove_entries_by_keys(&prev_state.entry_keys);
+            }
+        }
+        self.apply_scan_results(&mut merged_codebase, &new_file_scans);
+
+        // Population turns a class name into an object type only while the class-like exists, and
+        // never turns it back. An unchanged file would keep a type resolved against a class-like
+        // that is now gone, so a full analysis resolves every type again, as a cold run does.
+        let class_like_removed = new_file_scans
+            .iter()
+            .map(|(file_id, _)| file_id)
+            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)))
+            .filter_map(|file_id| self.file_states.get(file_id))
+            .flat_map(|state| &state.entry_keys.class_like_names)
+            .any(|&name| merged_codebase.symbols.get_kind(name).is_none());
+        if class_like_removed {
+            return self.analyze();
+        }
+
+        merged_codebase.safe_symbols.clear();
+        merged_codebase.safe_symbol_members.clear();
+
+        let reads = symbols_read_by(&self.file_states, &self.database, &unchanged_file_ids);
+        let Some(mut invalid_files) = merged_codebase.mark_safe_symbols(&diff, &self.native_symbol_references, reads)
+        else {
+            tracing::warn!("Invalidation cascade too expensive (>5000 steps), falling back to full analysis");
+
+            return self.analyze();
+        };
+
+        let safe_symbols = std::mem::take(&mut merged_codebase.safe_symbols);
+        let safe_symbol_members = std::mem::take(&mut merged_codebase.safe_symbol_members);
+
+        let mut dirty_symbols: HashSet<(mago_word::Word, mago_word::Word)> = diff.get_changed().clone();
+        for (_file_id, metadata) in &new_file_scans {
+            for &key in metadata.function_likes.keys() {
+                dirty_symbols.insert(key);
+            }
+
+            for &name in metadata.class_likes.keys() {
+                dirty_symbols.insert((name, mago_word::empty_word()));
+            }
+
+            for &name in metadata.constants.keys() {
+                dirty_symbols.insert((name, mago_word::empty_word()));
+            }
+        }
+
+        let mut symbol_references = std::mem::take(&mut self.native_symbol_references);
+        symbol_references.retain_references_from_files(&current_file_names);
+        symbol_references.remove_dirty_symbol_references(&dirty_symbols);
+
+        populate_codebase_targeted(
+            &mut merged_codebase,
+            &mut symbol_references,
+            safe_symbols,
+            safe_symbol_members,
+            dirty_symbols,
+        );
+        let changed_listings: HashSet<Listing> = listings_before
+            .into_iter()
+            .filter(|(listing, answer)| listing.answer(&merged_codebase) != *answer)
+            .map(|(listing, _)| listing)
+            .collect();
+        for file_id in &unchanged_file_ids {
+            if self
+                .file_states
+                .get(file_id)
+                .is_some_and(|state| state.reads.listings.iter().any(|listing| changed_listings.contains(listing)))
+                && let Ok(file) = self.database.get(file_id)
+            {
+                invalid_files.insert(mago_word::word(file.name.as_ref()));
+            }
+        }
+        let files_to_skip = self.files_to_skip(&merged_codebase, &unchanged_file_ids, &invalid_files);
+
+        let reanalyzed_file_names: WordSet = new_file_scans
+            .iter()
+            .map(|(file_id, _)| *file_id)
+            .chain(unchanged_file_ids.iter().copied().filter(|file_id| !files_to_skip.contains(file_id)))
+            .filter_map(|file_id| self.database.get(&file_id).ok())
+            .map(|file| mago_word::word(file.name.as_ref()))
+            .collect();
+        symbol_references.remove_references_from_files(&reanalyzed_file_names);
+
+        // For files that will be re-analyzed (not skipped), remove their symbols from
+        // safe_symbols/safe_symbol_members. When diff=true, the analyzer skips safe classes,
+        // but since we replace per-file issues wholesale, skipped classes would lose their issues.
+        // Only files in files_to_skip keep their cached issues; all others are fully re-analyzed.
+        {
+            let mut symbols_to_unsafify = Vec::new();
+            let mut members_to_unsafify = Vec::new();
+
+            for &file_id in &unchanged_file_ids {
+                if !files_to_skip.contains(&file_id)
+                    && let Some(sig) = merged_codebase.get_file_signature(&file_id)
+                {
+                    for node in &sig.ast_nodes {
+                        symbols_to_unsafify.push(node.name);
+                        for child in &node.children {
+                            members_to_unsafify.push((node.name, child.name));
+                        }
+                    }
+                }
+            }
+
+            // Also clear for changed files (they are always re-analyzed).
+            for (_file_id, metadata) in &new_file_scans {
+                for &name in metadata.class_likes.keys() {
+                    symbols_to_unsafify.push(name);
+                }
+
+                // Use file signature nodes (not metadata keys) for consistency with
+                // how unchanged files are unsafified. File signature nodes use
+                // (name, empty) for top-level symbols, matching safe_symbols format.
+                // This differs from function_likes keys which use (empty, name) for
+                // standalone functions.
+                for sig in metadata.file_signatures.values() {
+                    for node in &sig.ast_nodes {
+                        symbols_to_unsafify.push(node.name);
+                        for child in &node.children {
+                            members_to_unsafify.push((node.name, child.name));
+                        }
+                    }
+                }
+            }
+
+            for name in symbols_to_unsafify {
+                merged_codebase.safe_symbols.remove(&name);
+            }
+            for key in members_to_unsafify {
+                merged_codebase.safe_symbol_members.remove(&key);
+            }
+        }
+
+        let SelectiveAnalysisOutput {
+            result: mut analysis_result,
+            native_symbol_references,
+            external_symbol_references,
+            late_symbol_references,
+            mut late_symbol_references_by_file,
+            mut reads_by_file,
+            mut per_file_issues,
+            per_file_pragmas,
+            snapshots,
+            codebase_issues: new_codebase_issues,
+            per_file_effect_summaries,
+            per_file_effect_issues,
+        } = self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
+        #[cfg(test)]
+        {
+            self.analyzed_files = per_file_issues.keys().copied().collect();
+        }
+        self.external_symbol_references = external_symbol_references;
+        self.late_symbol_references = late_symbol_references;
+        self.native_symbol_references = native_symbol_references;
+        self.lifecycle_issues = std::mem::take(&mut analysis_result.issues);
+        self.analysis_snapshots.retain(|file_id, _| current_file_ids.contains(file_id));
+        for snapshot in snapshots {
+            self.analysis_snapshots.insert(snapshot.file_id(), snapshot);
+        }
+
+        self.file_states.retain(|id, _| current_file_ids.contains(id));
+
+        let changed_file_ids: HashSet<FileId> = new_file_scans.iter().map(|(fid, _)| *fid).collect();
+        let re_analyzed_unchanged: Vec<FileId> = per_file_issues
+            .keys()
+            .filter(|fid| self.file_states.contains_key(fid) && !changed_file_ids.contains(fid))
+            .copied()
+            .collect();
+
+        // Clear codebase issues for files that were NOT skipped (their symbols were re-populated).
+        // Files in files_to_skip keep their old codebase_issues intact.
+        for (file_id, state) in self.file_states.iter_mut() {
+            if !files_to_skip.contains(file_id) {
+                state.codebase_issues = IssueCollection::default();
+            }
+        }
+
+        // Distribute new codebase issues (from re-populated symbols) to per-file caches.
+        self.codebase_issues = IssueCollection::default();
+        self.distribute_codebase_issues(new_codebase_issues);
+
+        for file_id in re_analyzed_unchanged {
+            if let Some(issues) = per_file_issues.remove(&file_id)
+                && let Some(state) = self.file_states.get_mut(&file_id)
+            {
+                state.unreconciled_analysis_issues = issues.clone();
+                state.analysis_issues = issues;
+                state.deferred_pragmas = per_file_pragmas.get(&file_id).cloned();
+                state.late_symbol_references = late_symbol_references_by_file.remove(&file_id).unwrap_or_default();
+                state.reads = reads_by_file.remove(&file_id).unwrap_or_default();
+            }
+        }
+
+        for (file_id, metadata) in new_file_scans {
+            let content_hash = file_hashes[&file_id];
+            let analysis_issues = per_file_issues.remove(&file_id).unwrap_or_default();
+            // Owned keys (spans match merged) so a future touch of this file does
+            // not clobber a rival file that won the tiebreak over this one.
+            let entry_keys = metadata.extract_owned_keys(&merged_codebase);
+            let codebase_issues = self.file_states.get(&file_id).map(|s| s.codebase_issues.clone()).unwrap_or_default();
+            let deferred_pragmas = per_file_pragmas.get(&file_id).cloned();
+            let late_symbol_references = late_symbol_references_by_file.remove(&file_id).unwrap_or_default();
+            self.file_states.insert(
+                file_id,
+                FileState {
+                    content_hash,
+                    entry_keys,
+                    unreconciled_analysis_issues: analysis_issues.clone(),
+                    analysis_issues,
+                    codebase_issues,
+                    deferred_pragmas,
+                    late_symbol_references,
+                    reads: reads_by_file.remove(&file_id).unwrap_or_default(),
+                    effect_summaries: Vec::new(),
+                    effect_issues: IssueCollection::default(),
+                },
+            );
+        }
+        self.store_effects(per_file_effect_summaries, per_file_effect_issues);
+
+        self.codebase = merged_codebase;
+        self.symbol_references = std::mem::take(&mut analysis_result.symbol_references);
+        self.refresh_late_reference_issues();
+        analysis_result.issues = self.collect_all_issues();
+
+        Ok(analysis_result)
+    }
+
+    /// Analyzes a single file and returns both its issues and the
+    /// [`AnalysisArtifacts`] (per-expression types, assertions, inferred
+    /// returns, etc.) produced during analysis.
+    ///
+    /// Used by editor integrations that need precise type information at
+    /// arbitrary cursor positions; LSP completion and hover both rely on
+    /// this to answer "what's the type of `$obj` here?".
+    #[must_use]
+    pub fn analyze_file_with_artifacts(&self, file_id: FileId) -> Option<(IssueCollection, AnalysisArtifacts)> {
+        let external_session = self.plugin_registry.create_external_analysis_session(self.database.files());
+        let file = self.database.get(&file_id).ok()?;
+
+        let arena = LocalArena::new();
+        let program = parse_file_with_settings(&arena, &file, self.parser_settings);
+        let resolved_names = NameResolver::new(&arena).resolve(program);
+
+        let mut issues = IssueCollection::new();
+        if program.has_errors() {
+            for error in program.errors.iter() {
+                issues.push(Issue::from(error));
+            }
+        }
+
+        let semantics_checker = SemanticsChecker::new(self.settings.version);
+        let semantic_issues = semantics_checker.check(&file, program, &resolved_names);
+        issues.extend(semantic_issues.iter().cloned());
+
+        let mut analysis_result = AnalysisResult::new(SymbolReferences::new());
+        let analyzer = self.file_analyzer(&arena, &file, &resolved_names, external_session.as_ref());
+
+        let artifacts = match analyzer.analyze_with_artifacts(program, &mut analysis_result) {
+            Ok(artifacts) => artifacts,
+            Err(err) => {
+                issues.push(Issue::error(format!("Analysis error: {err}")));
+                return Some((issues, AnalysisArtifacts::new()));
+            }
+        };
+
+        let analyzer_issues = drop_follow_on_issues(&file, &semantic_issues, analysis_result.issues);
+        if self.late_symbol_references.is_empty() {
+            issues.extend(analyzer_issues);
+        } else {
+            issues.extend(
+                LateSymbolReferenceIssueReconciler::new(&self.codebase, &self.symbol_references)
+                    .reconcile(analyzer_issues),
+            );
+        }
+        Some((issues, artifacts))
+    }
+
+    /// Analyzes a single file synchronously, returning its issues.
+    ///
+    /// This is useful for LSP single-file analysis. It uses the current codebase
+    /// state for type resolution but only reports issues for the specified file.
+    pub fn analyze_file(&self, file_id: FileId) -> IssueCollection {
+        let external_session = self.plugin_registry.create_external_analysis_session(self.database.files());
+        let Ok(file) = self.database.get(&file_id) else {
+            tracing::error!("File with ID {:?} not found in database", file_id);
+            return IssueCollection::default();
+        };
+
+        let arena = LocalArena::new();
+        let program = parse_file_with_settings(&arena, &file, self.parser_settings);
+        let resolved_names = NameResolver::new(&arena).resolve(program);
+
+        let mut issues = IssueCollection::new();
+        if program.has_errors() {
+            for error in program.errors.iter() {
+                issues.push(Issue::from(error));
+            }
+        }
+
+        let semantics_checker = SemanticsChecker::new(self.settings.version);
+        let semantic_issues = semantics_checker.check(&file, program, &resolved_names);
+        issues.extend(semantic_issues.iter().cloned());
+
+        let mut analysis_result = AnalysisResult::new(SymbolReferences::new());
+        let analyzer = self.file_analyzer(&arena, &file, &resolved_names, external_session.as_ref());
+
+        if let Err(err) = analyzer.analyze(program, &mut analysis_result) {
+            issues.push(Issue::error(format!("Analysis error: {err}")));
+        }
+
+        let analyzer_issues = drop_follow_on_issues(&file, &semantic_issues, analysis_result.issues);
+        if self.late_symbol_references.is_empty() {
+            issues.extend(analyzer_issues);
+        } else {
+            issues.extend(
+                LateSymbolReferenceIssueReconciler::new(&self.codebase, &self.symbol_references)
+                    .reconcile(analyzer_issues),
+            );
+        }
+        issues
+    }
+
+    /// The analyzer of one file against the current codebase, with the references the before-analysis hooks
+    /// contributed, outside the full analysis's passes.
+    fn file_analyzer<'ctx, 'ast, 'arena>(
+        &'ctx self,
+        arena: &'arena LocalArena,
+        file: &'ctx File,
+        resolved_names: &'ast ResolvedNames<'arena>,
+        session: Option<&'ctx ExternalAnalysisSession>,
+    ) -> Analyzer<'ctx, 'ast, 'arena, LocalArena> {
+        let mut analyzer =
+            Analyzer::new(arena, file, resolved_names, &self.codebase, &self.plugin_registry, self.settings.clone());
+        if let Some(session) = session {
+            analyzer = analyzer.with_external_analysis_session(session);
+        }
+        if !self.external_symbol_references.is_empty() {
+            analyzer = analyzer.with_additional_symbol_references(&self.external_symbol_references);
+        }
+
+        analyzer
+    }
+
+    /// The `unchanged` files that need no new analysis once [`CodebaseMetadata::mark_safe_symbols`] marked `codebase`'s
+    /// safe symbols: each one's
+    /// top-level code is not in `invalid_files`, and every symbol and member it declares stayed safe.
+    fn files_to_skip(
+        &self,
+        codebase: &CodebaseMetadata,
+        unchanged: &[FileId],
+        invalid_files: &WordSet,
+    ) -> HashSet<FileId> {
+        unchanged
+            .iter()
+            .copied()
+            .filter(|file_id| {
+                let file_invalid = self
+                    .database
+                    .get(file_id)
+                    .is_ok_and(|file| invalid_files.contains(&mago_word::word(file.name.as_ref())));
+                let Some(sig) = codebase.get_file_signature(file_id) else {
+                    return false;
+                };
+
+                !file_invalid
+                    && sig.ast_nodes.iter().all(|node| {
+                        let symbol_safe = node.name.is_empty() || codebase.safe_symbols.contains(&node.name);
+                        let children_safe = node.children.iter().all(|child| {
+                            child.name.is_empty() || codebase.safe_symbol_members.contains(&(node.name, child.name))
+                        });
+                        symbol_safe && children_safe
+                    })
+            })
+            .collect()
+    }
+
+    /// Runs the analyzer on host files.
+    ///
+    /// Returns `(aggregated_result, per_file_issues)` where `per_file_issues` contains
+    /// only the files that were actually analyzed (not skipped).
+    fn run_analyzer_selective(
+        &self,
+        codebase: &mut CodebaseMetadata,
+        current_symbol_references: SymbolReferences,
+        settings: &Settings,
+        skip_files: &HashSet<FileId>,
+    ) -> Result<SelectiveAnalysisOutput, OrchestratorError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        const ANALYSIS_DURATION_THRESHOLD: Duration = Duration::from_secs(5);
+
+        let plugin_registry = &self.plugin_registry;
+        #[cfg(not(target_arch = "wasm32"))]
+        let trace_enabled = tracing::enabled!(tracing::Level::TRACE);
+        #[cfg(not(target_arch = "wasm32"))]
+        let snapshot_ns = AtomicU64::new(0);
+        #[cfg(not(target_arch = "wasm32"))]
+        let snapshot_count = AtomicU64::new(0);
+        let external_session =
+            self.plugin_registry.create_external_analysis_session(self.database.files()).map(Arc::new);
+        plugin_registry.prepare_external_analyzer().map_err(mago_analyzer::error::AnalysisError::from)?;
+        let after_file = !self.scan_only
+            && plugin_registry
+                .has_external_after_file_analysis_hooks()
+                .map_err(mago_analyzer::error::AnalysisError::from)?;
+        let after_analysis = !self.scan_only
+            && plugin_registry
+                .has_external_after_analysis_hooks()
+                .map_err(mago_analyzer::error::AnalysisError::from)?;
+        let node_analysis_requirements =
+            plugin_registry.external_node_analysis_requirements().map_err(mago_analyzer::error::AnalysisError::from)?;
+        let declaring_files = self.database.files().filter(|file| file.file_type == FileType::Host).collect::<Vec<_>>();
+        resolve_body_returns(
+            codebase,
+            &declaring_files,
+            plugin_registry,
+            settings,
+            self.parser_settings,
+            external_session.as_deref(),
+        )?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let before_start = trace_enabled.then(Instant::now);
+        let before = plugin_registry
+            .run_external_before_analysis_hooks(codebase, external_session.as_deref())
+            .map_err(mago_analyzer::error::AnalysisError::from)?;
+        let references_changed = before.references != self.external_symbol_references;
+        let external_symbol_references = before.references;
+        let effective_skip_files = if references_changed { HashSet::default() } else { skip_files.clone() };
+        let host_files: Vec<_> = self
+            .database
+            .files()
+            .filter(|file| {
+                !self.scan_only && file.file_type == FileType::Host && !effective_skip_files.contains(&file.id)
+            })
+            .map(|file| self.database.get(&file.id))
+            .collect::<Result<Vec<_>, _>>()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(start) = before_start {
+            tracing::trace!(
+                issues = before.issues.len(),
+                contributed_references = external_symbol_references.count_body_references()
+                    + external_symbol_references.count_signature_references(),
+                references_changed,
+                elapsed = ?start.elapsed(),
+                "Incremental external before-analysis hooks completed."
+            );
+        }
+
+        if host_files.is_empty() && effective_skip_files.is_empty() {
+            tracing::warn!("No host files found for analysis.");
+        }
+        let settings = settings.clone();
+        let parser_settings = self.parser_settings;
+        let analyzing_bar = (self.use_progress_bars && !host_files.is_empty())
+            .then(|| create_progress_bar(host_files.len(), "🔬 Analyzing", ProgressBarTheme::Green));
+        #[cfg(not(target_arch = "wasm32"))]
+        let hang_watcher = trace_enabled.then(|| HangWatcher::spawn(rayon::current_num_threads()));
+        #[cfg(not(target_arch = "wasm32"))]
+        let slowest_files = trace_enabled.then(SlowestFiles::new);
+
+        let results = host_files
+            .into_par_iter()
+            .map_init(LocalArena::new, |arena, source_file| {
+                #[cfg(not(target_arch = "wasm32"))]
+                let _hang_guard = hang_watcher.as_ref().map(|watcher| watcher.track(Arc::clone(&source_file)));
+                #[cfg(not(target_arch = "wasm32"))]
+                let file_start = trace_enabled.then(Instant::now);
+                let file_id = source_file.id;
+                let mut analysis_result = AnalysisResult::new(SymbolReferences::new());
+
+                let program = parse_file_with_settings(arena, &source_file, parser_settings);
+                let resolved_names = NameResolver::new(arena).resolve(program);
+
+                let semantics_checker = SemanticsChecker::new(settings.version);
+                let mut analyzer =
+                    Analyzer::new(arena, &source_file, &resolved_names, codebase, plugin_registry, settings.clone());
+                if let Some(requirements) = node_analysis_requirements.as_ref() {
+                    analyzer = analyzer.with_node_analysis_requirements(requirements);
+                }
+                analyzer = analyzer.with_deferred_pragmas();
+                if let Some(session) = external_session.as_deref() {
+                    analyzer = analyzer.with_external_analysis_session(session);
+                }
+                if !external_symbol_references.is_empty() {
+                    analyzer = analyzer.with_additional_symbol_references(&external_symbol_references);
+                }
+
+                let semantic_issues = semantics_checker.check(&source_file, program, &resolved_names);
+                let mut artifacts = if program.dialect.is_sharp() {
+                    let artifacts = analyzer.analyze_with_artifacts(program, &mut analysis_result)?;
+                    let analyzer_issues = std::mem::take(&mut analysis_result.issues);
+                    let analyzer_issues = drop_follow_on_issues(&source_file, &semantic_issues, analyzer_issues);
+                    analysis_result.issues.extend(program.errors.iter().map(Issue::from));
+                    analysis_result.issues.extend(semantic_issues);
+                    analysis_result.issues.extend(analyzer_issues);
+                    artifacts
+                } else {
+                    analysis_result.issues.extend(program.errors.iter().map(Issue::from));
+                    analysis_result.issues.extend(semantic_issues);
+                    analyzer.analyze_with_artifacts(program, &mut analysis_result)?
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let snapshot_start = (trace_enabled && (after_file || after_analysis)).then(Instant::now);
+                let snapshot = if after_file || after_analysis {
+                    Some(Arc::new(
+                        FileAnalysisSnapshot::new(
+                            &source_file,
+                            program,
+                            &resolved_names,
+                            &artifacts,
+                            codebase,
+                            node_analysis_requirements.as_ref(),
+                            self.node_analysis_files.as_ref().is_none_or(|files| files.contains(&file_id)),
+                        )
+                        .map_err(|error| {
+                            OrchestratorError::General(format!("Failed to retain external analysis data: {error}"))
+                        })?,
+                    ))
+                } else {
+                    None
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(start) = snapshot_start {
+                    snapshot_ns.fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+                    snapshot_count.fetch_add(1, Relaxed);
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                if analysis_result.time_in_analysis > ANALYSIS_DURATION_THRESHOLD {
+                    tracing::warn!(
+                        "Analysis of source file '{}' took longer than {}s: {}s",
+                        mago_bytes::BytesDisplay(&source_file.name),
+                        ANALYSIS_DURATION_THRESHOLD.as_secs_f32(),
+                        analysis_result.time_in_analysis.as_secs_f32()
+                    );
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                if let (Some(slowest_files), Some(start)) = (slowest_files.as_ref(), file_start) {
+                    slowest_files.record(start.elapsed(), Arc::clone(&source_file));
+                }
+
+                arena.reset();
+                if let Some(analyzing_bar) = &analyzing_bar {
+                    analyzing_bar.inc(1);
+                }
+
+                Ok((file_id, analysis_result, snapshot, std::mem::take(&mut artifacts.effect_summaries)))
+            })
+            .collect::<Result<Vec<_>, OrchestratorError>>()?;
+        if let Some(analyzing_bar) = analyzing_bar {
+            remove_progress_bar(&analyzing_bar);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(hang_watcher);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if trace_enabled {
+            if let Some(slowest_files) = slowest_files {
+                slowest_files.emit_slowest(20, "the analysis phase");
+            }
+            analyzer_telemetry::dump_and_reset();
+            tracing::trace!(
+                analyzed_files = results.len(),
+                retained_snapshots = snapshot_count.load(Relaxed),
+                snapshot_worker_cpu = ?Duration::from_nanos(snapshot_ns.load(Relaxed)),
+                "Incremental external lifecycle parallel-phase summary."
+            );
+        }
+
+        let mut aggregated_result = AnalysisResult::new(current_symbol_references);
+        aggregated_result.issues = before.issues;
+        let mut per_file_issues: HashMap<FileId, IssueCollection> = HashMap::default();
+        let mut per_file_pragmas: HashMap<FileId, DeferredPragmas> = HashMap::default();
+        let mut snapshots = Vec::new();
+        let mut per_file_effect_summaries: HashMap<FileId, Vec<EffectSummary>> = HashMap::default();
+
+        for (file_id, mut result, snapshot, effect_summaries) in results {
+            let mut deferred_pragmas = result.take_deferred_pragmas();
+            aggregated_result.symbol_references.extend(result.symbol_references);
+            per_file_issues.insert(file_id, result.issues);
+            per_file_effect_summaries.insert(file_id, effect_summaries);
+            if let Some(pragmas) = deferred_pragmas.pop() {
+                per_file_pragmas.insert(file_id, pragmas);
+            }
+            debug_assert!(
+                deferred_pragmas.is_empty(),
+                "one file analysis must produce at most one deferred pragma state",
+            );
+            snapshots.extend(snapshot);
+        }
+
+        let mut late_symbol_references_by_file = HashMap::<FileId, SymbolReferences>::default();
+
+        if after_file {
+            #[cfg(not(target_arch = "wasm32"))]
+            let after_file_start = trace_enabled.then(Instant::now);
+            let batches = snapshots
+                .par_chunks(AFTER_FILE_ANALYSIS_BATCH_SIZE)
+                .map(|files| {
+                    plugin_registry.run_external_after_file_analysis_batch_hooks(
+                        files,
+                        codebase,
+                        external_session.as_deref(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(mago_analyzer::error::AnalysisError::from)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let issue_count = batches.iter().map(|batch| batch.issues.len()).sum::<usize>();
+            for batch in batches {
+                for issue in batch.issues {
+                    let file_id = issue.annotations.first().map(|annotation| annotation.span.file_id);
+                    if let Some(issues) = file_id.and_then(|file_id| per_file_issues.get_mut(&file_id)) {
+                        issues.push(issue);
+                    } else {
+                        aggregated_result.issues.push(issue);
+                    }
+                }
+                for (file_id, references) in batch.references_by_file {
+                    late_symbol_references_by_file.entry(file_id).or_default().extend(references);
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(start) = after_file_start {
+                tracing::trace!(
+                    files = snapshots.len(),
+                    batches = snapshots.len().div_ceil(AFTER_FILE_ANALYSIS_BATCH_SIZE),
+                    issues = issue_count,
+                    elapsed = ?start.elapsed(),
+                    "Incremental external after-file hook batches completed."
+                );
+            }
+        }
+
+        let mut late_symbol_references = SymbolReferences::new();
+        for file_id in &effective_skip_files {
+            if let Some(state) = self.file_states.get(file_id) {
+                late_symbol_references.extend(state.late_symbol_references.clone());
+            }
+        }
+        for references in late_symbol_references_by_file.values() {
+            late_symbol_references.extend(references.clone());
+        }
+
+        // The solve runs over the summaries of every file, so a body edit reaches the getters of the files it skipped.
+        let mut effect_summaries: Vec<(FileId, &[EffectSummary])> =
+            per_file_effect_summaries.iter().map(|(file_id, summaries)| (*file_id, summaries.as_slice())).collect();
+        effect_summaries.extend(
+            effective_skip_files
+                .iter()
+                .filter_map(|file_id| Some((*file_id, self.file_states.get(file_id)?.effect_summaries.as_slice()))),
+        );
+        effect_summaries.sort_unstable_by_key(|(file_id, _)| *file_id);
+        let effect_summaries: Vec<EffectSummary> =
+            effect_summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
+        let mut per_file_effect_issues: HashMap<FileId, IssueCollection> = HashMap::default();
+        for issue in Effects::solve(codebase, &effect_summaries).issues(codebase) {
+            match issue.primary_span() {
+                Some(span) => per_file_effect_issues.entry(span.file_id).or_default().push(issue),
+                None => aggregated_result.issues.push(issue),
+            }
+        }
+
+        let cached_pragmas =
+            effective_skip_files.iter().filter_map(|file_id| self.file_states.get(file_id)?.deferred_pragmas.clone());
+        let mut pragma_reconciler = DeferredIssueReconciler::new(
+            cached_pragmas.chain(per_file_pragmas.values().cloned()),
+            self.database.files(),
+        );
+        aggregated_result.issues = pragma_reconciler.reconcile(std::mem::take(&mut aggregated_result.issues))?;
+        for issues in per_file_issues.values_mut().chain(per_file_effect_issues.values_mut()) {
+            *issues = pragma_reconciler.reconcile(std::mem::take(issues))?;
+        }
+        let codebase_issues = if self.scan_only {
+            IssueCollection::default()
+        } else {
+            pragma_reconciler.reconcile(codebase.take_issues(true))?
+        };
+        for (file_id, pragmas) in &mut per_file_pragmas {
+            if let Some(reconciled) = pragma_reconciler.state(*file_id) {
+                *pragmas = reconciled.clone();
+            }
+        }
+
+        let native_symbol_references = aggregated_result.symbol_references.clone();
+        aggregated_result.symbol_references.extend(external_symbol_references.clone());
+        aggregated_result.symbol_references.extend(late_symbol_references.clone());
+
+        if after_analysis {
+            let analyzed = snapshots.iter().map(|snapshot| snapshot.file_id()).collect::<HashSet<_>>();
+            let current = self
+                .database
+                .files()
+                .filter(|file| file.file_type == FileType::Host)
+                .map(|file| file.id)
+                .collect::<HashSet<_>>();
+            let mut project_files = self
+                .analysis_snapshots
+                .iter()
+                .filter(|(file_id, _)| current.contains(file_id) && !analyzed.contains(file_id))
+                .map(|(_, snapshot)| Arc::clone(snapshot))
+                .collect::<Vec<_>>();
+            project_files.extend(snapshots.iter().cloned());
+            project_files.sort_unstable_by_key(|snapshot| snapshot.file_id());
+
+            let mut project_result = AnalysisResult::new(aggregated_result.symbol_references.clone());
+            project_result.issues.extend(aggregated_result.issues.iter().cloned());
+            let late_reconciler = (!late_symbol_references.is_empty())
+                .then(|| LateSymbolReferenceIssueReconciler::new(codebase, &aggregated_result.symbol_references));
+            for issues in per_file_issues.values().cloned() {
+                project_result.issues.extend(match late_reconciler.as_ref() {
+                    Some(reconciler) => reconciler.reconcile(issues),
+                    None => issues,
+                });
+            }
+            for (file_id, state) in &self.file_states {
+                if effective_skip_files.contains(file_id) {
+                    let issues = state.unreconciled_analysis_issues.clone();
+                    project_result.issues.extend(match late_reconciler.as_ref() {
+                        Some(reconciler) => reconciler.reconcile(issues),
+                        None => issues,
+                    });
+                    project_result.issues.extend(state.codebase_issues.iter().cloned());
+                }
+            }
+            project_result.issues.extend(codebase_issues.iter().cloned());
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let after_start = trace_enabled.then(Instant::now);
+            let after_issues = plugin_registry
+                .run_external_after_analysis_hooks(
+                    &project_result,
+                    &project_files,
+                    codebase,
+                    external_session.as_deref(),
+                )
+                .map_err(mago_analyzer::error::AnalysisError::from)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(start) = after_start {
+                tracing::trace!(
+                    files = project_files.len(),
+                    issues = after_issues.len(),
+                    elapsed = ?start.elapsed(),
+                    "Incremental external after-analysis hooks completed."
+                );
+            }
+            aggregated_result.issues.extend(pragma_reconciler.reconcile(after_issues)?);
+        }
+
+        aggregated_result.issues.extend(pragma_reconciler.finish()?);
+
+        if !after_analysis {
+            snapshots.clear();
+        }
+
+        Ok(SelectiveAnalysisOutput {
+            result: aggregated_result,
+            native_symbol_references,
+            external_symbol_references,
+            late_symbol_references,
+            late_symbol_references_by_file,
+            reads_by_file: external_session.map(|session| session.take_reads()).unwrap_or_default(),
+            per_file_issues,
+            per_file_pragmas,
+            snapshots,
+            codebase_issues,
+            per_file_effect_summaries,
+            per_file_effect_issues,
+        })
+    }
+}
+
+/// The `extern` declarations in `file_id`, in the codebase's order. A body's summary records the effects of the
+/// declarations its calls fall under, and the second declaration of a target is an error in its own file, so a change
+/// to them changes files that the signature diff cannot see.
+fn externs_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ExternMetadata> {
+    let mut externs: Vec<&ExternMetadata> =
+        codebase.externs.values().flatten().filter(|declaration| declaration.span.file_id == file_id).collect();
+    externs.sort();
+    externs
+}
+
+/// The functions `file_id`'s `[Replaces]` attributes wrap, each with its wrapping methods in the codebase's order. A
+/// change to them changes the issues of every file that calls a wrapped function, which the signature diff cannot see.
+fn wrappers_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<(Word, MethodIdentifier)> {
+    let mut wrappers: Vec<(Word, MethodIdentifier)> = codebase
+        .wrapped_functions
+        .iter()
+        .flat_map(|(function, wrappers)| {
+            wrappers.iter().filter(|(_, span, _)| span.file_id == file_id).map(|(_, _, method)| (*function, *method))
+        })
+        .collect();
+    wrappers.sort_by_key(|(function, _)| *function);
+    wrappers
+}
+
+/// The symbols the extension hooks and providers of each of `files` read, by file name, for the invalidation cascade.
+fn symbols_read_by<'state>(
+    file_states: &'state HashMap<FileId, FileState>,
+    database: &ReadDatabase,
+    files: &[FileId],
+) -> Vec<(Word, &'state HashSet<SymbolIdentifier>)> {
+    files
+        .iter()
+        .filter_map(|file_id| {
+            let state = file_states.get(file_id).filter(|state| !state.reads.symbols.is_empty())?;
+            let file = database.get(file_id).ok()?;
+            Some((mago_word::word(file.name.as_ref()), &state.reads.symbols))
+        })
+        .collect()
+}
+
+/// Keeps the keys whose entry in the merged codebase `file_id` declared.
+///
+/// This is [`CodebaseMetadata::extract_owned_keys`] applied after the merge, so a file's scan
+/// need not outlive it: an entry's span names the file that declared it, and one file declares
+/// at most one entry per name.
+fn retain_owned_keys(
+    keys: &mut CodebaseEntryKeys,
+    file_id: FileId,
+    merged: &CodebaseMetadata,
+    merged_aliases: &HashSet<(Word, FileId)>,
+) {
+    keys.class_like_names
+        .retain(|name| merged.class_likes.get(name).is_some_and(|entry| entry.span.file_id == file_id));
+    keys.class_like_aliases.retain(|(alias, _, _)| merged_aliases.contains(&(*alias, file_id)));
+    keys.function_like_keys
+        .retain(|key| merged.function_likes.get(key).is_some_and(|entry| entry.span.file_id == file_id));
+    keys.constant_names.retain(|name| merged.constants.get(name).is_some_and(|entry| entry.span.file_id == file_id));
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::similar_names)]
+mod tests {
+    use super::*;
+
+    use std::borrow::Cow;
+    use std::path::Path;
+    use std::sync::LazyLock;
+
+    use mago_analyzer::plugin::PluginRegistry;
+    use mago_database::Database;
+    use mago_database::DatabaseConfiguration;
+    use mago_database::file::File;
+    use mago_word::word;
+
+    static PLUGIN_REGISTRY: LazyLock<Arc<PluginRegistry>> =
+        LazyLock::new(|| Arc::new(PluginRegistry::with_library_providers()));
+
+    fn make_database(files: Vec<(&str, &str)>) -> Database<'static> {
+        let config = DatabaseConfiguration {
+            workspace: Cow::Owned(Path::new("/test").to_path_buf()),
+            paths: vec![Cow::Borrowed(b"src")],
+            includes: vec![],
+            patches: vec![],
+            excludes: vec![],
+            extensions: vec![Cow::Borrowed(b"php")],
+            glob: mago_database::GlobSettings::default(),
+        };
+
+        let mut db = Database::new(config);
+        for (name, contents) in files {
+            db.add(File::new(
+                Cow::Owned(name.as_bytes().to_vec()),
+                FileType::Host,
+                None,
+                Cow::Owned(contents.as_bytes().to_vec()),
+            ));
+        }
+
+        db
+    }
+
+    fn make_service(db: &Database<'_>) -> IncrementalAnalysisService {
+        IncrementalAnalysisService::new(
+            db.read_only(),
+            Default::default,
+            Settings::default(),
+            ParserSettings::default(),
+            Arc::clone(&PLUGIN_REGISTRY),
+        )
+    }
+
+    static PRELUDE_DECODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counted_prelude() -> (CodebaseMetadata, SymbolReferences) {
+        PRELUDE_DECODES.fetch_add(1, Relaxed);
+        let file = File::new(
+            Cow::Borrowed(b"prelude.php"),
+            FileType::Builtin,
+            None,
+            Cow::Borrowed(b"<?php\nfunction from_prelude(): int { return 1; }\n"),
+        );
+        let arena = LocalArena::new();
+        let program = parse_file_with_settings(&arena, &file, ParserSettings::default());
+        let resolved_names = NameResolver::new(&arena).resolve(program);
+        let mut codebase = scan_program(&arena, &file, program, &resolved_names, Settings::default().version);
+        let mut symbol_references = SymbolReferences::new();
+        populate_codebase(&mut codebase, &mut symbol_references, WordSet::default(), HashSet::default());
+
+        (codebase, symbol_references)
+    }
+
+    #[test]
+    fn the_prelude_is_decoded_for_each_analysis_from_scratch_and_never_kept() {
+        let db = make_database(vec![("src/main.php", "<?php\nfunction main(): int { return from_prelude(); }\n")]);
+        let mut service = IncrementalAnalysisService::new(
+            db.read_only(),
+            counted_prelude,
+            Settings::default(),
+            ParserSettings::default(),
+            Arc::clone(&PLUGIN_REGISTRY),
+        );
+        assert_eq!(PRELUDE_DECODES.load(Relaxed), 0);
+
+        let first = service.analyze().expect("Full analysis failed.");
+        assert!(first.issues.is_empty(), "{:#?}", first.issues);
+        assert_eq!(PRELUDE_DECODES.load(Relaxed), 1);
+
+        service.reset();
+        let again = service.analyze().expect("Full analysis after a reset failed.");
+        assert!(again.issues.is_empty(), "{:#?}", again.issues);
+        assert_eq!(PRELUDE_DECODES.load(Relaxed), 2);
+    }
+
+    fn diff_issues(a: &IssueCollection, b: &IssueCollection) -> (Vec<String>, Vec<String>) {
+        let sig = |i: &Issue| -> String {
+            let span_info = i
+                .annotations
+                .iter()
+                .find(|ann| ann.kind == mago_reporting::AnnotationKind::Primary)
+                .map(|ann| format!("{:?}:{:?}", ann.span.file_id, ann.span.start))
+                .unwrap_or_default();
+            format!("{}:{}:{}", i.code.as_deref().unwrap_or("?"), span_info, i.message)
+        };
+
+        let sigs_a: std::collections::HashSet<String> = a.iter().map(sig).collect();
+        let sigs_b: std::collections::HashSet<String> = b.iter().map(sig).collect();
+
+        let only_a: Vec<_> = sigs_a.difference(&sigs_b).cloned().collect();
+        let only_b: Vec<_> = sigs_b.difference(&sigs_a).cloned().collect();
+
+        (only_a, only_b)
+    }
+
+    #[test]
+    fn test_initial_analysis_runs_successfully() {
+        let db = make_database(vec![(
+            "src/main.php",
+            "<?php\nfunction greet(string $name): string { return 'Hello ' . $name; }\n",
+        )]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect(
+            "Initial analysis failed when it should have succeeded. Check that the parser and analyzer can handle basic PHP code."
+        );
+        assert!(service.is_initialized());
+    }
+
+    #[test]
+    fn issues_come_out_in_file_order() {
+        let files = (0..24)
+            .map(|index| {
+                (format!("src/file{index}.php"), format!("<?php\nfunction f{index}(): int {{ return 'text'; }}\n"))
+            })
+            .collect::<Vec<_>>();
+        let db = make_database(files.iter().map(|(name, contents)| (name.as_str(), contents.as_str())).collect());
+
+        let issues = make_service(&db).analyze().expect("Full analysis failed.").issues;
+        let reported = issues
+            .iter()
+            .filter_map(|issue| issue.annotations.iter().find(|annotation| annotation.kind.is_primary()))
+            .map(|annotation| annotation.span.file_id)
+            .collect::<Vec<_>>();
+
+        let mut ordered = reported.clone();
+        ordered.sort();
+        assert_eq!(reported.len(), files.len(), "{issues:#?}");
+        assert_eq!(reported, ordered);
+    }
+
+    #[test]
+    fn a_name_declared_in_two_files_survives_signature_edits_to_either_file() {
+        let declarations = |value: &str, kind: &str| {
+            format!(
+                "<?php\nclass Shared {{ public function value(): {kind} {{ return {value}; }} }}\nclass_alias(Shared::class, 'Alias');\nfunction shared(): {kind} {{ return {value}; }}\nconst SHARED = {value};\n"
+            )
+        };
+        let user = "<?php\nfunction user(): int { return (new Shared())->value() + (new Alias())->value() + shared() + SHARED; }\n";
+        let first = declarations("1", "int");
+        let second = declarations("2", "int");
+        let mut db = make_database(vec![
+            ("src/first.php", first.as_str()),
+            ("src/second.php", second.as_str()),
+            ("src/user.php", user),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        for (name, contents) in [
+            ("src/second.php", declarations("'2'", "string")),
+            ("src/second.php", second),
+            ("src/first.php", declarations("'1'", "string")),
+            ("src/first.php", first),
+        ] {
+            db.update(FileId::new(name.as_bytes()), Cow::Owned(contents.into_bytes()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+            assert_matches_full(&service, &db, name);
+        }
+    }
+
+    #[test]
+    fn test_incremental_no_change_returns_same_result() {
+        let db = make_database(vec![
+            ("src/a.php", "<?php\nfunction foo(): int { return 42; }\n"),
+            ("src/b.php", "<?php\nfunction bar(): string { return 'hello'; }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        let initial = service.analyze().expect("Full analysis failed.");
+
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        assert_eq!(initial.issues.len(), incremental.issues.len());
+    }
+
+    #[test]
+    fn test_incremental_after_body_change_matches_full() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction get_value(): int { return 42; }\n"),
+            ("src/b.php", "<?php\nfunction use_value(): int { return get_value(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(b"<?php\nfunction get_value(): int { return 99; }\n".to_vec()));
+
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Incremental and full analysis produced different issues.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_after_signature_change_matches_full() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction compute(): int { return 1; }\n"),
+            ("src/b.php", "<?php\nfunction caller(): int { return compute(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(
+            FileId::new(b"src/a.php"),
+            Cow::Owned(b"<?php\nfunction compute(): string { return 'hello'; }\n".to_vec()),
+        );
+
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "After signature change, incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_after_file_deletion_matches_full() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction helper(): int { return 1; }\n"),
+            ("src/b.php", "<?php\nfunction main_func(): int { return helper(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.delete(FileId::new(b"src/a.php"));
+
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "After file deletion, incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_after_file_addition_matches_full() {
+        let mut db = make_database(vec![("src/a.php", "<?php\nfunction existing(): int { return 1; }\n")]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.add(File::new(
+            Cow::Owned(b"src/b.php".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(b"<?php\nfunction new_func(): int { return existing(); }\n".to_vec()),
+        ));
+
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis after file addition failed");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis after file addition failed");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "After file addition, incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_revert_matches_full() {
+        let original_content = "<?php\nfunction get_value(): int { return 42; }\n";
+        let modified_content = "<?php\nfunction get_value(): string { return 'hello'; }\n";
+
+        let mut db = make_database(vec![
+            ("src/a.php", original_content),
+            ("src/b.php", "<?php\nfunction use_it(): int { return get_value(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(modified_content.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("incremental analysis after modification failed");
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(original_content.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let reverted = service.analyze_incremental(None).expect("incremental analysis after revert failed");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("full analysis after revert failed");
+
+        let (only_incr, only_full) = diff_issues(&reverted.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "After revert, incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_multiple_cycles_consistent() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction compute(int $x): int { return $x * 2; }\n"),
+            ("src/b.php", "<?php\nfunction wrapper(): int { return compute(5); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(
+            FileId::new(b"src/a.php"),
+            Cow::Owned(b"<?php\nfunction compute(int $x): int { return $x * 3; }\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        let cycle1 = service.analyze_incremental(None).expect("First incremental analysis failed");
+        let cycle2 = service.analyze_incremental(None).expect("Second incremental analysis failed");
+
+        db.update(
+            FileId::new(b"src/a.php"),
+            Cow::Owned(b"<?php\nfunction compute(int $x): string { return (string)($x * 3); }\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        let cycle3 = service.analyze_incremental(None).expect("Third incremental analysis failed");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis after multiple cycles failed");
+
+        let (only_incr, only_full) = diff_issues(&cycle3.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "After multiple cycles, incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+
+        assert_eq!(cycle1.issues.len(), cycle2.issues.len(), "No-change cycle should produce same issue count");
+    }
+
+    #[test]
+    fn test_incremental_class_inheritance_change() {
+        let parent_v1 = concat!(
+            "<?php\n",
+            "class Animal {\n",
+            "    public function speak(): string { return 'generic'; }\n",
+            "}\n",
+        );
+        let child = concat!(
+            "<?php\n",
+            "class Dog extends Animal {\n",
+            "    public function bark(): string { return $this->speak(); }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Animal.php", parent_v1), ("src/Dog.php", child)]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        let parent_v2 =
+            concat!("<?php\n", "class Animal {\n", "    public function speak(): int { return 42; }\n", "}\n",);
+        db.update(FileId::new(b"src/Animal.php"), Cow::Owned(parent_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis after class change failed");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis after class change failed");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Class inheritance change: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_type_error_introduced_and_fixed() {
+        let a_valid = "<?php\nfunction get_count(): int { return 42; }\n";
+        let b_code = "<?php\nfunction print_count(): void { echo get_count() + 1; }\n";
+
+        let mut db = make_database(vec![("src/a.php", a_valid), ("src/b.php", b_code)]);
+
+        let mut service = make_service(&db);
+        let initial = service.analyze().expect("Initial analysis failed.");
+        let initial_count = initial.issues.len();
+
+        let a_broken = "<?php\nfunction get_count(): string { return 'not a number'; }\n";
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(a_broken.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let broken = service.analyze_incremental(None).expect("Incremental analysis after breaking change failed");
+
+        let mut fresh_service = make_service(&db);
+        let full_broken = fresh_service.analyze().expect("Full analysis after breaking change failed");
+        let (only_incr, only_full) = diff_issues(&broken.issues, &full_broken.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Broken state: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(a_valid.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let fixed = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service2 = make_service(&db);
+        let full_fixed = fresh_service2.analyze().expect("Full analysis failed.");
+        let (only_incr, only_full) = diff_issues(&fixed.issues, &full_fixed.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Fixed state: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+
+        assert_eq!(initial_count, fixed.issues.len(), "After fix, issue count should match initial");
+    }
+
+    #[test]
+    fn test_incremental_multiple_files_changed_simultaneously() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction alpha(): int { return 1; }\n"),
+            ("src/b.php", "<?php\nfunction beta(): int { return 2; }\n"),
+            ("src/c.php", "<?php\nfunction gamma(): int { return alpha() + beta(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        // Change both a.php and b.php at the same time
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(b"<?php\nfunction alpha(): string { return 'a'; }\n".to_vec()));
+        db.update(FileId::new(b"src/b.php"), Cow::Owned(b"<?php\nfunction beta(): string { return 'b'; }\n".to_vec()));
+
+        service.update_database(db.read_only());
+        let incremental =
+            service.analyze_incremental(None).expect("Incremental analysis after multiple simultaneous changes failed");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis after multiple simultaneous changes failed");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Multiple simultaneous changes: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_parse_error_recovery() {
+        let mut db = make_database(vec![("src/a.php", "<?php\nfunction valid(): int { return 1; }\n")]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(b"<?php\nfunction broken( { return 1; }\n".to_vec()));
+        service.update_database(db.read_only());
+        let with_error = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        // Should have at least one parse error
+        assert!(!with_error.issues.is_empty(), "Parse error should produce at least one issue");
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(b"<?php\nfunction valid(): int { return 1; }\n".to_vec()));
+        service.update_database(db.read_only());
+        let fixed = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&fixed.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "After parse error recovery: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_symbol_added_to_existing_file() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction first(): int { return 1; }\n"),
+            ("src/b.php", "<?php\nfunction caller(): int { return first(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(
+            FileId::new(b"src/a.php"),
+            Cow::Owned(
+                b"<?php\nfunction first(): int { return 1; }\nfunction second(): string { return 'two'; }\n".to_vec(),
+            ),
+        );
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "After symbol addition: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_symbol_removed_from_existing_file() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction first(): int { return 1; }\nfunction second(): string { return 'two'; }\n"),
+            ("src/b.php", "<?php\nfunction caller(): int { return first(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(b"<?php\nfunction first(): int { return 1; }\n".to_vec()));
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "After symbol removal: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_rapid_edit_cycles_stress() {
+        let base_a = "<?php\nfunction compute(int $x): int { return $x * 2; }\n";
+
+        let mut db = make_database(vec![
+            ("src/a.php", base_a),
+            ("src/b.php", "<?php\nfunction use_compute(): int { return compute(5); }\n"),
+            ("src/c.php", "<?php\nfunction chain(): int { return compute(use_compute()); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        let edits = [
+            "<?php\nfunction compute(int $x): int { return $x * 3; }\n",
+            "<?php\nfunction compute(int $x): int { return $x + 1; }\n",
+            "<?php\nfunction compute(int $x): string { return (string)$x; }\n",
+            base_a,
+            "<?php\nfunction compute(int $x): int { return $x * 2; }\nfunction helper(): int { return 0; }\n",
+            "<?php\nfunction compute(int $x): int { return $x * 2; }\nfunction helper(): string { return ''; }\n",
+            base_a,
+            "<?php\nfunction compute(string $x): int { return (int)$x * 2; }\n",
+            base_a,
+            "<?php\n",
+        ];
+
+        for (i, edit) in edits.iter().enumerate() {
+            db.update(FileId::new(b"src/a.php"), Cow::Owned(edit.as_bytes().to_vec()));
+            service.update_database(db.read_only());
+            let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+            let mut fresh_service = make_service(&db);
+            let full = fresh_service.analyze().expect("Full analysis failed.");
+
+            let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+            assert!(
+                only_incr.is_empty() && only_full.is_empty(),
+                "Rapid edit cycle {}: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn test_incremental_all_files_changed() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction a(): int { return 1; }\n"),
+            ("src/b.php", "<?php\nfunction b(): int { return 2; }\n"),
+            ("src/c.php", "<?php\nfunction c(): int { return a() + b(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(b"<?php\nfunction a(): string { return 'a'; }\n".to_vec()));
+        db.update(FileId::new(b"src/b.php"), Cow::Owned(b"<?php\nfunction b(): string { return 'b'; }\n".to_vec()));
+        db.update(
+            FileId::new(b"src/c.php"),
+            Cow::Owned(b"<?php\nfunction c(): string { return a() . b(); }\n".to_vec()),
+        );
+
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "All files changed: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_file_replaced_entirely() {
+        let mut db = make_database(vec![
+            ("src/a.php", "<?php\nfunction old_func(): int { return 1; }\n"),
+            ("src/b.php", "<?php\nfunction caller(): int { return old_func(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(
+            FileId::new(b"src/a.php"),
+            Cow::Owned(
+                b"<?php\nclass NewClass {\n    public function method(): string { return 'hello'; }\n}\n".to_vec(),
+            ),
+        );
+
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "File replaced entirely: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_incremental_empty_to_nonempty_and_back() {
+        let mut db = make_database(vec![("src/a.php", "<?php\n"), ("src/b.php", "<?php\nfunction user(): void {}\n")]);
+
+        let mut service = make_service(&db);
+        let initial = service.analyze().expect("Full analysis failed.");
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(b"<?php\nfunction new_thing(): int { return 42; }\n".to_vec()));
+        service.update_database(db.read_only());
+        let with_content = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full_with = fresh_service.analyze().expect("Full analysis failed.");
+        let (only_incr, only_full) = diff_issues(&with_content.issues, &full_with.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Empty to nonempty: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(b"<?php\n".to_vec()));
+        service.update_database(db.read_only());
+        let back_to_empty = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service2 = make_service(&db);
+        let full_empty = fresh_service2.analyze().expect("Full analysis failed.");
+        let (only_incr, only_full) = diff_issues(&back_to_empty.issues, &full_empty.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Back to empty: incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+
+        assert_eq!(
+            initial.issues.len(),
+            back_to_empty.issues.len(),
+            "After reverting to empty, issue count should match initial"
+        );
+    }
+
+    #[test]
+    fn test_memory_stability_body_only_edits() {
+        let original =
+            "<?php\nclass Greeter {\n    public function greet(string $name): string { return 'Hello ' . $name; }\n}\n";
+
+        let mut db = make_database(vec![
+            ("src/greeter.php", original),
+            ("src/main.php", "<?php\nfunction main(): void { echo (new Greeter())->greet('world'); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        let baseline_refs = service.symbol_references().total_map_entries();
+        let baseline_files = service.tracked_file_count();
+
+        for i in 0..50 {
+            let edited = format!(
+                "<?php\nclass Greeter {{\n    public function greet(string $name): string {{ return 'Hi #{} ' . $name; }}\n}}\n",
+                i
+            );
+            db.update(FileId::new(b"src/greeter.php"), Cow::Owned(edited.into_bytes()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+            db.update(FileId::new(b"src/greeter.php"), Cow::Owned(original.as_bytes().to_vec()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+        }
+
+        let final_refs = service.symbol_references().total_map_entries();
+        let final_files = service.tracked_file_count();
+
+        assert_eq!(
+            baseline_files, final_files,
+            "File count should remain stable: baseline={}, final={}",
+            baseline_files, final_files
+        );
+
+        let diff = (final_refs as i64 - baseline_refs as i64).unsigned_abs();
+        assert!(
+            diff <= 5,
+            "Reference entries should remain stable across body-only edit cycles.\n  Baseline: {}\n  After 100 cycles: {}\n  Growth: {}",
+            baseline_refs,
+            final_refs,
+            diff
+        );
+    }
+
+    #[test]
+    fn test_memory_stability_signature_edits() {
+        let original = "<?php\nfunction compute(): int { return 42; }\n";
+
+        let mut db = make_database(vec![
+            ("src/compute.php", original),
+            ("src/caller.php", "<?php\nfunction caller(): int { return compute(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        let baseline_refs = service.symbol_references().total_map_entries();
+
+        for i in 0..30 {
+            let edited = format!("<?php\nfunction compute(): string {{ return 'value_{}'; }}\n", i);
+            db.update(FileId::new(b"src/compute.php"), Cow::Owned(edited.into_bytes()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+            db.update(FileId::new(b"src/compute.php"), Cow::Owned(original.as_bytes().to_vec()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+        }
+
+        let final_refs = service.symbol_references().total_map_entries();
+        let diff = (final_refs as i64 - baseline_refs as i64).unsigned_abs();
+
+        assert!(
+            diff <= 5,
+            "Reference entries should remain stable across signature edit cycles.\n  Baseline: {}\n  After 60 cycles: {}\n  Growth: {}",
+            baseline_refs,
+            final_refs,
+            diff
+        );
+    }
+
+    #[test]
+    fn test_memory_stability_mixed_edits() {
+        let base = "<?php\nfunction alpha(): int { return 1; }\n";
+
+        let mut db = make_database(vec![
+            ("src/a.php", base),
+            ("src/b.php", "<?php\nfunction beta(): int { return alpha(); }\n"),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        let baseline_refs = service.symbol_references().total_map_entries();
+        let baseline_files = service.tracked_file_count();
+
+        for i in 0..20 {
+            let body_edit = format!("<?php\nfunction alpha(): int {{ return {}; }}\n", i);
+            db.update(FileId::new(b"src/a.php"), Cow::Owned(body_edit.into_bytes()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+            db.update(
+                FileId::new(b"src/a.php"),
+                Cow::Owned(b"<?php\nfunction alpha(): string { return 'x'; }\n".to_vec()),
+            );
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+            db.update(
+                FileId::new(b"src/a.php"),
+                Cow::Owned(b"<?php\nfunction alpha(): string { return 'x'; }\nfunction extra(): void {}\n".to_vec()),
+            );
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+            db.update(FileId::new(b"src/a.php"), Cow::Owned(base.as_bytes().to_vec()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental analysis failed.");
+        }
+
+        let final_refs = service.symbol_references().total_map_entries();
+        let final_files = service.tracked_file_count();
+
+        assert_eq!(baseline_files, final_files, "File count drift");
+        let diff = (final_refs as i64 - baseline_refs as i64).unsigned_abs();
+        assert!(
+            diff <= 5,
+            "Reference entries should remain stable across mixed edit cycles.\n  Baseline: {}\n  After 80 cycles: {}\n  Growth: {}",
+            baseline_refs,
+            final_refs,
+            diff
+        );
+    }
+
+    /// Regression test for https://github.com/carthage-software/mago/issues/1178
+    ///
+    /// Editing an unrelated file (body-only change) must not lose codebase-level
+    /// issues from other files (e.g. incompatible return types from class hierarchy).
+    #[test]
+    fn test_incremental_body_only_unrelated_file_preserves_codebase_issues() {
+        let base =
+            concat!("<?php\n", "class Base {\n", "    public function process(): string { return 'hello'; }\n", "}\n",);
+        let child = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "}\n",
+        );
+        let unrelated = concat!(
+            "<?php\n",
+            "class Unrelated {\n",
+            "    public function greet(): string { return 'hello'; }\n",
+            "}\n",
+        );
+
+        let mut db =
+            make_database(vec![("src/Base.php", base), ("src/Child.php", child), ("src/Unrelated.php", unrelated)]);
+
+        let mut service = make_service(&db);
+        let initial = service.analyze().expect("Full analysis failed.");
+
+        // Sanity: initial analysis should have at least one issue (incompatible return type).
+        let mut fresh_service = make_service(&db);
+        let full_initial = fresh_service.analyze().expect("Full analysis failed.");
+        assert_eq!(initial.issues.len(), full_initial.issues.len());
+
+        // Body-only change to an unrelated file.
+        let unrelated_v2 =
+            concat!("<?php\n", "class Unrelated {\n", "    public function greet(): string { return 'hi'; }\n", "}\n",);
+        db.update(FileId::new(b"src/Unrelated.php"), Cow::Owned(unrelated_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service2 = make_service(&db);
+        let full = fresh_service2.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Body-only change to unrelated file lost codebase issues.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    /// Regression test for https://github.com/carthage-software/mago/issues/1176
+    ///
+    /// Editing a file with codebase-level issues (body-only change) must preserve
+    /// those codebase-level issues and not lose them after re-population.
+    #[test]
+    fn test_incremental_body_only_same_file_preserves_codebase_issues() {
+        let base = concat!(
+            "<?php\n",
+            "class Base {\n",
+            "    public function process(int $id): string { return 'hello'; }\n",
+            "}\n",
+        );
+        let child = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(int $id): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child)]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        // Body-only change to Child.php (modify method body, keep signature).
+        let child_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(int $id): float { return 2.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Body-only change to file with codebase issues lost them.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    /// An `@mago-expect` pragma fulfils a codebase-level issue the same way it fulfils an issue
+    /// reported while analyzing the file, on the first run and on later incremental runs.
+    #[test]
+    fn test_expect_pragma_fulfils_codebase_issue() {
+        let child = concat!(
+            "<?php\n",
+            "class Base {}\n",
+            "// @mago-expect analysis:invalid-extends-tag\n",
+            "/** @extends Missing<int> */\n",
+            "final class Child extends Base {}\n",
+        );
+        let unrelated = "<?php\nfunction greet(): string { return 'hello'; }\n";
+        let mut db = make_database(vec![("src/Child.php", child), ("src/Unrelated.php", unrelated)]);
+        let reported = |issues: &IssueCollection| {
+            issues
+                .iter()
+                .filter_map(|issue| issue.code.clone())
+                .filter(|code| code == "invalid-extends-tag" || code == "unfulfilled-expect")
+                .collect::<Vec<_>>()
+        };
+
+        let mut service = make_service(&db);
+        let initial = service.analyze().expect("Full analysis failed.");
+        assert_eq!(reported(&initial.issues), Vec::<String>::new());
+
+        db.update(
+            FileId::new(b"src/Unrelated.php"),
+            Cow::Owned(b"<?php\nfunction greet(): string { return 'hi'; }\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(reported(&incremental.issues), Vec::<String>::new());
+    }
+
+    /// Regression test: signature change in one file must preserve codebase-level
+    /// issues in other files that are not affected by the change.
+    #[test]
+    fn test_incremental_signature_change_preserves_unaffected_codebase_issues() {
+        let base =
+            concat!("<?php\n", "class Base {\n", "    public function process(): string { return 'hello'; }\n", "}\n",);
+        let child = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "}\n",
+        );
+        // Independent class in a separate file - signature change here should
+        // not affect the codebase issues for Base/Child hierarchy.
+        let other =
+            concat!("<?php\n", "class Other {\n", "    public function compute(): int { return 42; }\n", "}\n",);
+        let user = concat!(
+            "<?php\n",
+            "class OtherUser {\n",
+            "    public function run(): int { return (new Other())->compute(); }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![
+            ("src/Base.php", base),
+            ("src/Child.php", child),
+            ("src/Other.php", other),
+            ("src/OtherUser.php", user),
+        ]);
+
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        // Signature change to Other.php (unrelated to Base/Child hierarchy).
+        let other_v2 = concat!(
+            "<?php\n",
+            "class Other {\n",
+            "    public function compute(): string { return 'hello'; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Other.php"), Cow::Owned(other_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Signature change in unrelated file lost codebase issues.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    /// Regression test: body-only change in a child class must re-populate its metadata
+    /// so the analyzer can still detect incompatible return types, undefined method calls, etc.
+    #[test]
+    fn test_incremental_body_only_change_in_child_class_preserves_analysis() {
+        let base =
+            concat!("<?php\n", "class Base {\n", "    public function process(): string { return 'base'; }\n", "}\n",);
+        let child_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_service(&db);
+        let initial = service.analyze().expect("Full analysis failed.");
+
+        // Body-only change: add a statement inside the method body.
+        let child_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { echo 'hi'; return 1.0; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Body-only change in child class lost analysis issues.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+
+        // Ensure we didn't lose issues compared to initial analysis
+        // (the incompatible-return-type should still be present).
+        assert!(
+            incremental.issues.len() >= initial.issues.len(),
+            "Body-only change reduced issue count from {} to {}",
+            initial.issues.len(),
+            incremental.issues.len()
+        );
+    }
+
+    /// Regression test: signature change (adding #[Override]) must not lose unrelated
+    /// per-file analyzer issues like unused-method.
+    #[test]
+    fn test_incremental_signature_change_override_preserves_unused_method() {
+        let base =
+            concat!("<?php\n", "class Base {\n", "    public function process(): string { return 'base'; }\n", "}\n",);
+        let child_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        // Signature change: add #[Override] attribute.
+        let child_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    #[\\Override] public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let incremental = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh_service = make_service(&db);
+        let full = fresh_service.analyze().expect("Full analysis failed.");
+
+        let (only_incr, only_full) = diff_issues(&incremental.issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "Signature change (add Override) lost issues.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    fn make_service_with_settings(db: &Database<'_>, settings: Settings) -> IncrementalAnalysisService {
+        IncrementalAnalysisService::new(
+            db.read_only(),
+            Default::default,
+            settings,
+            ParserSettings::default(),
+            Arc::clone(&PLUGIN_REGISTRY),
+        )
+    }
+
+    /// Regression test: body-only change followed by signature change must not lose issues.
+    /// This reproduces the exact user scenario: first add `$this->something()` (body-only),
+    /// then add `#[Override]` (signature change).
+    #[test]
+    fn test_incremental_body_then_signature_change_preserves_all_issues() {
+        let settings =
+            Settings { check_missing_override: true, find_unused_parameters: true, diff: true, ..Default::default() };
+
+        let base = concat!(
+            "<?php\n",
+            "class Base {\n",
+            "    public function process(int $id): string { return 'base'; }\n",
+            "}\n",
+        );
+        let child_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(int $id): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_service_with_settings(&db, settings.clone());
+        service.analyze().expect("Initial analysis failed.");
+
+        // Cycle 1: body-only change - add $this->something() call.
+        let child_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(int $id): float { $this->something(); return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let cycle1 = service.analyze_incremental(None).expect("Incremental analysis failed.");
+
+        let mut fresh1 = make_service_with_settings(&db, settings.clone());
+        let full1 = fresh1.analyze().expect("Full analysis failed.");
+        let (only_incr1, only_full1) = diff_issues(&cycle1.issues, &full1.issues);
+        assert!(
+            only_incr1.is_empty() && only_full1.is_empty(),
+            "Cycle 1 (body-only) mismatch.\n  Only in incremental: {only_incr1:?}\n  Only in full: {only_full1:?}"
+        );
+
+        // Cycle 2: signature change - add #[Override] attribute.
+        let child_v3 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    #[\\Override] public function process(int $id): float { $this->something(); return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v3.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        let child_id = FileId::new(b"src/Child.php");
+        let cycle2 = service
+            .analyze_incremental(Some(&[child_id]))
+            .expect("Incremental analysis failed after signature change following body-only change.");
+
+        let mut fresh2 = make_service_with_settings(&db, settings);
+        let full2 = fresh2.analyze().expect("Full analysis failed.");
+
+        let (only_incr2, only_full2) = diff_issues(&cycle2.issues, &full2.issues);
+        assert!(
+            only_incr2.is_empty() && only_full2.is_empty(),
+            "Cycle 2 (signature change after body-only) mismatch.\n  Only in incremental: {only_incr2:?}\n  Only in full: {only_full2:?}"
+        );
+    }
+
+    fn make_watch_service(db: &Database<'_>) -> IncrementalAnalysisService {
+        make_service_with_settings(
+            db,
+            Settings {
+                diff: true,
+                find_unused_definitions: true,
+                find_unused_parameters: true,
+                check_missing_override: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Compare incremental analysis against a fresh full analysis.
+    /// Panics with a detailed diff if they disagree.
+    fn assert_matches_full(service: &IncrementalAnalysisService, db: &Database<'_>, context: &str) {
+        let incremental_issues = service.collect_all_issues();
+        let mut fresh = make_watch_service(db);
+        let full = fresh.analyze().expect("Full analysis failed.");
+        let (only_incr, only_full) = diff_issues(&incremental_issues, &full.issues);
+        assert!(
+            only_incr.is_empty() && only_full.is_empty(),
+            "[{context}] incremental != full.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
+        );
+    }
+
+    #[test]
+    fn test_watch_class_alias_target_changes() {
+        let real = concat!(
+            "<?php\n",
+            "class First { public function value(): int { return 1; } }\n",
+            "class Second { public function value(): string { return ''; } }\n",
+        );
+        let alias = "<?php\nclass_alias(First::class, Alias::class);\n";
+        let consumer = concat!(
+            "<?php\n",
+            "function consume(Alias $value): int { return $value->value(); }\n",
+            "consume(new First());\n",
+        );
+
+        let mut db =
+            make_database(vec![("src/Real.php", real), ("src/Alias.php", alias), ("src/Consumer.php", consumer)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial class alias");
+
+        db.update(
+            FileId::new(b"src/Alias.php"),
+            Cow::Owned(b"<?php\nclass_alias(Second::class, Alias::class);\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "changed class alias target");
+
+        db.update(FileId::new(b"src/Alias.php"), Cow::Owned(b"<?php\n".to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "removed class alias");
+    }
+
+    /// A body edit changes what every caller's body reaches, so the warm run re-analyzes only the edited file and
+    /// the solve over every cached summary reports the getter in the unchanged file.
+    #[test]
+    fn test_watch_body_edit_reaches_an_unchanged_files_getter() {
+        let order =
+            |price: &str| format!("namespace App;\n\npublic class Order\n{{\n    public int price() => {price};\n}}\n");
+        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n";
+        let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
+        let now = "<?php\nfunction now(): int { return time(); }\n";
+        let order_id = FileId::new(b"src/Order.sharp");
+        let mut db = make_database(vec![
+            ("src/Order.sharp", order("1").as_str()),
+            ("src/Cart.sharp", cart),
+            ("src/Clock.sharp", clock),
+            ("src/now.php", now),
+        ]);
+        let impure_getters = |service: &IncrementalAnalysisService| {
+            service
+                .collect_all_issues()
+                .iter()
+                .filter(|issue| issue.code.as_deref() == Some("impure-getter"))
+                .map(|issue| issue.message.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(impure_getters(&service), Vec::<String>::new());
+
+        db.update(order_id, Cow::Owned(order("now()").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
+        assert_eq!(
+            impure_getters(&service),
+            ["Getter `total` reaches `Order.price`, which calls `now` with the effect `Clock`. Getters must be pure."]
+        );
+        assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
+        assert_matches_full(&service, &db, "Order.price calls now");
+
+        db.update(order_id, Cow::Owned(order("1").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
+        assert_eq!(impure_getters(&service), Vec::<String>::new());
+        assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
+        assert_matches_full(&service, &db, "Order.price returns 1 again");
+    }
+
+    /// A body records the effects its `extern` declarations list, so an edit of a declaration changes the summaries
+    /// of every file that calls what it declares.
+    #[test]
+    fn test_watch_extern_edit_reaches_every_caller() {
+        let clock = |uses: &str| format!("namespace App.Stubs;\n\nextern now{uses};\n");
+        let report = "namespace App;\n\npublic class Report\n{\n    public int stamp => now();\n}\n";
+        let now = "<?php\nfunction now(): int { return time(); }\n";
+        let clock_id = FileId::new(b"src/Clock.sharp");
+        let mut db = make_database(vec![
+            ("src/Clock.sharp", clock("").as_str()),
+            ("src/Report.sharp", report),
+            ("src/now.php", now),
+        ]);
+        let impure_getters = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-getter")).count()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(impure_getters(&service), 0);
+
+        db.update(clock_id, Cow::Owned(clock(" uses Clock").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
+        assert_eq!(impure_getters(&service), 1);
+        assert_matches_full(&service, &db, "now uses Clock");
+
+        db.update(clock_id, Cow::Owned(clock("").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
+        assert_eq!(impure_getters(&service), 0);
+        assert_matches_full(&service, &db, "now is pure again");
+    }
+
+    /// A signature edit re-analyzes its file in watch mode, and the methods it did not touch keep what they do.
+    #[test]
+    fn test_watch_signature_edit_keeps_the_effects_of_the_files_other_methods() {
+        let order = |extra: &str| {
+            format!("namespace App;\n\npublic class Order\n{{\n    public int price() => now();\n{extra}}}\n")
+        };
+        let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n}\n";
+        let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
+        let now = "<?php\nfunction now(): int { return time(); }\n";
+        let order_id = FileId::new(b"src/Order.sharp");
+        let mut db = make_database(vec![
+            ("src/Order.sharp", order("").as_str()),
+            ("src/Cart.sharp", cart),
+            ("src/Clock.sharp", clock),
+            ("src/now.php", now),
+        ]);
+        let impure_getters = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-getter")).count()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(impure_getters(&service), 1);
+
+        db.update(order_id, Cow::Owned(order("\n    public int discount() => 0;\n").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
+        assert_eq!(impure_getters(&service), 1);
+        assert_matches_full(&service, &db, "Order gains discount");
+    }
+
+    /// A library edit that adds or drops a `[Replaces]` changes the diagnostics of a project file that calls the
+    /// function, though nothing in the project file changed.
+    #[test]
+    fn test_watch_library_replaces_change_reaches_a_project_caller() {
+        let replaces = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_METHOD)]\npublic class Replaces\n{\n    public Replaces(string ...functions)\n    {\n    }\n}\n";
+        let date = |attribute: &str| {
+            format!(
+                "namespace Sharp.Time;\n\npublic static class Date\n{{\n    {attribute}\n    public static string format(string pattern) => stamp(pattern);\n}}\n"
+            )
+        };
+        let stamp = "<?php\nfunction stamp(string $pattern): string { return $pattern; }\n";
+        let clock = "namespace App;\n\npublic class Clock\n{\n    public string year() => stamp(\"Y\");\n}\n";
+
+        let mut db = make_database(vec![("src/stamp.php", stamp), ("src/Clock.sharp", clock)]);
+        for (name, contents) in
+            [("library/Sharp/Replaces.sharp", replaces.to_owned()), ("library/Sharp/Time/Date.sharp", date(""))]
+        {
+            let mut file = File::new(
+                Cow::Owned(name.as_bytes().to_vec()),
+                FileType::Host,
+                None,
+                Cow::Owned(contents.into_bytes()),
+            );
+            file.is_standard_library = true;
+            db.add(file);
+        }
+        let wrapped = |service: &IncrementalAnalysisService| {
+            service
+                .collect_all_issues()
+                .iter()
+                .filter(|issue| issue.code.as_deref() == Some("wrapped-function"))
+                .count()
+        };
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(wrapped(&service), 0);
+
+        db.update(
+            FileId::new(b"library/Sharp/Time/Date.sharp"),
+            Cow::Owned(date("[Replaces(\"stamp\")]").into_bytes()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_eq!(wrapped(&service), 1);
+        assert_matches_full(&service, &db, "added replaces");
+
+        db.update(FileId::new(b"library/Sharp/Time/Date.sharp"), Cow::Owned(date("").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_eq!(wrapped(&service), 0);
+        assert_matches_full(&service, &db, "removed replaces");
+    }
+
+    /// Parent changes return type making child's override incompatible.
+    #[test]
+    fn test_watch_parent_return_type_change_child_untouched() {
+        let base_v1 = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base_v1), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Parent changes return type to int — child's override is now incompatible.
+        let base_v2 = "<?php\nclass Base {\n    public function run(): int { return 42; }\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent return type changed");
+
+        // Revert parent — child should be compatible again.
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent reverted");
+    }
+
+    /// Parent changes parameter type making child's override incompatible.
+    #[test]
+    fn test_watch_parent_param_type_change_child_untouched() {
+        let base_v1 = "<?php\nclass Base {\n    public function process(int $x): void { echo $x; }\n}\n";
+        let child =
+            "<?php\nclass Child extends Base {\n    public function process(int $x): void { echo $x + 1; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base_v1), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Parent changes parameter type to string.
+        let base_v2 = "<?php\nclass Base {\n    public function process(string $x): void { echo $x; }\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent param type changed");
+    }
+
+    /// Parent adds a new method — child's existing override should still work.
+    #[test]
+    fn test_watch_parent_adds_method_child_untouched() {
+        let base_v1 = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base_v1), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Parent adds a new method.
+        let base_v2 = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n    public function extra(): void {}\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent added method");
+    }
+
+    /// Parent removes the method that child overrides.
+    #[test]
+    fn test_watch_parent_removes_overridden_method() {
+        let base_v1 = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n    public function other(): void {}\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    #[\\Override] public function run(): string { return 'child'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base_v1), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Parent removes the overridden method — child's #[Override] now has no parent method.
+        let base_v2 = "<?php\nclass Base {\n    public function other(): void {}\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent removed overridden method");
+    }
+
+    /// Child changes return type to become incompatible with parent.
+    #[test]
+    fn test_watch_child_return_type_becomes_incompatible() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child_v1 = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - compatible");
+
+        // Child changes return type to float — now incompatible.
+        let child_v2 = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n}\n";
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child return type incompatible");
+
+        // Child fixes return type — compatible again.
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child return type fixed");
+    }
+
+    /// Child adds #[Override] attribute — signature change.
+    #[test]
+    fn test_watch_child_adds_override_attribute() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child_v1 = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n    private function unused(): void {}\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - no Override");
+
+        // Add #[Override].
+        let child_v2 = "<?php\nclass Child extends Base {\n    #[\\Override] public function run(): string { return 'child'; }\n    private function unused(): void {}\n}\n";
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child added Override");
+    }
+
+    /// Child removes #[Override] attribute — signature change, should report missing-override.
+    #[test]
+    fn test_watch_child_removes_override_attribute() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child_v1 = "<?php\nclass Child extends Base {\n    #[\\Override] public function run(): string { return 'child'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - with Override");
+
+        // Remove #[Override].
+        let child_v2 = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n}\n";
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child removed Override");
+    }
+
+    /// Body-only change in child class with diff=true.
+    #[test]
+    fn test_watch_body_change_in_child() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child_v1 = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n    private function unused(): void {}\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Body-only change in child.
+        let child_v2 = "<?php\nclass Child extends Base {\n    public function run(): float { echo 'hi'; return 1.0; }\n    private function unused(): void {}\n}\n";
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "body change in child");
+    }
+
+    /// Body-only change in parent class with diff=true.
+    #[test]
+    fn test_watch_body_change_in_parent() {
+        let base_v1 = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n    private function unused(): void {}\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base_v1), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Body-only change in parent.
+        let base_v2 = "<?php\nclass Base {\n    public function run(): string { return 'changed'; }\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "body change in parent");
+    }
+
+    /// Body-only change in unrelated file with diff=true.
+    #[test]
+    fn test_watch_body_change_in_unrelated_file() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n    private function unused(): void {}\n}\n";
+        let unrelated_v1 = "<?php\nclass Unrelated {\n    public function greet(): string { return 'hello'; }\n}\n";
+
+        let mut db =
+            make_database(vec![("src/Base.php", base), ("src/Child.php", child), ("src/Unrelated.php", unrelated_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Body-only change in unrelated file.
+        let unrelated_v2 = "<?php\nclass Unrelated {\n    public function greet(): string { return 'hi'; }\n}\n";
+        db.update(FileId::new(b"src/Unrelated.php"), Cow::Owned(unrelated_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "body change in unrelated file");
+    }
+
+    /// Add a method to one class in a multi-class file — other class's issues preserved.
+    #[test]
+    fn test_watch_add_method_multi_class_file() {
+        let base = "<?php\nclass Base {\n    public function process(): string { return 'ok'; }\n}\n";
+        let child_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+            "\n",
+            "class Helper {\n",
+            "    public function help(): void { echo 'help'; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Add a method to Helper — signature change for Helper, Child untouched.
+        let child_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+            "\n",
+            "class Helper {\n",
+            "    public function help(): void { echo 'help'; }\n",
+            "    public function extra(): void { echo []; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "added method to Helper");
+
+        // Revert — should restore original issues exactly.
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "reverted Helper method addition");
+    }
+
+    /// Remove a method from a class.
+    #[test]
+    fn test_watch_remove_method_from_class() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function run(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "    private function alsoUnused(): void {}\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Remove alsoUnused method.
+        let child_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function run(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "removed method");
+    }
+
+    /// Add a new private unused method.
+    #[test]
+    fn test_watch_add_unused_private_method() {
+        let code_v1 = "<?php\nclass Foo {\n    public function bar(): void { echo 'bar'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Foo.php", code_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Add an unused private method.
+        let code_v2 = "<?php\nclass Foo {\n    public function bar(): void { echo 'bar'; }\n    private function secret(): void {}\n}\n";
+        db.update(FileId::new(b"src/Foo.php"), Cow::Owned(code_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "added unused private method");
+    }
+
+    /// A private method was called; caller is removed → method becomes unused.
+    #[test]
+    fn test_watch_method_becomes_unused_after_caller_removed() {
+        let code_v1 = concat!(
+            "<?php\n",
+            "class Foo {\n",
+            "    public function bar(): void { $this->helper(); }\n",
+            "    private function helper(): void { echo 'help'; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Foo.php", code_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - helper is used");
+
+        // Remove the call to helper — it becomes unused.
+        let code_v2 = concat!(
+            "<?php\n",
+            "class Foo {\n",
+            "    public function bar(): void { echo 'no helper'; }\n",
+            "    private function helper(): void { echo 'help'; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Foo.php"), Cow::Owned(code_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "helper became unused");
+    }
+
+    /// A private method was unused; caller is added → method is now used.
+    #[test]
+    fn test_watch_method_becomes_used_after_caller_added() {
+        let code_v1 = concat!(
+            "<?php\n",
+            "class Foo {\n",
+            "    public function bar(): void { echo 'no helper'; }\n",
+            "    private function helper(): void { echo 'help'; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Foo.php", code_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - helper is unused");
+
+        // Add a call to helper — it becomes used.
+        let code_v2 = concat!(
+            "<?php\n",
+            "class Foo {\n",
+            "    public function bar(): void { $this->helper(); }\n",
+            "    private function helper(): void { echo 'help'; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Foo.php"), Cow::Owned(code_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "helper became used");
+    }
+
+    /// An array callable names a method its class does not have yet; the class adds it.
+    #[test]
+    fn test_watch_array_callable_method_added_later() {
+        let foo_v1 = "<?php\nfinal class Foo {}\n";
+        let caller =
+            "<?php\n/** @return list<string> */\nfunction callable_pair(): array { return [Foo::class, 'bar']; }\n";
+
+        let mut db = make_database(vec![("src/Foo.php", foo_v1), ("src/caller.php", caller)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - Foo has no bar");
+
+        let foo_v2 = "<?php\nfinal class Foo {\n    public static function bar(): void {}\n}\n";
+        db.update(FileId::new(b"src/Foo.php"), Cow::Owned(foo_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "Foo added bar");
+
+        let mut fresh = make_watch_service(&db);
+        fresh.analyze().expect("Full analysis failed.");
+        let bar = (word(b"foo"), word(b"bar"));
+        assert_eq!(
+            service.symbol_references().count_referencing_symbols(&bar, false),
+            fresh.symbol_references().count_referencing_symbols(&bar, false),
+            "incremental references to Foo::bar != full"
+        );
+    }
+
+    /// Cross-file reference: function called from another file, that file removes the call.
+    #[test]
+    fn test_watch_cross_file_reference_removed() {
+        let lib = "<?php\nfunction helper(): int { return 42; }\n";
+        let caller_v1 = "<?php\nfunction main_fn(): int { return helper(); }\n";
+
+        let mut db = make_database(vec![("src/lib.php", lib), ("src/caller.php", caller_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Caller stops calling helper.
+        let caller_v2 = "<?php\nfunction main_fn(): int { return 99; }\n";
+        db.update(FileId::new(b"src/caller.php"), Cow::Owned(caller_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "cross-file reference removed");
+    }
+
+    /// Cross-file reference: function was not called, another file adds a call.
+    #[test]
+    fn test_watch_cross_file_reference_added() {
+        let lib = "<?php\nfunction helper(): int { return 42; }\n";
+        let caller_v1 = "<?php\nfunction main_fn(): int { return 99; }\n";
+
+        let mut db = make_database(vec![("src/lib.php", lib), ("src/caller.php", caller_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - no call");
+
+        // Caller adds a call to helper.
+        let caller_v2 = "<?php\nfunction main_fn(): int { return helper(); }\n";
+        db.update(FileId::new(b"src/caller.php"), Cow::Owned(caller_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "cross-file reference added");
+    }
+
+    /// Parent class deleted — child's extends is now dangling.
+    #[test]
+    fn test_watch_parent_class_deleted() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n    private function unused(): void {}\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Delete parent class file.
+        db.delete(FileId::new(b"src/Base.php"));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent deleted");
+    }
+
+    /// Child class deleted — parent should be unaffected.
+    #[test]
+    fn test_watch_child_class_deleted() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n    private function unused(): void {}\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Delete child class file.
+        db.delete(FileId::new(b"src/Child.php"));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child deleted");
+    }
+
+    /// Parent class re-added after deletion.
+    #[test]
+    fn test_watch_parent_class_deleted_then_readded() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Delete parent.
+        db.delete(FileId::new(b"src/Base.php"));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent deleted");
+
+        // Re-add parent.
+        db.add(File::new(
+            Cow::Owned(b"src/Base.php".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(base.as_bytes().to_vec()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent re-added");
+    }
+
+    /// File has two classes; change signature of one, other's issues preserved.
+    #[test]
+    fn test_watch_multi_class_file_one_class_signature_change() {
+        let base = "<?php\nclass Base {\n    public function process(): string { return 'ok'; }\n}\n";
+        let file_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+            "\n",
+            "class AnotherClass {\n",
+            "    public function doStuff(): void { echo 'stuff'; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Classes.php", file_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change AnotherClass signature — Child issues must be preserved.
+        let file_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+            "\n",
+            "class AnotherClass {\n",
+            "    public function doStuff(): void { echo 'stuff'; }\n",
+            "    public function newMethod(): void { echo []; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Classes.php"), Cow::Owned(file_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "one class changed in multi-class file");
+    }
+
+    /// File has two classes; change signature of one, then revert.
+    #[test]
+    fn test_watch_multi_class_file_change_and_revert() {
+        let base = "<?php\nclass Base {\n    public function process(): string { return 'ok'; }\n}\n";
+        let file_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+            "\n",
+            "class Helper {\n",
+            "    public function help(): void { echo 'help'; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Classes.php", file_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change Helper.
+        let file_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+            "\n",
+            "class Helper {\n",
+            "    public function help(): void { echo 'help'; }\n",
+            "    public function extra(): int { return 1; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Classes.php"), Cow::Owned(file_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "changed Helper");
+
+        // Revert.
+        db.update(FileId::new(b"src/Classes.php"), Cow::Owned(file_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "reverted multi-class file");
+    }
+
+    /// File has two classes; body-only change in one, other's issues preserved.
+    #[test]
+    fn test_watch_multi_class_file_body_only_change() {
+        let base = "<?php\nclass Base {\n    public function process(): string { return 'ok'; }\n}\n";
+        let file_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "}\n",
+            "\n",
+            "class Helper {\n",
+            "    public function help(): void { echo 'help'; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Classes.php", file_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Body-only change in Helper.
+        let file_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "}\n",
+            "\n",
+            "class Helper {\n",
+            "    public function help(): void { echo 'changed'; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Classes.php"), Cow::Owned(file_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "body-only change in multi-class file");
+    }
+
+    /// A new child class is added in a new file extending an existing parent.
+    #[test]
+    fn test_watch_new_child_class_added() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - no child");
+
+        // Add a new child class file with incompatible return type.
+        let child = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n}\n";
+        db.add(File::new(
+            Cow::Owned(b"src/Child.php".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(child.as_bytes().to_vec()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "new child class added");
+    }
+
+    /// An interface is implemented; then the implementation is removed.
+    #[test]
+    fn test_watch_interface_implementation_added_and_removed() {
+        let iface = "<?php\ninterface Printable {\n    public function print(): string;\n}\n";
+        let class_v1 = "<?php\nclass Printer {\n    public function print(): string { return 'hello'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Printable.php", iface), ("src/Printer.php", class_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - no implementation");
+
+        // Add implements clause.
+        let class_v2 =
+            "<?php\nclass Printer implements Printable {\n    public function print(): string { return 'hello'; }\n}\n";
+        db.update(FileId::new(b"src/Printer.php"), Cow::Owned(class_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "added implements");
+
+        // Remove implements clause.
+        db.update(FileId::new(b"src/Printer.php"), Cow::Owned(class_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "removed implements");
+    }
+
+    /// Multiple sequential signature changes across different files.
+    #[test]
+    fn test_watch_sequential_changes_across_files() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n    private function unused(): void {}\n}\n";
+        let user_code = "<?php\nfunction useChild(): string { return (new Child())->run(); }\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child), ("src/user.php", user_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Cycle 1: Change base return type.
+        db.update(
+            FileId::new(b"src/Base.php"),
+            Cow::Owned(b"<?php\nclass Base {\n    public function run(): int { return 42; }\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "cycle 1: base changed");
+
+        // Cycle 2: Change child return type to match new base.
+        db.update(
+            FileId::new(b"src/Child.php"),
+            Cow::Owned(b"<?php\nclass Child extends Base {\n    public function run(): int { return 99; }\n    private function unused(): void {}\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "cycle 2: child matched base");
+
+        // Cycle 3: Change user code.
+        db.update(
+            FileId::new(b"src/user.php"),
+            Cow::Owned(b"<?php\nfunction useChild(): int { return (new Child())->run() + 1; }\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "cycle 3: user code changed");
+    }
+
+    /// Alternating body and signature changes in the same file.
+    #[test]
+    fn test_watch_alternating_body_and_signature_changes() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child_v1 = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n    private function unused(): void {}\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Body change.
+        let child_body = "<?php\nclass Child extends Base {\n    public function run(): float { echo 'x'; return 1.0; }\n    private function unused(): void {}\n}\n";
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_body.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "body change");
+
+        // Signature change.
+        let child_sig = "<?php\nclass Child extends Base {\n    #[\\Override] public function run(): float { echo 'x'; return 1.0; }\n    private function unused(): void {}\n}\n";
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_sig.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "signature change");
+
+        // Another body change.
+        let child_body2 = "<?php\nclass Child extends Base {\n    #[\\Override] public function run(): float { echo 'y'; return 2.0; }\n    private function unused(): void {}\n}\n";
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_body2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "another body change");
+
+        // Revert to original.
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "reverted to original");
+    }
+
+    /// Three-level inheritance chain: grandparent, parent, child.
+    #[test]
+    fn test_watch_three_level_inheritance() {
+        let grandparent = "<?php\nclass GrandParent_ {\n    public function run(): string { return 'gp'; }\n}\n";
+        let parent =
+            "<?php\nclass Parent_ extends GrandParent_ {\n    public function run(): string { return 'parent'; }\n}\n";
+        let child = "<?php\nclass Child extends Parent_ {\n    public function run(): string { return 'child'; }\n}\n";
+
+        let mut db = make_database(vec![
+            ("src/GrandParent.php", grandparent),
+            ("src/Parent.php", parent),
+            ("src/Child.php", child),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change grandparent return type — should cascade to parent and child.
+        db.update(
+            FileId::new(b"src/GrandParent.php"),
+            Cow::Owned(b"<?php\nclass GrandParent_ {\n    public function run(): int { return 42; }\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "grandparent changed");
+
+        // Fix parent to match.
+        db.update(
+            FileId::new(b"src/Parent.php"),
+            Cow::Owned(
+                b"<?php\nclass Parent_ extends GrandParent_ {\n    public function run(): int { return 1; }\n}\n"
+                    .to_vec(),
+            ),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent fixed");
+
+        // Fix child to match.
+        db.update(
+            FileId::new(b"src/Child.php"),
+            Cow::Owned(
+                b"<?php\nclass Child extends Parent_ {\n    public function run(): int { return 2; }\n}\n".to_vec(),
+            ),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child fixed");
+    }
+
+    /// Delete and re-add a file with different content.
+    #[test]
+    fn test_watch_delete_and_readd_different_content() {
+        let a = "<?php\nfunction helper(): int { return 42; }\n";
+        let b = "<?php\nfunction caller(): int { return helper(); }\n";
+
+        let mut db = make_database(vec![("src/a.php", a), ("src/b.php", b)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Delete a.php.
+        db.delete(FileId::new(b"src/a.php"));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "a.php deleted");
+
+        // Re-add a.php with different content.
+        db.add(File::new(
+            Cow::Owned(b"src/a.php".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(b"<?php\nfunction helper(): string { return 'oops'; }\n".to_vec()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "a.php re-added with different content");
+    }
+
+    /// File with only a class (no standalone functions) — body change.
+    #[test]
+    fn test_watch_class_only_file_body_change() {
+        let code_v1 = concat!(
+            "<?php\n",
+            "class Service {\n",
+            "    public function handle(): void { echo 'v1'; }\n",
+            "    private function log(): void { echo 'log'; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Service.php", code_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Body change that doesn't affect signature.
+        let code_v2 = concat!(
+            "<?php\n",
+            "class Service {\n",
+            "    public function handle(): void { echo 'v2'; $this->log(); }\n",
+            "    private function log(): void { echo 'log'; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Service.php"), Cow::Owned(code_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "body change — log now used");
+
+        // Remove the call again — log becomes unused.
+        db.update(FileId::new(b"src/Service.php"), Cow::Owned(code_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "reverted — log unused again");
+    }
+
+    /// Multiple inheritance hierarchies in different files; change in one hierarchy
+    /// must not affect the other.
+    #[test]
+    fn test_watch_independent_hierarchies() {
+        let animal_base = "<?php\nclass Animal {\n    public function speak(): string { return 'generic'; }\n}\n";
+        let dog = "<?php\nclass Dog extends Animal {\n    public function speak(): string { return 'woof'; }\n}\n";
+        let vehicle_base = "<?php\nclass Vehicle {\n    public function speed(): int { return 0; }\n}\n";
+        let car = "<?php\nclass Car extends Vehicle {\n    public function speed(): float { return 60.0; }\n}\n";
+
+        let mut db = make_database(vec![
+            ("src/Animal.php", animal_base),
+            ("src/Dog.php", dog),
+            ("src/Vehicle.php", vehicle_base),
+            ("src/Car.php", car),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change Animal hierarchy — Vehicle hierarchy must be unaffected.
+        db.update(
+            FileId::new(b"src/Animal.php"),
+            Cow::Owned(b"<?php\nclass Animal {\n    public function speak(): int { return 42; }\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "animal hierarchy changed");
+
+        // Change Vehicle hierarchy — Animal hierarchy must be unaffected.
+        db.update(
+            FileId::new(b"src/Vehicle.php"),
+            Cow::Owned(b"<?php\nclass Vehicle {\n    public function speed(): string { return 'fast'; }\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "vehicle hierarchy changed");
+    }
+
+    /// Rapid edits to a file with multiple classes — stress test.
+    #[test]
+    fn test_watch_rapid_edits_multi_class_stress() {
+        let base = "<?php\nclass Base {\n    public function process(): string { return 'ok'; }\n}\n";
+        let file_original = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function process(): float { return 1.0; }\n",
+            "    private function unused(): void {}\n",
+            "}\n",
+            "\n",
+            "class Helper {\n",
+            "    public function help(): void { echo 'help'; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Classes.php", file_original)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        let edits = [
+            // Body change in Helper.
+            concat!(
+                "<?php\n",
+                "class Child extends Base {\n",
+                "    public function process(): float { return 1.0; }\n",
+                "    private function unused(): void {}\n",
+                "}\n",
+                "\n",
+                "class Helper {\n",
+                "    public function help(): void { echo 'changed'; }\n",
+                "}\n",
+            ),
+            // Signature change in Helper (add method).
+            concat!(
+                "<?php\n",
+                "class Child extends Base {\n",
+                "    public function process(): float { return 1.0; }\n",
+                "    private function unused(): void {}\n",
+                "}\n",
+                "\n",
+                "class Helper {\n",
+                "    public function help(): void { echo 'changed'; }\n",
+                "    public function extra(): int { return 1; }\n",
+                "}\n",
+            ),
+            // Signature change in Child (add Override).
+            concat!(
+                "<?php\n",
+                "class Child extends Base {\n",
+                "    #[\\Override] public function process(): float { return 1.0; }\n",
+                "    private function unused(): void {}\n",
+                "}\n",
+                "\n",
+                "class Helper {\n",
+                "    public function help(): void { echo 'changed'; }\n",
+                "    public function extra(): int { return 1; }\n",
+                "}\n",
+            ),
+            // Remove unused method from Child.
+            concat!(
+                "<?php\n",
+                "class Child extends Base {\n",
+                "    #[\\Override] public function process(): float { return 1.0; }\n",
+                "}\n",
+                "\n",
+                "class Helper {\n",
+                "    public function help(): void { echo 'changed'; }\n",
+                "    public function extra(): int { return 1; }\n",
+                "}\n",
+            ),
+            // Remove extra from Helper.
+            concat!(
+                "<?php\n",
+                "class Child extends Base {\n",
+                "    #[\\Override] public function process(): float { return 1.0; }\n",
+                "}\n",
+                "\n",
+                "class Helper {\n",
+                "    public function help(): void { echo 'changed'; }\n",
+                "}\n",
+            ),
+        ];
+
+        for (i, edit) in edits.iter().enumerate() {
+            db.update(FileId::new(b"src/Classes.php"), Cow::Owned(edit.as_bytes().to_vec()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental failed.");
+            assert_matches_full(&service, &db, &format!("rapid edit {}", i + 1));
+        }
+
+        // Revert to original.
+        db.update(FileId::new(b"src/Classes.php"), Cow::Owned(file_original.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "reverted to original");
+    }
+
+    /// Trait usage: class uses a trait, trait method changes.
+    #[test]
+    fn test_watch_trait_method_change() {
+        let trait_v1 = "<?php\ntrait Greeter {\n    public function greet(): string { return 'hello'; }\n}\n";
+        let class_code = "<?php\nclass MyClass {\n    use Greeter;\n    public function run(): string { return $this->greet(); }\n}\n";
+
+        let mut db = make_database(vec![("src/Greeter.php", trait_v1), ("src/MyClass.php", class_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change trait method return type.
+        let trait_v2 = "<?php\ntrait Greeter {\n    public function greet(): int { return 42; }\n}\n";
+        db.update(FileId::new(b"src/Greeter.php"), Cow::Owned(trait_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "trait method return type changed");
+    }
+
+    /// Abstract class with concrete child — abstract method signature changes.
+    #[test]
+    fn test_watch_abstract_method_signature_change() {
+        let abstract_v1 = "<?php\nabstract class Shape {\n    abstract public function area(): float;\n}\n";
+        let concrete = "<?php\nclass Circle extends Shape {\n    public function area(): float { return 3.14; }\n}\n";
+
+        let mut db = make_database(vec![("src/Shape.php", abstract_v1), ("src/Circle.php", concrete)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change abstract method return type to int — Circle's implementation is now incompatible.
+        let abstract_v2 = "<?php\nabstract class Shape {\n    abstract public function area(): int;\n}\n";
+        db.update(FileId::new(b"src/Shape.php"), Cow::Owned(abstract_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "abstract method return type changed");
+
+        // Revert abstract method.
+        db.update(FileId::new(b"src/Shape.php"), Cow::Owned(abstract_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "abstract method reverted");
+    }
+
+    /// Enum with methods — method signature change in enum.
+    #[test]
+    fn test_watch_enum_method_change() {
+        let enum_v1 = concat!(
+            "<?php\n",
+            "enum Color: string {\n",
+            "    case Red = 'red';\n",
+            "    case Blue = 'blue';\n",
+            "    public function label(): string { return $this->value; }\n",
+            "}\n",
+        );
+        let user_code = "<?php\nfunction getLabel(): string { return Color::Red->label(); }\n";
+
+        let mut db = make_database(vec![("src/Color.php", enum_v1), ("src/user.php", user_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Add a new case to enum.
+        let enum_v2 = concat!(
+            "<?php\n",
+            "enum Color: string {\n",
+            "    case Red = 'red';\n",
+            "    case Blue = 'blue';\n",
+            "    case Green = 'green';\n",
+            "    public function label(): string { return $this->value; }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Color.php"), Cow::Owned(enum_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "enum case added");
+    }
+
+    /// Simultaneous changes to parent and child in the same cycle.
+    #[test]
+    fn test_watch_parent_and_child_change_simultaneously() {
+        let base_v1 = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child_v1 = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n    private function unused(): void {}\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base_v1), ("src/Child.php", child_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Both change at the same time.
+        let base_v2 = "<?php\nclass Base {\n    public function run(): int { return 42; }\n}\n";
+        let child_v2 = "<?php\nclass Child extends Base {\n    public function run(): int { return 99; }\n    private function unused(): void {}\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v2.as_bytes().to_vec()));
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "both parent and child changed");
+    }
+
+    /// Move a class from one file to another (delete from old, add to new).
+    #[test]
+    fn test_watch_move_class_between_files() {
+        let file_a_v1 = concat!(
+            "<?php\n",
+            "class Foo {\n",
+            "    public function bar(): string { return 'foo'; }\n",
+            "}\n",
+            "class Helper {\n",
+            "    public function help(): void { echo (new Foo())->bar(); }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/a.php", file_a_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - both in a.php");
+
+        // Move Foo to b.php.
+        let file_a_v2 = "<?php\nclass Helper {\n    public function help(): void { echo (new Foo())->bar(); }\n}\n";
+        let file_b = "<?php\nclass Foo {\n    public function bar(): string { return 'foo'; }\n}\n";
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(file_a_v2.as_bytes().to_vec()));
+        db.add(File::new(
+            Cow::Owned(b"src/b.php".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(file_b.as_bytes().to_vec()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "Foo moved to b.php");
+    }
+
+    /// Change a class from non-abstract to abstract.
+    #[test]
+    fn test_watch_class_becomes_abstract() {
+        let class_v1 = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let user = "<?php\nfunction make(): Base { return new Base(); }\n";
+
+        let mut db = make_database(vec![("src/Base.php", class_v1), ("src/user.php", user)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - concrete class");
+
+        // Make it abstract.
+        let class_v2 = "<?php\nabstract class Base {\n    abstract public function run(): string;\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(class_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "class became abstract");
+    }
+
+    /// Property type changes in parent, child inherits.
+    #[test]
+    fn test_watch_property_type_change_in_parent() {
+        let base_v1 = "<?php\nclass Base {\n    public string $name = 'default';\n    public function getName(): string { return $this->name; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function greet(): string { return 'Hello ' . $this->name; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base_v1), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change property type.
+        let base_v2 = "<?php\nclass Base {\n    public int $name = 42;\n    public function getName(): int { return $this->name; }\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent property type changed");
+    }
+
+    /// Multiple files with issues; edit one, all others' issues must survive.
+    #[test]
+    fn test_watch_many_files_with_issues_edit_one() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child1 = "<?php\nclass Child1 extends Base {\n    public function run(): float { return 1.0; }\n}\n";
+        let child2 = "<?php\nclass Child2 extends Base {\n    public function run(): int { return 42; }\n}\n";
+        let child3 = "<?php\nclass Child3 extends Base {\n    public function run(): bool { return true; }\n}\n";
+
+        let mut db = make_database(vec![
+            ("src/Base.php", base),
+            ("src/Child1.php", child1),
+            ("src/Child2.php", child2),
+            ("src/Child3.php", child3),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Edit only Child1 (body change) — Child2 and Child3 issues must persist.
+        db.update(
+            FileId::new(b"src/Child1.php"),
+            Cow::Owned(
+                b"<?php\nclass Child1 extends Base {\n    public function run(): float { echo 'x'; return 1.0; }\n}\n"
+                    .to_vec(),
+            ),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "edit Child1 body");
+
+        // Edit only Child2 (signature change) — Child1 and Child3 issues must persist.
+        db.update(
+            FileId::new(b"src/Child2.php"),
+            Cow::Owned(
+                b"<?php\nclass Child2 extends Base {\n    #[\\Override] public function run(): int { return 42; }\n}\n"
+                    .to_vec(),
+            ),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "edit Child2 signature");
+    }
+
+    /// Trait used by two classes. Trait method return type changes — both users must be re-checked.
+    #[test]
+    fn test_watch_trait_used_by_multiple_classes() {
+        let trait_v1 = "<?php\ntrait Logger {\n    public function log(): string { return 'log'; }\n}\n";
+        let class_a =
+            "<?php\nclass A {\n    use Logger;\n    public function run(): string { return $this->log(); }\n}\n";
+        let class_b =
+            "<?php\nclass B {\n    use Logger;\n    public function exec(): string { return $this->log(); }\n}\n";
+
+        let mut db = make_database(vec![("src/Logger.php", trait_v1), ("src/A.php", class_a), ("src/B.php", class_b)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change trait method return type.
+        let trait_v2 = "<?php\ntrait Logger {\n    public function log(): int { return 42; }\n}\n";
+        db.update(FileId::new(b"src/Logger.php"), Cow::Owned(trait_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "trait return type changed");
+    }
+
+    /// Trait adds a new method — classes using the trait should see it.
+    #[test]
+    fn test_watch_trait_adds_method() {
+        let trait_v1 = "<?php\ntrait Greet {\n    public function hello(): string { return 'hi'; }\n}\n";
+        let class_code =
+            "<?php\nclass MyClass {\n    use Greet;\n    public function run(): string { return $this->hello(); }\n}\n";
+
+        let mut db = make_database(vec![("src/Greet.php", trait_v1), ("src/MyClass.php", class_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Add a method to trait.
+        let trait_v2 = "<?php\ntrait Greet {\n    public function hello(): string { return 'hi'; }\n    public function goodbye(): int { return 0; }\n}\n";
+        db.update(FileId::new(b"src/Greet.php"), Cow::Owned(trait_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "trait added method");
+    }
+
+    /// Trait removes a method that a class calls.
+    #[test]
+    fn test_watch_trait_removes_method_used_by_class() {
+        let trait_v1 = "<?php\ntrait Helper {\n    public function assist(): string { return 'help'; }\n    public function other(): void {}\n}\n";
+        let class_code = "<?php\nclass Worker {\n    use Helper;\n    public function work(): string { return $this->assist(); }\n}\n";
+
+        let mut db = make_database(vec![("src/Helper.php", trait_v1), ("src/Worker.php", class_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Remove assist method from trait.
+        let trait_v2 = "<?php\ntrait Helper {\n    public function other(): void {}\n}\n";
+        db.update(FileId::new(b"src/Helper.php"), Cow::Owned(trait_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "trait method removed");
+    }
+
+    /// Interface method signature changes — implementor becomes incompatible.
+    #[test]
+    fn test_watch_interface_method_signature_change() {
+        let iface_v1 = "<?php\ninterface Renderable {\n    public function render(): string;\n}\n";
+        let class_code =
+            "<?php\nclass Page implements Renderable {\n    public function render(): string { return '<html>'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Renderable.php", iface_v1), ("src/Page.php", class_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Interface changes return type.
+        let iface_v2 = "<?php\ninterface Renderable {\n    public function render(): int;\n}\n";
+        db.update(FileId::new(b"src/Renderable.php"), Cow::Owned(iface_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "interface return type changed");
+
+        // Revert.
+        db.update(FileId::new(b"src/Renderable.php"), Cow::Owned(iface_v1.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "interface reverted");
+    }
+
+    /// Interface adds a new required method — implementor now missing it.
+    #[test]
+    fn test_watch_interface_adds_required_method() {
+        let iface_v1 = "<?php\ninterface Cacheable {\n    public function getKey(): string;\n}\n";
+        let class_code =
+            "<?php\nclass Item implements Cacheable {\n    public function getKey(): string { return 'item'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Cacheable.php", iface_v1), ("src/Item.php", class_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Add required method to interface.
+        let iface_v2 = "<?php\ninterface Cacheable {\n    public function getKey(): string;\n    public function getTtl(): int;\n}\n";
+        db.update(FileId::new(b"src/Cacheable.php"), Cow::Owned(iface_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "interface added method");
+    }
+
+    /// Multiple interfaces — class implements two, one changes.
+    #[test]
+    fn test_watch_class_implements_multiple_interfaces_one_changes() {
+        let iface_a = "<?php\ninterface Readable {\n    public function read(): string;\n}\n";
+        let iface_b = "<?php\ninterface Writable {\n    public function write(string $data): void;\n}\n";
+        let class_code = concat!(
+            "<?php\n",
+            "class File implements Readable, Writable {\n",
+            "    public function read(): string { return 'data'; }\n",
+            "    public function write(string $data): void { echo $data; }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![
+            ("src/Readable.php", iface_a),
+            ("src/Writable.php", iface_b),
+            ("src/File.php", class_code),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change Writable interface.
+        let iface_b_v2 = "<?php\ninterface Writable {\n    public function write(string $data): int;\n}\n";
+        db.update(FileId::new(b"src/Writable.php"), Cow::Owned(iface_b_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "one of two interfaces changed");
+    }
+
+    /// Parent constructor changes — child calling parent::__construct should be re-checked.
+    #[test]
+    fn test_watch_parent_constructor_changes() {
+        let parent_v1 = "<?php\nclass Base {\n    public function __construct(public string $name) {}\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function __construct() { parent::__construct('default'); }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", parent_v1), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Parent adds required parameter.
+        let parent_v2 =
+            "<?php\nclass Base {\n    public function __construct(public string $name, public int $age) {}\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(parent_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent constructor added param");
+    }
+
+    /// Constructor promotion — property type changes via constructor.
+    #[test]
+    fn test_watch_constructor_promoted_property_type_change() {
+        let class_v1 = "<?php\nclass Config {\n    public function __construct(public string $value) {}\n    public function get(): string { return $this->value; }\n}\n";
+        let user = "<?php\nfunction useConfig(): string { return (new Config('x'))->get(); }\n";
+
+        let mut db = make_database(vec![("src/Config.php", class_v1), ("src/user.php", user)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change promoted property type.
+        let class_v2 = "<?php\nclass Config {\n    public function __construct(public int $value) {}\n    public function get(): int { return $this->value; }\n}\n";
+        db.update(FileId::new(b"src/Config.php"), Cow::Owned(class_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "promoted property type changed");
+    }
+
+    /// Class constant value/type changes.
+    #[test]
+    fn test_watch_class_constant_type_change() {
+        let class_v1 = "<?php\nclass Settings {\n    public const string VERSION = '1.0';\n    public function getVersion(): string { return self::VERSION; }\n}\n";
+        let user = "<?php\nfunction printVersion(): void { echo Settings::VERSION; }\n";
+
+        let mut db = make_database(vec![("src/Settings.php", class_v1), ("src/user.php", user)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change constant type.
+        let class_v2 = "<?php\nclass Settings {\n    public const int VERSION = 2;\n    public function getVersion(): int { return self::VERSION; }\n}\n";
+        db.update(FileId::new(b"src/Settings.php"), Cow::Owned(class_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "constant type changed");
+    }
+
+    /// Enum case added/removed.
+    #[test]
+    fn test_watch_enum_case_added_removed() {
+        let enum_v1 = "<?php\nenum Status: string {\n    case Active = 'active';\n    case Inactive = 'inactive';\n}\n";
+        let user = "<?php\nfunction getStatus(): Status { return Status::Active; }\n";
+
+        let mut db = make_database(vec![("src/Status.php", enum_v1), ("src/user.php", user)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Add a case.
+        let enum_v2 = "<?php\nenum Status: string {\n    case Active = 'active';\n    case Inactive = 'inactive';\n    case Pending = 'pending';\n}\n";
+        db.update(FileId::new(b"src/Status.php"), Cow::Owned(enum_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "enum case added");
+
+        // Remove a case.
+        let enum_v3 = "<?php\nenum Status: string {\n    case Active = 'active';\n}\n";
+        db.update(FileId::new(b"src/Status.php"), Cow::Owned(enum_v3.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "enum cases removed");
+    }
+
+    /// File with multiple functions — one changes signature, other's issues preserved.
+    #[test]
+    fn test_watch_multi_function_file_one_changes() {
+        let file_v1 = concat!(
+            "<?php\n",
+            "function alpha(): int { return 'not_int'; }\n",
+            "function beta(): string { return 42; }\n",
+        );
+
+        let mut db = make_database(vec![("src/funcs.php", file_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - both have issues");
+
+        // Change alpha's signature — beta's issues must persist.
+        let file_v2 = concat!(
+            "<?php\n",
+            "function alpha(): string { return 'now_correct'; }\n",
+            "function beta(): string { return 42; }\n",
+        );
+        db.update(FileId::new(b"src/funcs.php"), Cow::Owned(file_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "alpha changed, beta preserved");
+    }
+
+    /// Mixed functions and classes in the same file.
+    #[test]
+    fn test_watch_mixed_functions_and_classes() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let file_v1 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function run(): float { return 1.0; }\n",
+            "}\n",
+            "function standalone(): int { return 'oops'; }\n",
+        );
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/mixed.php", file_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change standalone function signature.
+        let file_v2 = concat!(
+            "<?php\n",
+            "class Child extends Base {\n",
+            "    public function run(): float { return 1.0; }\n",
+            "}\n",
+            "function standalone(): string { return 'fixed'; }\n",
+        );
+        db.update(FileId::new(b"src/mixed.php"), Cow::Owned(file_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "function changed, class issues preserved");
+    }
+
+    /// Method visibility changes from public to private.
+    #[test]
+    fn test_watch_method_visibility_change() {
+        let class_v1 = "<?php\nclass Service {\n    public function doWork(): void { echo 'work'; }\n}\n";
+        let user = "<?php\nfunction callService(): void { (new Service())->doWork(); }\n";
+
+        let mut db = make_database(vec![("src/Service.php", class_v1), ("src/user.php", user)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - public");
+
+        // Make method private.
+        let class_v2 = "<?php\nclass Service {\n    private function doWork(): void { echo 'work'; }\n}\n";
+        db.update(FileId::new(b"src/Service.php"), Cow::Owned(class_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "method became private");
+    }
+
+    /// Class becomes final — existing child should error.
+    #[test]
+    fn test_watch_class_becomes_final() {
+        let base_v1 = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base_v1), ("src/Child.php", child)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - non-final");
+
+        // Make base final.
+        let base_v2 = "<?php\nfinal class Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "base became final");
+    }
+
+    /// Method becomes static.
+    #[test]
+    fn test_watch_method_becomes_static() {
+        let class_v1 = "<?php\nclass Math {\n    public function add(int $a, int $b): int { return $a + $b; }\n}\n";
+        let user = "<?php\nfunction calc(): int { return (new Math())->add(1, 2); }\n";
+
+        let mut db = make_database(vec![("src/Math.php", class_v1), ("src/user.php", user)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Make method static.
+        let class_v2 =
+            "<?php\nclass Math {\n    public static function add(int $a, int $b): int { return $a + $b; }\n}\n";
+        db.update(FileId::new(b"src/Math.php"), Cow::Owned(class_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "method became static");
+    }
+
+    /// Four-level inheritance: change at top cascades all the way down.
+    #[test]
+    fn test_watch_four_level_inheritance_cascade() {
+        let l1 = "<?php\nclass L1 {\n    public function method(): string { return 'l1'; }\n}\n";
+        let l2 = "<?php\nclass L2 extends L1 {\n    public function method(): string { return 'l2'; }\n}\n";
+        let l3 = "<?php\nclass L3 extends L2 {\n    public function method(): string { return 'l3'; }\n}\n";
+        let l4 = "<?php\nclass L4 extends L3 {\n    public function method(): string { return 'l4'; }\n}\n";
+
+        let mut db =
+            make_database(vec![("src/L1.php", l1), ("src/L2.php", l2), ("src/L3.php", l3), ("src/L4.php", l4)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change L1 return type.
+        db.update(
+            FileId::new(b"src/L1.php"),
+            Cow::Owned(b"<?php\nclass L1 {\n    public function method(): int { return 1; }\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "L1 return type changed — cascade to L2/L3/L4");
+    }
+
+    /// Diamond pattern: class implements two interfaces with same method, interface changes.
+    #[test]
+    fn test_watch_diamond_interfaces() {
+        let iface_a = "<?php\ninterface A {\n    public function process(): string;\n}\n";
+        let iface_b = "<?php\ninterface B {\n    public function process(): string;\n}\n";
+        let class_code =
+            "<?php\nclass Impl implements A, B {\n    public function process(): string { return 'ok'; }\n}\n";
+
+        let mut db = make_database(vec![("src/A.php", iface_a), ("src/B.php", iface_b), ("src/Impl.php", class_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change interface A return type — now class is incompatible with A.
+        db.update(
+            FileId::new(b"src/A.php"),
+            Cow::Owned(b"<?php\ninterface A {\n    public function process(): int;\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "interface A changed in diamond");
+    }
+
+    /// Class extends parent AND implements interface — both change.
+    #[test]
+    fn test_watch_class_with_parent_and_interface_both_change() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'base'; }\n}\n";
+        let iface = "<?php\ninterface HasId {\n    public function getId(): int;\n}\n";
+        let class_code = concat!(
+            "<?php\n",
+            "class Entity extends Base implements HasId {\n",
+            "    public function run(): string { return 'entity'; }\n",
+            "    public function getId(): int { return 1; }\n",
+            "}\n",
+        );
+
+        let mut db =
+            make_database(vec![("src/Base.php", base), ("src/HasId.php", iface), ("src/Entity.php", class_code)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Both parent and interface change simultaneously.
+        db.update(
+            FileId::new(b"src/Base.php"),
+            Cow::Owned(b"<?php\nclass Base {\n    public function run(): int { return 42; }\n}\n".to_vec()),
+        );
+        db.update(
+            FileId::new(b"src/HasId.php"),
+            Cow::Owned(b"<?php\ninterface HasId {\n    public function getId(): string;\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent and interface both changed");
+    }
+
+    /// One parent, many children. Parent changes — all children must be re-checked.
+    #[test]
+    fn test_watch_one_parent_many_children() {
+        let base = "<?php\nclass Base {\n    public function method(): string { return 'base'; }\n}\n";
+        let c1 = "<?php\nclass C1 extends Base {\n    public function method(): string { return 'c1'; }\n}\n";
+        let c2 = "<?php\nclass C2 extends Base {\n    public function method(): string { return 'c2'; }\n}\n";
+        let c3 = "<?php\nclass C3 extends Base {\n    public function method(): string { return 'c3'; }\n}\n";
+
+        let mut db =
+            make_database(vec![("src/Base.php", base), ("src/C1.php", c1), ("src/C2.php", c2), ("src/C3.php", c3)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Parent changes return type — all children become incompatible.
+        db.update(
+            FileId::new(b"src/Base.php"),
+            Cow::Owned(b"<?php\nclass Base {\n    public function method(): int { return 1; }\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent changed — all children affected");
+    }
+
+    /// Two files with only functions. One function's return type changes.
+    #[test]
+    fn test_watch_standalone_function_return_type_cascade() {
+        let lib = "<?php\nfunction helper(): int { return 42; }\n";
+        let caller = "<?php\nfunction caller(): int { return helper() + 1; }\n";
+
+        let mut db = make_database(vec![("src/lib.php", lib), ("src/caller.php", caller)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Change helper return type.
+        db.update(
+            FileId::new(b"src/lib.php"),
+            Cow::Owned(b"<?php\nfunction helper(): string { return 'nope'; }\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "function return type changed");
+
+        // Revert.
+        db.update(FileId::new(b"src/lib.php"), Cow::Owned(lib.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "function reverted");
+    }
+
+    /// A class named only in a parameter's type changes its template's bound.
+    #[test]
+    fn test_watch_type_hinted_class_signature_change_reanalyzes_the_hinting_file() {
+        let a = "<?php\nnamespace Lib;\n\nclass A\n{\n    /** @param B<int> $b */\n    public function f(B $b): void {}\n}\n";
+        let mut db = make_database(vec![
+            ("src/A.php", a),
+            ("src/B.php", "<?php\nnamespace Lib;\n\n/** @template T */\nclass B\n{\n}\n"),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        db.update(
+            FileId::new(b"src/B.php"),
+            Cow::Owned(b"<?php\nnamespace Lib;\n\n/** @template T of string */\nclass B\n{\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "the type-hinted class's template now takes only strings");
+    }
+
+    /// A class named only in a parameter's type is deleted, then added back.
+    #[test]
+    fn test_watch_type_hinted_class_deleted_reports_it_missing_in_the_hinting_file() {
+        let mut db = make_database(vec![
+            ("src/A.php", "<?php\nnamespace Lib;\n\nclass A\n{\n    public function f(?B $b = null): void {}\n}\n"),
+            ("src/B.php", "<?php\nnamespace Lib;\n\nclass B\n{\n}\n"),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        db.delete(FileId::new(b"src/B.php"));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "the type-hinted class was deleted");
+
+        db.add(File::new(
+            Cow::Owned(b"src/B.php".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(b"<?php\nnamespace Lib;\n\nclass B\n{\n}\n".to_vec()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "the type-hinted class was added back");
+    }
+
+    /// Every recorded reference names a class-like or function by the lowercase name its declaration has, however
+    /// the code wrote it, because the warm path finds changes by the declaration's name. Only a global constant
+    /// keeps its case, as its declaration does.
+    #[test]
+    fn test_references_name_class_likes_and_functions_by_their_lowercase_names() {
+        let declarations = "<?php\nnamespace App;\n\n#[\\Attribute]\nclass Marker {}\n\nclass Item\n{\n    public const KIND = 1;\n}\n\nclass BaseBox {}\n\ninterface Sized {}\n\nfunction helper(): int { return 1; }\n\nconst Limit = 3;\n";
+        let user = "<?php\nnamespace App;\n\n#[MARKER]\nconst Size = 2;\n\nenum Mode\n{\n    #[MARKER]\n    case On;\n}\n\n#[MARKER]\nfinal class Box extends BASEBOX implements SIZED\n{\n    #[MARKER]\n    public const Shape = 1;\n\n    #[MARKER]\n    public ITEM $item;\n\n    public function __construct(#[MARKER] ITEM $item)\n    {\n        $this->item = $item;\n    }\n\n    /**\n     * @param list<ITEM> $items\n     * @param ITEM::KIND $kind\n     */\n    #[MARKER]\n    public function fill(array $items, int $kind, ?MISSING $missing = null): ITEM\n    {\n        return $items[0] ?? new ITEM();\n    }\n\n    public function size(): int\n    {\n        return HELPER() + Limit + ITEM::KIND + strlen(ITEM::class);\n    }\n}\n";
+        let sharp = "namespace App;\n\nclass Report\n{\n    public static string kind()\n    {\n        return typeof(Item);\n    }\n}\n";
+        let db = make_database(vec![
+            ("src/declarations.php", declarations),
+            ("src/user.php", user),
+            ("src/report.sharp", sharp),
+        ]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Analysis failed.");
+
+        let codebase = &service.codebase;
+        let mut written_case = Vec::new();
+        service.native_symbol_references.for_each_reference(|origin, target, kind| {
+            let names_a_constant = target.1.is_empty() && codebase.constants.contains_key(&target.0);
+            if !names_a_constant && target.0 != mago_word::ascii_lowercase_word(target.0.as_bytes()) {
+                written_case.push(format!("{origin:?} -> {target:?} ({kind:?})"));
+            }
+        });
+
+        assert!(written_case.is_empty(), "references keep the written case:\n{}", written_case.join("\n"));
+    }
+
+    /// Create a class, add a child in another cycle, then modify parent, then delete child.
+    #[test]
+    fn test_watch_lifecycle_create_inherit_modify_delete() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial — base only");
+
+        // Add a child.
+        let child = "<?php\nclass Child extends Base {\n    public function run(): string { return 'child'; }\n    private function secret(): void {}\n}\n";
+        db.add(File::new(
+            Cow::Owned(b"src/Child.php".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(child.as_bytes().to_vec()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child added");
+
+        // Modify parent return type.
+        db.update(
+            FileId::new(b"src/Base.php"),
+            Cow::Owned(b"<?php\nclass Base {\n    public function run(): int { return 42; }\n}\n".to_vec()),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent modified after child added");
+
+        // Delete child.
+        db.delete(FileId::new(b"src/Child.php"));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child deleted");
+
+        // Revert parent.
+        db.update(FileId::new(b"src/Base.php"), Cow::Owned(base.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "parent reverted after child deleted");
+    }
+
+    /// Back-to-back file additions then deletion of all at once.
+    #[test]
+    fn test_watch_add_multiple_files_then_delete_all() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Add three children at once.
+        for name in ["src/A.php", "src/B.php", "src/C.php"] {
+            let content = format!(
+                "<?php\nclass {} extends Base {{\n    public function run(): float {{ return 1.0; }}\n}}\n",
+                &name[4..5]
+            );
+            db.add(File::new(
+                Cow::Owned(name.as_bytes().to_vec()),
+                FileType::Host,
+                None,
+                Cow::Owned(content.into_bytes()),
+            ));
+        }
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "three children added");
+
+        // Delete all three at once.
+        for name in ["src/A.php", "src/B.php", "src/C.php"] {
+            db.delete(FileId::new(name.as_bytes()));
+        }
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "all children deleted");
+    }
+
+    /// Swap class between two files (move A→B and B→A simultaneously).
+    #[test]
+    fn test_watch_swap_classes_between_files() {
+        let file_a_v1 = "<?php\nclass Alpha {\n    public function name(): string { return 'alpha'; }\n}\n";
+        let file_b_v1 = "<?php\nclass Beta {\n    public function name(): string { return 'beta'; }\n}\n";
+        let user = "<?php\nfunction test(): string { return (new Alpha())->name() . (new Beta())->name(); }\n";
+
+        let mut db = make_database(vec![("src/a.php", file_a_v1), ("src/b.php", file_b_v1), ("src/user.php", user)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Swap: Alpha goes to b.php, Beta goes to a.php.
+        let file_a_v2 = "<?php\nclass Beta {\n    public function name(): string { return 'beta'; }\n}\n";
+        let file_b_v2 = "<?php\nclass Alpha {\n    public function name(): string { return 'alpha'; }\n}\n";
+        db.update(FileId::new(b"src/a.php"), Cow::Owned(file_a_v2.as_bytes().to_vec()));
+        db.update(FileId::new(b"src/b.php"), Cow::Owned(file_b_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "classes swapped between files");
+    }
+
+    /// Rename a class (old class disappears, new class appears in same file).
+    #[test]
+    fn test_watch_rename_class() {
+        let file_v1 = "<?php\nclass OldName {\n    public function run(): string { return 'ok'; }\n}\n";
+        let user = "<?php\nfunction test(): string { return (new OldName())->run(); }\n";
+
+        let mut db = make_database(vec![("src/class.php", file_v1), ("src/user.php", user)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Rename class.
+        let file_v2 = "<?php\nclass NewName {\n    public function run(): string { return 'ok'; }\n}\n";
+        db.update(FileId::new(b"src/class.php"), Cow::Owned(file_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "class renamed");
+    }
+
+    /// Rapid alternation: delete, re-add, modify, revert over multiple cycles.
+    #[test]
+    fn test_watch_chaotic_lifecycle() {
+        let base = "<?php\nclass Base {\n    public function run(): string { return 'ok'; }\n}\n";
+        let child_original = "<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n    private function unused(): void {}\n}\n";
+
+        let mut db = make_database(vec![("src/Base.php", base), ("src/Child.php", child_original)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Delete child.
+        db.delete(FileId::new(b"src/Child.php"));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child deleted");
+
+        // Re-add child with different content.
+        db.add(File::new(
+            Cow::Owned(b"src/Child.php".to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(
+                b"<?php\nclass Child extends Base {\n    public function run(): string { return 'compatible'; }\n}\n"
+                    .to_vec(),
+            ),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child re-added compatible");
+
+        // Modify child to be incompatible again.
+        db.update(FileId::new(b"src/Child.php"), Cow::Owned(child_original.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "child made incompatible again");
+
+        // Modify base at the same time as child.
+        db.update(
+            FileId::new(b"src/Base.php"),
+            Cow::Owned(b"<?php\nclass Base {\n    public function run(): float { return 0.5; }\n}\n".to_vec()),
+        );
+        db.update(
+            FileId::new(b"src/Child.php"),
+            Cow::Owned(
+                b"<?php\nclass Child extends Base {\n    public function run(): float { return 1.0; }\n}\n".to_vec(),
+            ),
+        );
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "both changed to be compatible");
+    }
+
+    /// Body-only change in a file with a closure whose parameter references another class.
+    /// Reproduces a bug where closure/arrow function type references were never populated
+    /// in the targeted incremental path, leaving TReference::Symbol entries unresolved.
+    #[test]
+    fn test_watch_body_change_closure_with_typed_param() {
+        let exception_class = "<?php\nclass MyException extends \\Exception {\n    public function getDetails(): string { return 'details'; }\n}\n";
+        let service_v1 = concat!(
+            "<?php\nclass Service {\n",
+            "    public function run(): void {\n",
+            "        $handler = function(MyException $e): string {\n",
+            "            return $e->getDetails();\n",
+            "        };\n",
+            "    }\n",
+            "}\n",
+        );
+
+        let mut db = make_database(vec![("src/MyException.php", exception_class), ("src/Service.php", service_v1)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial");
+
+        // Body-only change: modify the closure body but keep the signature identical.
+        let service_v2 = concat!(
+            "<?php\nclass Service {\n",
+            "    public function run(): void {\n",
+            "        $handler = function(MyException $e): string {\n",
+            "            return $e->getDetails() . ' extra';\n",
+            "        };\n",
+            "    }\n",
+            "}\n",
+        );
+        db.update(FileId::new(b"src/Service.php"), Cow::Owned(service_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "body change in closure with typed param");
+    }
+
+    fn make_db_with_types(files: Vec<(&[u8], FileType, &[u8])>) -> Database<'static> {
+        let config = DatabaseConfiguration {
+            workspace: Cow::Owned(Path::new("/test").to_path_buf()),
+            paths: vec![Cow::Borrowed(b"src")],
+            includes: vec![],
+            patches: vec![],
+            excludes: vec![],
+            extensions: vec![Cow::Borrowed(b"php")],
+            glob: mago_database::GlobSettings::default(),
+        };
+        let mut db = Database::new(config);
+        for (name, file_type, contents) in files {
+            db.add(File::new(Cow::Owned(name.to_vec()), file_type, None, Cow::Owned(contents.to_vec())));
+        }
+        db
+    }
+
+    /// After a patch changes its declared return type, host classes that override
+    /// the patched method must be re-analyzed against the new type.
+    #[test]
+    fn test_watch_patch_return_type_change_propagates_to_host() {
+        let vendor = b"<?php\nclass VendorBase {\n    public function compute(): mixed {}\n}\n";
+        let patch_v1 = b"<?php\nclass VendorBase {\n    public function compute(): string {}\n}\n";
+        let host =
+            b"<?php\nclass MyImpl extends VendorBase {\n    public function compute(): string { return 'hello'; }\n}\n";
+
+        let mut db = make_db_with_types(vec![
+            (b"vendor/VendorBase.php", FileType::Vendored, vendor),
+            (b"patches/VendorBase.php", FileType::Patch, patch_v1),
+            (b"src/MyImpl.php", FileType::Host, host),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - patches declare string return");
+
+        // Patch changes declared return type from string to int — child's string override is now incompatible.
+        let patch_v2 = "<?php\nclass VendorBase {\n    public function compute(): int {}\n}\n";
+        db.update(FileId::new(b"patches/VendorBase.php"), Cow::Owned(patch_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        {
+            let mut fresh = make_watch_service(&db);
+            let full = fresh.analyze().expect("Full analysis failed.");
+            assert!(!full.issues.is_empty(), "Expected at least one issue after patch changes return type to int");
+        }
+        assert_matches_full(&service, &db, "patch changed return type to int");
+
+        // Revert patch.
+        db.update(FileId::new(b"patches/VendorBase.php"), Cow::Owned(patch_v1.to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "patch reverted to string");
+    }
+
+    /// Same scenario but the patch only changes its PHPDoc return annotation, not the PHP return
+    /// type hint. The file-signature differ would see no change (signature_hash unchanged), so the
+    /// patch-change fix must inject the patched symbols into diff.get_changed() to trigger cascade.
+    #[test]
+    fn test_watch_patch_phpdoc_only_change_propagates_to_host() {
+        let vendor = b"<?php\nclass VendorBase {\n    public function compute(): mixed {}\n}\n";
+        let patch_v1 =
+            b"<?php\nclass VendorBase {\n    /** @return string */\n    public function compute(): mixed {}\n}\n";
+        let host =
+            b"<?php\nclass MyImpl extends VendorBase {\n    public function compute(): string { return 'hello'; }\n}\n";
+
+        let mut db = make_db_with_types(vec![
+            (b"vendor/VendorBase.php", FileType::Vendored, vendor),
+            (b"patches/VendorBase.php", FileType::Patch, patch_v1),
+            (b"src/MyImpl.php", FileType::Host, host),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - patch phpdoc says string");
+
+        // Change only the PHPDoc annotation — PHP return hint stays mixed.
+        let patch_v2 =
+            "<?php\nclass VendorBase {\n    /** @return int */\n    public function compute(): mixed {}\n}\n";
+        db.update(FileId::new(b"patches/VendorBase.php"), Cow::Owned(patch_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        {
+            let mut fresh = make_watch_service(&db);
+            let full = fresh.analyze().expect("Full analysis failed.");
+            assert!(!full.issues.is_empty(), "Expected at least one issue after patch PHPDoc changes to @return int");
+        }
+        assert_matches_full(&service, &db, "patch phpdoc changed to int");
+
+        // Revert.
+        db.update(FileId::new(b"patches/VendorBase.php"), Cow::Owned(patch_v1.to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "patch phpdoc reverted to string");
+    }
+
+    /// Deleting a patch must revert the refinements it folded into the vendor baseline. The patch
+    /// changes `compute()`'s return type to `int`, which makes the host's `return $v->compute()`
+    /// (declared `string`) an error. Once the patch file is gone the vendor's `string` is restored
+    /// and the error must clear — a stale patched type would keep it.
+    #[test]
+    fn test_watch_patch_deleted_reverts_to_vendor() {
+        let vendor = b"<?php\nclass VendorBase {\n    public function compute(): string { return ''; }\n}\n";
+        let patch = b"<?php\nclass VendorBase {\n    public function compute(): int {}\n}\n";
+        let host = b"<?php\nclass MyImpl {\n    public function run(VendorBase $v): string {\n        return $v->compute();\n    }\n}\n";
+
+        let mut db = make_db_with_types(vec![
+            (b"vendor/VendorBase.php", FileType::Vendored, vendor),
+            (b"patches/VendorBase.php", FileType::Patch, patch),
+            (b"src/MyImpl.php", FileType::Host, host),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        {
+            let mut fresh = make_watch_service(&db);
+            let full = fresh.analyze().expect("Full analysis failed.");
+            assert!(!full.issues.is_empty(), "Expected a return-type error while the patch makes compute() return int");
+        }
+        assert_matches_full(
+            &service,
+            &db,
+            "initial - patch makes compute() return int, host returning it as string is an error",
+        );
+
+        // Delete the patch — compute() reverts to the vendor's `string`, so the host is correct again.
+        db.delete(FileId::new(b"patches/VendorBase.php"));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "patch deleted, return-type error must clear");
+    }
+
+    /// Mirrors the user's play directory: Base (vendor) → Child extends Base (vendor, no method)
+    /// → patch refines Child with @return bool → Borked extends Child returning 123 (host).
+    /// Changing the patch's @return bool to @return int must clear the type-mismatch error.
+    #[test]
+    fn test_watch_patch_application_on_intermediate_class() {
+        let vendor = b"<?php\nclass Base {\n    /** @return mixed */\n    public function does_it() { return 4; }\n}\nclass Child extends Base {\n}\n";
+        let patch_v1 =
+            b"<?php\nclass Child extends Base {\n    /** @return bool */\n    abstract public function does_it();\n}\n";
+        let host = b"<?php\nclass Borked extends Child {\n    public function does_it() { return 123; }\n}\n";
+
+        let mut db = make_db_with_types(vec![
+            (b"vendor/vendor.php", FileType::Vendored, vendor),
+            (b"patches/patches.php", FileType::Patch, patch_v1),
+            (b"src/Borked.php", FileType::Host, host),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - patch says @return bool, 123 is an error");
+
+        // Patch changes @return bool to @return int — Borked returning 123 is now compatible.
+        let patch_v2 =
+            "<?php\nclass Child extends Base {\n    /** @return int */\n    abstract public function does_it();\n}\n";
+        db.update(FileId::new(b"patches/patches.php"), Cow::Owned(patch_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "patch phpdoc changed to @return int, type-mismatch should clear");
+
+        // Revert.
+        db.update(FileId::new(b"patches/patches.php"), Cow::Owned(patch_v1.to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "patch reverted to @return bool, error should return");
+    }
+
+    /// When a vendor file is updated to remove a method that a patch overrides, the patch
+    /// is now introducing a method that does not exist in the vendor and must be flagged.
+    #[test]
+    fn test_watch_vendor_removes_method_patch_becomes_new_method() {
+        let vendor_v1 = b"<?php\nclass VendorClass {\n    public function existing(): void {}\n    public function willDisappear(): void {}\n}\n";
+        let patch =
+            b"<?php\nclass VendorClass {\n    public function willDisappear(): string { return 'patched'; }\n}\n";
+
+        let mut db = make_db_with_types(vec![
+            (b"vendor/VendorClass.php", FileType::Vendored, vendor_v1),
+            (b"patches/VendorClass.php", FileType::Patch, patch),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - patch overrides existing vendor method, no error");
+
+        // Vendor removes the method — patch now introduces a brand-new method and must be flagged.
+        let vendor_v2 = "<?php\nclass VendorClass {\n    public function existing(): void {}\n}\n";
+        db.update(FileId::new(b"vendor/VendorClass.php"), Cow::Owned(vendor_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        {
+            let mut fresh = make_watch_service(&db);
+            let full = fresh.analyze().expect("Full analysis failed.");
+            assert!(
+                !full.issues.is_empty(),
+                "Expected patch-introduces-new-method issue after vendor removes the method"
+            );
+        }
+        assert_matches_full(&service, &db, "vendor removed method, patch must be flagged");
+
+        // Revert vendor — patch is patching an existing method again, no error.
+        db.update(FileId::new(b"vendor/VendorClass.php"), Cow::Owned(vendor_v1.to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "vendor reverted, patch-introduces-new-method clears");
+    }
+
+    /// Same as the class-method case but for a free function: vendor removes a function that
+    /// the patch targets, so the patch is now introducing a function that does not exist.
+    #[test]
+    fn test_watch_vendor_removes_function_patch_becomes_orphan() {
+        let vendor_v1 =
+            b"<?php\nfunction vendor_existing(): void {}\nfunction vendor_will_disappear(): string { return 'hi'; }\n";
+        let patch = b"<?php\n/** @return non-empty-string */\nfunction vendor_will_disappear(): string {}\n";
+
+        let mut db = make_db_with_types(vec![
+            (b"vendor/funcs.php", FileType::Vendored, vendor_v1),
+            (b"patches/funcs.php", FileType::Patch, patch),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_matches_full(&service, &db, "initial - patch overrides existing vendor function, no error");
+
+        // Vendor removes the function — patch is now an orphan and must be flagged.
+        let vendor_v2 = "<?php\nfunction vendor_existing(): void {}\n";
+        db.update(FileId::new(b"vendor/funcs.php"), Cow::Owned(vendor_v2.as_bytes().to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        {
+            let mut fresh = make_watch_service(&db);
+            let full = fresh.analyze().expect("Full analysis failed.");
+            assert!(!full.issues.is_empty(), "Expected orphan-patch-function issue after vendor removes the function");
+        }
+        assert_matches_full(&service, &db, "vendor removed function, patch must be flagged as orphan");
+
+        // Revert vendor — patch targets an existing function again, no error.
+        db.update(FileId::new(b"vendor/funcs.php"), Cow::Owned(vendor_v1.to_vec()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental failed.");
+        assert_matches_full(&service, &db, "vendor reverted, orphan-patch-function clears");
+    }
+
+    /// A patch whose parameter names do not line up with the original would apply its refined
+    /// types to the wrong parameters by position. That can signal a wrong parameter order or a
+    /// patch drifting out of sync with the vendor, so the patch is skipped and the mismatch is
+    /// reported rather than misapplied silently.
+    #[test]
+    fn test_watch_patch_parameter_name_mismatch_is_rejected() {
+        let vendor = b"<?php\nfunction vendor_fn(string $a, int $b): void {}\n";
+        // The patch renames the first parameter, so position 1 no longer matches by name.
+        let patch =
+            b"<?php\n/** @param non-empty-string $renamed */\nfunction vendor_fn(string $renamed, int $b): void {}\n";
+
+        let db = make_db_with_types(vec![
+            (b"vendor/funcs.php", FileType::Vendored, vendor),
+            (b"patches/funcs.php", FileType::Patch, patch),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        let result = service.analyze().expect("Initial analysis failed.");
+        assert!(
+            result.issues.iter().any(|i| i.code.as_deref() == Some("patch-function-parameter-name-mismatch")),
+            "Expected a parameter-name-mismatch diagnostic, got: {:?}",
+            result.issues.iter().map(|i| i.code.clone()).collect::<Vec<_>>()
+        );
+    }
+}

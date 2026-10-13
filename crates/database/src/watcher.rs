@@ -1,0 +1,671 @@
+//! Database watcher for real-time file change monitoring.
+
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::mem::ManuallyDrop;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
+
+use globset::GlobBuilder;
+use globset::GlobSet;
+use globset::GlobSetBuilder;
+use notify::Config;
+use notify::Event;
+use notify::EventKind;
+use notify::RecommendedWatcher;
+use notify::RecursiveMode;
+use notify::Watcher as NotifyWatcher;
+use notify::event::ModifyKind;
+
+use crate::Database;
+use crate::DatabaseReader;
+use crate::ReadDatabase;
+use crate::error::DatabaseError;
+use crate::exclusion::Exclusion;
+use crate::file::File;
+use crate::file::FileId;
+use crate::file::FileType;
+use crate::loader::calculate_pattern_specificity;
+use crate::loader::is_standard_library;
+use crate::loader::resolve_file_type;
+use crate::utils::bytes_to_path;
+
+const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
+const WAIT_INTERNAL_MS: u64 = 100;
+const WAIT_DEBOUNCE_MS: u64 = 300;
+const STABILITY_CHECK_MS: u64 = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ChangedFile {
+    id: FileId,
+    path: PathBuf,
+}
+
+/// Options for configuring the file system watcher.
+#[derive(Debug, Clone)]
+pub struct WatchOptions {
+    pub poll_interval: Option<Duration>,
+    pub additional_excludes: Vec<Exclusion<'static>>,
+}
+
+impl Default for WatchOptions {
+    #[inline]
+    fn default() -> Self {
+        Self { poll_interval: Some(Duration::from_millis(DEFAULT_POLL_INTERVAL_MS)), additional_excludes: vec![] }
+    }
+}
+
+/// Database watcher service that monitors file changes and updates the database.
+pub struct DatabaseWatcher<'config> {
+    database: Database<'config>,
+    watcher: Option<RecommendedWatcher>,
+    watched_paths: Vec<PathBuf>,
+    receiver: Option<Receiver<Vec<ChangedFile>>>,
+    /// Configured base paths paired with their loader-style specificity score.
+    ///
+    /// Carrying the score (computed via [`calculate_pattern_specificity`] over the original
+    /// pattern, before stripping any glob suffix) is what lets the watcher and the loader
+    /// agree on which [`FileType`] a newly-added file should get.
+    host_base_paths: Vec<(PathBuf, usize)>,
+    patch_base_paths: Vec<(PathBuf, usize)>,
+    include_base_paths: Vec<(PathBuf, usize)>,
+}
+
+impl<'config> DatabaseWatcher<'config> {
+    #[inline]
+    #[must_use]
+    pub fn new(database: Database<'config>) -> Self {
+        Self {
+            database,
+            watcher: None,
+            watched_paths: Vec::new(),
+            receiver: None,
+            host_base_paths: Vec::new(),
+            patch_base_paths: Vec::new(),
+            include_base_paths: Vec::new(),
+        }
+    }
+
+    /// Starts watching for file changes in the configured directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DatabaseError`] if:
+    /// - A glob pattern is invalid
+    /// - The file system watcher cannot be created
+    /// - Directories cannot be watched
+    #[inline]
+    pub fn watch(&mut self, options: WatchOptions) -> Result<(), DatabaseError> {
+        self.stop();
+
+        let config = &self.database.configuration;
+
+        let (tx, rx) = mpsc::channel();
+
+        let mut all_exclusions = vec![
+            Exclusion::Pattern(Cow::Borrowed("**/node_modules/**")),
+            Exclusion::Pattern(Cow::Borrowed("**/.git/**")),
+            Exclusion::Pattern(Cow::Borrowed("**/.idea/**")),
+            Exclusion::Pattern(Cow::Borrowed("**/vendor/**")),
+        ];
+        all_exclusions.extend(config.excludes.iter().cloned());
+        all_exclusions.extend(options.additional_excludes);
+
+        let glob_settings = &config.glob;
+        let mut glob_builder = GlobSetBuilder::new();
+        for ex in &all_exclusions {
+            if let Exclusion::Pattern(pat) = ex {
+                let glob = GlobBuilder::new(pat)
+                    .case_insensitive(glob_settings.case_insensitive)
+                    .literal_separator(glob_settings.literal_separator)
+                    .backslash_escape(glob_settings.backslash_escape)
+                    .empty_alternates(glob_settings.empty_alternates)
+                    .build()?;
+                glob_builder.add(glob);
+            }
+        }
+
+        let glob_excludes = glob_builder.build()?;
+
+        let path_excludes: HashSet<PathBuf> = all_exclusions
+            .iter()
+            .filter_map(|ex| match ex {
+                Exclusion::Path(p) => Some(p.as_ref().to_path_buf()),
+                Exclusion::Pattern(_) => None,
+            })
+            .collect();
+
+        let extensions: HashSet<Vec<u8>> = config.extensions.iter().map(|c| c.to_vec()).collect();
+        let workspace = config.workspace.as_ref().to_path_buf();
+
+        // Build the set of explicitly configured watch paths so that events from
+        // these directories are never filtered out by the default glob exclusions
+        // (e.g., a project that explicitly includes `vendor/revolt` should still
+        // receive change events for files under that directory).
+        let mut unique_watch_paths = HashSet::new();
+
+        let mut host_base_paths = Vec::new();
+        for path in &config.paths {
+            // Compute specificity on the original pattern (with glob intact); the watch path
+            // strips trailing globs so the watcher can recurse into a real directory.
+            let specificity = calculate_pattern_specificity(path.as_ref());
+            let watch_path = Self::extract_watch_path(path.as_ref());
+            let absolute_path = if watch_path.is_absolute() { watch_path } else { config.workspace.join(watch_path) };
+
+            let canonical = absolute_path.canonicalize().unwrap_or_else(|_| absolute_path.clone());
+            host_base_paths.push((canonical, specificity));
+            unique_watch_paths.insert(absolute_path);
+        }
+
+        let mut include_base_paths = Vec::new();
+        for path in &config.includes {
+            let specificity = calculate_pattern_specificity(path.as_ref());
+            let watch_path = Self::extract_watch_path(path.as_ref());
+            let absolute_path = if watch_path.is_absolute() { watch_path } else { config.workspace.join(watch_path) };
+            let canonical = absolute_path.canonicalize().unwrap_or_else(|_| absolute_path.clone());
+            include_base_paths.push((canonical, specificity));
+            unique_watch_paths.insert(absolute_path);
+        }
+
+        let mut patch_base_paths = Vec::new();
+        for path in &config.patches {
+            let specificity = calculate_pattern_specificity(path.as_ref());
+            let watch_path = Self::extract_watch_path(path.as_ref());
+            let absolute_path = if watch_path.is_absolute() { watch_path } else { config.workspace.join(watch_path) };
+            let canonical = absolute_path.canonicalize().unwrap_or_else(|_| absolute_path.clone());
+            patch_base_paths.push((canonical, specificity));
+            unique_watch_paths.insert(absolute_path);
+        }
+
+        let explicit_watch_paths: Vec<PathBuf> = unique_watch_paths
+            .iter()
+            .filter(|wp| glob_excludes.is_match(wp.as_path()) || path_excludes.contains(wp.as_path()))
+            .cloned()
+            .collect();
+
+        let mut watcher = RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res
+                    && let Some(changed) = Self::handle_event(
+                        event,
+                        &workspace,
+                        &glob_excludes,
+                        &path_excludes,
+                        &extensions,
+                        &explicit_watch_paths,
+                    )
+                {
+                    let _ = tx.send(changed);
+                }
+            },
+            Config::default()
+                .with_poll_interval(options.poll_interval.unwrap_or(Duration::from_millis(DEFAULT_POLL_INTERVAL_MS))),
+        )
+        .map_err(DatabaseError::WatcherInit)?;
+
+        let mut watched_paths = Vec::new();
+        for path in unique_watch_paths {
+            watcher.watch(&path, RecursiveMode::Recursive).map_err(DatabaseError::WatcherWatch)?;
+            watched_paths.push(path.clone());
+            tracing::debug!("Watching path: {}", path.display());
+        }
+
+        tracing::info!("Database watcher started for workspace: {}", config.workspace.display());
+
+        self.watcher = Some(watcher);
+        self.watched_paths = watched_paths;
+        self.receiver = Some(rx);
+        self.host_base_paths = host_base_paths;
+        self.patch_base_paths = patch_base_paths;
+        self.include_base_paths = include_base_paths;
+
+        Ok(())
+    }
+
+    /// Stops watching if currently active.
+    #[inline]
+    pub fn stop(&mut self) {
+        if let Some(mut watcher) = self.watcher.take() {
+            for path in &self.watched_paths {
+                let _ = watcher.unwatch(path);
+                tracing::debug!("Stopped watching: {}", path.display());
+            }
+        }
+        self.watched_paths.clear();
+        self.receiver = None;
+        self.host_base_paths.clear();
+        self.patch_base_paths.clear();
+        self.include_base_paths.clear();
+    }
+
+    /// Checks if the watcher is currently active.
+    #[inline]
+    #[must_use]
+    pub fn is_watching(&self) -> bool {
+        self.watcher.is_some()
+    }
+
+    /// Extracts the base directory path from a potentially glob-pattern path.
+    ///
+    /// For glob patterns (containing *, ?, [, {), this returns the directory portion
+    /// before the first glob metacharacter. For regular paths, returns the path as-is.
+    ///
+    /// # Examples
+    ///
+    /// - `"src/**/*.php"` → `"src"`
+    /// - `"lib/*/foo.php"` → `"lib"`
+    /// - `"tests/fixtures"` → `"tests/fixtures"` (unchanged)
+    fn extract_watch_path(pattern: &[u8]) -> PathBuf {
+        let is_glob =
+            pattern.contains(&b'*') || pattern.contains(&b'?') || pattern.contains(&b'[') || pattern.contains(&b'{');
+
+        if !is_glob {
+            return bytes_to_path(pattern).into_owned();
+        }
+
+        let first_glob_pos =
+            pattern.iter().position(|&b| matches!(b, b'*' | b'?' | b'[' | b'{')).unwrap_or(pattern.len());
+
+        let base = &pattern[..first_glob_pos];
+
+        let mut end = base.len();
+        while end > 0 && matches!(base[end - 1], b'/' | b'\\') {
+            end -= 1;
+        }
+        let base = &base[..end];
+
+        if base.is_empty() { PathBuf::from(".") } else { bytes_to_path(base).into_owned() }
+    }
+
+    fn handle_event(
+        event: Event,
+        workspace: &Path,
+        glob_excludes: &GlobSet,
+        path_excludes: &HashSet<PathBuf>,
+        extensions: &HashSet<Vec<u8>>,
+        explicit_watch_paths: &[PathBuf],
+    ) -> Option<Vec<ChangedFile>> {
+        tracing::debug!("Watcher received event: kind={:?}, paths={:?}", event.kind, event.paths);
+
+        if let EventKind::Other | EventKind::Any | EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_)) =
+            event.kind
+        {
+            tracing::debug!("Ignoring non-modification event: {:?}", event.kind);
+
+            return None;
+        }
+
+        let mut changed_files = Vec::new();
+
+        for path in event.paths {
+            // Check if file has a valid extension
+            if let Some(ext) = path.extension() {
+                if !extensions.contains(ext.as_encoded_bytes()) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            let is_explicitly_watched = explicit_watch_paths.iter().any(|wp| path.starts_with(wp));
+            if !is_explicitly_watched {
+                // Check glob pattern exclusions
+                if glob_excludes.is_match(&path) {
+                    tracing::debug!("Skipping path excluded by pattern: {}", path.display());
+                    continue;
+                }
+
+                // Check exact path exclusions
+                if path_excludes.contains(&path) {
+                    tracing::debug!("Skipping excluded path: {}", path.display());
+                    continue;
+                }
+
+                // Check if any parent directory is in path_excludes
+                let mut should_skip = false;
+                for ancestor in path.ancestors().skip(1) {
+                    if path_excludes.contains(ancestor) {
+                        tracing::debug!("Skipping path under excluded directory: {}", path.display());
+                        should_skip = true;
+                        break;
+                    }
+                }
+
+                if should_skip {
+                    continue;
+                }
+            }
+
+            // Normalize to forward slashes for cross-platform determinism
+            #[cfg(windows)]
+            let logical_name = path
+                .strip_prefix(workspace)
+                .unwrap_or(&path)
+                .as_os_str()
+                .as_encoded_bytes()
+                .iter()
+                .map(|i| if *i == b'\\' { b'/' } else { *i })
+                .collect::<Vec<_>>();
+            #[cfg(not(windows))]
+            let logical_name = path.strip_prefix(workspace).unwrap_or(&path).as_os_str().as_encoded_bytes().to_owned();
+
+            let file_id = FileId::new(&logical_name);
+
+            changed_files.push(ChangedFile { id: file_id, path });
+        }
+
+        if changed_files.is_empty() { None } else { Some(changed_files) }
+    }
+
+    /// Waits for file changes and updates the database.
+    ///
+    /// This method blocks until file changes are detected, then updates the database
+    /// in place and returns the IDs of changed files.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DatabaseError`] if:
+    /// - The watcher is not currently active ([`DatabaseError::WatcherNotActive`])
+    /// - Updating the database with changed files fails
+    #[inline]
+    pub fn wait(&mut self) -> Result<Vec<FileId>, DatabaseError> {
+        let Some(receiver) = &self.receiver else {
+            return Err(DatabaseError::WatcherNotActive);
+        };
+
+        let config = &self.database.configuration;
+        let workspace = config.workspace.as_ref().to_path_buf();
+
+        match receiver.recv_timeout(Duration::from_millis(WAIT_INTERNAL_MS)) {
+            Ok(changed_files) => {
+                let mut all_changed = changed_files;
+                loop {
+                    match receiver.recv_timeout(Duration::from_millis(WAIT_DEBOUNCE_MS)) {
+                        Ok(more) => all_changed.extend(more),
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            self.stop();
+                            return Err(DatabaseError::WatcherNotActive);
+                        }
+                    }
+                }
+
+                let mut latest_changes: HashMap<FileId, ChangedFile> = HashMap::new();
+                for changed in all_changed {
+                    latest_changes.insert(changed.id, changed);
+                }
+                let all_changed: Vec<ChangedFile> = latest_changes.into_values().collect();
+                let mut changed_ids = Vec::new();
+                let mut standard_library_directories = foldhash::HashMap::default();
+
+                for changed_file in &all_changed {
+                    changed_ids.push(changed_file.id);
+
+                    let Ok(file) = self.database.get(&changed_file.id) else {
+                        if changed_file.path.exists() {
+                            let new_file_type = classify_added_file(
+                                &changed_file.path,
+                                &self.host_base_paths,
+                                &self.patch_base_paths,
+                                &self.include_base_paths,
+                            );
+                            match File::read(&workspace, &changed_file.path, new_file_type) {
+                                Ok(mut file) => {
+                                    file.is_standard_library =
+                                        is_standard_library(&file, &workspace, &mut standard_library_directories);
+                                    self.database.add(file);
+                                    tracing::debug!("Added new file to database: {}", changed_file.path.display());
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to load new file {}: {}", changed_file.path.display(), e);
+                                }
+                            }
+                        }
+
+                        continue;
+                    };
+
+                    if !changed_file.path.exists() {
+                        self.database.delete(changed_file.id);
+                        tracing::trace!("Deleted file from database: {}", String::from_utf8_lossy(&file.name));
+                        continue;
+                    }
+
+                    match Self::read_stable_contents(&changed_file.path) {
+                        Ok(contents) => {
+                            if self.database.update(changed_file.id, Cow::Owned(contents)) {
+                                tracing::trace!("Updated file in database: {}", String::from_utf8_lossy(&file.name));
+                            } else {
+                                tracing::warn!(
+                                    "Failed to update file in database (ID not found): {}",
+                                    String::from_utf8_lossy(&file.name)
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to read file {}: {}", changed_file.path.display(), e);
+                        }
+                    }
+                }
+
+                Ok(changed_ids)
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(Vec::new()),
+            Err(RecvTimeoutError::Disconnected) => {
+                self.stop();
+                Err(DatabaseError::WatcherNotActive)
+            }
+        }
+    }
+
+    /// Reads file contents with a stability check to handle partial writes.
+    ///
+    /// Some IDEs and formatters write files in multiple steps (save, then format).
+    /// This method reads the file, waits briefly, and re-reads to ensure the content
+    /// has stabilized before returning.
+    fn read_stable_contents(path: &Path) -> std::io::Result<Vec<u8>> {
+        let contents = std::fs::read(path)?;
+
+        std::thread::sleep(Duration::from_millis(STABILITY_CHECK_MS));
+
+        if path.exists()
+            && let Ok(reread) = std::fs::read(path)
+            && reread != contents
+        {
+            tracing::debug!("File content changed during stability check: {}", path.display());
+
+            return Ok(reread);
+        }
+
+        Ok(contents)
+    }
+
+    /// Returns a reference to the database.
+    #[inline]
+    #[must_use]
+    pub fn database(&self) -> &Database<'config> {
+        &self.database
+    }
+
+    /// Returns a reference to the database.
+    #[inline]
+    #[must_use]
+    pub fn read_only_database(&self) -> ReadDatabase {
+        self.database.read_only()
+    }
+
+    /// Returns a mutable reference to the database.
+    #[inline]
+    pub fn database_mut(&mut self) -> &mut Database<'config> {
+        &mut self.database
+    }
+
+    /// Provides temporary mutable access to the database through a closure.
+    ///
+    /// This method helps Rust's borrow checker understand that the mutable borrow
+    /// of the database is scoped to just the closure execution, allowing the watcher
+    /// to be used again after the closure returns.
+    ///
+    /// The closure is bounded with for<'x> to explicitly show that the database
+    /// reference lifetime is scoped to the closure execution only.
+    #[inline]
+    pub fn with_database_mut<F, R>(&mut self, f: F) -> R
+    where
+        F: for<'borrow> FnOnce(&'borrow mut Database<'config>) -> R,
+    {
+        f(&mut self.database)
+    }
+
+    /// Consumes the watcher and returns the database.
+    #[inline]
+    #[must_use]
+    pub fn into_database(self) -> Database<'config> {
+        let mut md = ManuallyDrop::new(self);
+        md.stop();
+        // SAFETY: `md` is a `ManuallyDrop<Self>`, so its `Drop` impl will not run; reading the
+        // `database` field byte-for-byte is safe because we never read or drop it again.
+        unsafe { std::ptr::read(&raw const md.database) }
+    }
+}
+
+impl Drop for DatabaseWatcher<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Picks the [`FileType`] for a newly-discovered file based on which configured base path
+/// it lives under.
+///
+/// Computes the per-tier maximum specificity over every base path the file matched (paired
+/// with the pattern's [`calculate_pattern_specificity`] score) and delegates to
+/// [`resolve_file_type`] for the actual conflict resolution. The watcher and the loader
+/// therefore reach the same `FileType` for the same file under the same configuration —
+/// see the helper's docs for the priority rules.
+fn classify_added_file(
+    path: &Path,
+    host_bases: &[(PathBuf, usize)],
+    patch_bases: &[(PathBuf, usize)],
+    include_bases: &[(PathBuf, usize)],
+) -> FileType {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let max_spec = |bases: &[(PathBuf, usize)]| {
+        bases.iter().filter(|(b, _)| canonical.starts_with(b.as_path())).map(|(_, s)| *s).max()
+    };
+
+    resolve_file_type(max_spec(host_bases), max_spec(include_bases), max_spec(patch_bases))
+}
+
+#[cfg(test)]
+mod classify_added_file_tests {
+    use super::*;
+
+    fn bases(items: &[&str]) -> Vec<(PathBuf, usize)> {
+        items.iter().map(|p| (PathBuf::from(p), calculate_pattern_specificity(p.as_bytes()))).collect()
+    }
+
+    #[test]
+    fn defaults_to_host_when_no_base_matches() {
+        let ft =
+            classify_added_file(Path::new("/ws/orphan/foo.php"), &bases(&["/ws/src"]), &[], &bases(&["/ws/stubs"]));
+        assert_eq!(ft, FileType::Host);
+    }
+
+    #[test]
+    fn vendored_when_only_include_matches() {
+        // Regression test: prior to this fix the watcher hardcoded `FileType::Host` for
+        // every newly-discovered file, so a fresh PHP file dropped into an `includes`
+        // directory at runtime was wrongly added as source and linted as such.
+        let ft = classify_added_file(Path::new("/ws/stubs/foo.php"), &bases(&["/ws/src"]), &[], &bases(&["/ws/stubs"]));
+        assert_eq!(ft, FileType::Vendored);
+    }
+
+    #[test]
+    fn host_when_only_host_matches() {
+        let ft = classify_added_file(Path::new("/ws/src/foo.php"), &bases(&["/ws/src"]), &[], &bases(&["/ws/stubs"]));
+        assert_eq!(ft, FileType::Host);
+    }
+
+    #[test]
+    fn matches_loader_at_equal_specificity_for_same_dir_under_both() {
+        // The same directory configured under both `paths` and `includes`: vendored wins,
+        // matching the loader's "vendored beats host at equal specificity" rule. Catches
+        // the divergence the original watcher hit (it was awarding the file to host).
+        let ft =
+            classify_added_file(Path::new("/ws/shared/foo.php"), &bases(&["/ws/shared"]), &[], &bases(&["/ws/shared"]));
+        assert_eq!(ft, FileType::Vendored);
+    }
+
+    #[test]
+    fn include_wins_when_strictly_more_specific() {
+        // An include path nested inside a host path overrides for files under the nested
+        // path. Matches the loader's "vendored beats host when strictly more specific".
+        let ft = classify_added_file(
+            Path::new("/ws/src/vendor/stub.php"),
+            &bases(&["/ws/src"]),
+            &[],
+            &bases(&["/ws/src/vendor"]),
+        );
+        assert_eq!(ft, FileType::Vendored);
+    }
+
+    #[test]
+    fn exact_host_file_beats_directory_include_via_loader_score() {
+        // Catches the second divergence: with the component-count heuristic the watcher
+        // treated `src/` and `src/foo.php` as equally specific (both 2 components) and
+        // gave the file to vendored; the loader-aligned specificity score (file × 1000
+        // beats dir × 100) instead keeps it on host.
+        let ft =
+            classify_added_file(Path::new("/ws/src/foo.php"), &bases(&["/ws/src/foo.php"]), &[], &bases(&["/ws/src"]));
+        assert_eq!(ft, FileType::Host);
+    }
+
+    #[test]
+    fn patch_when_only_patch_matches() {
+        let ft = classify_added_file(
+            Path::new("/ws/patches/foo.php"),
+            &bases(&["/ws/src"]),
+            &bases(&["/ws/patches"]),
+            &bases(&["/ws/stubs"]),
+        );
+        assert_eq!(ft, FileType::Patch);
+    }
+
+    #[test]
+    fn patch_wins_over_host_when_strictly_more_specific() {
+        let ft = classify_added_file(
+            Path::new("/ws/src/patches/foo.php"),
+            &bases(&["/ws/src"]),
+            &bases(&["/ws/src/patches"]),
+            &[],
+        );
+        assert_eq!(ft, FileType::Patch);
+    }
+
+    #[test]
+    fn host_wins_over_patch_at_equal_specificity() {
+        // Tie between host and patch goes to host — same precedence the loader applies.
+        let ft =
+            classify_added_file(Path::new("/ws/shared/foo.php"), &bases(&["/ws/shared"]), &bases(&["/ws/shared"]), &[]);
+        assert_eq!(ft, FileType::Host);
+    }
+
+    #[test]
+    fn patch_wins_over_include_when_both_match_without_host() {
+        // No host match; patch and include both match. Patch beats vendored — matches the
+        // loader's USER_DEFINED > PATCH > BUILT_IN > VENDORED tier order.
+        let ft = classify_added_file(
+            Path::new("/ws/overlap/foo.php"),
+            &[],
+            &bases(&["/ws/overlap"]),
+            &bases(&["/ws/overlap"]),
+        );
+        assert_eq!(ft, FileType::Patch);
+    }
+}

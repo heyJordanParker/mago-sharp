@@ -1,0 +1,11 @@
+.DS_Store
+.idea
+*/node_modules
+/crates/wasm/pkg
+/target
+/crates/*/target
+/vendor/
+.direnv
+.mago/
+/corpus/vendor/
+/corpus/composer.lock

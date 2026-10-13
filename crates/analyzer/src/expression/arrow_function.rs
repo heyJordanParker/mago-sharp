@@ -1,0 +1,335 @@
+use foldhash::HashSet;
+
+use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
+use mago_codex::context::ScopeContext;
+use mago_span::HasSpan;
+use mago_syntax::cst::ArrowFunction;
+use mago_word::word;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::statement::function_like::FunctionLikeBody;
+use crate::statement::function_like::analyze_function_like;
+use crate::statement::function_like::capture_lambda_locals;
+use crate::statement::function_like::merge_captured_references;
+use crate::statement::function_like::receiver_class;
+use crate::statement::function_like::resolve_closure_like_type;
+use crate::statement::function_like::unused_parameter;
+use crate::utils::expression::variable::get_variables_referenced_in_expression;
+use crate::utils::missing_type_hints;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrowFunction<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let s = self.span();
+
+        let Some(function_metadata) = context.codebase.get_closure_at(context.source_file, s) else {
+            return Err(AnalysisError::InternalError(
+                format!(
+                    "Metadata for arrow function defined in `{}` at offset {} not found.",
+                    BytesDisplay(&context.source_file.name),
+                    s.start.offset
+                ),
+                s,
+            ));
+        };
+
+        let mut scope = ScopeContext::new(block_context.scope.get_reference_origin());
+        scope.set_function_like(Some(function_metadata));
+        if let Some(receiver) = &function_metadata.refined_this_type {
+            scope.set_class_like(receiver_class(context, &receiver.type_union));
+            scope.set_static(false);
+        } else if let Some(bind_scope) = &artifacts.closure_bind_scope {
+            if let Some(class_name) = bind_scope.class_name {
+                scope.set_class_like(context.codebase.get_class_like(class_name.as_bytes()));
+            } else {
+                scope.set_class_like(block_context.scope.get_class_like());
+            }
+
+            scope.set_static(!bind_scope.has_this);
+        } else {
+            scope.set_class_like(block_context.scope.get_class_like());
+            scope.set_static(self.r#static.is_some());
+        }
+
+        let mut inner_block_context = BlockContext::new(scope, context.settings.register_super_globals);
+
+        let variables = if context.dialect.is_sharp() {
+            capture_lambda_locals(context, s, block_context, &mut inner_block_context);
+
+            HashSet::default()
+        } else {
+            get_variables_referenced_in_expression(self.expression, true)
+        };
+        let params = self.parameter_list.parameters.iter().map(|param| param.variable.name).collect::<HashSet<_>>();
+
+        for (variable, _) in variables {
+            if params.contains(&variable) {
+                continue;
+            }
+
+            let variable_atom = word(variable);
+
+            if inner_block_context.variables_possibly_in_scope.contains(&variable_atom) {
+                continue;
+            }
+
+            block_context.add_conditionally_referenced_variable(variable);
+
+            if let Some(existing_type) = block_context.locals.get(&variable_atom).cloned() {
+                inner_block_context.locals.insert(variable_atom, existing_type);
+            }
+
+            inner_block_context.variables_possibly_in_scope.insert(variable_atom);
+        }
+
+        if !context.settings.allow_implicit_pipe_callable_types || !block_context.flags.inside_pipe_callable() {
+            for parameter in &self.parameter_list.parameters {
+                missing_type_hints::check_parameter_type_hint(
+                    context,
+                    block_context.scope.get_class_like(),
+                    function_metadata,
+                    parameter,
+                );
+            }
+
+            missing_type_hints::check_return_type_hint(
+                context,
+                block_context.scope.get_class_like(),
+                function_metadata,
+                b"arrow function",
+                self.return_type_hint.as_ref(),
+                self.span(),
+            );
+        }
+
+        // Check for imprecise type hints (bare `array` or `iterable`)
+        for (i, parameter) in self.parameter_list.parameters.iter().enumerate() {
+            missing_type_hints::check_imprecise_parameter_type_hint(context, function_metadata, parameter, i);
+        }
+
+        missing_type_hints::check_imprecise_return_type_hint(
+            context,
+            function_metadata,
+            b"arrow function",
+            self.return_type_hint.as_ref(),
+        );
+
+        let inferred_parameter_types = artifacts.inferred_parameter_types.take();
+        let inner_artifacts = analyze_function_like(
+            context,
+            artifacts,
+            &mut inner_block_context,
+            function_metadata,
+            &self.parameter_list,
+            FunctionLikeBody::Expression(self.expression),
+            inferred_parameter_types,
+        )?;
+
+        let has_returned = inner_block_context.flags.has_returned();
+        merge_captured_references(context, block_context, inner_block_context);
+
+        let resulting_closure = resolve_closure_like_type(context, s, function_metadata, has_returned, inner_artifacts);
+
+        artifacts.set_expression_type(self, resulting_closure);
+
+        if context.settings.find_unused_parameters {
+            unused_parameter::check_unused_params(
+                function_metadata,
+                self.parameter_list.parameters.as_slice(),
+                FunctionLikeBody::Expression(self.expression),
+                context,
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = concat_operator_test,
+        code = indoc! {"
+            <?php
+
+            function i_take_float(float $_f): void {}
+            function i_take_string(string $_s): void {}
+
+            /**
+             * @template T
+             * @template U
+             *
+             * @param list<T> $list
+             * @param (Closure(T): U) $callback
+             *
+             * @return list<U>
+             */
+            function map_vector(array $list, Closure $callback): array
+            {
+                $result = [];
+                foreach ($list as $item) {
+                    $result[] = $callback($item);
+                }
+
+                return $result;
+            }
+
+            $integers = [1, 2, 3];
+            $strings = map_vector($integers, fn(int $i): string => (string) $i);
+            $floats = map_vector($integers, fn(int $i): float => (float) $i);
+
+            foreach ($strings as $s) {
+                i_take_string($s);
+            }
+
+            foreach ($floats as $f) {
+                i_take_float($f);
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = returns_typed_closure_arrow,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @param (Closure(int): int) $f
+             * @param (Closure(int): int) $g
+             *
+             * @return (Closure(int): int)
+             */
+            function foo(Closure $f, Closure $g): Closure {
+                return fn(int $x): int => $f($g($x));
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = inferred_arrow_function_return_type,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @param (Closure(): 'Hello, World!') $fn
+             */
+            function x(Closure $fn)
+            {
+                echo $fn();
+            }
+
+            x(fn(): string => 'Hello, World!');
+            x(fn() => 'Hello, World!');
+        "}
+    }
+
+    test_analysis! {
+        name = arrow_function_returns_never,
+        code = indoc! {"
+            <?php
+
+            function i_never_return(): never {
+                while (true) {
+                    // Infinite loop
+                }
+            }
+
+            /**
+             * @param (Closure(): never) $task
+             * @return never
+             */
+            function run(Closure $task): never {
+                $task();
+            }
+
+            run(fn(): never => i_never_return());
+        "}
+    }
+
+    test_analysis! {
+        name = arrow_function_templates,
+        code = indoc! {"
+            <?php
+
+            function i_take_int(int $_i): void {}
+            function i_take_float(float $_f): void {}
+            function i_take_string(string $_s): void {}
+
+            /**
+             * @template T
+             * @template U
+             *
+             * @param list<T> $list
+             * @param (Closure(T): U) $callback
+             *
+             * @return list<U>
+             */
+            function map_vector(array $list, Closure $callback): array {
+                $result = [];
+                foreach ($list as $item) {
+                    $result[] = $callback($item);
+                }
+                return $result;
+            }
+
+            /**
+             * @template T
+             * @template U
+             *
+             * @param T $item
+             * @param (Closure(T): U) $callback
+             *
+             * @return array{'before': T, 'after': U}
+             */
+            function cap(mixed $item, Closure $callback): array {
+                return ['before' => $item, 'after' => $callback($item)];
+            }
+
+            $mapper =
+                /**
+                 * @template T
+                 * @template U
+                 *
+                 * @param list<T> $list
+                 * @param (Closure(T): U) $callback
+                 *
+                 * @return list<array{'before': T, 'after': U}>
+                 */
+                fn(array $list, Closure $callback): array => map_vector(
+                    $list,
+                    /**
+                     * @param T $item
+                     * @return array{'before': T, 'after': U}
+                     */
+                    fn($item) => cap($item, $callback),
+                );
+
+            $integers = [1, 2, 3];
+            foreach ($mapper($integers, fn(int $i): float => (float) $i) as $item) {
+                i_take_int($item['before']);
+                i_take_float($item['after']);
+            }
+
+            foreach ($mapper($integers, fn(int $i): string => (string) $i) as $item) {
+                i_take_int($item['before']);
+                i_take_string($item['after']);
+            }
+        "}
+    }
+}

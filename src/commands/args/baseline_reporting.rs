@@ -1,0 +1,160 @@
+//! Command-line arguments for baseline-enabled issue reporting.
+//!
+//! This module provides command-line arguments for managing baseline files
+//! in combination with issue reporting. Baselines allow teams to establish
+//! a snapshot of existing issues and focus on preventing new issues from
+//! being introduced.
+//!
+//! The baseline functionality supports generating new baselines from current
+//! issues, verifying that baselines are up-to-date, and filtering reported
+//! issues against a baseline. It also includes options for backup and strict
+//! synchronization checking.
+
+use std::borrow::Cow;
+use std::path::Path;
+use std::path::PathBuf;
+
+use clap::ArgGroup;
+use clap::ColorChoice;
+use clap::Parser;
+use mago_reporting::Level;
+use mago_reporting::baseline::BaselineVariant;
+
+use crate::commands::args::reporting::ReportingArgs;
+use crate::service::BaselineIssueProcessor;
+
+/// Command-line arguments for baseline functionality combined with reporting.
+///
+/// This struct is designed to be flattened into other clap commands
+/// that require baseline functionality for filtering issues.
+#[derive(Parser, Debug, Clone, Default)]
+#[command(group(
+    ArgGroup::new("baseline_write").args(["generate_baseline", "remove_outdated_baseline_entries"]),
+))]
+pub struct BaselineReportingArgs {
+    /// Specify a baseline file to ignore existing issues.
+    ///
+    /// A baseline file contains a list of known issues that should be ignored
+    /// in future runs. This is useful for gradually improving code quality by
+    /// focusing on new issues while suppressing existing ones.
+    /// Can be overridden by configuration in mago.toml.
+    #[arg(long, value_name = "PATH")]
+    pub baseline: Option<PathBuf>,
+
+    /// Generate a new baseline file from current issues.
+    ///
+    /// This creates a baseline file containing all issues found in the current run.
+    /// Use this to establish a starting point for future issue tracking.
+    /// Requires --baseline to specify where to save the file.
+    #[arg(long)]
+    pub generate_baseline: bool,
+
+    /// Create a backup of the existing baseline file before generating a new one.
+    ///
+    /// When generating a new baseline (or removing outdated entries), the old file
+    /// will be saved with a .bkp extension.
+    /// This provides a safety net in case you need to revert the baseline.
+    /// Requires --generate-baseline or --remove-outdated-baseline-entries to be enabled.
+    #[arg(long, requires = "baseline_write")]
+    pub backup_baseline: bool,
+
+    /// Check if the baseline file is synchronized with current issues.
+    ///
+    /// This compares the baseline against current issues to detect if the baseline
+    /// is outdated. Exits with failure if issues have changed since the baseline
+    /// was created. Cannot be used with --generate-baseline.
+    #[arg(long, conflicts_with = "generate_baseline")]
+    pub verify_baseline: bool,
+
+    /// Remove outdated entries from the baseline file without adding new ones.
+    ///
+    /// Like --generate-baseline, this rewrites the baseline file, but it only removes
+    /// entries that no longer match a current issue. New issues introduced since the
+    /// baseline was created are left unsuppressed, so fixing old issues never silently
+    /// hides new ones. Requires --baseline to specify the file to update.
+    #[arg(
+        long,
+        conflicts_with = "verify_baseline",
+        conflicts_with = "fail_on_out_of_sync_baseline",
+        conflicts_with = "ignore_baseline"
+    )]
+    pub remove_outdated_baseline_entries: bool,
+
+    /// Fail the command when baseline is out of sync, even with no new issues.
+    ///
+    /// Normally, if there are no current issues to report, the command succeeds
+    /// even if the baseline is outdated. This flag forces failure when the baseline
+    /// contains issues that no longer exist, ensuring baselines stay clean.
+    #[arg(long, conflicts_with = "generate_baseline", conflicts_with = "verify_baseline")]
+    pub fail_on_out_of_sync_baseline: bool,
+
+    /// Ignore the baseline file, reporting all issues.
+    ///
+    /// When this flag is set, any configured or specified baseline file is ignored,
+    /// and all issues are reported as if no baseline exists. This is useful for
+    /// fixing issues that are currently suppressed by the baseline.
+    #[arg(
+        long,
+        conflicts_with = "baseline",
+        conflicts_with = "generate_baseline",
+        conflicts_with = "verify_baseline",
+        conflicts_with = "backup_baseline",
+        conflicts_with = "fail_on_out_of_sync_baseline"
+    )]
+    pub ignore_baseline: bool,
+
+    /// Arguments related to reporting and fixing issues.
+    #[clap(flatten)]
+    pub reporting: ReportingArgs,
+}
+
+impl BaselineReportingArgs {
+    /// Creates a baseline-aware issue processor from these arguments.
+    ///
+    /// This method converts the command-line arguments into a [`BaselineIssueProcessor`]
+    /// that will filter issues against a baseline file and handle baseline generation
+    /// and verification according to the configured options.
+    ///
+    /// # Arguments
+    ///
+    /// * `color_choice` - Whether to use colored output
+    /// * `baseline` - Optional baseline path from configuration (overridden by CLI arg)
+    /// * `baseline_variant` - The variant to use when generating new baselines
+    ///
+    /// # Returns
+    ///
+    /// A [`BaselineIssueProcessor`] configured with all the baseline and reporting
+    /// options from this argument set.
+    pub fn get_processor(
+        &self,
+        color_choice: ColorChoice,
+        baseline: Option<&Path>,
+        baseline_variant: BaselineVariant,
+        editor_url: Option<String>,
+        config_minimum_fail_level: Level,
+        scoped_analysis: bool,
+    ) -> BaselineIssueProcessor {
+        BaselineIssueProcessor {
+            baseline_path: if self.ignore_baseline {
+                None
+            } else {
+                match &self.baseline {
+                    Some(path) => Some(Cow::Owned(path.to_path_buf())),
+                    None => baseline.map(|p| Cow::Owned(p.to_path_buf())),
+                }
+            },
+            generate_baseline: self.generate_baseline,
+            backup_baseline: self.backup_baseline,
+            verify_baseline: self.verify_baseline,
+            remove_outdated_baseline_entries: self.remove_outdated_baseline_entries,
+            fail_on_out_of_sync_baseline: self.fail_on_out_of_sync_baseline,
+            baseline_variant,
+            issue_processor: self.reporting.get_processor(
+                color_choice,
+                editor_url,
+                config_minimum_fail_level,
+                scoped_analysis,
+            ),
+        }
+    }
+}

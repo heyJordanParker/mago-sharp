@@ -1,0 +1,856 @@
+use std::collections::hash_map::Entry;
+use std::convert::AsRef;
+use std::ops::Deref;
+use std::rc::Rc;
+
+use indexmap::IndexMap;
+
+use mago_algebra::clause::Clause;
+use mago_algebra::saturate_clauses;
+use mago_allocator::Arena;
+use mago_codex::consts::MAX_ENUM_CASES_FOR_ANALYSIS;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::key::ArrayKey;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::combine_optional_union_types;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::ArrayElement;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Match;
+use mago_syntax::cst::MatchArm;
+use mago_syntax::cst::MatchDefaultArm;
+use mago_syntax::cst::MatchExpressionArm;
+use mago_word::Word;
+use mago_word::WordSet;
+use mago_word::concat_word;
+use mago_word::u32_word;
+use mago_word::word;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::common::synthetic::new_synthetic_disjunctive_identity;
+use crate::common::synthetic::new_synthetic_variable;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::context::utils::inherit_branch_context_properties;
+use crate::error::AnalysisError;
+use crate::formula::add_nullsafe_base_clauses;
+use crate::formula::get_formula;
+use crate::formula::negate_or_synthesize;
+use crate::reconciler::reconcile_keyed_types;
+use crate::utils::expression::get_expression_id;
+use crate::utils::expression::get_literal_array_key;
+use crate::utils::misc::unwrap_expression;
+use crate::utils::names::display_bool;
+use crate::utils::names::display_type;
+use crate::utils::symbol_existence::extract_function_constant_existence;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Match<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        MatchAnalyzer::new(self, context, block_context, artifacts).analyze()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum ArmExecutionStatus {
+    Always,
+    Never,
+    Conditional,
+}
+
+struct FiniteArrayMatchCoverage {
+    keys: Vec<ArrayKey>,
+    dimensions: Vec<Vec<TAtomic>>,
+    covered: Vec<bool>,
+    remaining: usize,
+}
+
+impl FiniteArrayMatchCoverage {
+    fn new(
+        expression: &Expression<'_>,
+        artifacts: &AnalysisArtifacts,
+        codebase: &CodebaseMetadata,
+        limit: usize,
+    ) -> Option<Self> {
+        let (keys, values) = get_array_product_parts(expression, artifacts)?;
+        let mut dimensions = Vec::with_capacity(values.len());
+        let mut combination_count = 1usize;
+
+        for value in values {
+            let alternatives = expand_finite_match_type(artifacts.get_expression_type(value)?, codebase)?;
+            combination_count = combination_count.checked_mul(alternatives.len())?;
+            if combination_count > limit {
+                return None;
+            }
+
+            dimensions.push(alternatives);
+        }
+
+        Some(Self { keys, dimensions, covered: vec![false; combination_count], remaining: combination_count })
+    }
+
+    fn subtract(&mut self, expression: &Expression<'_>, artifacts: &AnalysisArtifacts) {
+        let Some((keys, values)) = get_array_product_parts(expression, artifacts) else {
+            return;
+        };
+
+        if keys != self.keys {
+            return;
+        }
+
+        let mut index = 0;
+        for (value, dimension) in values.into_iter().zip(&self.dimensions) {
+            let Some(atomic) = artifacts.get_expression_type(value).and_then(get_finite_singleton) else {
+                return;
+            };
+            let Some(position) = dimension.iter().position(|candidate| candidate == atomic) else {
+                return;
+            };
+
+            index = index * dimension.len() + position;
+        }
+
+        if !self.covered[index] {
+            self.covered[index] = true;
+            self.remaining -= 1;
+        }
+    }
+
+    fn is_exhaustive(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
+fn get_array_product_parts<'expression, 'arena>(
+    expression: &'expression Expression<'arena>,
+    artifacts: &AnalysisArtifacts,
+) -> Option<(Vec<ArrayKey>, Vec<&'expression Expression<'arena>>)> {
+    let elements = match unwrap_expression(expression) {
+        Expression::Array(array) => array.elements.as_slice(),
+        Expression::LegacyArray(array) => array.elements.as_slice(),
+        _ => return None,
+    };
+
+    let keyed = matches!(elements.first()?, ArrayElement::KeyValue(_));
+    let mut keys = Vec::with_capacity(elements.len());
+    let mut values = Vec::with_capacity(elements.len());
+
+    for (index, element) in elements.iter().enumerate() {
+        let (key, value) = match element {
+            ArrayElement::Value(element) if !keyed => (ArrayKey::Integer(i64::try_from(index).ok()?), element.value),
+            ArrayElement::KeyValue(element) if keyed => (get_literal_array_key(element.key, artifacts)?, element.value),
+            _ => return None,
+        };
+
+        if keys.contains(&key) {
+            return None;
+        }
+
+        keys.push(key);
+        values.push(value);
+    }
+
+    Some((keys, values))
+}
+
+fn expand_finite_match_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> Option<Vec<TAtomic>> {
+    let mut alternatives = Vec::new();
+
+    for atomic in r#type.types.as_ref() {
+        match atomic {
+            TAtomic::Scalar(TScalar::Bool(boolean)) if boolean.is_general() => {
+                alternatives.push(TAtomic::Scalar(TScalar::r#true()));
+                alternatives.push(TAtomic::Scalar(TScalar::r#false()));
+            }
+            TAtomic::Object(TObject::Enum(r#enum)) if r#enum.case.is_none() => {
+                let metadata = codebase.get_enum(r#enum.name.as_bytes())?;
+                if metadata.enum_cases.is_empty() || metadata.enum_cases.len() > MAX_ENUM_CASES_FOR_ANALYSIS {
+                    return None;
+                }
+
+                let mut cases = metadata.enum_cases.keys().copied().collect::<Vec<_>>();
+                cases.sort_unstable();
+                alternatives.extend(
+                    cases.into_iter().map(|case| TAtomic::Object(TObject::Enum(TEnum::new_case(r#enum.name, case)))),
+                );
+            }
+            _ if atomic.is_literal()
+                || matches!(atomic, TAtomic::Object(TObject::Enum(r#enum)) if r#enum.case.is_some()) =>
+            {
+                alternatives.push(atomic.clone());
+            }
+            _ => return None,
+        }
+    }
+
+    (!alternatives.is_empty()).then_some(alternatives)
+}
+
+fn get_finite_singleton(r#type: &TUnion) -> Option<&TAtomic> {
+    let atomic = r#type.is_single().then(|| r#type.get_single())?;
+
+    (atomic.is_literal() || matches!(atomic, TAtomic::Object(TObject::Enum(r#enum)) if r#enum.case.is_some()))
+        .then_some(atomic)
+}
+
+struct MatchAnalyzer<'anlyz, 'ctx, 'ast, 'arena, A>
+where
+    A: Arena,
+{
+    stmt: &'ast Match<'arena>,
+    context: &'anlyz mut Context<'ctx, 'arena, A>,
+    block_context: &'anlyz mut BlockContext<'ctx>,
+    artifacts: &'anlyz mut AnalysisArtifacts,
+}
+
+impl<'anlyz, 'ctx, 'ast, 'arena, A> MatchAnalyzer<'anlyz, 'ctx, 'ast, 'arena, A>
+where
+    A: Arena,
+{
+    const SYNTHETIC_MATCH_VAR_PREFIX: &'static [u8] = b"$-tmp-match-";
+
+    fn new(
+        stmt: &'ast Match<'arena>,
+        context: &'anlyz mut Context<'ctx, 'arena, A>,
+        block_context: &'anlyz mut BlockContext<'ctx>,
+        artifacts: &'anlyz mut AnalysisArtifacts,
+    ) -> Self {
+        Self { stmt, context, block_context, artifacts }
+    }
+
+    fn analyze(&mut self) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let was_inside_conditional = self.block_context.flags.inside_conditional();
+        self.block_context.flags.set_inside_conditional(true);
+        self.stmt.expression.analyze(self.context, self.block_context, self.artifacts)?;
+        self.block_context.flags.set_inside_conditional(was_inside_conditional);
+
+        let mut expression_arms = vec![];
+        let mut first_default_arm = None;
+
+        for arm in &self.stmt.arms {
+            match arm {
+                MatchArm::Expression(expr_arm) => expression_arms.push(expr_arm),
+                MatchArm::Default(default_arm) => {
+                    if first_default_arm.is_none() {
+                        first_default_arm = Some(default_arm);
+                    }
+                }
+            }
+        }
+
+        if expression_arms.is_empty() {
+            if let Some(default_arm) = first_default_arm {
+                self.report_only_default_arm();
+                default_arm.expression.analyze(self.context, self.block_context, self.artifacts)?;
+                if let Some(expr_type) = self.artifacts.get_rc_expression_type(&default_arm.expression).cloned() {
+                    self.artifacts.set_rc_expression_type(self.stmt, expr_type);
+                }
+            } else {
+                self.report_empty_match();
+                self.set_unhandled_match_error(None, self.stmt.span(), true);
+                self.artifacts.set_expression_type(self.stmt, get_never());
+            }
+            return Ok(());
+        }
+
+        let subject_type = if let Some(t) = self.artifacts.get_rc_expression_type(&self.stmt.expression).cloned() {
+            t
+        } else {
+            self.report_unknown_subject_type();
+            Rc::new(get_mixed())
+        };
+
+        if subject_type.is_never() {
+            self.report_subject_is_never();
+            self.artifacts.set_expression_type(self.stmt, get_never());
+            return Ok(());
+        }
+
+        let mut finite_array_coverage = FiniteArrayMatchCoverage::new(
+            self.stmt.expression,
+            self.artifacts,
+            self.context.codebase,
+            usize::from(self.context.settings.formula_size_threshold),
+        );
+
+        let (is_synthetic, subject_id, subject_for_conditions) = self.get_subject_info(&subject_type);
+
+        let mut arm_body_types: Vec<Rc<TUnion>> = Vec::new();
+        let mut arm_exit_contexts: Vec<BlockContext<'ctx>> = Vec::new();
+        let mut running_else_context = self.block_context.clone();
+        let last_expression_arm_index = expression_arms.len().saturating_sub(1);
+        let mut previous_arms_executed = ArmExecutionStatus::Never;
+
+        let mut changed_variables = WordSet::default();
+        let mut is_exhaustive = false;
+        let mut can_apply_original_subject_assertions = true;
+        for (i, expression_arm) in expression_arms.iter().enumerate() {
+            is_exhaustive = is_exhaustive || {
+                running_else_context.locals.get(&subject_id).is_some_and(|t| t.is_never())
+                    || changed_variables
+                        .iter()
+                        .any(|var_id| running_else_context.locals.get(var_id).is_some_and(|t| t.is_never()))
+            };
+
+            let is_last_arm = i == last_expression_arm_index && first_default_arm.is_none();
+            let has_boolean_literal_conditions =
+                expression_arm.conditions.iter().all(|condition| condition.is_true() || condition.is_false());
+            let (arm_status, new_else_clauses) = self.analyze_expression_arm(
+                &subject_for_conditions,
+                expression_arm,
+                &mut running_else_context,
+                &mut arm_body_types,
+                &mut arm_exit_contexts,
+                is_last_arm,
+                is_exhaustive,
+                can_apply_original_subject_assertions && has_boolean_literal_conditions,
+            )?;
+
+            if let Some(coverage) = &mut finite_array_coverage {
+                for condition in &expression_arm.conditions {
+                    coverage.subtract(condition, self.artifacts);
+                }
+
+                is_exhaustive |= coverage.is_exhaustive();
+            }
+
+            can_apply_original_subject_assertions &= has_boolean_literal_conditions;
+            if arm_status != ArmExecutionStatus::Never {
+                if previous_arms_executed == ArmExecutionStatus::Never {
+                    previous_arms_executed = arm_status;
+                } else {
+                    previous_arms_executed = ArmExecutionStatus::Conditional;
+                }
+
+                if arm_status == ArmExecutionStatus::Always {
+                    is_exhaustive = true;
+                }
+            }
+
+            // Apply only the assertions newly introduced by THIS arm. Previous
+            // arms' assertions have already been reconciled into
+            // `running_else_context.locals` in earlier iterations, and
+            // reconcile_keyed_types intersects new assertions with whatever
+            // is already there. The cumulative state is identical to running
+            // the full clause set every iteration; but the per-iteration
+            // cost stops being O(K) in arm count.
+            if !new_else_clauses.is_empty() {
+                let mut else_referenced_ids = WordSet::default();
+                let (reconcilable_else_types, _) =
+                    mago_algebra::find_satisfying_assignments(&new_else_clauses, None, &mut else_referenced_ids);
+
+                if !reconcilable_else_types.is_empty() {
+                    reconcile_keyed_types(
+                        self.context,
+                        &reconcilable_else_types,
+                        IndexMap::default(),
+                        &mut running_else_context,
+                        &mut changed_variables,
+                        &else_referenced_ids,
+                        &expression_arm.span(),
+                        false,
+                        false,
+                    );
+                }
+            }
+        }
+
+        is_exhaustive = is_exhaustive || {
+            running_else_context.locals.get(&subject_id).is_some_and(|t| t.is_never())
+                || changed_variables
+                    .iter()
+                    .any(|var_id| running_else_context.locals.get(var_id).is_some_and(|t| t.is_never()))
+        };
+
+        if let Some(default_arm) = first_default_arm {
+            self.analyze_default_arm(
+                default_arm,
+                &running_else_context,
+                &mut arm_body_types,
+                &mut arm_exit_contexts,
+                previous_arms_executed,
+                is_exhaustive,
+            )?;
+
+            is_exhaustive = true;
+        }
+
+        if first_default_arm.is_none() {
+            if !is_exhaustive {
+                let unhandled_type =
+                    running_else_context.locals.get(&subject_id).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
+
+                self.report_non_exhaustive(&subject_type, &unhandled_type);
+                self.set_unhandled_match_error(Some(&mut running_else_context), self.stmt.span(), false);
+            }
+
+            arm_body_types.push(Rc::new(get_never()));
+            if !finite_array_coverage.as_ref().is_some_and(FiniteArrayMatchCoverage::is_exhaustive) {
+                arm_exit_contexts.push(running_else_context);
+            }
+        }
+
+        self.merge_match_contexts(&arm_exit_contexts);
+
+        if is_synthetic {
+            self.block_context.locals.remove(&subject_id);
+        }
+
+        let final_type = arm_body_types.into_iter().reduce(|acc, item| {
+            Rc::new(combine_union_types(
+                acc.as_ref(),
+                item.as_ref(),
+                self.context.codebase,
+                self.context.settings.combiner_options(),
+            ))
+        });
+
+        self.artifacts.set_rc_expression_type(self.stmt, final_type.unwrap_or_else(|| Rc::new(get_mixed())));
+
+        Ok(())
+    }
+
+    fn get_subject_info(&mut self, subject_type: &Rc<TUnion>) -> (bool, Word, Expression<'arena>) {
+        if let Some(id) = get_expression_id(
+            self.stmt.expression,
+            self.block_context.scope.get_class_like_name(),
+            self.context.resolved_names,
+            Some(self.context.codebase),
+        ) && memchr::memmem::find(id.as_bytes(), b"?->").is_none()
+            && memchr::memmem::find(id.as_bytes(), b"()").is_none()
+        {
+            let inserted = match self.block_context.locals.entry(id) {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(entry) => {
+                    entry.insert(Rc::clone(subject_type));
+                    true
+                }
+            };
+
+            (inserted, id, self.stmt.expression.clone())
+        } else {
+            let subject_id =
+                concat_word!(Self::SYNTHETIC_MATCH_VAR_PREFIX, u32_word(self.stmt.expression.start_offset()));
+            self.block_context.locals.insert(subject_id, Rc::clone(subject_type));
+            let subject_for_conditions =
+                new_synthetic_variable(self.context.arena, subject_id.as_bytes(), self.stmt.expression.span());
+
+            (true, subject_id, subject_for_conditions)
+        }
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn analyze_expression_arm(
+        &mut self,
+        subject_expr: &Expression<'arena>,
+        expression_arm: &MatchExpressionArm<'arena>,
+        running_else_context: &mut BlockContext<'ctx>,
+        arm_body_types: &mut Vec<Rc<TUnion>>,
+        arm_exit_contexts: &mut Vec<BlockContext<'ctx>>,
+        is_last: bool,
+        is_exhaustive: bool,
+        apply_original_subject_assertions: bool,
+    ) -> Result<(ArmExecutionStatus, Vec<Clause>), AnalysisError> {
+        if is_exhaustive {
+            self.report_unreachable_arm(
+                expression_arm,
+                "All possible types for the subject have been handled by previous arms.",
+            );
+
+            return Ok((ArmExecutionStatus::Never, Vec::new()));
+        }
+
+        let arm_condition = new_synthetic_disjunctive_identity(
+            self.context.arena,
+            subject_expr,
+            expression_arm.conditions.get(0).unwrap(),
+            expression_arm.conditions.iter().skip(1).copied().collect(),
+        );
+
+        let was_inside_conditional = running_else_context.flags.inside_conditional();
+        let was_inside_loop = running_else_context.flags.inside_loop();
+        running_else_context.flags.set_inside_conditional(true);
+        running_else_context.flags.set_inside_loop(false);
+        arm_condition.analyze(self.context, running_else_context, self.artifacts)?;
+        running_else_context.flags.set_inside_conditional(was_inside_conditional);
+        running_else_context.flags.set_inside_loop(was_inside_loop);
+
+        let arm_status = if let Some(condition_type) = self.artifacts.get_rc_expression_type(&arm_condition).cloned() {
+            if condition_type.is_always_truthy() {
+                if !is_last {
+                    self.report_always_matching_arm(expression_arm);
+                }
+                ArmExecutionStatus::Always
+            } else if condition_type.is_always_falsy() {
+                let note = format!("The condition is always {} in this context.", display_bool(self.context, false));
+                self.report_unreachable_arm(expression_arm, &note);
+                ArmExecutionStatus::Never
+            } else {
+                ArmExecutionStatus::Conditional
+            }
+        } else {
+            ArmExecutionStatus::Conditional
+        };
+
+        if arm_status == ArmExecutionStatus::Never {
+            return Ok((ArmExecutionStatus::Never, Vec::new()));
+        }
+
+        let mut arm_body_context = running_else_context.clone();
+        let assertion_context = self.context.get_assertion_context_from_block(&arm_body_context);
+
+        let arm_clauses = get_formula(
+            expression_arm.span(),
+            expression_arm.span(),
+            &arm_condition,
+            assertion_context,
+            self.artifacts,
+            &self.context.settings.algebra_thresholds(),
+            self.context.settings.formula_size_threshold,
+        )
+        .unwrap_or_default();
+
+        let original_arm_condition = apply_original_subject_assertions.then(|| {
+            new_synthetic_disjunctive_identity(
+                self.context.arena,
+                self.stmt.expression,
+                expression_arm.conditions.get(0).unwrap(),
+                expression_arm.conditions.iter().skip(1).copied().collect(),
+            )
+        });
+
+        let original_arm_clauses = original_arm_condition
+            .as_ref()
+            .and_then(|condition| {
+                get_formula(
+                    expression_arm.span(),
+                    expression_arm.span(),
+                    condition,
+                    assertion_context,
+                    self.artifacts,
+                    &self.context.settings.algebra_thresholds(),
+                    self.context.settings.formula_size_threshold,
+                )
+            })
+            .unwrap_or_default();
+
+        let mut nullsafe_subject_clauses = vec![];
+        if expression_arm
+            .conditions
+            .iter()
+            .all(|condition| self.artifacts.get_expression_type(condition).is_some_and(|ty| !ty.can_be_null()))
+        {
+            add_nullsafe_base_clauses(
+                self.stmt.expression,
+                &mut nullsafe_subject_clauses,
+                expression_arm.span(),
+                expression_arm.span(),
+                assertion_context,
+            );
+        }
+
+        let combined_clauses: Vec<_> = saturate_clauses(
+            arm_clauses
+                .iter()
+                .chain(original_arm_clauses.iter())
+                .chain(nullsafe_subject_clauses.iter())
+                .chain(arm_body_context.clauses.iter().map(Deref::deref)),
+            &self.context.settings.algebra_thresholds(),
+        )
+        .into_iter()
+        .map(Rc::new)
+        .collect();
+
+        let mut arm_referenced_ids = WordSet::default();
+        let (reconcilable_types, active_types) = mago_algebra::find_satisfying_assignments(
+            &combined_clauses.iter().map(|c| (**c).clone()).collect::<Vec<_>>(),
+            None,
+            &mut arm_referenced_ids,
+        );
+
+        if !reconcilable_types.is_empty() {
+            reconcile_keyed_types(
+                self.context,
+                &reconcilable_types,
+                active_types,
+                &mut arm_body_context,
+                &mut WordSet::default(),
+                &arm_referenced_ids,
+                &arm_condition.span(),
+                false,
+                false,
+            );
+        }
+
+        for condition in &expression_arm.conditions {
+            extract_function_constant_existence(condition, self.artifacts, &mut arm_body_context, false);
+        }
+
+        expression_arm.expression.analyze(self.context, &mut arm_body_context, self.artifacts)?;
+        arm_body_types.push(
+            self.artifacts
+                .get_rc_expression_type(&expression_arm.expression)
+                .cloned()
+                .unwrap_or_else(|| Rc::new(get_mixed())),
+        );
+
+        arm_exit_contexts.push(arm_body_context);
+        let mut negated_arm_clauses = negate_or_synthesize(
+            arm_clauses,
+            &arm_condition,
+            self.context.get_assertion_context_from_block(running_else_context),
+            self.artifacts,
+            &self.context.settings.algebra_thresholds(),
+            self.context.settings.formula_size_threshold,
+        );
+
+        if let Some(original_arm_condition) = original_arm_condition {
+            negated_arm_clauses.extend(negate_or_synthesize(
+                original_arm_clauses,
+                &original_arm_condition,
+                self.context.get_assertion_context_from_block(running_else_context),
+                self.artifacts,
+                &self.context.settings.algebra_thresholds(),
+                self.context.settings.formula_size_threshold,
+            ));
+        }
+
+        running_else_context.clauses = saturate_clauses(
+            running_else_context.clauses.iter().map(Deref::deref).chain(negated_arm_clauses.iter()),
+            &self.context.settings.algebra_thresholds(),
+        )
+        .into_iter()
+        .map(Rc::new)
+        .collect();
+
+        Ok((arm_status, negated_arm_clauses))
+    }
+
+    #[allow(clippy::needless_pass_by_ref_mut)]
+    fn analyze_default_arm(
+        &mut self,
+        default_arm: &'ast MatchDefaultArm<'arena>,
+        running_else_context: &BlockContext<'ctx>,
+        arm_body_types: &mut Vec<Rc<TUnion>>,
+        arm_exit_contexts: &mut Vec<BlockContext<'ctx>>,
+        previous_arms_executed: ArmExecutionStatus,
+        is_exhaustive: bool,
+    ) -> Result<(), AnalysisError> {
+        if previous_arms_executed == ArmExecutionStatus::Never {
+            self.report_default_always_executed(default_arm);
+        }
+
+        if is_exhaustive {
+            self.report_unreachable_default_arm(default_arm);
+
+            return Ok(());
+        }
+
+        let mut default_context = running_else_context.clone();
+        default_arm.expression.analyze(self.context, &mut default_context, self.artifacts)?;
+
+        arm_body_types.push(
+            self.artifacts
+                .get_rc_expression_type(&default_arm.expression)
+                .cloned()
+                .unwrap_or_else(|| Rc::new(get_mixed())),
+        );
+        arm_exit_contexts.push(default_context);
+
+        Ok(())
+    }
+
+    fn set_unhandled_match_error(
+        &mut self,
+        block_context: Option<&mut BlockContext<'ctx>>,
+        span: Span,
+        always_throws: bool,
+    ) {
+        let block_context = block_context.unwrap_or(self.block_context);
+
+        block_context.possibly_thrown_exceptions.entry(word("UnhandledMatchError")).or_default().insert(span);
+
+        if always_throws {
+            block_context.flags.set_has_returned(true);
+        }
+    }
+
+    fn merge_match_contexts(&mut self, arm_exit_contexts: &[BlockContext<'ctx>]) {
+        let reachable_contexts: Vec<_> = arm_exit_contexts.iter().filter(|c| !c.flags.has_returned()).collect();
+
+        if reachable_contexts.is_empty() {
+            self.block_context.flags.set_has_returned(true);
+            return;
+        }
+
+        let mut all_redefined_vars: WordSet = WordSet::default();
+        for ctx in &reachable_contexts {
+            inherit_branch_context_properties(self.context, self.block_context, ctx);
+
+            all_redefined_vars.extend(
+                ctx.get_redefined_locals(&self.block_context.locals, false, &mut WordSet::default()).keys().copied(),
+            );
+        }
+
+        for var_id in all_redefined_vars {
+            let base_type = self.block_context.locals.get(&var_id).map(AsRef::as_ref);
+
+            let mut final_type: Option<TUnion> = None;
+
+            for arm_context in &reachable_contexts {
+                let arm_type = arm_context.locals.get(&var_id).map(AsRef::as_ref).or(base_type);
+                final_type = Some(combine_optional_union_types(final_type.as_ref(), arm_type, self.context.codebase));
+            }
+
+            if let Some(final_type) = final_type {
+                self.block_context.locals.insert(var_id, Rc::new(final_type));
+            }
+        }
+
+        for ctx in &reachable_contexts {
+            self.block_context.variables_possibly_in_scope.extend(ctx.variables_possibly_in_scope.iter().copied());
+        }
+    }
+
+    fn report_empty_match(&mut self) {
+        self.context.collector.report_with_code(
+            IssueCode::EmptyMatchExpression,
+            Issue::error("Match expression cannot be empty.")
+                .with_annotation(Annotation::primary(self.stmt.span()).with_message("This match has no arms"))
+                .with_note("In PHP, an empty `match` expression will result in a fatal `UnhandledMatchError`."),
+        );
+    }
+
+    fn report_only_default_arm(&mut self) {
+        self.context.collector.report_with_code(
+            IssueCode::MatchExpressionOnlyDefaultArm,
+            Issue::help("This match expression is redundant as it only contains a default arm.")
+                .with_annotation(
+                    Annotation::primary(self.stmt.span())
+                        .with_message("This match will always execute the default arm"),
+                )
+                .with_help("Consider replacing the entire match expression with the body of the default arm."),
+        );
+    }
+
+    fn report_unknown_subject_type(&mut self) {
+        self.context.collector.report_with_code(
+            IssueCode::UnknownMatchSubjectType,
+            Issue::error("The type of the match subject expression is unknown.")
+                .with_annotation(
+                    Annotation::primary(self.stmt.expression.span())
+                        .with_message("The type of the match subject expression could not be determined."),
+                )
+                .with_note("Ensure that the expression is well-formed and has a valid type."),
+        );
+    }
+
+    fn report_subject_is_never(&mut self) {
+        self.context.collector.report_with_code(
+            IssueCode::MatchSubjectTypeIsNever,
+            Issue::error("The match subject is of type `never`, making the match expression unreachable.")
+                .with_annotation(
+                    Annotation::primary(self.stmt.expression.span())
+                        .with_message("The match subject expression evaluates to `never`"),
+                )
+                .with_note("This means the subject can never have a value at runtime."),
+        );
+    }
+
+    fn report_unreachable_arm(&mut self, arm: &MatchExpressionArm, note: &str) {
+        self.context.collector.report_with_code(
+            IssueCode::UnreachableMatchArm,
+            Issue::warning("This match arm is unreachable.")
+                .with_annotation(Annotation::primary(arm.span()).with_message("This arm can never be reached"))
+                .with_annotation(Annotation::secondary(self.stmt.span()).with_message("In this match expression"))
+                .with_note(note.to_string()),
+        );
+    }
+
+    fn report_always_matching_arm(&mut self, arm: &MatchExpressionArm) {
+        let holds = display_bool(self.context, true);
+        self.context.collector.report_with_code(
+            IssueCode::MatchArmAlwaysTrue,
+            Issue::warning(format!("This match arm is always {holds}, making subsequent arms unreachable."))
+                .with_annotation(
+                    Annotation::primary(arm.span()).with_message("This arm covers all remaining cases for the subject"),
+                )
+                .with_annotation(Annotation::secondary(self.stmt.span()).with_message("In this match expression"))
+                .with_note("Any arms after this one can never be reached."),
+        );
+    }
+
+    fn report_unreachable_default_arm(&mut self, arm: &MatchDefaultArm) {
+        // A PHP# `match` needs `default` until enums with data and sealed interfaces make one exhaustive without it.
+        if self.context.dialect.is_sharp() {
+            return;
+        }
+
+        self.context.collector.report_with_code(
+            IssueCode::UnreachableMatchDefaultArm,
+            Issue::warning("This default arm is unreachable.")
+                .with_annotation(Annotation::primary(arm.span()).with_message("This default arm can never be reached"))
+                .with_annotation(Annotation::secondary(self.stmt.span()).with_message("In this match expression"))
+                .with_note("All possible types for the subject have been handled by previous arms."),
+        );
+    }
+
+    fn report_default_always_executed(&mut self, arm: &MatchDefaultArm) {
+        self.context.collector.report_with_code(
+            IssueCode::MatchDefaultArmAlwaysExecuted,
+            Issue::warning("This default arm is always executed because no other arms can match.")
+                .with_annotation(Annotation::primary(arm.span()).with_message("This arm is always executed"))
+                .with_annotation(Annotation::secondary(self.stmt.span()).with_message("In this match expression"))
+                .with_note("None of the preceding conditions can be met."),
+        );
+    }
+
+    fn report_non_exhaustive(&mut self, subject_type: &TUnion, unhandled_type: &TUnion) {
+        let subject_type = display_type(self.context, subject_type);
+        let unhandled_type = display_type(self.context, unhandled_type);
+
+        self.context.collector.report_with_code(
+            IssueCode::MatchNotExhaustive,
+            Issue::error(format!(
+                "Non-exhaustive `match` expression: subject of type `{subject_type}` is not fully handled."
+            ))
+            .with_annotation(
+                Annotation::primary(self.stmt.expression.span())
+                    .with_message(format!("Unhandled portion of subject: `{unhandled_type}`")),
+            )
+            .with_annotation(
+                Annotation::secondary(self.stmt.span()).with_message(
+                    "The `match` arms here do not cover all possible types and lack a `default` arm.",
+                ),
+            )
+            .with_note(
+                "If the subject expression evaluates to one of the unhandled types at runtime, PHP will throw an `UnhandledMatchError`.",
+            )
+            .with_help(format!(
+                "Add conditional arms to cover type(s) `{unhandled_type}` or include a `default` arm to handle all other possibilities."
+            )),
+        );
+    }
+}

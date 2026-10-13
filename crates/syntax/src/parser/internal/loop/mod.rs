@@ -1,0 +1,39 @@
+use crate::T;
+use crate::cst::cst::Break;
+use crate::cst::cst::Continue;
+use crate::error::ParseError;
+use crate::parser::Parser;
+use mago_allocator::prelude::*;
+
+pub mod do_while;
+pub mod r#for;
+pub mod for_of;
+pub mod foreach;
+pub mod r#while;
+
+impl<'arena, A> Parser<'_, 'arena, A>
+where
+    A: Arena,
+{
+    pub(crate) fn parse_continue(&mut self) -> Result<Continue<'arena>, ParseError> {
+        Ok(Continue {
+            r#continue: self.expect_keyword(T!["continue"])?,
+            level: match self.stream.peek_kind(0)? {
+                Some(T![";" | "?>"]) => None,
+                _ => Some(self.parse_expression()?),
+            },
+            terminator: self.parse_terminator()?,
+        })
+    }
+
+    pub(crate) fn parse_break(&mut self) -> Result<Break<'arena>, ParseError> {
+        Ok(Break {
+            r#break: self.expect_keyword(T!["break"])?,
+            level: match self.stream.peek_kind(0)? {
+                Some(T![";" | "?>"]) => None,
+                _ => Some(self.parse_expression()?),
+            },
+            terminator: self.parse_terminator()?,
+        })
+    }
+}

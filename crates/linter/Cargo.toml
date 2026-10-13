@@ -1,0 +1,54 @@
+[package]
+name = "mago-linter"
+description = "A PHP linter that identifies common coding errors, style issues, and potential bugs, helping maintain high code quality."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mago-bytes = { workspace = true }
+mago-word = { workspace = true }
+mago-text-edit = { workspace = true }
+mago-reporting = { workspace = true }
+mago-phpdoc-syntax = { workspace = true }
+mago-span = { workspace = true }
+mago-syntax = { workspace = true }
+mago-syntax-core = { workspace = true }
+mago-database = { workspace = true }
+mago-casing = { workspace = true }
+mago-names = { workspace = true }
+mago-php-version = { workspace = true }
+mago-collector = { workspace = true }
+mago-extension = { workspace = true }
+foldhash = { workspace = true }
+memchr = { workspace = true }
+ordered-float = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+regex = { workspace = true }
+indoc = { workspace = true }
+mago-allocator = { workspace = true }
+tracing = { workspace = true }
+schemars = { workspace = true }
+strum = { workspace = true }
+
+[features]
+default = []
+serde = [
+    "dep:serde",
+    "dep:serde_json",
+    "mago-reporting/serde",
+    "mago-php-version/serde",
+]
+
+[dev-dependencies]
+mago-syntax = { workspace = true }
+mago-names = { workspace = true }
+mago-allocator = { workspace = true }

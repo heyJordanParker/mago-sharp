@@ -1,0 +1,35 @@
+//! Statement hooks for intercepting statement analysis.
+
+use mago_syntax::cst::Statement;
+
+use crate::plugin::context::HookContext;
+use crate::plugin::hook::HookAction;
+use crate::plugin::hook::HookResult;
+use crate::plugin::provider::Provider;
+
+/// Hook trait for intercepting statement analysis.
+///
+/// This hook receives the real CST statement and full mutable context,
+/// allowing hooks to inspect statements, report issues, and modify analysis state.
+pub trait StatementHook: Provider {
+    /// Called before a statement is analyzed.
+    ///
+    /// Return `HookAction::Continue` to proceed with normal analysis, or
+    /// `HookAction::Skip` to skip analysis of this statement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HookError`] if the underlying plugin implementation propagates one.
+    fn before_statement(&self, _stmt: &Statement<'_>, _context: &mut HookContext<'_, '_>) -> HookResult<HookAction> {
+        Ok(HookAction::Continue)
+    }
+
+    /// Called after a statement has been analyzed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HookError`] if the underlying plugin implementation propagates one.
+    fn after_statement(&self, _stmt: &Statement<'_>, _context: &mut HookContext<'_, '_>) -> HookResult<()> {
+        Ok(())
+    }
+}

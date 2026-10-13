@@ -1,0 +1,288 @@
+use indoc::indoc;
+use mago_allocator::Arena;
+use schemars::JsonSchema;
+
+use mago_php_version::PHPVersion;
+use mago_php_version::PHPVersionRange;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::Level;
+use mago_span::HasSpan;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+use mago_syntax::cst::Return;
+use mago_text_edit::Safety;
+use mago_text_edit::TextEdit;
+
+use crate::category::Category;
+use crate::context::LintContext;
+use crate::requirements::RuleRequirements;
+use crate::rule::Config;
+use crate::rule::LintRule;
+use crate::rule::best_practices::is_call_forwarding;
+use crate::rule::best_practices::is_convertible_to_first_class_callable;
+use crate::rule::utils::misc::get_single_return_statement;
+use crate::rule_meta::RuleMeta;
+use crate::settings::RuleSettings;
+
+#[derive(Debug, Clone)]
+pub struct PreferArrowFunctionRule {
+    meta: &'static RuleMeta,
+    cfg: PreferArrowFunctionConfig,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct PreferArrowFunctionConfig {
+    pub level: Level,
+}
+
+impl Default for PreferArrowFunctionConfig {
+    fn default() -> Self {
+        Self { level: Level::Help }
+    }
+}
+
+impl Config for PreferArrowFunctionConfig {
+    fn level(&self) -> Level {
+        self.level
+    }
+}
+
+impl LintRule for PreferArrowFunctionRule {
+    type Config = PreferArrowFunctionConfig;
+
+    fn meta() -> &'static RuleMeta {
+        const META: RuleMeta = RuleMeta {
+            name: "Prefer Arrow Function",
+            code: "prefer-arrow-function",
+            description: indoc! {"
+                Promotes the use of arrow functions (`fn() => ...`) over traditional closures (`function() { ... }`).
+
+                This rule identifies closures that consist solely of a single return statement
+                and suggests converting them to arrow functions.
+            "},
+            good_example: indoc! {r"
+                <?php
+
+                $a = fn($x) => $x + 1;
+            "},
+            bad_example: indoc! {r"
+                <?php
+
+                $a = function($x) {
+                    return $x + 1;
+                };
+            "},
+            category: Category::BestPractices,
+            requirements: RuleRequirements::PHPVersion(PHPVersionRange::from(PHPVersion::PHP74)),
+        };
+
+        &META
+    }
+
+    fn targets() -> &'static [NodeKind] {
+        const TARGETS: &[NodeKind] = &[NodeKind::Closure];
+
+        TARGETS
+    }
+
+    fn build(settings: &RuleSettings<Self::Config>) -> Self {
+        Self { meta: Self::meta(), cfg: settings.config }
+    }
+
+    fn check<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, node: Node<'_, 'arena>)
+    where
+        A: Arena,
+    {
+        let Node::Closure(closure) = node else {
+            return;
+        };
+
+        // `mago lint` skips PHP# files, the only ones with a closure without `function`.
+        let Some(function) = &closure.function else {
+            return;
+        };
+
+        if ctx.is_in_constant_expression() {
+            return;
+        }
+
+        if let Some(use_clause) = closure.use_clause.as_ref()
+            && use_clause.variables.iter().any(|variable| variable.ampersand.is_some())
+        {
+            // If the closure captures any variables by reference, we skip it.
+            return;
+        }
+
+        let Some(return_statement) = get_single_return_statement(&closure.body) else {
+            return;
+        };
+
+        let Return { r#return: keyword, value: Some(value), terminator } = return_statement else {
+            return;
+        };
+
+        if ctx.registry.is_rule_enabled("prefer-first-class-callable")
+            && let Expression::Call(call) = value
+            && is_call_forwarding(&closure.parameter_list, call)
+            && is_convertible_to_first_class_callable(call)
+        {
+            // If the "prefer-first-class-callable" rule is enabled,
+            // we skip reporting this issue to avoid overlapping suggestions.
+            return;
+        }
+
+        let issue =
+            Issue::new(self.cfg.level(), "This closure can be simplified to a more concise arrow function.")
+                .with_code(self.meta.code)
+                .with_annotation(
+                    Annotation::primary(function.span).with_message("This traditional closure..."),
+                )
+                .with_annotation(
+                    Annotation::secondary(value.span())
+                        .with_message("...can be converted to an arrow function that implicitly returns this expression."),
+                )
+                .with_note("Arrow functions provide a more concise syntax for simple closures that do nothing but return an expression.")
+                .with_note("Arrow functions automatically capture variables from the parent scope by-value, which differs from traditional closures that use an explicit `use` clause and can capture by-reference.")
+                .with_help("Consider rewriting this as an arrow function to improve readability.");
+
+        ctx.collector.propose(issue, |edits| {
+            let function_span = function.span;
+            let to_replace_with_n = function_span.from_start(function_span.start.forward(1));
+            let to_replace_with_arrow = match &closure.use_clause {
+                Some(use_clause) => use_clause.span().join(keyword.span),
+                None => closure.body.left_brace.join(keyword.span),
+            };
+            let to_remove = terminator.span().join(closure.body.right_brace);
+
+            edits.push(TextEdit::replace(to_replace_with_n, "n").with_safety(Safety::PotentiallyUnsafe));
+            edits.push(TextEdit::replace(to_replace_with_arrow, "=>").with_safety(Safety::PotentiallyUnsafe));
+            edits.push(TextEdit::delete(to_remove).with_safety(Safety::PotentiallyUnsafe));
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use super::PreferArrowFunctionRule;
+    use crate::test_lint_failure;
+    use crate::test_lint_success;
+
+    test_lint_failure! {
+        name = simple_closure_with_return,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            $a = function($x) {
+                return $x + 1;
+            };
+        "#}
+    }
+
+    test_lint_failure! {
+        name = closure_with_use_clause,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            $y = 5;
+            $a = function($x) use ($y) {
+                return $x + $y;
+            };
+        "#}
+    }
+
+    test_lint_success! {
+        name = closure_in_attribute_argument,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            #[Route('/', middleware: function(): Middleware {
+                return new Auth();
+            })]
+            function index(): Response {
+                return new Response();
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = closure_in_parameter_default,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            function foo($callback = function($x) { return $x + 1; }) {
+                return $callback(5);
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = closure_in_property_default,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            class Foo {
+                public $callback = function($x) { return $x + 1; };
+            }
+        "#}
+
+    }
+
+    test_lint_success! {
+        name = closure_in_class_constant,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            class Foo {
+                const CALLBACK = function($x) { return $x + 1; };
+            }
+        "#}
+    }
+
+    test_lint_success! {
+        name = closure_in_top_level_constant,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            const CALLBACK = function($x) { return $x + 1; };
+        "#}
+    }
+
+    test_lint_success! {
+        name = closure_with_reference_capture,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            $y = 5;
+            $a = function($x) use (&$y) {
+                return $x + $y;
+            };
+        "#}
+    }
+
+    test_lint_success! {
+        name = closure_with_multiple_statements,
+        rule = PreferArrowFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            $a = function($x) {
+                $y = $x + 1;
+                return $y;
+            };
+        "#}
+    }
+}

@@ -1,0 +1,226 @@
+use indoc::indoc;
+use mago_allocator::Arena;
+use mago_span::Span;
+use schemars::JsonSchema;
+
+use mago_casing::is_camel_case;
+use mago_casing::is_snake_case;
+use mago_casing::to_camel_case;
+use mago_casing::to_snake_case;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::Level;
+use mago_span::HasSpan;
+use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+use mago_syntax::cst::PropertyItem;
+
+use crate::category::Category;
+use crate::context::LintContext;
+use crate::requirements::RuleRequirements;
+use crate::rule::Config;
+use crate::rule::LintRule;
+use crate::rule::consistency::is_valid_identifier;
+use crate::rule_meta::RuleMeta;
+use crate::settings::RuleSettings;
+
+#[derive(Debug, Clone)]
+pub struct PropertyNameRule {
+    meta: &'static RuleMeta,
+    cfg: PropertyNameConfig,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct PropertyNameConfig {
+    pub level: Level,
+    pub camel: bool,
+    pub either: bool,
+}
+
+impl Default for PropertyNameConfig {
+    fn default() -> Self {
+        Self { level: Level::Help, camel: true, either: false }
+    }
+}
+
+impl Config for PropertyNameConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn level(&self) -> Level {
+        self.level
+    }
+}
+
+impl LintRule for PropertyNameRule {
+    type Config = PropertyNameConfig;
+
+    fn meta() -> &'static RuleMeta {
+        const META: RuleMeta = RuleMeta {
+            name: "Property Name",
+            code: "property-name",
+            description: indoc! {"
+                Detects class property declarations that do not follow camel or snake naming convention.
+
+                Property names should be in camel case or snake case, depending on the configuration.
+            "},
+            good_example: indoc! {r"
+                <?php
+
+                final class Foo {
+                    public string $myProperty;
+
+                    public function __construct(
+                        public int $myPromotedProperty,
+                    ) {}
+                }
+            "},
+            bad_example: indoc! {r"
+                <?php
+
+                final class Foo {
+                    public string $My_Property;
+
+                    public function __construct(
+                        public int $My_Promoted_Property,
+                    ) {}
+                }
+            "},
+            category: Category::Consistency,
+            requirements: RuleRequirements::None,
+        };
+
+        &META
+    }
+
+    fn targets() -> &'static [NodeKind] {
+        const TARGETS: &[NodeKind] = &[NodeKind::PropertyItem, NodeKind::FunctionLikeParameter];
+
+        TARGETS
+    }
+
+    fn build(settings: &RuleSettings<Self::Config>) -> Self {
+        Self { meta: Self::meta(), cfg: settings.config }
+    }
+
+    fn check<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, node: Node<'_, 'arena>)
+    where
+        A: Arena,
+    {
+        match node {
+            Node::PropertyItem(property_item) => {
+                self.check_property_item(ctx, property_item);
+            }
+            Node::FunctionLikeParameter(parameter) => {
+                self.check_promoted_property(ctx, parameter);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl PropertyNameRule {
+    fn check_property_item<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, property_item: &PropertyItem<'arena>)
+    where
+        A: Arena,
+    {
+        let variable = property_item.variable();
+
+        self.check_property_name(ctx, variable.name, variable.span());
+    }
+
+    fn check_promoted_property<'arena, A>(
+        &self,
+        ctx: &mut LintContext<'_, 'arena, A>,
+        parameter: &FunctionLikeParameter<'arena>,
+    ) where
+        A: Arena,
+    {
+        if !parameter.is_promoted_property() {
+            return;
+        }
+
+        self.check_property_name(ctx, parameter.variable.name, parameter.variable.span());
+    }
+
+    fn check_property_name<A>(&self, ctx: &mut LintContext<'_, '_, A>, name_bytes: &[u8], span: Span)
+    where
+        A: Arena,
+    {
+        let Some(name) = std::str::from_utf8(name_bytes).ok() else { return };
+        let name_without_dollar = name.strip_prefix('$').unwrap_or(name);
+
+        if self.cfg.either {
+            if !is_camel_case(name_without_dollar) && !is_snake_case(name_without_dollar) {
+                let camel_name = to_camel_case(name_without_dollar);
+                let snake_name = to_snake_case(name_without_dollar);
+                if !is_valid_identifier(&camel_name) || !is_valid_identifier(&snake_name) {
+                    return;
+                }
+
+                ctx.collector.report(
+                    Issue::new(
+                        self.cfg.level(),
+                        format!("Property name `{name}` should be in either camel case or snake case."),
+                    )
+                    .with_code(self.meta.code)
+                    .with_annotation(
+                        Annotation::primary(span).with_message(format!("Property `{name}` is declared here")),
+                    )
+                    .with_note(format!(
+                        "The property name `{name}` does not follow either camel case or snake naming convention."
+                    ))
+                    .with_help(format!(
+                        "Consider renaming it to `${}` or `${}` to adhere to the naming convention.",
+                        String::from_utf8_lossy(&camel_name),
+                        String::from_utf8_lossy(&snake_name)
+                    )),
+                );
+            }
+
+            return;
+        }
+
+        if self.cfg.camel && !is_camel_case(name_without_dollar) {
+            let suggested_name = to_camel_case(name_without_dollar);
+            if !is_valid_identifier(&suggested_name) {
+                return;
+            }
+
+            ctx.collector.report(
+                Issue::new(self.cfg.level(), format!("Property name `{name}` should be in camel case."))
+                    .with_code(self.meta.code)
+                    .with_annotation(
+                        Annotation::primary(span).with_message(format!("Property `{name}` is declared here")),
+                    )
+                    .with_note(format!("The property name `{name}` does not follow camel naming convention."))
+                    .with_help(format!(
+                        "Consider renaming it to `${}` to adhere to the naming convention.",
+                        String::from_utf8_lossy(&suggested_name)
+                    )),
+            );
+        } else if !self.cfg.camel && !is_snake_case(name_without_dollar) {
+            let suggested_name = to_snake_case(name_without_dollar);
+            if !is_valid_identifier(&suggested_name) {
+                return;
+            }
+
+            ctx.collector.report(
+                Issue::new(self.cfg.level(), format!("Property name `{name}` should be in snake case."))
+                    .with_code(self.meta.code)
+                    .with_annotation(
+                        Annotation::primary(span).with_message(format!("Property `{name}` is declared here")),
+                    )
+                    .with_note(format!("The property name `{name}` does not follow snake naming convention."))
+                    .with_help(format!(
+                        "Consider renaming it to `${}` to adhere to the naming convention.",
+                        String::from_utf8_lossy(&suggested_name)
+                    )),
+            );
+        }
+    }
+}

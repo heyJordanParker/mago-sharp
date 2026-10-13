@@ -1,0 +1,609 @@
+#![allow(clippy::unnecessary_struct_initialization)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::default_constructed_unit_structs)]
+
+use mago_allocator::LocalArena;
+use std::borrow::Cow;
+use std::fs;
+
+use mago_formatter::Formatter;
+use mago_formatter::settings::BraceStyle;
+use mago_formatter::settings::FormatSettings;
+use mago_formatter::settings::MethodChainBreakingStyle;
+use mago_formatter::settings::NullTypeHint;
+use mago_formatter::settings::SortOrder;
+use mago_formatter::settings::SortUses;
+use mago_php_version::PHPVersion;
+
+#[macro_export]
+macro_rules! test_case {
+    ($name:ident) => {
+        $crate::test_case!($name, PHPVersion::PHP84);
+    };
+    ($name:ident, $version:expr) => {
+        #[test]
+        pub fn $name() {
+            let code = include_bytes!(concat!("cases/", stringify!($name), "/before.php"));
+            let expected = include_bytes!(concat!("cases/", stringify!($name), "/after.php"));
+            let settings = include!(concat!("cases/", stringify!($name), "/settings.inc"));
+
+            let arena = LocalArena::new();
+            let formatter = Formatter::new(&arena, $version, settings);
+
+            let formatted_code = formatter.format_code(Cow::Borrowed(b"code.php"), Cow::Borrowed(code)).unwrap();
+
+            pretty_assertions::assert_eq!(expected, formatted_code, "Formatted code does not match expected",);
+
+            let reformatted_code = formatter
+                .format_code(Cow::Borrowed(b"formatted_code.php"), Cow::Owned(formatted_code.to_vec()))
+                .unwrap();
+
+            pretty_assertions::assert_eq!(expected, reformatted_code, "Reformatted code does not match expected",);
+        }
+    };
+}
+
+// Test cases
+test_case!(leading_comment_with_missing_prefix);
+test_case!(docblock_before_function_declaration);
+test_case!(inline_single_breaking_value_argument);
+test_case!(inline_single_breaking_value_argument_default_off);
+test_case!(dangling_block_comments);
+test_case!(opening_tag_trailing_comments);
+test_case!(opening_tag_on_own_line);
+test_case!(opening_tag_on_own_line_disabled);
+test_case!(combine_opening_tag_and_declare);
+test_case!(combine_opening_tag_and_declare_with_comment);
+test_case!(callee_needs_parens);
+test_case!(php83_instantiation_with_member_access_parentheses, PHPVersion::PHP83);
+test_case!(php84_instantiation_with_member_access_parentheses, PHPVersion::PHP84);
+test_case!(php83_instantiation_with_member_access_parentheses_disabled, PHPVersion::PHP83);
+test_case!(php84_instantiation_with_member_access_parentheses_disabled, PHPVersion::PHP84);
+test_case!(expand_last_argument);
+test_case!(expand_first_argument);
+test_case!(hug_new_expression);
+test_case!(array_indent_multiline);
+test_case!(hug_new_expression_with_simple_args);
+test_case!(hug_last_new_expression_with_named_args);
+test_case!(assignments);
+test_case!(assignments_chain);
+test_case!(assignment_breaks_after_operator);
+test_case!(conditional_assignment);
+test_case!(conditional_assignment_wide);
+test_case!(conditional_assignment_narrow);
+test_case!(conditional_assignment_super_narrow);
+test_case!(logical_operations_within_parens);
+test_case!(simple_binaryish_operators);
+test_case!(multiple_concat_operations_in_array);
+test_case!(binary_operand_needs_parens);
+test_case!(binary_precedence_parens_noise);
+test_case!(binary_precedence_parens_noise_disabled);
+test_case!(bitwise_precedence_parens_noise);
+test_case!(bitwise_precedence_parens_noise_disabled);
+test_case!(binary_ops_wrapping);
+test_case!(parens_around_constructs);
+test_case!(interpolated_strings_vars);
+test_case!(closure_creation);
+test_case!(fluid_member_access_chain);
+test_case!(member_access_chain_in_conditional);
+test_case!(short_member_access_chain);
+test_case!(member_access_chain_comment_variable_base);
+test_case!(member_access_chain_comment_paren_new_base);
+test_case!(member_access_chain_comment_arrow_fn_base);
+test_case!(member_access_chain_comment_short_chain);
+test_case!(member_access_chain_comment_nullsafe);
+test_case!(member_access_chain_comment_block);
+test_case!(member_access_chain_comment_multiple_lines);
+test_case!(member_access_chain_comment_mid_chain);
+test_case!(member_access_chain_comment_property_first);
+test_case!(member_access_chain_comment_method_call_base);
+test_case!(member_access_chain_comment_default_variable);
+test_case!(member_access_chain_comment_default_short);
+test_case!(member_access_chain_comment_default_paren_new);
+test_case!(use_sorting);
+test_case!(use_sorting_with_separation);
+test_case!(use_sorting_with_expansion);
+test_case!(use_sorting_with_grouping);
+test_case!(use_sorting_with_grouping_and_separation);
+test_case!(use_sorting_separation_expansion);
+test_case!(use_sorting_by_length);
+test_case!(use_sorting_by_length_with_expansion);
+test_case!(use_sorting_by_length_with_grouping);
+test_case!(use_no_change);
+test_case!(use_mixed_use_list);
+test_case!(use_mixed_use_list_expanded);
+test_case!(docs_before_use_are_preserved);
+test_case!(mixed_expressions);
+test_case!(inline_html);
+test_case!(inline_php);
+test_case!(inline_html_alignment);
+test_case!(inline_echo);
+test_case!(inline_php_closing_tag_idempotency);
+test_case!(broken_concatenation_chain_is_indented);
+test_case!(statement_terminator_stays_on_last_line);
+test_case!(parameter_attributes);
+test_case!(parameter_attribute_on_new_line);
+test_case!(parameter_attribute_on_new_line_disabled);
+test_case!(parameter_attribute_on_new_line_preserve);
+test_case!(parameter_attribute_on_new_line_disabled_preserve);
+test_case!(no_space_before_enum_backing_type_colon);
+test_case!(closing_echo_tag_preserved);
+test_case!(closing_tag_removed);
+test_case!(closing_tag_preserved);
+test_case!(inline_comment_before_closing_tag);
+test_case!(single_quote_string);
+test_case!(double_quote_string);
+test_case!(uppercase_literal_keyword);
+test_case!(inline_if_statement);
+test_case!(top_level_inline_if);
+test_case!(trailing_comma_in_array_destructuring);
+test_case!(php70_trailing_comma_respects_php_version, PHPVersion::PHP70);
+test_case!(php74_trailing_comma_respects_php_version, PHPVersion::PHP74);
+test_case!(php80_trailing_comma_respects_php_version, PHPVersion::PHP80);
+test_case!(inline_control_structures);
+test_case!(aligned_inline_control_structures);
+test_case!(following_clause_on_newline);
+test_case!(try_catch_trailing_comment);
+test_case!(html_template);
+test_case!(complex_html_template);
+test_case!(attributes);
+test_case!(keyword_as_method_name);
+test_case!(parens_around_closure);
+test_case!(parens);
+test_case!(use_typed_use_list_expanded);
+test_case!(use_nested_namespace_expanded);
+test_case!(adds_empty_line_after_use);
+test_case!(separate_trait_use);
+test_case!(separate_trait_use_disabled);
+test_case!(separate_trait_use_with_adaptations);
+test_case!(attributes_order_alpha_asc);
+test_case!(attributes_order_alpha_desc);
+test_case!(attributes_order_length_asc);
+test_case!(attributes_order_length_desc);
+test_case!(attributes_order_preserve);
+test_case!(separate_attributes);
+test_case!(attributes_order_with_separation);
+test_case!(leaves_single_empty_line_after_use);
+test_case!(nesting_wrap);
+test_case!(nesting_wrap_wide);
+test_case!(nesting_wrap_more_narrow);
+test_case!(nesting_wrap_narrow);
+test_case!(nesting_wrap_super_narrow);
+test_case!(awaitable);
+test_case!(argument_list_comments);
+test_case!(space_after_not_operator);
+test_case!(breaking_named_arguments);
+test_case!(break_fn_args);
+test_case!(member_access_chain);
+test_case!(member_access_chain_short_after_breaking_receiver_args);
+test_case!(member_access_chain_short_after_collapsed_receiver_args);
+test_case!(same_line_chain_property_receiver);
+test_case!(same_line_chain_method_receiver);
+test_case!(same_line_chain_multi_property_receiver);
+test_case!(same_line_chain_property_receiver_preserve);
+test_case!(same_line_chain_property_receiver_preserve_opt_in);
+test_case!(next_line_chain_property_receiver_unchanged);
+test_case!(return_wrapping);
+test_case!(shebang);
+test_case!(arrow_return);
+test_case!(match_breaking);
+test_case!(array_alignment);
+test_case!(align_parameters);
+test_case!(align_parameters_comment_marker_false_positive);
+test_case!(align_parameters_default_off);
+test_case!(align_named_arguments);
+test_case!(align_named_arguments_default_off);
+test_case!(binary_alignment);
+test_case!(binary_alignment_before_op);
+test_case!(chain_comments);
+test_case!(literal_concat_parens);
+test_case!(literal_concat_parens_without_spaces);
+test_case!(method_chain_semicolon_group_scope);
+test_case!(method_chain_semicolon_closing_tag);
+test_case!(method_chain_semicolon_group_scope_same_line_first_break);
+test_case!(preserve_breaking_member_access_chain);
+test_case!(preserve_breaking_member_access_chain_same_line_first_break);
+test_case!(preserve_breaking_member_access_chain_same_line_first_break_opt_in);
+test_case!(preserve_breaking_member_access_chain_disabled);
+test_case!(preserve_breaking_argument_list);
+test_case!(preserve_breaking_argument_list_disabled);
+test_case!(preserve_breaking_array_like);
+test_case!(preserve_breaking_array_like_disabled);
+test_case!(preserve_breaking_array_like_expand_last);
+test_case!(preserve_breaking_array_like_method_chain);
+test_case!(preserve_breaking_parameter_list);
+test_case!(preserve_breaking_parameter_list_disabled);
+test_case!(preserve_breaking_attribute_list);
+test_case!(preserve_breaking_attribute_list_disabled);
+test_case!(preserve_breaking_conditional_expression);
+test_case!(preserve_breaking_conditional_expression_disabled);
+test_case!(preserve_breaking_condition_expression);
+test_case!(preserve_breaking_condition_expression_disabled);
+test_case!(preserve_breaking_binary_expression);
+test_case!(preserve_breaking_binary_expression_disabled);
+test_case!(preserve_breaking_pipe_expression);
+test_case!(preserve_breaking_pipe_expression_disabled);
+test_case!(indent_binary_expression_continuation);
+test_case!(preserve_breaking_parameter_list_promoted_properties);
+test_case!(hooks_always_break);
+test_case!(inline_abstract_property_hooks);
+test_case!(do_not_inline_abstract_property_hooks);
+test_case!(comments_are_preserved);
+test_case!(array_comment);
+test_case!(array_preserve_empty_lines);
+test_case!(spacing_options);
+test_case!(spacing_options_flipped);
+test_case!(line_options);
+test_case!(line_options_flipped);
+test_case!(line_options_all_on);
+test_case!(line_options_all_off);
+test_case!(blank_line_between_same_symbols_disabled);
+test_case!(whitespace_in_heredoc);
+test_case!(shell_style_comments);
+test_case!(double_slash_comments);
+test_case!(inline_empty_braces_enabled);
+test_case!(inline_empty_braces_disabled);
+test_case!(inline_empty_braces_default);
+test_case!(inline_empty_braces_swapped);
+test_case!(pipe_operator);
+test_case!(disabled_class_like_member_separations);
+test_case!(sort_class_methods);
+test_case!(sort_class_methods_disabled);
+test_case!(unary_parens);
+test_case!(predictable_conditional);
+test_case!(preserve_predictable_conditional);
+test_case!(predictable_arguments);
+test_case!(preserve_predictable_arguments);
+test_case!(unary_prefix_prec);
+test_case!(rescue);
+test_case!(yield_kv_closure);
+test_case!(symfony_form_builder);
+test_case!(empty_line_after_class_like_open);
+test_case!(empty_line_after_class_like_open_add);
+test_case!(empty_line_after_class_like_open_drupal);
+test_case!(empty_line_before_class_like_close);
+test_case!(empty_line_before_class_like_close_add);
+test_case!(empty_line_before_class_like_close_drupal);
+test_case!(empty_line_before_class_like_close_empty_inline);
+test_case!(format_ignore_single_line_comment);
+test_case!(format_ignore_block_comment);
+test_case!(format_ignore_docblock);
+test_case!(format_ignore_hash_comment);
+test_case!(format_ignore_range_basic);
+test_case!(format_ignore_range_no_end);
+test_case!(format_ignore_range_multiple);
+test_case!(format_ignore_range_block_comment);
+test_case!(format_ignore_range_multi_statements);
+test_case!(issue_2346);
+test_case!(issue_2348);
+test_case!(format_ignore_next_basic);
+test_case!(format_ignore_next_multiple);
+test_case!(class_member_format_ignore_next);
+test_case!(class_member_format_ignore_region);
+test_case!(class_member_format_ignore_next_trait_use);
+test_case!(class_member_format_ignore_next_enum_case);
+test_case!(class_member_format_ignore_next_with_attributes);
+test_case!(class_member_format_ignore_region_mixed_types);
+test_case!(class_member_format_ignore_in_trait);
+test_case!(class_member_format_ignore_in_interface);
+test_case!(class_member_format_ignore_in_enum);
+test_case!(class_member_format_ignore_in_anonymous_class);
+test_case!(class_member_format_ignore_next_last_member);
+test_case!(class_member_format_ignore_next_multiple_consecutive);
+test_case!(class_member_format_ignore_region_entire_body);
+test_case!(class_member_format_ignore_region_single_member);
+test_case!(class_member_format_ignore_region_standalone_comment);
+test_case!(class_member_format_ignore_next_abstract_method);
+test_case!(class_member_format_ignore_next_static_members);
+test_case!(class_member_format_ignore_next_readonly_property);
+test_case!(class_member_format_ignore_next_promoted_property);
+test_case!(class_member_format_ignore_block_comment);
+test_case!(class_member_format_ignore_hash_comment);
+test_case!(class_member_format_ignore_docblock);
+test_case!(class_member_format_ignore_multiple_regions);
+test_case!(class_member_format_ignore_nested_class);
+test_case!(class_member_format_ignore_next_final_method);
+test_case!(class_member_format_ignore_next_visibility_variations);
+test_case!(class_member_format_ignore_region_with_comments);
+test_case!(class_member_format_ignore_next_hooked_property);
+test_case!(class_member_format_ignore_next_interface_constant);
+test_case!(class_member_format_ignore_next_backed_enum);
+test_case!(class_member_format_ignore_in_nested_anonymous_class);
+test_case!(align_assignment_like);
+test_case!(align_statement_like);
+test_case!(align_array_like);
+test_case!(align_array_like_compact_inline);
+test_case!(align_variable_assignments);
+test_case!(align_variable_assignments_array_append_and_chains);
+test_case!(align_class_properties);
+test_case!(align_class_constants);
+test_case!(align_global_constants);
+test_case!(align_enum_cases);
+test_case!(align_match_arms);
+test_case!(align_match_arms_default_off);
+test_case!(align_run_breaking);
+test_case!(align_modifier_breaking);
+test_case!(inline_block_comments_in_arguments);
+test_case!(idempotent_chain_with_array);
+test_case!(idempotent_chain_with_complex_arguments);
+test_case!(match_idempotency);
+test_case!(heredoc_indentation);
+test_case!(heredoc_indentation_disabled);
+test_case!(drupal_preset);
+test_case!(redundant_grouping_parens);
+test_case!(preserve_logical_grouping_parens);
+test_case!(preserve_logical_grouping_parens_disabled);
+test_case!(null_type_hint_null_pipe_last);
+test_case!(null_type_hint_question_reorders_null_last);
+test_case!(comment_placement_binary);
+test_case!(comment_placement_conditional);
+test_case!(comment_placement_conditional_preserve);
+test_case!(unary_prefix_block_comment);
+test_case!(comment_placement_grouping_parens, PHPVersion::PHP85);
+test_case!(fits_line_suffix);
+
+// A special test case for regressions in the Psl codebase
+test_case!(psl_regressions);
+test_case!(psl_regressions_2);
+test_case!(psl_regressions_3);
+
+// GitHub issue test cases
+test_case!(issue_122);
+test_case!(issue_123);
+test_case!(issue_128);
+test_case!(issue_130);
+test_case!(issue_138);
+test_case!(issue_149);
+test_case!(issue_150);
+test_case!(issue_151);
+test_case!(issue_156);
+test_case!(issue_157);
+test_case!(issue_162);
+test_case!(issue_164);
+test_case!(issue_165);
+test_case!(issue_166);
+test_case!(issue_171);
+test_case!(issue_198);
+test_case!(issue_199);
+test_case!(issue_205);
+test_case!(issue_207);
+test_case!(issue_208);
+test_case!(issue_214);
+test_case!(issue_217);
+test_case!(issue_218);
+test_case!(issue_221);
+test_case!(issue_223);
+test_case!(issue_241);
+test_case!(issue_246);
+test_case!(issue_225);
+test_case!(issue_263);
+test_case!(issue_272);
+test_case!(issue_236);
+test_case!(issue_244);
+test_case!(issue_280);
+test_case!(issue_286);
+test_case!(issue_287);
+test_case!(issue_268);
+test_case!(issue_245);
+test_case!(issue_242);
+test_case!(issue_197);
+test_case!(issue_290);
+test_case!(issue_294);
+test_case!(issue_298);
+test_case!(issue_297);
+test_case!(issue_296);
+test_case!(issue_299);
+test_case!(issue_279);
+test_case!(issue_300);
+test_case!(issue_301);
+test_case!(issue_317);
+test_case!(issue_238);
+test_case!(issue_204);
+test_case!(issue_332);
+test_case!(issue_334);
+test_case!(issue_336);
+test_case!(issue_344);
+test_case!(issue_346);
+test_case!(issue_428_part_1);
+test_case!(issue_428_part_2);
+test_case!(issue_428_part_3);
+test_case!(issue_428_part_4);
+test_case!(issue_441);
+test_case!(issue_482);
+test_case!(issue_483);
+test_case!(issue_495);
+test_case!(issue_503);
+test_case!(issue_545);
+test_case!(issue_536);
+test_case!(issue_556);
+test_case!(issue_594);
+test_case!(issue_602);
+test_case!(issue_634);
+test_case!(issue_640);
+test_case!(issue_683);
+test_case!(issue_727);
+test_case!(issue_738);
+test_case!(issue_788);
+test_case!(issue_796);
+test_case!(issue_812);
+test_case!(issue_813);
+test_case!(issue_816);
+test_case!(issue_817);
+test_case!(issue_825);
+test_case!(issue_888);
+test_case!(issue_926);
+test_case!(issue_897_method_brace_same_line);
+test_case!(issue_897_method_brace_next_line);
+test_case!(issue_897_method_brace_always_next_line);
+test_case!(issue_897_function_brace_same_line);
+test_case!(issue_897_function_brace_next_line);
+test_case!(issue_897_function_brace_always_next_line);
+test_case!(issue_897_closure_brace_same_line);
+test_case!(issue_897_closure_brace_next_line);
+test_case!(issue_897_closure_brace_always_next_line);
+test_case!(issue_897_anonymous_class_brace_same_line);
+test_case!(issue_897_anonymous_class_brace_next_line);
+test_case!(issue_897_anonymous_class_brace_always_next_line);
+test_case!(partial_args_in_attribute);
+test_case!(partial_args_in_anonymous_class);
+test_case!(issue_974);
+test_case!(issue_993_print_width_with_indentation);
+test_case!(issue_994);
+test_case!(issue_978);
+test_case!(issue_1077);
+test_case!(issue_1082);
+test_case!(issue_1091);
+test_case!(issue_1105);
+test_case!(issue_1115);
+test_case!(issue_1124);
+test_case!(issue_1135);
+test_case!(issue_1149);
+test_case!(issue_1153);
+test_case!(issue_1198);
+test_case!(issue_1221);
+test_case!(issue_1231);
+test_case!(issue_1255);
+test_case!(issue_1350);
+test_case!(issue_1451);
+test_case!(issue_1460);
+test_case!(issue_1513);
+test_case!(issue_1623);
+test_case!(issue_1623_within_width);
+test_case!(issue_1672);
+test_case!(issue_1744);
+test_case!(issue_1806);
+test_case!(issue_1808);
+test_case!(issue_1874);
+test_case!(issue_1875);
+test_case!(issue_2038);
+test_case!(issue_2038_parenthesized_array_access_bases);
+test_case!(issue_2060);
+test_case!(issue_2063);
+test_case!(issue_2093);
+test_case!(issue_2094);
+test_case!(issue_2221);
+test_case!(issue_2255);
+test_case!(issue_2032);
+test_case!(issue_2032_nested_function_argument);
+test_case!(member_access_chain_keeps_breaks_with_comments);
+test_case!(issue_1562);
+test_case!(bare_cr_line_endings);
+test_case!(table_style_tiny_print_width);
+test_case!(issue_2150);
+test_case!(issue_2316);
+test_case!(issue_2380);
+test_case!(issue_2183);
+
+// PHP identifiers may contain non-UTF-8 bytes; the formatter must round-trip
+// `before.php`/`after.php` byte-for-byte without lossy decoding.
+test_case!(non_utf8_identifiers);
+
+// Idempotency regressions found by the corpus smoke test.
+test_case!(idempotency_keyed_array_value_call);
+test_case!(idempotency_keyed_array_value_nested_array);
+test_case!(idempotency_arrow_fn_returns_keyed_array_with_call);
+test_case!(idempotency_anon_class_with_leading_docblock);
+test_case!(idempotency_null_coalesce_chain_new_expr);
+test_case!(idempotency_comment_before_call_args);
+test_case!(idempotency_mixed_breaking_logical_chain);
+test_case!(idempotency_docblock_before_parameter);
+test_case!(idempotency_html_echo_ternary_break);
+test_case!(idempotency_inline_echo_mid_line_call);
+test_case!(idempotency_inline_echo_mid_line_ternary);
+test_case!(idempotency_inline_echo_multi_break_mid_line);
+
+// Full-file idempotency fixtures sourced from the corpus. When a corpus
+// file stops being idempotent, copy it here so the formatter test suite
+// captures the regression directly and we can iterate without touching
+// the corpus tree.
+test_case!(idempotency_corpus_numeric_comparator);
+test_case!(idempotency_corpus_carbon_period);
+test_case!(idempotency_corpus_symfony_trace_html);
+test_case!(idempotency_corpus_nette_factory);
+test_case!(idempotency_corpus_phparkitect_arch_rule);
+test_case!(idempotency_corpus_apiplatform_schema_property);
+test_case!(idempotency_corpus_apiplatform_type_factory);
+test_case!(idempotency_corpus_symfony_json_streamer);
+
+/// PHP identifiers are allowed to contain any byte ≥ 0x80, so a class name
+/// like `Café` is valid even when the source file is Latin-1 (or any other
+/// non-UTF-8 encoding). The formatter must pass these bytes through verbatim
+/// rather than lossy-converting them. This test stitches together a PHP
+/// snippet whose class/method/function names contain raw 0xC9 0xE9 0xFF —
+/// none of which form valid UTF-8 — and verifies that:
+///
+/// 1. parsing succeeds,
+/// 2. those exact bytes appear in the formatted output,
+/// 3. the second pass is idempotent (re-formatting yields the same bytes).
+#[test]
+fn preserves_non_utf8_identifiers() {
+    // Latin-1 `É` (0xC9), `é` (0xE9), and a stray 0xFF that is invalid in any
+    // UTF-8 sequence. Bundled into class / method / function / constant names
+    // and a property name so the formatter sees them across multiple CST
+    // positions.
+    let bad: &[u8] = &[0xC9, 0xE9, 0xFF];
+
+    let mut src: Vec<u8> = Vec::new();
+    src.extend_from_slice(b"<?php\n\nclass Caf");
+    src.extend_from_slice(bad);
+    src.extend_from_slice(b" {\n    public string $pr");
+    src.extend_from_slice(bad);
+    src.extend_from_slice(b" = '';\n\n    public function m");
+    src.extend_from_slice(bad);
+    src.extend_from_slice(b"(): void {}\n}\n\nfunction f");
+    src.extend_from_slice(bad);
+    src.extend_from_slice(b"(): void {}\n");
+
+    // Sanity-check that the input we just built is not valid UTF-8 — if it
+    // were, the test would not exercise the byte-fidelity contract we care
+    // about.
+    assert!(std::str::from_utf8(&src).is_err(), "test input must contain non-UTF-8 bytes");
+
+    let arena = LocalArena::new();
+    let formatter = Formatter::new(&arena, PHPVersion::PHP84, FormatSettings::default());
+
+    let Ok(formatted_pass1) = formatter.format_code(Cow::Borrowed(b"non_utf8.php"), Cow::Owned(src.clone())) else {
+        panic!("formatter must accept non-UTF-8 identifiers");
+    };
+
+    // The exact bytes must appear in every identifier position.
+    for needle in [&b"Caf\xC9\xE9\xFF"[..], &b"$pr\xC9\xE9\xFF"[..], &b"m\xC9\xE9\xFF"[..], &b"f\xC9\xE9\xFF"[..]] {
+        assert!(
+            memchr::memmem::find(formatted_pass1, needle).is_some(),
+            "formatted output must contain identifier {:02X?}",
+            needle,
+        );
+    }
+
+    // Idempotency: a second format pass must yield the same bytes.
+    let Ok(reformatted) = formatter.format_code(Cow::Borrowed(b"non_utf8.php"), Cow::Owned(formatted_pass1.to_vec()))
+    else {
+        panic!("second format pass must succeed");
+    };
+    assert_eq!(formatted_pass1, reformatted, "formatter is not idempotent on non-UTF-8 identifiers");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_all_test_cases_are_ran() {
+    let test_case_file = include_str!("mod.rs");
+    let test_cases_dir = fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases")).unwrap();
+
+    for entry in test_cases_dir {
+        let path = entry.unwrap().path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let file_name = path.file_stem().unwrap().to_str().unwrap();
+
+        if file_name == "-template" {
+            continue;
+        }
+
+        assert!(
+            test_case_file.contains(&format!("test_case!({file_name}")),
+            "Directory '{file_name}' was not found as a test case"
+        );
+    }
+}

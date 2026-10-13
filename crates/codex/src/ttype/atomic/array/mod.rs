@@ -1,0 +1,370 @@
+use std::sync::Arc;
+
+use mago_word::Word;
+use mago_word::concat_word;
+
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::keyed::TKeyedArray;
+use crate::ttype::atomic::array::list::TList;
+use crate::ttype::get_arraykey;
+use crate::ttype::get_int;
+use crate::ttype::get_mixed;
+use crate::ttype::union::TUnion;
+
+pub mod key;
+pub mod keyed;
+pub mod list;
+
+/// Represents the type of a PHP array, distinguishing between list-like and keyed/associative usage.
+#[allow(clippy::derived_hash_with_manual_eq)]
+#[derive(Debug, Clone, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TArray {
+    /// Represents an array used as a list (sequential, zero-based integer keys). `list<T>`.
+    List(TList),
+    /// Represents an array used as a map (string keys or non-standard integer keys). `array<Tk, Tv>`.
+    Keyed(TKeyedArray),
+    /// Represents a PHP# `Set<T>`, holding its element type: an array keyed by each element, or by a backed enum's
+    /// backing value, with the element as the value. Iteration follows insertion order.
+    Set(Arc<TUnion>),
+}
+
+impl PartialEq for TArray {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        if std::ptr::eq(self, other) {
+            return true;
+        }
+
+        match (self, other) {
+            (TArray::List(a), TArray::List(b)) => a == b,
+            (TArray::Keyed(a), TArray::Keyed(b)) => a == b,
+            (TArray::Set(a), TArray::Set(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl TArray {
+    /// Checks if this represents a list (`list<T>`).
+    #[inline]
+    #[must_use]
+    pub const fn is_list(&self) -> bool {
+        matches!(self, TArray::List(_))
+    }
+
+    /// Checks if this represents a keyed array (`array<Tk, Tv>`).
+    #[inline]
+    #[must_use]
+    pub const fn is_keyed(&self) -> bool {
+        matches!(self, TArray::Keyed(_))
+    }
+
+    /// Returns a reference to the `ListArrayType` data if this is a `List` variant.
+    #[inline]
+    #[must_use]
+    pub const fn get_list(&self) -> Option<&TList> {
+        if let TArray::List(data) = self { Some(data) } else { None }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        if self.is_non_empty() {
+            return false;
+        }
+
+        match &self {
+            Self::Keyed(keyed_array) => {
+                keyed_array.parameters.is_none()
+                    && keyed_array.known_items.as_ref().is_none_or(std::collections::BTreeMap::is_empty)
+            }
+            Self::List(list) => {
+                list.element_type.is_never()
+                    && list.known_elements.as_ref().is_none_or(std::collections::BTreeMap::is_empty)
+            }
+            Self::Set(element_type) => element_type.is_never(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_known_items(&self) -> bool {
+        match &self {
+            Self::Keyed(keyed_array) => keyed_array.known_items.as_ref().is_some_and(|items| !items.is_empty()),
+            Self::List(list) => list.known_elements.as_ref().is_some_and(|items| !items.is_empty()),
+            Self::Set(_) => false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        match &self {
+            Self::Keyed(keyed_array) => keyed_array.parameters.is_none(),
+            Self::List(list) => list.element_type.is_never(),
+            Self::Set(element_type) => element_type.is_never(),
+        }
+    }
+
+    /// Checks if the array is known to be non-empty.
+    #[inline]
+    #[must_use]
+    pub const fn is_non_empty(&self) -> bool {
+        match &self {
+            Self::Keyed(keyed_array) => keyed_array.non_empty,
+            Self::List(list) => list.non_empty,
+            Self::Set(_) => false,
+        }
+    }
+
+    /// Checks if the array is a native PHP array (no known items and standard key/value types).
+    #[inline]
+    #[must_use]
+    pub fn is_vanilla(&self) -> bool {
+        match &self {
+            Self::Keyed(keyed_array) => {
+                if keyed_array.non_empty {
+                    return false;
+                }
+
+                if keyed_array.known_items.is_some() {
+                    return false;
+                }
+
+                let Some((key_parameter, value_parameter)) = keyed_array.parameters.as_ref() else {
+                    return false;
+                };
+
+                key_parameter.is_array_key() && value_parameter.is_vanilla_mixed()
+            }
+            Self::List(_) | Self::Set(_) => false,
+        }
+    }
+
+    /// Returns the minimum size of the array based on known items or elements.
+    #[must_use]
+    pub fn get_minimum_size(&self) -> usize {
+        let mut size = 0;
+
+        match &self {
+            Self::Keyed(keyed_array) => {
+                if let Some(known_items) = keyed_array.known_items.as_ref() {
+                    for (optional, _) in known_items.values() {
+                        if !optional {
+                            size += 1;
+                        }
+                    }
+                } else if keyed_array.non_empty {
+                    size = 1;
+                }
+            }
+            Self::List(list) => {
+                if let Some(count) = list.known_count {
+                    size = count;
+                } else if let Some(known_elements) = list.known_elements.as_ref() {
+                    for (optional, _) in known_elements.values() {
+                        if !optional {
+                            size += 1;
+                        }
+                    }
+                } else if list.non_empty {
+                    size = 1;
+                }
+            }
+            Self::Set(_) => {}
+        }
+
+        size
+    }
+
+    /// Returns the key type of the array, if applicable.
+    #[must_use]
+    pub fn get_key_type(&self) -> Option<TUnion> {
+        match self {
+            Self::Keyed(keyed_array) => {
+                if let Some(parameters) = keyed_array.parameters.as_ref() {
+                    return Some(parameters.0.as_ref().clone());
+                }
+
+                None
+            }
+            Self::List(_) => Some(get_int()),
+            Self::Set(element_type) => Some(element_type.as_ref().clone()),
+        }
+    }
+
+    /// Returns the value type of the array, if available.
+    #[must_use]
+    pub fn get_value_type(&self) -> Option<TUnion> {
+        match self {
+            Self::Keyed(keyed_array) => {
+                if let Some(parameters) = keyed_array.parameters.as_ref() {
+                    return Some(parameters.1.as_ref().clone());
+                }
+
+                None
+            }
+            Self::List(list) => Some(list.element_type.as_ref().clone()),
+            Self::Set(element_type) => Some(element_type.as_ref().clone()),
+        }
+    }
+
+    /// Checks if the array is truthy (non-empty or contains known definite elements).
+    #[inline]
+    #[must_use]
+    pub fn is_truthy(&self) -> bool {
+        match &self {
+            Self::Keyed(keyed_array) => {
+                if keyed_array.non_empty {
+                    return true;
+                }
+
+                if let Some(known_items) = keyed_array.get_known_items() {
+                    for (optional, _) in known_items.values() {
+                        if !optional {
+                            return true;
+                        }
+                    }
+                }
+
+                false
+            }
+            Self::Set(_) => false,
+            Self::List(list) => {
+                if list.non_empty {
+                    return true;
+                }
+
+                if let Some(known_elements) = list.get_known_elements() {
+                    for (optional, _) in known_elements.values() {
+                        if !optional {
+                            return true;
+                        }
+                    }
+                }
+
+                false
+            }
+        }
+    }
+
+    /// Checks if the array is falsy (empty or contains no known elements).
+    #[inline]
+    #[must_use]
+    pub fn is_falsy(&self) -> bool {
+        match &self {
+            Self::Keyed(keyed_array) => {
+                if keyed_array.known_items.is_some() {
+                    return false;
+                }
+
+                if keyed_array
+                    .parameters
+                    .as_ref()
+                    .is_some_and(|parameters| !parameters.0.is_never() && !parameters.1.is_never())
+                {
+                    return false;
+                }
+
+                !keyed_array.non_empty
+            }
+            Self::List(list) => list.known_elements.is_none() && list.element_type.is_never() && !list.non_empty,
+            Self::Set(element_type) => element_type.is_never(),
+        }
+    }
+
+    /// Returns true if any type parameter in this array is a Placeholder.
+    #[inline]
+    #[must_use]
+    pub fn contains_placeholder(&self) -> bool {
+        match self {
+            Self::Keyed(keyed_array) => keyed_array
+                .parameters
+                .as_ref()
+                .is_some_and(|p| p.0.contains_placeholder() || p.1.contains_placeholder()),
+            Self::List(list) => list.element_type.contains_placeholder(),
+            Self::Set(element_type) => element_type.contains_placeholder(),
+        }
+    }
+
+    /// Removes placeholder types from the array type.
+    #[inline]
+    pub fn remove_placeholders(&mut self) {
+        match self {
+            Self::Keyed(keyed_array) => {
+                if let Some(parameters) = keyed_array.parameters.as_mut() {
+                    if matches!(parameters.0.get_single(), TAtomic::Placeholder) {
+                        *Arc::make_mut(&mut parameters.0) = get_arraykey();
+                    }
+
+                    if matches!(parameters.1.get_single(), TAtomic::Placeholder) {
+                        *Arc::make_mut(&mut parameters.1) = get_mixed();
+                    }
+                }
+            }
+            Self::List(list) => {
+                if matches!(list.element_type.get_single(), TAtomic::Placeholder) {
+                    *Arc::make_mut(&mut list.element_type) = get_mixed();
+                }
+            }
+            Self::Set(element_type) => {
+                if matches!(element_type.get_single(), TAtomic::Placeholder) {
+                    *Arc::make_mut(element_type) = get_mixed();
+                }
+            }
+        }
+    }
+}
+
+impl TType for TArray {
+    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        match self {
+            TArray::Keyed(keyed_array) => keyed_array.get_child_nodes(),
+            TArray::List(list) => list.get_child_nodes(),
+            TArray::Set(element_type) => vec![TypeRef::Union(element_type)],
+        }
+    }
+
+    fn needs_population(&self) -> bool {
+        match self {
+            TArray::Keyed(keyed_array) => keyed_array.needs_population(),
+            TArray::List(list) => list.needs_population(),
+            TArray::Set(element_type) => element_type.needs_population(),
+        }
+    }
+
+    fn is_expandable(&self) -> bool {
+        match self {
+            TArray::Keyed(keyed_array) => keyed_array.is_expandable(),
+            TArray::List(list) => list.is_expandable(),
+            TArray::Set(element_type) => element_type.is_expandable(),
+        }
+    }
+
+    fn is_complex(&self) -> bool {
+        match self {
+            TArray::Keyed(keyed_array) => keyed_array.is_complex(),
+            TArray::List(list) => list.is_complex(),
+            TArray::Set(element_type) => element_type.is_complex(),
+        }
+    }
+
+    fn get_id(&self) -> Word {
+        match self {
+            TArray::List(list_data) => list_data.get_id(),
+            TArray::Keyed(keyed_data) => keyed_data.get_id(),
+            TArray::Set(element_type) => concat_word!(b"set<", element_type.get_id(), b">"),
+        }
+    }
+
+    fn get_pretty_id_with_indent(&self, indent: usize) -> Word {
+        match self {
+            TArray::List(list_data) => list_data.get_pretty_id_with_indent(indent),
+            TArray::Keyed(keyed_data) => keyed_data.get_pretty_id_with_indent(indent),
+            TArray::Set(element_type) => {
+                concat_word!(b"set<", element_type.get_pretty_id_with_indent(indent), b">")
+            }
+        }
+    }
+}

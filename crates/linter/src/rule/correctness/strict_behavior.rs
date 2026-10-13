@@ -1,0 +1,332 @@
+use indoc::indoc;
+use mago_allocator::Arena;
+use schemars::JsonSchema;
+
+use mago_php_version::PHPVersion;
+use mago_php_version::PHPVersionRange;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::Level;
+use mago_span::HasSpan;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Literal;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+use mago_text_edit::Safety;
+use mago_text_edit::TextEdit;
+
+use crate::category::Category;
+use crate::context::LintContext;
+use crate::requirements::RuleRequirements;
+use crate::rule::Config;
+use crate::rule::LintRule;
+use crate::rule::utils::call::function_call_matches;
+use crate::rule_meta::RuleMeta;
+use crate::settings::RuleSettings;
+
+#[derive(Debug, Clone)]
+pub struct StrictBehaviorRule {
+    meta: &'static RuleMeta,
+    cfg: StrictBehaviorConfig,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct StrictBehaviorConfig {
+    pub level: Level,
+    pub allow_loose_behavior: bool,
+}
+
+impl Default for StrictBehaviorConfig {
+    fn default() -> Self {
+        Self { level: Level::Warning, allow_loose_behavior: false }
+    }
+}
+
+impl Config for StrictBehaviorConfig {
+    fn level(&self) -> Level {
+        self.level
+    }
+}
+
+impl LintRule for StrictBehaviorRule {
+    type Config = StrictBehaviorConfig;
+
+    fn meta() -> &'static RuleMeta {
+        const META: RuleMeta = RuleMeta {
+            name: "Strict Behavior",
+            code: "strict-behavior",
+            description: indoc! {"
+                Detects functions relying on loose comparison unless the `$strict` parameter is specified.
+                The use of loose comparison for these functions may lead to hard-to-debug, unexpected behaviors.
+            "},
+            good_example: indoc! {r"
+                <?php
+
+                in_array(1, ['foo', 'bar', 'baz'], strict: true);
+            "},
+            bad_example: indoc! {r"
+                <?php
+
+                in_array(1, ['foo', 'bar', 'baz']);
+            "},
+            category: Category::Correctness,
+            requirements: RuleRequirements::PHPVersion(PHPVersionRange::from(PHPVersion::PHP70)),
+        };
+
+        &META
+    }
+
+    fn targets() -> &'static [NodeKind] {
+        const TARGETS: &[NodeKind] = &[NodeKind::FunctionCall];
+
+        TARGETS
+    }
+
+    fn build(settings: &RuleSettings<Self::Config>) -> Self {
+        Self { meta: Self::meta(), cfg: settings.config }
+    }
+
+    fn check<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, node: Node<'_, 'arena>)
+    where
+        A: Arena,
+    {
+        let Node::FunctionCall(call) = node else {
+            return;
+        };
+
+        let (function_name, expected_position) = if function_call_matches(ctx, call, "base64_decode") {
+            ("base64_decode", 1)
+        } else if function_call_matches(ctx, call, "in_array") {
+            ("in_array", 2)
+        } else if function_call_matches(ctx, call, "array_search") {
+            ("array_search", 2)
+        } else if call.argument_list.arguments.len() > 1 && function_call_matches(ctx, call, "array_keys") {
+            ("array_keys", 2)
+        } else {
+            return;
+        };
+
+        let mut found = false;
+        let mut correct = false;
+        for (position, argument) in call.argument_list.arguments.iter().enumerate() {
+            match argument {
+                Argument::Positional(argument) if position == expected_position => {
+                    found = true;
+
+                    if matches!(argument.value, Expression::Literal(Literal::True(_)))
+                        || (self.cfg.allow_loose_behavior
+                            && matches!(argument.value, Expression::Literal(Literal::False(_))))
+                    {
+                        correct = true;
+                        break;
+                    }
+                }
+                Argument::Named(argument) => {
+                    if argument.name.value != b"strict" {
+                        continue;
+                    }
+
+                    found = true;
+                    if matches!(argument.value, Expression::Literal(Literal::True(_)))
+                        || (self.cfg.allow_loose_behavior
+                            && matches!(argument.value, Expression::Literal(Literal::False(_))))
+                    {
+                        correct = true;
+                        break;
+                    }
+                }
+                Argument::Positional(_) => {}
+            }
+        }
+
+        if found && (correct || self.cfg.allow_loose_behavior) {
+            return;
+        }
+
+        let mut issue =
+            Issue::new(self.cfg.level(), format!("Call to `{function_name}` must enforce strict comparison."))
+                .with_code(self.meta.code)
+                .with_annotation(Annotation::primary(call.function.span()).with_message(format!(
+                    "Function `{function_name}` relies on loose comparison which can lead to unexpected behavior",
+                )))
+                .with_help(format!("Call the function `{function_name}` with the `$strict` parameter set to `true`.",));
+
+        if self.cfg.allow_loose_behavior {
+            issue = issue.with_note(
+                "The `allow_loose_behavior` option is enabled; you may set the `$strict` parameter to `false`."
+                    .to_string(),
+            );
+        }
+
+        if found || self.cfg.allow_loose_behavior {
+            ctx.collector.report(issue);
+            return;
+        }
+
+        let trailing_comma = call.argument_list.arguments.has_trailing_token();
+        let has_any_arguments = !call.argument_list.arguments.is_empty();
+        let insertion = if !has_any_arguments {
+            "strict: true"
+        } else if trailing_comma {
+            " strict: true,"
+        } else {
+            ", strict: true"
+        };
+
+        ctx.collector.propose(issue, |edits| {
+            edits.push(
+                TextEdit::insert(call.argument_list.right_parenthesis.start_offset(), insertion)
+                    .with_safety(Safety::PotentiallyUnsafe),
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use super::StrictBehaviorRule;
+    use crate::test_lint_failure;
+    use crate::test_lint_fix;
+    use crate::test_lint_success;
+
+    test_lint_success! {
+        name = in_array_with_strict_true_positional,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            in_array(1, [1, 2, 3], true);
+        "#}
+    }
+
+    test_lint_success! {
+        name = in_array_with_strict_true_named,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            in_array(1, [1, 2, 3], strict: true);
+        "#}
+    }
+
+    test_lint_failure! {
+        name = in_array_without_strict_is_flagged,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            in_array(1, ['foo', 'bar', 'baz']);
+        "#}
+    }
+
+    test_lint_fix! {
+        name = fix_in_array_appends_named_argument,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            in_array(1, ['foo', 'bar', 'baz']);
+        "#},
+        fixed = indoc! {r#"
+            <?php
+
+            in_array(1, ['foo', 'bar', 'baz'], strict: true);
+        "#}
+    }
+
+    test_lint_fix! {
+        name = fix_array_search_appends_named_argument,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            array_search('x', $values);
+        "#},
+        fixed = indoc! {r#"
+            <?php
+
+            array_search('x', $values, strict: true);
+        "#}
+    }
+
+    test_lint_fix! {
+        name = fix_base64_decode_appends_named_argument,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            base64_decode($input);
+        "#},
+        fixed = indoc! {r#"
+            <?php
+
+            base64_decode($input, strict: true);
+        "#}
+    }
+
+    test_lint_fix! {
+        name = fix_array_keys_with_search_value_appends_named_argument,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            array_keys($values, 'needle');
+        "#},
+        fixed = indoc! {r#"
+            <?php
+
+            array_keys($values, 'needle', strict: true);
+        "#}
+    }
+
+    test_lint_fix! {
+        name = fix_reuses_trailing_comma,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            in_array(1, ['foo', 'bar', 'baz'],);
+        "#},
+        fixed = indoc! {r#"
+            <?php
+
+            in_array(1, ['foo', 'bar', 'baz'], strict: true,);
+        "#}
+    }
+
+    test_lint_fix! {
+        name = fix_preserves_multiline_call,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            in_array(
+                $needle,
+                $haystack,
+            );
+        "#},
+        fixed = indoc! {r#"
+            <?php
+
+            in_array(
+                $needle,
+                $haystack,
+             strict: true,);
+        "#}
+    }
+
+    test_lint_success! {
+        name = array_keys_without_search_value_is_not_flagged,
+        rule = StrictBehaviorRule,
+        code = indoc! {r#"
+            <?php
+
+            array_keys($values);
+        "#}
+    }
+}

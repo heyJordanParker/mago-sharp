@@ -1,0 +1,406 @@
+use std::sync::Arc;
+
+use mago_word::Word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::identifier::function_like::FunctionLikeIdentifier;
+use crate::misc::VariableIdentifier;
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::atomic::callable::parameter::TCallableParameter;
+use crate::ttype::get_mixed;
+use crate::ttype::union::TUnion;
+
+pub mod parameter;
+
+/// Represents the detailed signature of a PHP `callable` type.
+///
+/// This includes parameter types and flags, return type, and purity information,
+/// often derived from `@param callable(ParamType...): ReturnType` docblock tags
+/// or inferred from usage.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TCallableSignature {
+    /// `true` if the callable is known to be pure (no side effects), often from `@psalm-pure`.
+    pub is_pure: bool,
+    /// `true` if this signature specifically represents a closure instance.
+    pub is_closure: bool,
+    /// `Some` if PHP# wrote this signature, as a `Function<…>` type or as a method or lambda of a `.sharp` file, so its
+    /// parameters are PHP# types. A `Function<…>` type holds the full class names of the effects its `uses` lists. A
+    /// method or lambda holds none, as its body's effects are inferred. `None` if PHP wrote it.
+    pub effects: Option<Vec<Word>>,
+    /// Ordered list of parameters expected by the callable signature.
+    pub parameters: Vec<TCallableParameter>,
+    /// The return type of the callable, if specified. `None` implies `mixed` or unknown.
+    pub return_type: Option<Arc<TUnion>>,
+    /// The source of the callable, if it is an alias or reference to another function-like construct.
+    pub source: Option<FunctionLikeIdentifier>,
+    /// Captured arguments whose validity depends on parameters that will be
+    /// supplied when this callable is invoked.
+    pub constraints: Vec<TCallableConstraint>,
+}
+
+/// A captured argument check deferred by a partial application.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TCallableConstraint {
+    /// Parameters of this callable referenced by `parameter_type`.
+    pub parameter_names: Vec<VariableIdentifier>,
+    /// The type of the argument captured by the partial application.
+    pub input_type: Arc<TUnion>,
+    /// The original parameter type, with unbound callable parameters retained.
+    pub parameter_type: Arc<TUnion>,
+}
+
+impl TCallableConstraint {
+    #[inline]
+    #[must_use]
+    pub fn new(parameter_names: Vec<VariableIdentifier>, input_type: Arc<TUnion>, parameter_type: Arc<TUnion>) -> Self {
+        Self { parameter_names, input_type, parameter_type }
+    }
+}
+
+/// Represents a callable entity, which can either be a fully defined signature
+/// or an alias pointing to another function, method, or known closure.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TCallable {
+    /// A concrete callable signature with defined parameters and return type.
+    /// Example: Represents `callable(string): int`.
+    Signature(TCallableSignature),
+    /// An alias or reference to another function-like construct.
+    /// Example: Represents `foo(...)`,  `function() { }`.
+    Alias(FunctionLikeIdentifier),
+}
+
+impl TCallableSignature {
+    /// Creates a new `CallableSignature` with the specified purity and closure status.
+    #[inline]
+    #[must_use]
+    pub fn new(is_pure: bool, is_closure: bool) -> Self {
+        Self {
+            is_pure,
+            is_closure,
+            effects: None,
+            parameters: Vec::new(),
+            return_type: None,
+            source: None,
+            constraints: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn mixed(is_closure: bool) -> Self {
+        TCallableSignature::new(false, is_closure)
+            .with_parameters(vec![TCallableParameter::new(Some(Arc::new(get_mixed())), false, true, true)])
+            .with_return_type(Some(Arc::new(get_mixed())))
+    }
+
+    /// Returns a slice of the callable parameters.
+    #[inline]
+    #[must_use]
+    pub fn get_parameters(&self) -> &[TCallableParameter] {
+        &self.parameters
+    }
+
+    /// Returns a mutable slice of the callable parameters.
+    #[inline]
+    pub fn get_parameters_mut(&mut self) -> &mut [TCallableParameter] {
+        &mut self.parameters
+    }
+
+    /// Returns a reference to the return type (`TUnion`), if specified.
+    #[inline]
+    #[must_use]
+    pub fn get_return_type(&self) -> Option<&TUnion> {
+        self.return_type.as_deref()
+    }
+
+    /// Returns a mutable reference to the return type (`TUnion`), if specified.
+    #[inline]
+    pub fn get_return_type_mut(&mut self) -> Option<&mut TUnion> {
+        self.return_type.as_mut().map(Arc::make_mut)
+    }
+
+    /// Checks if the callable is marked as pure.
+    #[inline]
+    #[must_use]
+    pub const fn is_pure(&self) -> bool {
+        self.is_pure
+    }
+
+    /// Checks if this signature specifically represents a closure.
+    #[inline]
+    #[must_use]
+    pub const fn is_closure(&self) -> bool {
+        self.is_closure
+    }
+
+    /// Returns the source of the callable, if it is an alias or reference to another function-like construct.
+    #[inline]
+    #[must_use]
+    pub fn get_source(&self) -> Option<FunctionLikeIdentifier> {
+        self.source
+    }
+
+    /// Spec section 29: whether this function value's type lists an effect the `slot` function type does not list, so
+    /// the slot never holds it. A value with a `source` runs a PHP# body, whose effects only the effects solve knows, so
+    /// the solve judges it instead. A PHP signature lists no effects, and keeps PHP's rules.
+    #[must_use]
+    pub fn has_effect_outside(&self, slot: &TCallableSignature) -> bool {
+        let (Some(effects), Some(allowed)) = (&self.effects, &slot.effects) else {
+            return false;
+        };
+
+        self.source.is_none()
+            && !effects
+                .iter()
+                .all(|effect| allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())))
+    }
+
+    /// Returns a new instance with the given parameters.
+    #[inline]
+    #[must_use]
+    pub fn with_parameters(mut self, parameters: Vec<TCallableParameter>) -> Self {
+        self.parameters = parameters;
+        self
+    }
+
+    /// Returns a new instance with the return type set.
+    #[inline]
+    #[must_use]
+    pub fn with_return_type(mut self, return_type: Option<Arc<TUnion>>) -> Self {
+        self.return_type = return_type;
+        self
+    }
+
+    /// Returns a new instance with the source set.
+    #[inline]
+    #[must_use]
+    pub fn with_source(mut self, source: Option<FunctionLikeIdentifier>) -> Self {
+        self.source = source;
+        self
+    }
+
+    /// Returns a new signature with deferred captured-argument constraints.
+    #[inline]
+    #[must_use]
+    pub fn with_constraints(mut self, constraints: Vec<TCallableConstraint>) -> Self {
+        self.constraints = constraints;
+        self
+    }
+}
+
+impl TCallable {
+    #[inline]
+    #[must_use]
+    pub const fn is_closure(&self) -> bool {
+        match self {
+            TCallable::Signature(signature) => signature.is_closure(),
+            TCallable::Alias(identifier) => identifier.is_closure(),
+        }
+    }
+
+    /// Returns a reference to the `CallableSignature` if this is the `Signature` variant.
+    #[inline]
+    #[must_use]
+    pub fn get_signature(&self) -> Option<&TCallableSignature> {
+        match self {
+            TCallable::Signature(s) => Some(s),
+            TCallable::Alias(_) => None,
+        }
+    }
+
+    /// Returns a reference to the `FunctionLikeIdentifier` if this is the `Alias` variant.
+    #[inline]
+    #[must_use]
+    pub fn get_alias(&self) -> Option<&FunctionLikeIdentifier> {
+        match self {
+            TCallable::Signature(_) => None,
+            TCallable::Alias(a) => Some(a),
+        }
+    }
+}
+
+impl TType for TCallable {
+    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        let mut children = Vec::new();
+
+        if let TCallable::Signature(signature) = self {
+            if let Some(return_type) = &signature.return_type {
+                children.push(TypeRef::Union(return_type));
+            }
+
+            for parameter in &signature.parameters {
+                if let Some(parameter_type) = parameter.get_type_signature() {
+                    children.push(TypeRef::Union(parameter_type));
+                }
+            }
+
+            for constraint in &signature.constraints {
+                children.push(TypeRef::Union(&constraint.input_type));
+                children.push(TypeRef::Union(&constraint.parameter_type));
+            }
+        }
+
+        children
+    }
+
+    fn needs_population(&self) -> bool {
+        match self {
+            TCallable::Signature(signature) => {
+                signature.return_type.as_ref().is_some_and(|ty| ty.needs_population())
+                    || signature
+                        .parameters
+                        .iter()
+                        .any(|param| param.get_type_signature().is_some_and(super::super::TType::needs_population))
+                    || signature.constraints.iter().any(|constraint| {
+                        constraint.input_type.needs_population() || constraint.parameter_type.needs_population()
+                    })
+            }
+            TCallable::Alias(_) => false,
+        }
+    }
+
+    fn is_expandable(&self) -> bool {
+        match self {
+            TCallable::Alias(_) => true,
+            TCallable::Signature(signature) => {
+                signature.return_type.as_ref().is_some_and(|ty| ty.is_expandable())
+                    || signature
+                        .parameters
+                        .iter()
+                        .any(|param| param.get_type_signature().is_some_and(super::super::TType::is_expandable))
+                    || signature.constraints.iter().any(|constraint| {
+                        constraint.input_type.is_expandable() || constraint.parameter_type.is_expandable()
+                    })
+            }
+        }
+    }
+
+    fn is_complex(&self) -> bool {
+        match self {
+            TCallable::Alias(_) => false,
+            TCallable::Signature(signature) => {
+                signature.parameters.len() > 2
+                    || signature.return_type.as_ref().is_some_and(|ty| ty.is_complex())
+                    || signature
+                        .parameters
+                        .iter()
+                        .any(|param| param.get_type_signature().is_some_and(super::super::TType::is_complex))
+            }
+        }
+    }
+
+    fn get_id(&self) -> Word {
+        match self {
+            TCallable::Signature(signature) => {
+                let mut buf: Vec<u8> = Vec::new();
+                buf.extend_from_slice(b"(");
+                if signature.is_pure() {
+                    buf.extend_from_slice(b"pure-");
+                }
+
+                buf.extend_from_slice(if signature.is_closure() { b"closure(" } else { b"callable(" });
+                for (i, parameter) in signature.get_parameters().iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+
+                    if parameter.is_variadic() {
+                        buf.extend_from_slice(b"...");
+                    }
+
+                    if let Some(parameter_type) = parameter.get_type_signature() {
+                        buf.extend_from_slice(parameter_type.get_id().as_bytes());
+                    } else {
+                        buf.extend_from_slice(b"mixed");
+                    }
+
+                    if parameter.has_default() {
+                        buf.extend_from_slice(b"=");
+                    }
+                }
+
+                buf.extend_from_slice(b"): ");
+                if let Some(return_type) = signature.get_return_type() {
+                    buf.extend_from_slice(return_type.get_id().as_bytes());
+                } else {
+                    buf.extend_from_slice(b"mixed");
+                }
+
+                buf.extend_from_slice(b")");
+
+                word(&buf)
+            }
+            TCallable::Alias(id) => match id {
+                FunctionLikeIdentifier::Function(fn_name) => {
+                    concat_word!(b"Closure<", fn_name.as_bytes(), b">(...)")
+                }
+                FunctionLikeIdentifier::Method(fqcn, method_name) => {
+                    concat_word!(b"Closure<", fqcn.as_bytes(), b"::", method_name.as_bytes(), b">(...)")
+                }
+                FunctionLikeIdentifier::Closure(name) => {
+                    concat_word!(b"Closure<", name.as_bytes(), b">(...)")
+                }
+            },
+        }
+    }
+
+    fn get_pretty_id_with_indent(&self, indent: usize) -> Word {
+        match self {
+            TCallable::Signature(signature) => {
+                let parameters = signature.get_parameters();
+
+                // Use multiline format if there are more than 2 parameters
+                if parameters.len() > 2 {
+                    let mut buf: Vec<u8> = Vec::new();
+                    buf.extend_from_slice(b"(");
+                    if signature.is_pure() {
+                        buf.extend_from_slice(b"pure-");
+                    }
+                    buf.extend_from_slice(if signature.is_closure() { b"closure(\n" } else { b"callable(\n" });
+
+                    let param_indent = indent + 2;
+
+                    for (i, parameter) in parameters.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b",\n");
+                        }
+
+                        buf.resize(buf.len() + param_indent, b' ');
+                        if parameter.is_variadic() {
+                            buf.extend_from_slice(b"...");
+                        }
+
+                        if let Some(parameter_type) = parameter.get_type_signature() {
+                            buf.extend_from_slice(parameter_type.get_pretty_id_with_indent(param_indent).as_bytes());
+                        } else {
+                            buf.extend_from_slice(b"mixed");
+                        }
+
+                        if parameter.has_default() {
+                            buf.extend_from_slice(b"=");
+                        }
+                    }
+
+                    buf.extend_from_slice(b"\n");
+                    buf.resize(buf.len() + indent, b' ');
+                    buf.extend_from_slice(b"): ");
+                    if let Some(return_type) = signature.get_return_type() {
+                        buf.extend_from_slice(return_type.get_pretty_id_with_indent(indent).as_bytes());
+                    } else {
+                        buf.extend_from_slice(b"mixed");
+                    }
+                    buf.extend_from_slice(b")");
+
+                    word(&buf)
+                } else {
+                    self.get_id()
+                }
+            }
+            TCallable::Alias(_) => self.get_id(),
+        }
+    }
+}

@@ -1,0 +1,174 @@
+use indoc::indoc;
+use mago_allocator::Arena;
+use mago_text_edit::Safety;
+use mago_text_edit::TextEdit;
+use schemars::JsonSchema;
+
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::Level;
+use mago_span::HasSpan;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+
+use crate::category::Category;
+use crate::context::LintContext;
+use crate::requirements::RuleRequirements;
+use crate::rule::Config;
+use crate::rule::LintRule;
+use crate::rule::utils::call::function_call_matches;
+use crate::rule::utils::consts::ALIAS_TO_FUNCTION;
+use crate::rule_meta::RuleMeta;
+use crate::settings::RuleSettings;
+
+#[derive(Debug, Clone)]
+pub struct NoAliasFunctionRule {
+    meta: &'static RuleMeta,
+    cfg: NoAliasFunctionConfig,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct NoAliasFunctionConfig {
+    pub level: Level,
+}
+
+impl Default for NoAliasFunctionConfig {
+    fn default() -> Self {
+        Self { level: Level::Note }
+    }
+}
+
+impl Config for NoAliasFunctionConfig {
+    fn level(&self) -> Level {
+        self.level
+    }
+}
+
+impl LintRule for NoAliasFunctionRule {
+    type Config = NoAliasFunctionConfig;
+
+    fn meta() -> &'static RuleMeta {
+        const META: RuleMeta = RuleMeta {
+            name: "No Alias Function",
+            code: "no-alias-function",
+            description: indoc! {"
+                Detects usage of function aliases (e.g., `diskfreespace` instead of `disk_free_space`)
+                and suggests calling the canonical (original) function name instead.
+                This is primarily for consistency and clarity.
+            "},
+            good_example: indoc! {r#"
+                <?php
+
+                // 'disk_free_space' is the proper name instead of 'diskfreespace'
+                $freeSpace = disk_free_space("/");
+            "#},
+            bad_example: indoc! {r#"
+                <?php
+
+                // 'diskfreespace' is an alias for 'disk_free_space'
+                $freeSpace = diskfreespace("/");
+            "#},
+            category: Category::Consistency,
+
+            requirements: RuleRequirements::None,
+        };
+
+        &META
+    }
+
+    fn targets() -> &'static [NodeKind] {
+        const TARGETS: &[NodeKind] = &[NodeKind::FunctionCall];
+
+        TARGETS
+    }
+
+    fn build(settings: &RuleSettings<Self::Config>) -> Self {
+        Self { meta: Self::meta(), cfg: settings.config }
+    }
+
+    fn check<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, node: Node<'_, 'arena>)
+    where
+        A: Arena,
+    {
+        let Node::FunctionCall(function_call) = node else {
+            return;
+        };
+
+        for (function_name, original_name) in &ALIAS_TO_FUNCTION {
+            if !function_call_matches(ctx, function_call, function_name) {
+                continue;
+            }
+
+            let issue = Issue::new(self.cfg.level(), format!("Function alias `{function_name}` should not be used."))
+                .with_code(self.meta.code)
+                .with_annotation(
+                    Annotation::primary(function_call.function.span())
+                        .with_message(format!("This function is an alias of `{original_name}`")),
+                )
+                .with_note(format!("The function `{function_name}` is an alias of `{original_name}`."))
+                .with_help(format!("Consider using the function `{original_name}` instead."));
+
+            ctx.collector.propose(issue, |edits| {
+                let function_span = function_call.function.span();
+                edits.push(TextEdit::replace(function_span, *original_name).with_safety(Safety::PotentiallyUnsafe));
+            });
+
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_lint_failure;
+    use crate::test_lint_fix;
+    use crate::test_lint_success;
+
+    test_lint_success! {
+        name = canonical_implode_not_flagged,
+        rule = NoAliasFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            $str = implode(",", $arr);
+        "#}
+    }
+
+    test_lint_failure! {
+        name = alias_join_flagged,
+        rule = NoAliasFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            $str = join(",", $arr);
+        "#}
+    }
+
+    test_lint_failure! {
+        name = alias_sizeof_flagged,
+        rule = NoAliasFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            $len = sizeof($arr);
+        "#}
+    }
+
+    test_lint_fix! {
+        name = fix_join_to_implode,
+        rule = NoAliasFunctionRule,
+        code = indoc! {r#"
+            <?php
+
+            $str = join(",", $arr);
+        "#},
+        fixed = indoc! {r#"
+            <?php
+
+            $str = implode(",", $arr);
+        "#}
+    }
+}

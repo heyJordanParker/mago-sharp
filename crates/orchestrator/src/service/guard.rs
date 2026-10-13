@@ -1,0 +1,145 @@
+use std::sync::Arc;
+
+use mago_codex::metadata::CodebaseMetadata;
+use mago_database::ReadDatabase;
+use mago_guard::ArchitecturalGuard;
+use mago_guard::settings::Settings;
+use mago_names::resolver::NameResolver;
+use mago_reporting::Issue;
+use mago_reporting::IssueCollection;
+use mago_syntax::parser::parse_file_with_settings;
+use mago_syntax::settings::ParserSettings;
+
+use crate::error::OrchestratorError;
+use crate::service::pipeline::StatelessParallelPipeline;
+use crate::service::pipeline::StatelessReducer;
+use crate::service::refuse_sharp_file;
+
+/// Result of running the guard service.
+#[derive(Debug)]
+pub struct GuardResult {
+    /// The collection of issues found during guarding.
+    pub issues: IssueCollection,
+    /// Whether perimeter guard was skipped due to missing configuration.
+    pub missing_perimeter_configuration: bool,
+    /// Whether structural guard was skipped due to missing configuration.
+    pub missing_structural_configuration: bool,
+}
+
+/// Service responsible for running the guard pipeline.
+#[derive(Debug)]
+pub struct GuardService {
+    /// The read-only database containing source files to guard.
+    database: ReadDatabase,
+
+    /// A codebase metadata of builtin symbols.
+    codebase: CodebaseMetadata,
+
+    /// The guard settings to configure the guarding process.
+    settings: Settings,
+
+    /// The parser settings to configure the parsing process.
+    parser_settings: ParserSettings,
+
+    /// Whether to display progress bars during guarding.
+    use_progress_bars: bool,
+}
+
+impl GuardService {
+    /// Creates a new instance of the `GuardService`.
+    ///
+    /// # Arguments
+    ///
+    /// * `database` - The read-only database containing source files to guard.
+    /// * `codebase` - A codebase metadata of builtin symbols.
+    /// * `settings` - The guard settings to configure the guarding process.
+    /// * `parser_settings` - The parser settings to configure the parsing process.
+    /// * `use_progress_bars` - Whether to display progress bars during guarding.
+    ///
+    /// # Returns
+    ///
+    /// A new `GuardService` instance.
+    #[must_use]
+    pub fn new(
+        database: ReadDatabase,
+        codebase: CodebaseMetadata,
+        settings: Settings,
+        parser_settings: ParserSettings,
+        use_progress_bars: bool,
+    ) -> Self {
+        Self { database, codebase, settings, parser_settings, use_progress_bars }
+    }
+
+    /// Runs the guard pipeline on the codebase.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the [`GuardResult`] with all issues found and
+    /// information about which guards were skipped, or an [`OrchestratorError`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when guard pipelines fail or scanning encounters IO errors.
+    pub fn run(self) -> Result<GuardResult, OrchestratorError> {
+        const GUARD_PROGRESS_PREFIX: &str = "🔒 Guarding";
+
+        // Determine upfront which guards will be skipped due to missing config
+        let skipped_perimeter = matches!(self.settings.should_run_perimeter(), Some(false));
+        let skipped_structural = matches!(self.settings.should_run_structural(), Some(false));
+
+        let pipeline = StatelessParallelPipeline::new(
+            GUARD_PROGRESS_PREFIX,
+            self.database,
+            (Arc::new(self.codebase), self.settings, self.parser_settings),
+            Box::new(GuardResultReducer),
+            self.use_progress_bars,
+        );
+
+        let issues = pipeline.run(|(codebase, guard_settings, parser_settings), arena, source_file| {
+            refuse_sharp_file("guard", &source_file)?;
+
+            let mut issues = IssueCollection::new();
+
+            let program = parse_file_with_settings(arena, &source_file, parser_settings);
+            if program.has_errors() {
+                issues.extend(program.errors.iter().map(Issue::from));
+            }
+
+            let resolved_names = NameResolver::new(arena).resolve(program);
+            let guard = ArchitecturalGuard::new(guard_settings);
+            let report = guard.check(&codebase, program, &resolved_names);
+
+            issues.extend(
+                // Report as issues
+                report.report_into_issues(arena, &source_file, program),
+            );
+
+            Ok(issues)
+        })?;
+
+        Ok(GuardResult {
+            issues,
+            missing_perimeter_configuration: skipped_perimeter,
+            missing_structural_configuration: skipped_structural,
+        })
+    }
+}
+
+/// The "reduce" step for the guard pipeline.
+///
+/// This struct aggregates the `IssueCollection` from each parallel task into a single,
+/// final `IssueCollection` for the entire project.
+#[derive(Debug, Clone)]
+struct GuardResultReducer;
+
+impl StatelessReducer<IssueCollection, IssueCollection> for GuardResultReducer {
+    fn reduce(&self, results: Vec<IssueCollection>) -> Result<IssueCollection, OrchestratorError> {
+        let mut aggregated_issues = IssueCollection::new();
+
+        for result in results {
+            aggregated_issues.extend(result);
+        }
+
+        Ok(aggregated_issues)
+    }
+}

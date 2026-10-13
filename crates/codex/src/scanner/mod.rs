@@ -1,0 +1,1418 @@
+use mago_allocator::Arena;
+
+use mago_database::file::File;
+use mago_names::ResolvedNames;
+use mago_names::binding::Binding;
+use mago_names::binding::MethodParts;
+use mago_names::scope::NamespaceScope;
+use mago_names::scope::php_name;
+use mago_php_version::PHPVersion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_syntax::comments::docblock::get_docblock_before_position;
+use mago_syntax::cst::AnonymousClass;
+use mago_syntax::cst::ArrowFunction;
+use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Call;
+use mago_syntax::cst::Class;
+use mago_syntax::cst::Closure;
+use mago_syntax::cst::Constant;
+use mago_syntax::cst::Enum;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Extern;
+use mago_syntax::cst::Function;
+use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::If;
+use mago_syntax::cst::IfBody;
+use mago_syntax::cst::Interface;
+use mago_syntax::cst::Method;
+use mago_syntax::cst::Modifier;
+use mago_syntax::cst::Namespace;
+use mago_syntax::cst::Operator;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::Return;
+use mago_syntax::cst::Trait;
+use mago_syntax::cst::Trivia;
+use mago_syntax::cst::UnaryPrefix;
+use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Use;
+use mago_syntax::walker::MutWalker;
+use mago_syntax::walker::walk_anonymous_class_mut;
+use mago_syntax::walker::walk_class_mut;
+use mago_syntax::walker::walk_enum_mut;
+use mago_syntax::walker::walk_interface_mut;
+use mago_syntax::walker::walk_trait_mut;
+use mago_word::Word;
+use mago_word::WordMap;
+use mago_word::WordSet;
+use mago_word::ascii_lowercase_word;
+use mago_word::empty_word;
+use mago_word::word;
+
+use crate::identifier::method::MethodIdentifier;
+use crate::metadata::CodebaseMetadata;
+use crate::metadata::r#extern::ExternMetadata;
+use crate::metadata::flags::MetadataFlags;
+use crate::metadata::function_like::FunctionLikeKind;
+use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::scanner::class_alias::scan_class_like_alias;
+use crate::scanner::class_like::register_anonymous_class;
+use crate::scanner::class_like::register_class;
+use crate::scanner::class_like::register_enum;
+use crate::scanner::class_like::register_interface;
+use crate::scanner::class_like::register_trait;
+use crate::scanner::constant::scan_constant;
+use crate::scanner::constant::scan_defined_constant;
+use crate::scanner::function_like::scan_arrow_function;
+use crate::scanner::function_like::scan_closure;
+use crate::scanner::function_like::scan_function;
+use crate::scanner::function_like::scan_method;
+use crate::scanner::property::scan_promoted_property;
+use crate::ttype::resolution::TypeResolutionContext;
+use crate::ttype::template::GenericTemplate;
+
+mod assertion_inference;
+mod attribute;
+use crate::issue::ScanningIssueKind;
+use crate::ttype::error::TypeError;
+mod class_alias;
+mod class_like;
+mod class_like_constant;
+mod constant;
+mod docblock;
+mod enum_case;
+mod function_like;
+
+pub mod inference;
+
+mod parameter;
+mod property;
+mod ttype;
+mod version_claim;
+
+pub use ttype::get_union_from_hint;
+pub use ttype::merge_type_preserving_nullability;
+
+/// Scans a parsed PHP program into a [`CodebaseMetadata`] snapshot, gating
+/// each `Mago\AvailableSince` / `Mago\AvailableUntil` symbol against the
+/// configured PHP version on the way in.
+///
+/// Items whose claims exclude `version` are simply not inserted,
+/// so the resulting metadata is already version-correct and downstream
+/// consumers don't need a separate filter pass.
+#[inline]
+pub(super) fn typing_error_issue(message: &str, kind: ScanningIssueKind, typing_error: &TypeError) -> Issue {
+    Issue::error(message)
+        .with_code(kind)
+        .with_annotation(Annotation::primary(typing_error.span()).with_message(typing_error.to_string()))
+        .with_note(typing_error.note())
+        .with_help(typing_error.help())
+}
+
+pub fn scan_program<'arena, 'ctx, A>(
+    arena: &'arena A,
+    file: &'ctx File,
+    program: &'arena Program<'arena>,
+    resolved_names: &'ctx ResolvedNames<'arena>,
+    php_version: PHPVersion,
+) -> CodebaseMetadata
+where
+    A: Arena,
+{
+    let mut context = Context::new(arena, file, program, resolved_names, php_version);
+    let mut scanner = Scanner::new();
+
+    scanner.walk_program(program, &mut context);
+
+    scanner.codebase
+}
+
+#[derive(Clone, Debug)]
+struct Context<'ctx, 'arena, A> {
+    pub arena: &'arena A,
+    pub file: &'ctx File,
+    pub program: &'arena Program<'arena>,
+    pub resolved_names: &'arena ResolvedNames<'arena>,
+    /// PHP version configured for this scan, used to evaluate `Mago\*`
+    /// version-gating attributes inline.
+    pub php_version: PHPVersion,
+}
+
+impl<'ctx, 'arena, A> Context<'ctx, 'arena, A>
+where
+    A: Arena,
+{
+    pub fn new(
+        arena: &'arena A,
+        file: &'ctx File,
+        program: &'arena Program<'arena>,
+        resolved_names: &'arena ResolvedNames<'arena>,
+        php_version: PHPVersion,
+    ) -> Self {
+        Self { arena, file, program, resolved_names, php_version }
+    }
+
+    pub fn get_docblock(&self, node: impl HasSpan) -> Option<&'arena Trivia<'arena>> {
+        self.get_docblock_before(node.span().start.offset)
+    }
+
+    pub fn get_docblock_before(&self, start_offset: u32) -> Option<&'arena Trivia<'arena>> {
+        get_docblock_before_position(self.program.trivia.as_slice(), start_offset)
+    }
+
+    pub fn get_docblock_in_range(&self, start_offset: u32, end_offset: u32) -> Option<&'arena Trivia<'arena>> {
+        let trivia = self.program.trivia.as_slice();
+        let end = trivia.partition_point(|trivia| trivia.span.start.offset < end_offset);
+
+        trivia[..end]
+            .iter()
+            .rev()
+            .take_while(|trivia| trivia.span.start.offset >= start_offset)
+            .find(|trivia| trivia.kind.is_docblock())
+    }
+}
+
+type TemplateConstraint = (Word, GenericTemplate);
+type TemplateConstraintList = Vec<TemplateConstraint>;
+
+#[derive(Debug, Default)]
+struct Scanner {
+    codebase: CodebaseMetadata,
+    stack: Vec<Word>,
+    template_constraints: Vec<TemplateConstraintList>,
+    scope: NamespaceScope,
+    has_constructor: bool,
+    file_type_aliases: WordSet,
+    file_imported_aliases: WordMap<(Word, Word)>,
+    polyfill_depth: u32,
+    return_docblock_starts: Vec<Option<u32>>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PolyfillGuardBranch {
+    Then,
+    Else,
+    None,
+}
+
+const POLYFILL_GUARD_FUNCTIONS: &[&[u8]] =
+    &[b"class_exists", b"interface_exists", b"trait_exists", b"enum_exists", b"function_exists", b"defined"];
+
+fn classify_polyfill_guard(cond: &Expression<'_>) -> PolyfillGuardBranch {
+    let cond = cond.unparenthesized();
+
+    if is_polyfill_existence_check(cond) {
+        return PolyfillGuardBranch::Else;
+    }
+
+    if let Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), operand }) = cond
+        && is_polyfill_existence_check(operand.unparenthesized())
+    {
+        return PolyfillGuardBranch::Then;
+    }
+
+    PolyfillGuardBranch::None
+}
+
+/// Returns true if `expr` is a call to one of the recognized existence-check
+/// functions (regardless of whether it's written as `class_exists` or
+/// `\class_exists` — we just look at the trailing segment).
+fn is_polyfill_existence_check(expr: &Expression<'_>) -> bool {
+    let Expression::Call(Call::Function(FunctionCall { function, .. })) = expr.unparenthesized() else {
+        return false;
+    };
+    let Expression::Identifier(identifier) = function.unparenthesized() else {
+        return false;
+    };
+    let last = identifier.last_segment();
+    POLYFILL_GUARD_FUNCTIONS.iter().any(|name| last.eq_ignore_ascii_case(name))
+}
+
+impl Scanner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn get_current_type_resolution_context(&self) -> TypeResolutionContext {
+        let mut context = TypeResolutionContext::new();
+        context = context.with_type_aliases(self.file_type_aliases.clone());
+
+        for (local_name, (source_class, original_name)) in &self.file_imported_aliases {
+            context = context.with_imported_type_alias(*local_name, *source_class, *original_name);
+        }
+
+        for template_constraint_list in self.template_constraints.iter().rev() {
+            for (name, constraint) in template_constraint_list {
+                if !context.has_template_definition(*name) {
+                    context = context.with_template_definition(*name, vec![constraint.clone()]);
+                }
+            }
+        }
+
+        context
+    }
+
+    fn apply_polyfill_flag_to_class_like(&mut self, id: Word) {
+        if self.polyfill_depth == 0 {
+            return;
+        }
+
+        if let Some(metadata) = self.codebase.class_likes.get_mut(&id) {
+            metadata.flags |= MetadataFlags::POLYFILL;
+        }
+    }
+
+    /// Registers a method, or a PHP# operator as the static method it runs as, on the class-like being scanned, and
+    /// pushes its template constraints, which the matching walk out pops.
+    #[allow(clippy::expect_used)]
+    fn register_method<'arena, A>(&mut self, method: &MethodParts<'arena, 'arena>, context: &Context<'_, 'arena, A>)
+    where
+        A: Arena,
+    {
+        let current_class = self.stack.last().copied().expect("Expected class-like stack to be non-empty");
+        let mut class_like_metadata =
+            self.codebase.class_likes.remove(&current_class).expect("Expected class-like metadata to be present");
+
+        let name = ascii_lowercase_word(method.name);
+
+        if class_like_metadata.methods.contains(&name) {
+            if class_like_metadata.pseudo_methods.contains(&name)
+                && let Some(existing_method) = self.codebase.function_likes.get_mut(&(class_like_metadata.name, name))
+            {
+                class_like_metadata.pseudo_methods.remove(&name);
+                existing_method.flags.remove(MetadataFlags::MAGIC_METHOD);
+            }
+
+            self.codebase.class_likes.insert(current_class, class_like_metadata);
+            self.template_constraints.push(vec![]);
+
+            return;
+        }
+
+        let method_id = (class_like_metadata.name, name);
+        let type_resolution_context = {
+            let mut context = self.get_current_type_resolution_context();
+
+            for alias_name in class_like_metadata.type_aliases.keys() {
+                context = context.with_type_alias(*alias_name);
+            }
+
+            for (alias_name, (source_class, original_name, _span)) in &class_like_metadata.imported_type_aliases {
+                context = context.with_imported_type_alias(*alias_name, *source_class, *original_name);
+            }
+
+            context
+        };
+
+        let Some(mut function_like_metadata) = scan_method(
+            method_id,
+            method,
+            &class_like_metadata,
+            context,
+            &mut self.scope,
+            Some(type_resolution_context),
+        ) else {
+            // Restore the class-like metadata we removed above so the next method on
+            // this class can still find it, and push an empty template-constraints
+            // frame so the matching walk out pop balances.
+            self.codebase.class_likes.insert(current_class, class_like_metadata);
+            self.template_constraints.push(vec![]);
+            return;
+        };
+
+        #[allow(clippy::unreachable)]
+        let Some(method_metadata) = &function_like_metadata.method_metadata else {
+            unreachable!("Method info should be present for method.",);
+        };
+
+        let mut is_constructor = false;
+        let mut is_clone = false;
+        if method_metadata.is_constructor {
+            is_constructor = true;
+            self.has_constructor = true;
+
+            let type_context = self.get_current_type_resolution_context();
+            for (index, param) in method.parameter_list.parameters.iter().enumerate() {
+                if !param.is_promoted_property() {
+                    continue;
+                }
+
+                let Some(parameter_metadata) = function_like_metadata.parameters.get_mut(index) else {
+                    continue;
+                };
+
+                let property_metadata = scan_promoted_property(
+                    param,
+                    parameter_metadata,
+                    &mut class_like_metadata,
+                    current_class,
+                    &type_context,
+                    context,
+                    &self.scope,
+                );
+
+                class_like_metadata.add_property_metadata(property_metadata);
+            }
+        } else {
+            is_clone = name == word("__clone");
+        }
+
+        class_like_metadata.methods.insert(name);
+        let method_identifier = MethodIdentifier::new(class_like_metadata.name, name);
+        class_like_metadata.add_declaring_method_id(name, method_identifier);
+        if !method_metadata.visibility.is_private() || is_constructor || is_clone || class_like_metadata.kind.is_trait()
+        {
+            class_like_metadata.inheritable_method_ids.insert(name, method_identifier);
+        }
+
+        // PHP#'s `required` constructor is one every subclass keeps, so `new Self(…)` can call it, spec section 25.
+        let is_required = method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_)));
+        if (method_metadata.is_final || is_required) && is_constructor {
+            class_like_metadata.flags |= MetadataFlags::CONSISTENT_CONSTRUCTOR;
+        }
+
+        if context.file.is_standard_library {
+            let file = word(context.file.name.as_ref());
+            for (function, _) in function_like_metadata.replaced_functions() {
+                let wrapper = (file, function_like_metadata.span, method_identifier);
+                let wrappers =
+                    self.codebase.wrapped_functions.entry(ascii_lowercase_word(function.as_bytes())).or_default();
+                if !wrappers.contains(&wrapper) {
+                    wrappers.push(wrapper);
+                }
+            }
+        }
+
+        self.template_constraints.push(
+            function_like_metadata
+                .template_types
+                .iter()
+                .map(|(name, constraints)| (*name, constraints.clone()))
+                .collect(),
+        );
+
+        self.codebase.class_likes.entry(current_class).or_insert(class_like_metadata);
+        self.codebase.function_likes.entry(method_id).or_insert(function_like_metadata);
+    }
+}
+
+#[allow(clippy::expect_used)]
+impl<'ctx, 'arena, A> MutWalker<'arena, 'arena, Context<'ctx, 'arena, A>> for Scanner
+where
+    A: Arena,
+{
+    #[inline]
+    fn walk_in_namespace(&mut self, namespace: &'arena Namespace<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.scope = match &namespace.name {
+            Some(name) => NamespaceScope::for_namespace(php_name(name)),
+            None => NamespaceScope::global(),
+        };
+    }
+
+    #[inline]
+    fn walk_out_namespace(&mut self, _namespace: &'arena Namespace<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.scope = NamespaceScope::global();
+    }
+
+    #[inline]
+    fn walk_in_use(&mut self, r#use: &'arena Use<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.scope.populate_from_use(r#use);
+    }
+
+    /// Records a PHP# `extern` declaration. The binder decides whether its target is a class, with the member after
+    /// `.` when it names one, or a global function.
+    #[inline]
+    fn walk_in_extern(&mut self, r#extern: &'arena Extern<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        let target = &r#extern.target;
+        let name = ascii_lowercase_word(context.resolved_names.get(target));
+        let target = if context.resolved_names.binding(target) == Some(Binding::Class) {
+            (name, if target.is_dotted() { ascii_lowercase_word(target.last_segment()) } else { empty_word() })
+        } else {
+            (empty_word(), name)
+        };
+        let effects = r#extern
+            .uses
+            .iter()
+            .flat_map(|uses| uses.names.iter())
+            .map(|effect| word(context.resolved_names.get(effect)))
+            .collect();
+
+        self.codebase.externs.entry(target).or_default().push(ExternMetadata {
+            file: word(&context.file.name),
+            span: r#extern.span(),
+            target,
+            effects,
+        });
+    }
+
+    fn walk_if(&mut self, r#if: &'arena If<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        self.walk_keyword(&r#if.r#if, context);
+        self.walk_expression(r#if.condition, context);
+
+        let guard = classify_polyfill_guard(r#if.condition);
+
+        match &r#if.body {
+            IfBody::Statement(body) => {
+                let then_polyfill = matches!(guard, PolyfillGuardBranch::Then);
+                if then_polyfill {
+                    self.polyfill_depth = self.polyfill_depth.saturating_add(1);
+                }
+                self.walk_statement(body.statement, context);
+                if then_polyfill {
+                    self.polyfill_depth = self.polyfill_depth.saturating_sub(1);
+                }
+
+                for else_if_clause in &body.else_if_clauses {
+                    self.walk_if_statement_body_else_if_clause(else_if_clause, context);
+                }
+
+                if let Some(else_clause) = &body.else_clause {
+                    let else_polyfill = matches!(guard, PolyfillGuardBranch::Else);
+                    if else_polyfill {
+                        self.polyfill_depth = self.polyfill_depth.saturating_add(1);
+                    }
+                    self.walk_if_statement_body_else_clause(else_clause, context);
+                    if else_polyfill {
+                        self.polyfill_depth = self.polyfill_depth.saturating_sub(1);
+                    }
+                }
+            }
+            IfBody::ColonDelimited(body) => {
+                let then_polyfill = matches!(guard, PolyfillGuardBranch::Then);
+                if then_polyfill {
+                    self.polyfill_depth = self.polyfill_depth.saturating_add(1);
+                }
+                for statement in &body.statements {
+                    self.walk_statement(statement, context);
+                }
+                if then_polyfill {
+                    self.polyfill_depth = self.polyfill_depth.saturating_sub(1);
+                }
+
+                for else_if_clause in &body.else_if_clauses {
+                    self.walk_if_colon_delimited_body_else_if_clause(else_if_clause, context);
+                }
+
+                if let Some(else_clause) = &body.else_clause {
+                    let else_polyfill = matches!(guard, PolyfillGuardBranch::Else);
+                    if else_polyfill {
+                        self.polyfill_depth = self.polyfill_depth.saturating_add(1);
+                    }
+                    self.walk_if_colon_delimited_body_else_clause(else_clause, context);
+                    if else_polyfill {
+                        self.polyfill_depth = self.polyfill_depth.saturating_sub(1);
+                    }
+                }
+
+                self.walk_keyword(&body.endif, context);
+                self.walk_terminator(&body.terminator, context);
+            }
+        }
+    }
+
+    #[inline]
+    fn walk_in_function(&mut self, function: &'arena Function<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        let type_context = self.get_current_type_resolution_context();
+
+        let name = ascii_lowercase_word(context.resolved_names.get(&function.name));
+        let identifier = (empty_word(), name);
+        let Some(mut metadata) = scan_function(
+            identifier,
+            function,
+            self.stack.last().copied(),
+            context,
+            &mut self.scope,
+            type_context,
+            Some(&self.codebase.constants),
+        ) else {
+            // Push an empty frame so the matching `walk_out_function` pop balances.
+            self.template_constraints.push(vec![]);
+            return;
+        };
+
+        self.template_constraints
+            .push(metadata.template_types.iter().map(|(name, constraints)| (*name, constraints.clone())).collect());
+
+        if self.polyfill_depth > 0 {
+            metadata.flags |= MetadataFlags::POLYFILL;
+        }
+
+        self.codebase.function_likes.entry(identifier).or_insert(metadata);
+    }
+
+    #[inline]
+    fn walk_out_function(&mut self, _function: &'arena Function<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    #[inline]
+    fn walk_in_closure(&mut self, closure: &'arena Closure<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some(docblock_start) = self.return_docblock_starts.last_mut() {
+            docblock_start.take();
+        }
+
+        let span = closure.span();
+
+        let synthetic = crate::build_synthetic_name("closure", context.file, span);
+        let identifier = (empty_word(), synthetic);
+
+        let type_resolution_context = self.get_current_type_resolution_context();
+        let metadata = scan_closure(
+            identifier,
+            closure,
+            self.stack.last().copied(),
+            context,
+            &mut self.scope,
+            type_resolution_context,
+        );
+
+        self.template_constraints
+            .push(metadata.template_types.iter().map(|(name, constraints)| (*name, constraints.clone())).collect());
+
+        self.codebase.function_likes.entry(identifier).or_insert(metadata);
+    }
+
+    #[inline]
+    fn walk_out_closure(&mut self, _closure: &'arena Closure<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    #[inline]
+    fn walk_in_arrow_function(
+        &mut self,
+        arrow_function: &'arena ArrowFunction<'arena>,
+        context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        if let Some(docblock_start) = self.return_docblock_starts.last_mut() {
+            docblock_start.take();
+        }
+
+        let span = arrow_function.span();
+
+        let synthetic = crate::build_synthetic_name("closure", context.file, span);
+        let identifier = (empty_word(), synthetic);
+
+        let type_resolution_context = self.get_current_type_resolution_context();
+
+        let metadata = scan_arrow_function(
+            identifier,
+            arrow_function,
+            self.stack.last().copied(),
+            context,
+            &mut self.scope,
+            type_resolution_context,
+        );
+
+        self.template_constraints
+            .push(metadata.template_types.iter().map(|(name, constraints)| (*name, constraints.clone())).collect());
+        self.codebase.function_likes.entry(identifier).or_insert(metadata);
+    }
+
+    #[inline]
+    fn walk_out_arrow_function(
+        &mut self,
+        _arrow_function: &'arena ArrowFunction<'arena>,
+        _context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    #[inline]
+    fn walk_in_constant(&mut self, constant: &'arena Constant<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        let constants = scan_constant(constant, context, &self.get_current_type_resolution_context(), &self.scope);
+
+        for mut constant_metadata in constants {
+            if self.polyfill_depth > 0 {
+                constant_metadata.flags |= MetadataFlags::POLYFILL;
+            }
+            let constant_name = constant_metadata.name;
+            self.codebase.constants.entry(constant_name).or_insert(constant_metadata);
+        }
+    }
+
+    #[inline]
+    fn walk_in_function_call(
+        &mut self,
+        function_call: &'arena FunctionCall<'arena>,
+        context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        let Expression::Identifier(identifier) = function_call.function.unparenthesized() else {
+            return;
+        };
+
+        let function_name = identifier.value();
+        let is_class_alias = matches!(function_name.len(), 11 | 12)
+            && (function_name.eq_ignore_ascii_case(b"class_alias")
+                || function_name.eq_ignore_ascii_case(b"\\class_alias"));
+
+        if is_class_alias {
+            let current_class = self.stack.last().copied();
+            let parent_class = current_class
+                .and_then(|class| self.codebase.class_likes.get(&class))
+                .and_then(|metadata| metadata.direct_parent_class);
+            let Some((alias, target, span)) =
+                scan_class_like_alias(function_call, context, &self.scope, current_class, parent_class)
+            else {
+                return;
+            };
+
+            let mut flags = MetadataFlags::origin_flags(context.file.file_type);
+            if self.polyfill_depth > 0 {
+                flags |= MetadataFlags::POLYFILL;
+            }
+
+            self.codebase.add_class_like_alias(alias, target, span, flags);
+
+            return;
+        }
+
+        if function_name != b"define" {
+            return;
+        }
+
+        let Some(mut constant_metadata) =
+            scan_defined_constant(function_call, context, &self.get_current_type_resolution_context(), &self.scope)
+        else {
+            return;
+        };
+
+        if self.polyfill_depth > 0 {
+            constant_metadata.flags |= MetadataFlags::POLYFILL;
+        }
+
+        self.codebase.constants.entry(constant_metadata.name).or_insert(constant_metadata);
+    }
+
+    #[inline]
+    fn walk_anonymous_class(
+        &mut self,
+        anonymous_class: &'arena AnonymousClass<'arena>,
+        context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        let docblock_start = self
+            .return_docblock_starts
+            .last_mut()
+            .and_then(Option::take)
+            .unwrap_or_else(|| anonymous_class.span().start.offset);
+
+        if let Some((id, template_definition, type_aliases, imported_aliases)) =
+            register_anonymous_class(&mut self.codebase, anonymous_class, docblock_start, context, &mut self.scope)
+        {
+            self.apply_polyfill_flag_to_class_like(id);
+            self.file_type_aliases.extend(type_aliases);
+            self.file_imported_aliases.extend(imported_aliases);
+            self.stack.push(id);
+            self.template_constraints.push(template_definition);
+
+            walk_anonymous_class_mut(self, anonymous_class, context);
+        }
+    }
+
+    #[inline]
+    fn walk_in_return(&mut self, r#return: &'arena Return<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.return_docblock_starts.push(Some(r#return.span().start.offset));
+    }
+
+    #[inline]
+    fn walk_out_return(&mut self, _return: &'arena Return<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.return_docblock_starts.pop().expect("Expected return stack to be non-empty");
+    }
+
+    #[inline]
+    fn walk_class(&mut self, class: &'arena Class<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some((id, templates, type_aliases, imported_aliases)) =
+            register_class(&mut self.codebase, class, context, &mut self.scope)
+        {
+            self.apply_polyfill_flag_to_class_like(id);
+            self.file_type_aliases.extend(type_aliases);
+            self.file_imported_aliases.extend(imported_aliases);
+            self.stack.push(id);
+            self.template_constraints.push(templates);
+
+            walk_class_mut(self, class, context);
+        }
+    }
+
+    #[inline]
+    fn walk_trait(&mut self, r#trait: &'arena Trait<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some((id, templates, type_aliases, imported_aliases)) =
+            register_trait(&mut self.codebase, r#trait, context, &mut self.scope)
+        {
+            self.apply_polyfill_flag_to_class_like(id);
+            self.file_type_aliases.extend(type_aliases);
+            self.file_imported_aliases.extend(imported_aliases);
+            self.stack.push(id);
+            self.template_constraints.push(templates);
+
+            walk_trait_mut(self, r#trait, context);
+        }
+    }
+
+    #[inline]
+    fn walk_enum(&mut self, r#enum: &'arena Enum<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some((id, templates, type_aliases, imported_aliases)) =
+            register_enum(&mut self.codebase, r#enum, context, &mut self.scope)
+        {
+            self.apply_polyfill_flag_to_class_like(id);
+            self.file_type_aliases.extend(type_aliases);
+            self.file_imported_aliases.extend(imported_aliases);
+            self.stack.push(id);
+            self.template_constraints.push(templates);
+
+            walk_enum_mut(self, r#enum, context);
+        }
+    }
+
+    #[inline]
+    fn walk_interface(&mut self, interface: &'arena Interface<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        if let Some((id, templates, type_aliases, imported_aliases)) =
+            register_interface(&mut self.codebase, interface, context, &mut self.scope)
+        {
+            self.apply_polyfill_flag_to_class_like(id);
+            self.file_type_aliases.extend(type_aliases);
+            self.file_imported_aliases.extend(imported_aliases);
+            self.stack.push(id);
+            self.template_constraints.push(templates);
+
+            walk_interface_mut(self, interface, context);
+        }
+    }
+
+    #[inline]
+    fn walk_in_method(&mut self, method: &'arena Method<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        self.register_method(&MethodParts::of_method(method), context);
+    }
+
+    #[inline]
+    fn walk_out_method(&mut self, _method: &'arena Method<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    /// A PHP# operator registers as the static method it runs as, such as `op_Addition`, so a subclass inherits it.
+    /// An operator a class cannot declare, which semantics refuses, registers as none.
+    #[inline]
+    fn walk_in_operator(&mut self, operator: &'arena Operator<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        let Some(parts) = MethodParts::of_operator(operator) else {
+            self.template_constraints.push(vec![]);
+            return;
+        };
+        self.register_method(&parts, context);
+
+        // `operator ==` runs as `op_Equality(?Money $a, ?Money $b)`, which lifts `null` itself, so the PHP method
+        // takes `null`. Its body and PHP# callers keep the types the operator declares.
+        if matches!(operator.symbol, BinaryOperator::Equal(_))
+            && let Some(class) = self.stack.last().and_then(|class| self.codebase.class_likes.get(class))
+            && let Some(method) = self.codebase.function_likes.get_mut(&(class.name, ascii_lowercase_word(parts.name)))
+        {
+            for parameter in &mut method.parameters {
+                if let Some(declaration) = &mut parameter.type_declaration_metadata {
+                    declaration.type_union = declaration.type_union.clone().as_nullable();
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn walk_out_operator(&mut self, _operator: &'arena Operator<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    #[inline]
+    fn walk_out_anonymous_class(
+        &mut self,
+        _anonymous_class: &'arena AnonymousClass<'arena>,
+        _context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        self.stack.pop().expect("Expected class stack to be non-empty");
+        self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    #[inline]
+    fn walk_out_class(&mut self, _class: &'arena Class<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        finalize_class_like(self, context);
+    }
+
+    #[inline]
+    fn walk_out_trait(&mut self, _trait: &'arena Trait<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        finalize_class_like(self, context);
+    }
+
+    #[inline]
+    fn walk_out_enum(&mut self, _enum: &'arena Enum<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        finalize_class_like(self, context);
+    }
+
+    #[inline]
+    fn walk_out_interface(&mut self, _interface: &'arena Interface<'arena>, context: &mut Context<'ctx, 'arena, A>) {
+        finalize_class_like(self, context);
+    }
+}
+
+#[allow(clippy::expect_used)]
+fn finalize_class_like<A>(scanner: &mut Scanner, context: &Context<'_, '_, A>)
+where
+    A: Arena,
+{
+    let has_constructor = scanner.has_constructor;
+    scanner.has_constructor = false;
+
+    let class_like_id = scanner.stack.pop().expect("Expected class stack to be non-empty");
+    scanner.template_constraints.pop().expect("Expected template stack to be non-empty");
+
+    if has_constructor {
+        return;
+    }
+
+    let Some(mut class_like_metadata) = scanner.codebase.class_likes.remove(&class_like_id) else {
+        return;
+    };
+
+    if class_like_metadata.flags.has_consistent_constructor() {
+        let constructor_name = word("__construct");
+
+        class_like_metadata.methods.insert(constructor_name);
+        let constructor_method_id = MethodIdentifier::new(class_like_metadata.name, constructor_name);
+        class_like_metadata.add_declaring_method_id(constructor_name, constructor_method_id);
+        class_like_metadata.inheritable_method_ids.insert(constructor_name, constructor_method_id);
+
+        let mut flags = MetadataFlags::PURE;
+        flags |= MetadataFlags::origin_flags(context.file.file_type);
+
+        scanner.codebase.function_likes.insert(
+            (class_like_metadata.name, constructor_name),
+            FunctionLikeMetadata::new(
+                FunctionLikeKind::Method,
+                constructor_name,
+                constructor_name,
+                class_like_metadata.span,
+                flags,
+            ),
+        );
+    }
+
+    scanner.codebase.class_likes.insert(class_like_id, class_like_metadata);
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use mago_allocator::LocalArena;
+    use std::borrow::Cow;
+
+    use mago_database::Database;
+    use mago_database::DatabaseConfiguration;
+    use mago_database::DatabaseReader;
+    use mago_database::file::File;
+    use mago_names::resolver::NameResolver;
+    use mago_php_version::PHPVersion;
+    use mago_syntax::parser::parse_file;
+    use mago_word::ascii_lowercase_word;
+    use mago_word::empty_word;
+    use mago_word::word;
+
+    use crate::metadata::CodebaseMetadata;
+    use crate::metadata::attribute::ConstantExpression;
+    use crate::metadata::flags::MetadataFlags;
+    use crate::metadata::function_like::FunctionLikeMetadata;
+    use crate::scanner::scan_program;
+
+    fn scan(code: &'static str) -> CodebaseMetadata {
+        let file = File::ephemeral(Cow::Borrowed(b"code.php"), Cow::Borrowed(code.as_bytes()));
+        let config =
+            DatabaseConfiguration::new(std::path::Path::new("/"), vec![], vec![], vec![], vec![]).into_static();
+        let database = Database::single(file, config);
+
+        let mut codebase = CodebaseMetadata::new();
+        let arena = LocalArena::new();
+        for file in database.files() {
+            let program = parse_file(&arena, &file);
+            assert!(!program.has_errors(), "parse failed: {:?}", program.errors);
+            let resolved_names = NameResolver::new(&arena).resolve(program);
+            codebase.extend(scan_program(&arena, &file, program, &resolved_names, PHPVersion::LATEST));
+        }
+        codebase
+    }
+
+    fn class_flags(codebase: &CodebaseMetadata, name: &str) -> MetadataFlags {
+        codebase
+            .class_likes
+            .get(&ascii_lowercase_word(name.as_bytes()))
+            .unwrap_or_else(|| panic!("class-like `{name}` not found; have {:?}", codebase.class_likes.keys()))
+            .flags
+    }
+
+    fn function_flags(codebase: &CodebaseMetadata, name: &str) -> MetadataFlags {
+        codebase
+            .function_likes
+            .get(&(empty_word(), ascii_lowercase_word(name.as_bytes())))
+            .unwrap_or_else(|| panic!("function `{name}` not found"))
+            .flags
+    }
+
+    fn constant_flags(codebase: &CodebaseMetadata, name: &str) -> MetadataFlags {
+        codebase.constants.get(&word(name)).unwrap_or_else(|| panic!("constant `{name}` not found")).flags
+    }
+
+    #[test]
+    fn class_in_not_class_exists_is_polyfill() {
+        let code = "<?php
+            if (!class_exists('Foo')) {
+                class Foo {}
+            }
+        ";
+        assert!(class_flags(&scan(code), "Foo").is_polyfill());
+    }
+
+    #[test]
+    fn interface_in_not_interface_exists_is_polyfill() {
+        let code = "<?php
+            if (!interface_exists('Bar')) {
+                interface Bar {}
+            }
+        ";
+        assert!(class_flags(&scan(code), "Bar").is_polyfill());
+    }
+
+    #[test]
+    fn trait_in_not_trait_exists_is_polyfill() {
+        let code = "<?php
+            if (!trait_exists('Mix')) {
+                trait Mix {}
+            }
+        ";
+        assert!(class_flags(&scan(code), "Mix").is_polyfill());
+    }
+
+    #[test]
+    fn enum_in_not_enum_exists_is_polyfill() {
+        let code = "<?php
+            if (!enum_exists('Kind')) {
+                enum Kind { case A; }
+            }
+        ";
+        assert!(class_flags(&scan(code), "Kind").is_polyfill());
+    }
+
+    #[test]
+    fn function_in_not_function_exists_is_polyfill() {
+        let code = "<?php
+            if (!function_exists('foo')) {
+                function foo(): void {}
+            }
+        ";
+        assert!(function_flags(&scan(code), "foo").is_polyfill());
+    }
+
+    #[test]
+    fn const_in_not_defined_is_polyfill() {
+        let code = "<?php
+            if (!defined('FOO')) {
+                const FOO = 1;
+            }
+        ";
+        assert!(constant_flags(&scan(code), "FOO").is_polyfill());
+    }
+
+    #[test]
+    fn define_call_in_not_defined_is_polyfill() {
+        let code = "<?php
+            if (!defined('BAR')) {
+                define('BAR', 1);
+            }
+        ";
+        assert!(constant_flags(&scan(code), "BAR").is_polyfill());
+    }
+
+    #[test]
+    fn class_in_else_branch_of_positive_check_is_polyfill() {
+        let code = "<?php
+            if (class_exists('Foo')) {
+            } else {
+                class Foo {}
+            }
+        ";
+        assert!(class_flags(&scan(code), "Foo").is_polyfill());
+    }
+
+    #[test]
+    fn class_in_then_branch_of_positive_check_is_not_polyfill() {
+        let code = "<?php
+            if (class_exists('Foo')) {
+                class Bar {}
+            }
+        ";
+        assert!(!class_flags(&scan(code), "Bar").is_polyfill());
+    }
+
+    #[test]
+    fn top_level_class_is_not_polyfill() {
+        let code = "<?php class Plain {}";
+        assert!(!class_flags(&scan(code), "Plain").is_polyfill());
+    }
+
+    #[test]
+    fn class_inside_unrelated_if_is_not_polyfill() {
+        let code = "<?php
+            if (PHP_VERSION_ID > 80000) {
+                class Modern {}
+            }
+        ";
+        assert!(!class_flags(&scan(code), "Modern").is_polyfill());
+    }
+
+    #[test]
+    fn class_in_then_branch_when_condition_is_not_exists_check_is_not_polyfill() {
+        let code = "<?php
+            if (!some_other_check()) {
+                class Other {}
+            }
+        ";
+        assert!(!class_flags(&scan(code), "Other").is_polyfill());
+    }
+
+    #[test]
+    fn polyfill_flag_does_not_leak_to_siblings() {
+        let code = "<?php
+            if (!class_exists('Polyfilled')) {
+                class Polyfilled {}
+            }
+
+            class Real {}
+        ";
+        let codebase = scan(code);
+        assert!(class_flags(&codebase, "Polyfilled").is_polyfill());
+        assert!(!class_flags(&codebase, "Real").is_polyfill());
+    }
+
+    #[test]
+    fn class_inside_else_does_not_leak_to_preceding_sibling() {
+        let code = "<?php
+            if (class_exists('Gate')) {
+                class Sibling {}
+            } else {
+                class Gate {}
+            }
+        ";
+        let codebase = scan(code);
+        assert!(!class_flags(&codebase, "Sibling").is_polyfill());
+        assert!(class_flags(&codebase, "Gate").is_polyfill());
+    }
+
+    #[test]
+    fn class_nested_inside_polyfill_guard_is_still_polyfill() {
+        let code = "<?php
+            if (!class_exists('Wrapper')) {
+                if (PHP_VERSION_ID >= 80000) {
+                    class Wrapper {}
+                }
+            }
+        ";
+        assert!(class_flags(&scan(code), "Wrapper").is_polyfill());
+    }
+
+    #[test]
+    fn nested_polyfill_guards_unwind_correctly() {
+        let code = "<?php
+            if (!class_exists('A')) {
+                class A {}
+            }
+            class B {}
+            if (!class_exists('C')) {
+                class C {}
+            }
+            class D {}
+        ";
+        let codebase = scan(code);
+        assert!(class_flags(&codebase, "A").is_polyfill());
+        assert!(!class_flags(&codebase, "B").is_polyfill());
+        assert!(class_flags(&codebase, "C").is_polyfill());
+        assert!(!class_flags(&codebase, "D").is_polyfill());
+    }
+
+    #[test]
+    fn polyfill_within_namespace_gets_full_fqn_flagged() {
+        let code = r#"<?php
+            namespace Pkg;
+            if (!class_exists('Pkg\\Stub')) {
+                class Stub {}
+            }
+        "#;
+        assert!(class_flags(&scan(code), "Pkg\\Stub").is_polyfill());
+    }
+
+    #[test]
+    fn class_in_alternative_syntax_then_branch_is_polyfill() {
+        let code = "<?php
+            if (!class_exists('Alt')):
+                class Alt {}
+            endif;
+        ";
+        assert!(class_flags(&scan(code), "Alt").is_polyfill());
+    }
+
+    #[test]
+    fn class_in_alternative_syntax_else_branch_is_polyfill() {
+        let code = "<?php
+            if (class_exists('AltElse')):
+            else:
+                class AltElse {}
+            endif;
+        ";
+        assert!(class_flags(&scan(code), "AltElse").is_polyfill());
+    }
+
+    #[test]
+    fn leading_backslash_on_guard_function_is_recognized() {
+        let code = r#"<?php
+            if (!\class_exists('Qualified')) {
+                class Qualified {}
+            }
+        "#;
+        assert!(class_flags(&scan(code), "Qualified").is_polyfill());
+    }
+
+    #[test]
+    fn guard_function_case_insensitive() {
+        let code = "<?php
+            if (!CLASS_EXISTS('Uppercase')) {
+                class Uppercase {}
+            }
+        ";
+        assert!(class_flags(&scan(code), "Uppercase").is_polyfill());
+    }
+
+    #[test]
+    fn parenthesized_guard_expression_is_recognized() {
+        let code = "<?php
+            if (!(class_exists('Parenned'))) {
+                class Parenned {}
+            }
+        ";
+        assert!(class_flags(&scan(code), "Parenned").is_polyfill());
+    }
+
+    #[test]
+    fn doubly_parenthesized_guard_is_recognized() {
+        let code = "<?php
+            if ((!((class_exists('DoubleParen'))))) {
+                class DoubleParen {}
+            }
+        ";
+        assert!(class_flags(&scan(code), "DoubleParen").is_polyfill());
+    }
+
+    #[test]
+    fn class_in_elseif_branch_is_not_polyfill() {
+        let code = "<?php
+            if (false) {
+            } elseif (!class_exists('Never')) {
+                class Never {}
+            }
+        ";
+        assert!(!class_flags(&scan(code), "Never").is_polyfill());
+    }
+
+    #[test]
+    fn merge_non_polyfill_overrides_polyfill() {
+        let mut stub = scan(
+            "<?php
+            if (!class_exists('Shared')) {
+                class Shared {}
+            }
+        ",
+        );
+        let real = scan("<?php class Shared { public int $x = 1; }");
+        stub.extend(real);
+        let flags = class_flags(&stub, "Shared");
+        assert!(!flags.is_polyfill(), "polyfill should have been replaced by real: flags = {flags:?}");
+    }
+
+    #[test]
+    fn merge_polyfill_does_not_override_non_polyfill() {
+        let mut real = scan("<?php class Shared { public int $x = 1; }");
+        let stub = scan(
+            "<?php
+            if (!class_exists('Shared')) {
+                class Shared {}
+            }
+        ",
+        );
+        real.extend(stub);
+        assert!(!class_flags(&real, "Shared").is_polyfill());
+    }
+
+    #[test]
+    fn merge_only_polyfill_is_kept() {
+        let codebase = scan(
+            "<?php
+            if (!class_exists('OnlyStub')) {
+                class OnlyStub {}
+            }
+        ",
+        );
+        assert!(class_flags(&codebase, "OnlyStub").is_polyfill());
+    }
+
+    #[test]
+    fn merge_function_non_polyfill_overrides_polyfill() {
+        let mut stub = scan(
+            "<?php
+            if (!function_exists('array_is_list')) {
+                function array_is_list(array $arr): bool { return true; }
+            }
+        ",
+        );
+        let real = scan("<?php function array_is_list(array $arr): bool { return false; }");
+        stub.extend(real);
+        assert!(!function_flags(&stub, "array_is_list").is_polyfill());
+    }
+
+    #[test]
+    fn merge_constant_non_polyfill_overrides_polyfill() {
+        let mut stub = scan(
+            "<?php
+            if (!defined('MY_CONST')) {
+                const MY_CONST = 1;
+            }
+        ",
+        );
+        let real = scan("<?php const MY_CONST = 2;");
+        stub.extend(real);
+        assert!(!constant_flags(&stub, "MY_CONST").is_polyfill());
+    }
+
+    #[test]
+    fn phpunit_test_case_stub_scenario_prefers_real() {
+        let mut codebase = scan(
+            r#"<?php
+            namespace PHPUnit\Framework;
+
+            if (!class_exists('PHPUnit\\Framework\\TestCase')) {
+                abstract class TestCase {}
+            }
+        "#,
+        );
+        let real = scan(
+            r#"<?php
+            namespace PHPUnit\Framework {
+                abstract class Assert {}
+                abstract class TestCase extends Assert {}
+            }
+        "#,
+        );
+        codebase.extend(real);
+
+        let tc = codebase
+            .class_likes
+            .get(&ascii_lowercase_word(b"PHPUnit\\Framework\\TestCase"))
+            .expect("TestCase should be present in merged codebase");
+
+        assert!(!tc.flags.is_polyfill(), "merged TestCase should be the real definition");
+        assert_eq!(
+            tc.direct_parent_class.map(|p| p.to_string()),
+            Some("PHPUnit\\Framework\\Assert".to_ascii_lowercase()),
+        );
+    }
+
+    #[test]
+    fn scans_class_like_aliases() {
+        let mut codebase = scan(
+            r#"<?php
+            namespace App;
+
+            class Original {}
+            class Existing {}
+
+            class_alias(Original::class, Alias::class);
+            class_alias(Alias::class, 'App\Chain');
+            class_alias(Original::class, Existing::class);
+            class_alias('App\Missing', 'App\MissingAlias');
+            class_alias('App\CycleB', 'App\CycleA');
+            class_alias('App\CycleA', 'App\CycleB');
+        "#,
+        );
+
+        assert!(codebase.populate_class_like_aliases());
+
+        let original = ascii_lowercase_word(b"App\\Original");
+        let alias = ascii_lowercase_word(b"App\\Alias");
+        let chain = ascii_lowercase_word(b"App\\Chain");
+        let existing = ascii_lowercase_word(b"App\\Existing");
+        let missing = ascii_lowercase_word(b"App\\MissingAlias");
+        let cycle_a = ascii_lowercase_word(b"App\\CycleA");
+        let cycle_b = ascii_lowercase_word(b"App\\CycleB");
+
+        assert_eq!(codebase.class_like_aliases.get(&alias), Some(&original));
+        assert_eq!(codebase.class_like_aliases.get(&chain), Some(&original));
+        assert!(!codebase.class_like_aliases.contains_key(&existing));
+        assert!(!codebase.class_like_aliases.contains_key(&missing));
+        assert!(!codebase.class_like_aliases.contains_key(&cycle_a));
+        assert!(!codebase.class_like_aliases.contains_key(&cycle_b));
+        assert!(codebase.class_likes[&original].aliases.contains(&alias));
+        assert!(codebase.class_likes[&original].aliases.contains(&chain));
+        assert_eq!(codebase.symbols.get_kind(alias), Some(crate::symbol::SymbolKind::Class));
+    }
+
+    fn scan_on_a_small_stack(code: String) -> CodebaseMetadata {
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || scan(Box::leak(code.into_boxed_str())))
+            .expect("the thread starts")
+            .join()
+            .expect("the scan returns")
+    }
+
+    fn function<'codebase>(codebase: &'codebase CodebaseMetadata, name: &str) -> &'codebase FunctionLikeMetadata {
+        codebase
+            .function_likes
+            .get(&(empty_word(), ascii_lowercase_word(name.as_bytes())))
+            .unwrap_or_else(|| panic!("function `{name}` not found"))
+    }
+
+    #[test]
+    fn a_property_default_of_100_000_terms_is_inferred_on_a_small_stack() {
+        let codebase = scan_on_a_small_stack(format!(
+            "<?php class Report {{ public int $total = {}; }}",
+            vec!["1"; 100_000].join(" + ")
+        ));
+
+        let default_type = codebase
+            .get_property(b"Report", b"$total")
+            .and_then(|property| property.default_type_metadata.as_ref())
+            .expect("the default is inferred");
+        assert_eq!(default_type.type_union.get_single_literal_int_value(), Some(100_000));
+    }
+
+    #[test]
+    fn an_attribute_argument_in_509_parentheses_is_evaluated_on_a_small_stack() {
+        let codebase = scan_on_a_small_stack(format!(
+            "<?php #[Label({}1{})] function deep(): void {{}}",
+            "(".repeat(509),
+            ")".repeat(509)
+        ));
+
+        assert_eq!(function(&codebase, "deep").attributes[0].arguments[0].value, Some(ConstantExpression::Int(1)));
+    }
+
+    #[test]
+    fn a_return_negated_508_times_infers_its_assertions_on_a_small_stack() {
+        let codebase = scan_on_a_small_stack(format!(
+            "<?php function deep(mixed $value): bool {{ return {}is_int($value); }}",
+            "!".repeat(508)
+        ));
+
+        assert!(function(&codebase, "deep").if_true_assertions.contains_key(&word("$value")));
+    }
+
+    #[test]
+    fn a_global_in_509_nested_blocks_is_collected_on_a_small_stack() {
+        let codebase = scan_on_a_small_stack(format!(
+            "<?php function deep(): void {{ {}global $total;{} }}",
+            "{".repeat(509),
+            "}".repeat(509)
+        ));
+
+        assert!(function(&codebase, "deep").globals_accessed.contains(&word("$total")));
+    }
+}

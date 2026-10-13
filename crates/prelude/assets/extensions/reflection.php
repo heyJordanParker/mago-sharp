@@ -1,0 +1,1651 @@
+<?php
+
+class ReflectionException extends Exception {}
+
+interface Reflector extends Stringable
+{
+}
+
+class Reflection
+{
+    /**
+     * @return list<string>
+     */
+    public static function getModifierNames(int $modifiers): array {}
+}
+
+/**
+ * @template T of Fiber
+ */
+#[Mago\AvailableSince(80100)]
+final class ReflectionFiber
+{
+    /**
+     * @param T $fiber
+     */
+    public function __construct(Fiber $fiber) {}
+
+    /**
+     * @return T
+     *
+     * @pure
+     */
+    public function getFiber(): Fiber {}
+
+    /**
+     * @pure
+     */
+    public function getExecutingFile(): ?string {}
+
+    /**
+     * @pure
+     */
+    public function getExecutingLine(): ?int {}
+
+    /**
+     * @pure
+     */
+    public function getCallable(): callable {}
+
+    /**
+     * @return list<array<string, mixed>>
+     *
+     * @pure
+     */
+    public function getTrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT): array {}
+}
+
+final class ReflectionGenerator
+{
+    public function __construct(Generator $generator) {}
+
+    /**
+     * @pure
+     */
+    public function getExecutingLine(): int {}
+
+    /**
+     * @pure
+     */
+    public function getExecutingFile(): string {}
+
+    /**
+     * @return list<array<string, mixed>>
+     *
+     * @pure
+     */
+    public function getTrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT): array {}
+
+    /**
+     * @pure
+     */
+    public function getFunction(): ReflectionFunctionAbstract {}
+
+    /**
+     * @pure
+     */
+    public function getThis(): ?object {}
+
+    /**
+     * @pure
+     */
+    public function getExecutingGenerator(): Generator {}
+
+    /**
+     * @pure
+     */
+    public function isClosed(): bool {}
+}
+
+class ReflectionExtension implements Reflector
+{
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    /**
+     * @throws ReflectionException
+     */
+    public function __construct(string $name) {}
+
+    public function __toString(): string {}
+
+    /**
+     * @pure
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getVersion(): ?string {}
+
+    /**
+     * @return array<string, ReflectionFunction>
+     *
+     * @pure
+     */
+    public function getFunctions(): array {}
+
+    /**
+     * @return array<string, mixed>
+     *
+     * @pure
+     */
+    public function getConstants(): array {}
+
+    /**
+     * @return array<string, mixed>
+     *
+     * @pure
+     */
+    public function getINIEntries(): array {}
+
+    /**
+     * @return array<class-string, ReflectionClass>
+     *
+     * @pure
+     */
+    public function getClasses(): array {}
+
+    /**
+     * @return list<class-string>
+     *
+     * @pure
+     */
+    public function getClassNames(): array {}
+
+    /**
+     * @return array<string, string>
+     *
+     * @pure
+     */
+    public function getDependencies(): array {}
+
+    public function info(): void {}
+
+    /**
+     * @pure
+     */
+    public function isPersistent(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isTemporary(): bool {}
+
+    private function __clone(): void {}
+}
+
+abstract class ReflectionType implements Stringable
+{
+    /**
+     * @pure
+     */
+    public function allowsNull(): bool {}
+
+    public function __toString(): string {}
+
+    private function __clone(): void {}
+}
+
+class ReflectionNamedType extends ReflectionType
+{
+    /**
+     * @pure
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function isBuiltin(): bool {}
+}
+
+#[Mago\AvailableSince(80100)]
+class ReflectionIntersectionType extends ReflectionType
+{
+    /**
+     * @return list<ReflectionType>
+     *
+     * @pure
+     */
+    public function getTypes(): array {}
+}
+
+class ReflectionUnionType extends ReflectionType
+{
+    /**
+     * @return list<ReflectionNamedType|ReflectionIntersectionType>
+     *
+     * @pure
+     */
+    public function getTypes(): array {}
+}
+
+class ReflectionZendExtension implements Reflector
+{
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    /**
+     * @throws ReflectionException
+     */
+    public function __construct(string $name) {}
+
+    public function __toString(): string {}
+
+    /**
+     * @pure
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getVersion(): string {}
+
+    /**
+     * @pure
+     */
+    public function getAuthor(): string {}
+
+    /**
+     * @pure
+     */
+    public function getURL(): string {}
+
+    /**
+     * @pure
+     */
+    public function getCopyright(): string {}
+
+    private function __clone(): void {}
+}
+
+/**
+ * @template T of object
+ */
+class ReflectionAttribute implements Reflector
+{
+    /**
+     * @var class-string<T>
+     *
+     * @readonly
+     */
+    public string $name;
+
+    public const IS_INSTANCEOF = 2;
+
+    private function __construct() {}
+
+    public function __toString(): string {}
+
+    /**
+     * @return class-string<T>
+     *
+     * @pure
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getTarget(): int {}
+
+    /**
+     * @pure
+     */
+    public function isRepeated(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getArguments(): array {}
+
+    /**
+     * @return T
+     */
+    public function newInstance(): object {}
+
+    private function __clone(): void {}
+
+}
+
+/**
+ * @template T of object = object
+ */
+class ReflectionClassConstant implements Reflector
+{
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    /**
+     * @var class-string<T>
+     *
+     * @readonly
+     */
+    public string $class;
+
+    /**
+     * @readonly
+     */
+    public bool $isFinal;
+
+    public const IS_PUBLIC = 1;
+
+    public const IS_PROTECTED = 2;
+
+    public const IS_PRIVATE = 4;
+
+    public const IS_FINAL = 5;
+
+    /**
+     * @param class-string<T>|T $class
+     *
+     * @throws ReflectionException
+     */
+    public function __construct(string|object $class, string $constant) {}
+
+    /**
+     * @pure
+     */
+    public function getDeclaringClass(): ReflectionClass {}
+
+    /**
+     * @pure
+     */
+    public function getDocComment(): string|false {}
+
+    /**
+     * @pure
+     */
+    public function getModifiers(): int {}
+
+    /**
+     * @pure
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getValue(): mixed {}
+
+    /**
+     * @pure
+     */
+    public function isPrivate(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isProtected(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isPublic(): bool {}
+
+    public function __toString(): string {}
+
+    /**
+     * @template A
+     *
+     * @param class-string<A>|null $name
+     * @param int $flags
+     *
+     * @return list<ReflectionAttribute<A>>
+     *
+     * @pure
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array {}
+
+    private function __clone(): void {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80100)]
+    public function isEnumCase(): bool {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80100)]
+    public function isFinal(): bool {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80300)]
+    public function hasType(): bool {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80300)]
+    public function getType(): ?ReflectionType {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80400)]
+    public function isDeprecated(): bool {}
+}
+
+#[Mago\AvailableSince(80400)]
+enum PropertyHookType: string
+{
+    case Get = 'get';
+    case Set = 'set';
+}
+
+/**
+ * @template T of object = object
+ */
+class ReflectionProperty implements Reflector
+{
+    public const IS_ABSTRACT = 64;
+
+    public const IS_VIRTUAL = 512;
+
+    public const IS_STATIC = 16;
+
+    public const IS_PUBLIC = 1;
+
+    public const IS_PROTECTED = 2;
+
+    public const IS_PRIVATE = 4;
+
+    public const IS_READONLY = 128;
+
+    public const IS_PROTECTED_SET = 2048;
+
+    public const IS_PRIVATE_SET = 4096;
+
+    public const IS_FINAL = 32;
+
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    /**
+     * @var class-string<T>
+     *
+     * @readonly
+     */
+    public string $class;
+
+    /**
+     * @param class-string<T>|T $class
+     *
+     * @throws ReflectionException
+     */
+    public function __construct(object|string $class, string $property) {}
+
+    public function __toString(): string {}
+
+    /**
+     * @pure
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getValue(?object $object = null): mixed {}
+
+    public function setValue(mixed $objectOrValue, mixed $value): void {}
+
+    /**
+     * @pure
+     */
+    public function isPublic(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isPrivate(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isProtected(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isStatic(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isDefault(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getModifiers(): int {}
+
+    /**
+     * @return ReflectionClass<T>
+     *
+     * @pure
+     */
+    public function getDeclaringClass(): ReflectionClass {}
+
+    /**
+     * @pure
+     */
+    public function getDocComment(): string|false {}
+
+    /**
+     * @pure
+     */
+    #[Deprecated(since: '8.5', message: 'as it has no effect')]
+    public function setAccessible(bool $accessible): void {}
+
+    /**
+     * @pure
+     */
+    public function getType(): ReflectionNamedType|ReflectionUnionType|ReflectionIntersectionType|null {}
+
+    /**
+     * @pure
+     */
+    public function hasType(): bool {}
+
+    /**
+     * @param ?T $object
+     *
+     * @pure
+     */
+    public function isInitialized(?object $object = null): bool {}
+
+    /**
+     * @pure
+     */
+    public function isPromoted(): bool {}
+
+    private function __clone(): void {}
+
+    public function hasDefaultValue(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getDefaultValue(): mixed {}
+
+    /**
+     * @template A
+     *
+     * @param class-string<A>|null $name
+     * @param int $flags
+     *
+     * @return list<ReflectionAttribute<A>>
+     *
+     * @pure
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array {}
+
+    #[Mago\AvailableSince(80100)]
+    public function isReadOnly(): bool {}
+
+    #[Mago\AvailableSince(80400)]
+    public function getRawValue(object $object): mixed {}
+
+    #[Mago\AvailableSince(80400)]
+    public function setRawValue(object $object, mixed $value): void {}
+
+    #[Mago\AvailableSince(80400)]
+    public function isAbstract(): bool {}
+
+    #[Mago\AvailableSince(80400)]
+    public function isVirtual(): bool {}
+
+    #[Mago\AvailableSince(80400)]
+    public function getSettableType(): ?ReflectionType {}
+
+    #[Mago\AvailableSince(80400)]
+    public function hasHooks(): bool {}
+
+    #[Mago\AvailableSince(80400)]
+    public function getHooks(): array {}
+
+    #[Mago\AvailableSince(80400)]
+    public function hasHook(PropertyHookType $type): bool {}
+
+    #[Mago\AvailableSince(80400)]
+    public function getHook(PropertyHookType $type): ?ReflectionMethod {}
+
+    #[Mago\AvailableSince(80400)]
+    public function isPrivateSet(): bool {}
+
+    #[Mago\AvailableSince(80400)]
+    public function isProtectedSet(): bool {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80400)]
+    public function setRawValueWithoutLazyInitialization(object $object, mixed $value): void {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80400)]
+    public function skipLazyInitialization(object $object): void {}
+
+    public function isDynamic(): bool {}
+
+    public function isFinal(): bool {}
+
+    /**
+     * @param T $object
+     */
+    public function isLazy(object $object): bool {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80600)]
+    public function isReadable(?object $object = null): bool {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80600)]
+    public function isWriteable(?object $object = null): bool {}
+}
+
+final class ReflectionReference
+{
+    private function __construct() {}
+
+    public static function fromArrayElement(array $array, string|int $key): ?ReflectionReference {}
+
+    /**
+     * @pure
+     */
+    public function getId(): string {}
+
+    private function __clone(): void {}
+}
+
+#[Mago\AvailableSince(80500)]
+final class ReflectionConstant implements Reflector
+{
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    public function __construct(string $name) {}
+
+    public function getName(): string {}
+
+    public function getNamespaceName(): string {}
+
+    public function getShortName(): string {}
+
+    public function getValue(): mixed {}
+
+    public function isDeprecated(): bool {}
+
+    public function __toString(): string {}
+}
+
+class ReflectionParameter implements Reflector
+{
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    /**
+     * @param string|array{0: class-string, 1: string}|object $function
+     *
+     * @throws ReflectionException
+     */
+    public function __construct(string|array|object $function, string|int $param) {}
+
+    public function __toString(): string {}
+
+    /**
+     * @pure
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function isPassedByReference(): bool {}
+
+    /**
+     * @pure
+     */
+    public function canBePassedByValue(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getDeclaringFunction(): ReflectionFunctionAbstract {}
+
+    /**
+     * @pure
+     */
+    public function getDeclaringClass(): ?ReflectionClass {}
+
+    /**
+     * @pure
+     */
+    #[Deprecated(
+        since: '8.0',
+        reason: 'Use ReflectionParameter::getType() and the ReflectionType APIs should be used instead.',
+    )]
+    public function getClass(): ?ReflectionClass {}
+
+    /**
+     * @pure
+     */
+    public function hasType(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getType(): ReflectionNamedType|ReflectionUnionType|ReflectionIntersectionType|null {}
+
+    /**
+     * @pure
+     */
+    #[Deprecated(
+        since: '8.0',
+        reason: 'Use ReflectionParameter::getType() and the ReflectionType APIs should be used instead.',
+    )]
+    public function isArray(): bool {}
+
+    /**
+     * @pure
+     */
+    #[Deprecated(
+        since: '8.0',
+        reason: 'Use ReflectionParameter::getType() and the ReflectionType APIs should be used instead.',
+    )]
+    public function isCallable(): bool {}
+
+    /**
+     * @pure
+     */
+    public function allowsNull(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getPosition(): int {}
+
+    /**
+     * @pure
+     */
+    public function isOptional(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isDefaultValueAvailable(): bool {}
+
+    /**
+     * @throws ReflectionException
+     *
+     * @pure
+     */
+    public function getDefaultValue(): mixed {}
+
+    /**
+     * @pure
+     */
+    public function isDefaultValueConstant(): bool {}
+
+    /**
+     * @throws ReflectionException
+     *
+     * @pure
+     */
+    public function getDefaultValueConstantName(): ?string {}
+
+    /**
+     * @pure
+     */
+    public function isVariadic(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isPromoted(): bool {}
+
+    /**
+     * @template A
+     *
+     * @param class-string<A>|null $name
+     * @param int $flags
+     *
+     * @return list<ReflectionAttribute<A>>
+     *
+     * @pure
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array {}
+
+    private function __clone(): void {}
+}
+
+abstract class ReflectionFunctionAbstract implements Reflector
+{
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    private function __clone(): void {}
+
+    public function inNamespace(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isClosure(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isDeprecated(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isInternal(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isUserDefined(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isGenerator(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isVariadic(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getClosureThis(): ?object {}
+
+    /**
+     * @pure
+     */
+    public function getClosureScopeClass(): ?ReflectionClass {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80100)]
+    public function getClosureCalledClass(): ?ReflectionClass {}
+
+    /**
+     * @pure
+     */
+    public function getDocComment(): string|false {}
+
+    /**
+     * @pure
+     */
+    public function getEndLine(): int|false {}
+
+    /**
+     * @pure
+     */
+    public function getExtension(): ?ReflectionExtension {}
+
+    /**
+     * @pure
+     */
+    public function getExtensionName(): string|false {}
+
+    /**
+     * @pure
+     */
+    public function getFileName(): string|false {}
+
+    /**
+     * @pure
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getNamespaceName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getNumberOfParameters(): int {}
+
+    /**
+     * @pure
+     */
+    public function getNumberOfRequiredParameters(): int {}
+
+    /**
+     * @return ReflectionParameter[]
+     *
+     * @pure
+     */
+    public function getParameters(): array {}
+
+    /**
+     * @pure
+     */
+    public function getReturnType(): ReflectionNamedType|ReflectionUnionType|ReflectionIntersectionType|null {}
+
+    /**
+     * @pure
+     */
+    public function getShortName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getStartLine(): int|false {}
+
+    /**
+     * @pure
+     */
+    public function getStaticVariables(): array {}
+
+    /**
+     * @pure
+     */
+    public function returnsReference(): bool {}
+
+    /**
+     * @pure
+     */
+    public function hasReturnType(): bool {}
+
+    /**
+     * @template A
+     *
+     * @param class-string<A>|null $name
+     *
+     * @return list<ReflectionAttribute<A>>
+     *
+     * @pure
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80100)]
+    public function getClosureUsedVariables(): array {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80100)]
+    public function hasTentativeReturnType(): bool {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80100)]
+    public function getTentativeReturnType(): ?ReflectionType {}
+
+    /**
+     * @pure
+     */
+    public function isStatic(): bool {}
+
+    public function __toString(): string {}
+}
+
+class ReflectionFunction extends ReflectionFunctionAbstract
+{
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    public const IS_DEPRECATED = 2048;
+
+    /**
+     * @throws ReflectionException
+     */
+    public function __construct(Closure|string $function) {}
+
+    public function __toString(): string {}
+
+    /**
+     * @pure
+     */
+    #[\Deprecated(since: '8.0', reason: 'ReflectionFunction can no longer be constructed for disabled functions.')]
+    public function isDisabled(): bool {}
+
+    public function invoke(mixed ...$args): mixed {}
+
+    public function invokeArgs(array $args): mixed {}
+
+    /**
+     * @return Closure|null
+     *
+     * @pure
+     */
+    public function getClosure(): Closure {}
+
+    /**
+     * @pure
+     */
+    public function isAnonymous(): bool {}
+}
+
+/**
+ * @template T of object = object
+ */
+class ReflectionMethod extends ReflectionFunctionAbstract
+{
+    /**
+     * @readonly
+     */
+    public string $name;
+
+    /**
+     * @var class-string<T>
+     *
+     * @readonly
+     */
+    public string $class;
+
+    public const IS_STATIC = 16;
+
+    public const IS_PUBLIC = 1;
+
+    public const IS_PROTECTED = 2;
+
+    public const IS_PRIVATE = 4;
+
+    public const IS_ABSTRACT = 64;
+
+    public const IS_FINAL = 32;
+
+    /**
+     * @param class-string<T>|T $objectOrMethod
+     *
+     * @throws ReflectionException
+     */
+    public function __construct(object|string $objectOrMethod, ?string $method = null) {}
+
+    public function __toString(): string {}
+
+    /**
+     * @pure
+     */
+    public function isPublic(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isPrivate(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isProtected(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isAbstract(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isFinal(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isStatic(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isConstructor(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isDestructor(): bool {}
+
+    /**
+     * @param T|null $object
+     *
+     * @throws ValueError
+     * @throws ReflectionException
+     */
+    public function getClosure(?object $object = null): Closure {}
+
+    /**
+     * @pure
+     */
+    public function getModifiers(): int {}
+
+    /**
+     * @param T|null $object
+     *
+     * @throws ReflectionException
+     */
+    public function invoke($object, ...$args) {}
+
+    /**
+     * @param T|null $object
+     *
+     * @throws ReflectionException
+     */
+    public function invokeArgs(?object $object, array $args): mixed {}
+
+    /**
+     * @pure
+     */
+    public function getDeclaringClass(): ReflectionClass {}
+
+    /**
+     * @throws ReflectionException
+     *
+     * @pure
+     */
+    public function getPrototype(): ReflectionMethod {}
+
+    /**
+     * @pure
+     */
+    #[Deprecated(since: '8.5', message: 'as it has no effect')]
+    public function setAccessible(bool $accessible): void {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80100)]
+    public function hasPrototype(): bool {}
+
+    #[Mago\AvailableSince(80300)]
+    public static function createFromMethodName(string $method): static {}
+}
+
+/**
+ * @template T of object = object
+ */
+class ReflectionClass implements Reflector
+{
+    /**
+     * @var class-string<T>
+     */
+    public string $name;
+
+    public const IS_IMPLICIT_ABSTRACT = 16;
+
+    public const IS_EXPLICIT_ABSTRACT = 64;
+
+    public const IS_FINAL = 32;
+
+    public const IS_READONLY = 65536;
+
+    public const int SKIP_INITIALIZATION_ON_SERIALIZE = 0;
+
+    public const int SKIP_DESTRUCTOR = 0;
+
+    /**
+     * @param class-string<T>|T $objectOrClass
+     *
+     * @throws ReflectionException
+     */
+    public function __construct(object|string $objectOrClass) {}
+
+    public function __toString(): string {}
+
+    /**
+     * @pure
+     *
+     * @return class-string<T>
+     */
+    public function getName(): string {}
+
+    /**
+     * @pure
+     */
+    public function isInternal(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isUserDefined(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isInstantiable(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isCloneable(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getFileName(): string|false {}
+
+    /**
+     * @pure
+     */
+    public function getStartLine(): int|false {}
+
+    /**
+     * @pure
+     */
+    public function getEndLine(): int|false {}
+
+    /**
+     * @pure
+     */
+    public function getDocComment(): string|false {}
+
+    /**
+     * @pure
+     */
+    public function getConstructor(): ?ReflectionMethod {}
+
+    /**
+     * @pure
+     */
+    public function hasMethod(string $name): bool {}
+
+    /**
+     * @throws ReflectionException
+     *
+     * @return ReflectionMethod<T>
+     *
+     * @pure
+     */
+    public function getMethod(string $name): ReflectionMethod {}
+
+    /**
+     * @return list<ReflectionMethod<T>>
+     *
+     * @pure
+     */
+    public function getMethods(?int $filter = null): array {}
+
+    /**
+     * @pure
+     */
+    public function hasProperty(string $name): bool {}
+
+    /**
+     * @return ReflectionProperty<T>
+     *
+     * @throws ReflectionException
+     *
+     * @pure
+     */
+    public function getProperty(string $name): ReflectionProperty {}
+
+    /**
+     * @return list<ReflectionProperty<T>>
+     *
+     * @pure
+     */
+    public function getProperties(?int $filter = null): array {}
+
+    /**
+     * @return false|ReflectionClassConstant<T>
+     *
+     * @pure
+     */
+    public function getReflectionConstant(string $name): ReflectionClassConstant|false {}
+
+    /**
+     * @return list<ReflectionClassConstant<T>>
+     *
+     * @pure
+     */
+    public function getReflectionConstants(?int $filter = null): array {}
+
+    /**
+     * @pure
+     */
+    public function hasConstant(string $name): bool {}
+
+    /**
+     * @return array<string, mixed>
+     *
+     * @pure
+     */
+    public function getConstants(?int $filter = null): array {}
+
+    /**
+     * @pure
+     */
+    public function getConstant(string $name): mixed {}
+
+    /**
+     * @return array<interface-string, ReflectionClass>
+     *
+     * @pure
+     */
+    public function getInterfaces(): array {}
+
+    /**
+     * @return list<interface-string>
+     */
+    public function getInterfaceNames(): array {}
+
+    /**
+     * @pure
+     */
+    public function isAnonymous(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isInterface(): bool {}
+
+    /**
+     * @return array<trait-string, ReflectionClass>
+     *
+     * @pure
+     */
+    public function getTraits(): array {}
+
+    /**
+     * @return list<trait-string>
+     *
+     * @pure
+     */
+    public function getTraitNames(): array {}
+
+    /**
+     * @return array<string, string>
+     *
+     * @pure
+     */
+    public function getTraitAliases(): array {}
+
+    /**
+     * @pure
+     */
+    public function isTrait(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isAbstract(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isFinal(): bool {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80200)]
+    public function isReadOnly(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getModifiers(): int {}
+
+    /**
+     * @pure
+     *
+     * @assert-if-true T $object
+     */
+    public function isInstance(object $object): bool {}
+
+    /**
+     * @return T
+     *
+     * @throws ReflectionException
+     */
+    public function newInstance(...$args) {}
+
+    /**
+     * @return T
+     *
+     * @throws ReflectionException
+     */
+    public function newInstanceWithoutConstructor(): object {}
+
+    /**
+     * @return T|null
+     *
+     * @throws ReflectionException
+     */
+    public function newInstanceArgs(array $args = []): ?object {}
+
+    /**
+     * @pure
+     */
+    public function getParentClass(): ReflectionClass|false {}
+
+    /**
+     * @pure
+     */
+    public function isSubclassOf(ReflectionClass|string $class): bool {}
+
+    /**
+     * @pure
+     */
+    public function getStaticProperties(): array {}
+
+    /**
+     * @pure
+     */
+    public function getStaticPropertyValue(string $name, mixed $default): mixed {}
+
+    public function setStaticPropertyValue(string $name, mixed $value): void {}
+
+    /**
+     * @pure
+     */
+    public function getDefaultProperties(): array {}
+
+    /**
+     * @pure
+     */
+    public function isIterateable(): bool {}
+
+    /**
+     * @pure
+     */
+    public function isIterable(): bool {}
+
+    /**
+     * @pure
+     */
+    public function implementsInterface(ReflectionClass|string $interface): bool {}
+
+    /**
+     * @pure
+     */
+    public function getExtension(): ?ReflectionExtension {}
+
+    /**
+     * @pure
+     */
+    public function getExtensionName(): string|false {}
+
+    /**
+     * @pure
+     */
+    public function inNamespace(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getNamespaceName(): string {}
+
+    /**
+     * @pure
+     */
+    public function getShortName(): string {}
+
+    /**
+     * @template A
+     *
+     * @param class-string<A>|null $name
+     *
+     * @return list<ReflectionAttribute<A>>
+     *
+     * @pure
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array {}
+
+    private function __clone(): void {}
+
+    /**
+     * @pure
+     */
+    #[Mago\AvailableSince(80100)]
+    public function isEnum(): bool {}
+
+    #[Mago\AvailableSince(80400)]
+    public function newLazyGhost(callable $initializer, int $options = 0): object {}
+
+    /**
+     * @return T
+     */
+    #[Mago\AvailableSince(80400)]
+    public function newLazyProxy(callable $factory, int $options = 0): object {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80400)]
+    public function resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80400)]
+    public function resetAsLazyProxy(object $object, callable $factory, int $options = 0): void {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80400)]
+    public function initializeLazyObject(object $object): object {}
+
+    /**
+     * @param T $object
+     *
+     * @pure
+     */
+    #[Mago\AvailableSince(80400)]
+    public function isUninitializedLazyObject(object $object): bool {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80400)]
+    public function markLazyObjectAsInitialized(object $object): object {}
+
+    /**
+     * @param T $object
+     */
+    #[Mago\AvailableSince(80400)]
+    public function getLazyInitializer(object $object): ?callable {}
+}
+
+/**
+ * @template T of object = object
+ *
+ * @extends ReflectionClass<T>
+ */
+class ReflectionObject extends ReflectionClass
+{
+    /**
+     * @param T $object
+     */
+    public function __construct(object $object) {}
+}
+
+/**
+ * @extends ReflectionClass<UnitEnum|BackedEnum>
+ */
+#[Mago\AvailableSince(80100)]
+class ReflectionEnum extends ReflectionClass
+{
+    public function hasCase(string $name): bool {}
+
+    /**
+     * @return list<ReflectionEnumUnitCase|ReflectionEnumBackedCase>
+     */
+    public function getCases(): array {}
+
+    /**
+     * @throws ReflectionException
+     */
+    public function getCase(string $name): static {}
+
+    /**
+     * @pure
+     */
+    public function isBacked(): bool {}
+
+    /**
+     * @pure
+     */
+    public function getBackingType(): ?ReflectionNamedType {}
+}
+
+/**
+ * @extends ReflectionClassConstant<UnitEnum>
+ */
+#[Mago\AvailableSince(80100)]
+class ReflectionEnumUnitCase extends ReflectionClassConstant
+{
+    /**
+     * @pure
+     */
+    public function getValue(): UnitEnum {}
+
+    /**
+     * @pure
+     */
+    public function getEnum(): ReflectionEnum {}
+}
+
+/**
+ * @extends ReflectionEnumUnitCase<BackedEnum>
+ */
+#[Mago\AvailableSince(80100)]
+class ReflectionEnumBackedCase extends ReflectionEnumUnitCase
+{
+    /**
+     * @pure
+     */
+    public function getBackingValue(): int|string {}
+}

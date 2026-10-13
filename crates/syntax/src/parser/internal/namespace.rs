@@ -1,0 +1,72 @@
+use crate::T;
+use crate::cst::cst::Namespace;
+use crate::cst::cst::NamespaceBody;
+use crate::cst::cst::NamespaceImplicitBody;
+use crate::cst::sequence::Sequence;
+use crate::error::ParseError;
+use crate::parser::Parser;
+use mago_allocator::prelude::*;
+
+impl<'arena, A> Parser<'_, 'arena, A>
+where
+    A: Arena,
+{
+    pub(crate) fn parse_namespace(&mut self) -> Result<Namespace<'arena>, ParseError> {
+        let namespace = self.expect_keyword(T!["namespace"])?;
+        let name = match self.stream.peek_kind(0)? {
+            Some(T![";" | "?>" | "{"]) => None,
+            _ if self.dialect.is_sharp() => Some(self.parse_dotted_identifier()?),
+            _ => Some(self.parse_identifier()?),
+        };
+        let body = self.parse_namespace_body()?;
+
+        Ok(Namespace { namespace, name, body })
+    }
+
+    pub(crate) fn parse_namespace_body(&mut self) -> Result<NamespaceBody<'arena>, ParseError> {
+        match self.stream.peek_kind(0)? {
+            Some(T!["{"]) => Ok(NamespaceBody::BraceDelimited(self.parse_block()?)),
+            _ => Ok(NamespaceBody::Implicit(self.parse_namespace_implicit_body()?)),
+        }
+    }
+
+    pub(crate) fn parse_namespace_implicit_body(&mut self) -> Result<NamespaceImplicitBody<'arena>, ParseError> {
+        let terminator = self.parse_terminator()?;
+        let mut statements = self.new_vec();
+        loop {
+            let next = self.stream.peek_kind(0)?;
+            if matches!(next, None | Some(T!["namespace"])) {
+                break;
+            }
+
+            let position_before = self.stream.current_position();
+            let errors_before = self.errors.len();
+            match self.parse_statement() {
+                Ok(statement) => {
+                    // The namespace is the first level of each of its statements.
+                    if self.accepts_nesting(&statement, 1, errors_before) {
+                        statements.push(statement);
+                    }
+                }
+                Err(err) => {
+                    self.errors.push(err);
+                    self.accepts_nesting_errors(errors_before);
+                }
+            }
+            // Forward-progress guard: prevent an infinite loop.
+            if self.stream.current_position() == position_before {
+                if let Ok(Some(token)) = self.stream.lookahead(0) {
+                    if token.kind == T!["namespace"] {
+                        break;
+                    }
+                    self.errors.push(self.stream.unexpected(Some(token), &[]));
+                    let _ = self.stream.consume();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        Ok(NamespaceImplicitBody { terminator, statements: Sequence::new(statements) })
+    }
+}

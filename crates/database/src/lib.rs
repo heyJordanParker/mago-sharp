@@ -1,0 +1,673 @@
+#![allow(clippy::exhaustive_enums)]
+
+//! High-performance file database for PHP projects.
+//!
+//! This crate provides an efficient in-memory database for managing collections of PHP source files.
+//! It offers two complementary database types optimized for different access patterns:
+//!
+//! - [`Database`]: Mutable builder optimized for modifications (add, update, delete)
+//! - [`ReadDatabase`]: Immutable snapshot optimized for high-performance reads
+//!
+//! # Architecture
+//!
+//! The database uses a two-phase approach:
+//!
+//! 1. **Build Phase**: Use [`Database`] to load files, make modifications, and track changes
+//! 2. **Query Phase**: Convert to [`ReadDatabase`] via [`Database::read_only`] for fast lookups
+//!
+//! # Key Features
+//!
+//! - **Fast Lookups**: O(1) average-time access by ID, name, or filesystem path
+//! - **Change Tracking**: Record and batch apply file modifications via [`ChangeLog`]
+//! - **Deterministic Iteration**: [`ReadDatabase`] guarantees consistent iteration order
+//! - **Parallel Operations**: Concurrent file I/O and processing support
+//! - **Type Safety**: Strong typing with stable [`FileId`] handles
+//!
+//! # Common Workflow
+//!
+//! ## Loading Files
+//!
+//! Use [`loader::DatabaseLoader`] to scan a project directory:
+//!
+//! The loader handles file discovery, exclusion patterns, and parallel loading.
+//!
+//! ## Querying Files
+//!
+//! Both database types implement [`DatabaseReader`] for uniform access:
+//!
+//! ## Modifying Files
+//!
+//! Use [`ChangeLog`] to batch modifications:
+//!
+//! Changes can be applied to the database and optionally written to disk in parallel.
+//!
+//! # Performance Characteristics
+//!
+//! ## Database (Mutable)
+//!
+//! - Add/Update/Delete: O(1) average
+//! - Lookup by ID/name: O(1) average
+//! - Iteration: Unordered
+//! - Memory: ~2x file count (maps for bidirectional lookup)
+//!
+//! ## `ReadDatabase` (Immutable)
+//!
+//! - Creation: O(n log n) for sorting
+//! - Lookup by ID/name/path: O(1) average
+//! - Iteration: Deterministic, sorted by `FileId`
+//! - Memory: ~3x file count (vector + 3 index maps)
+//!
+//! # Thread Safety
+//!
+//! [`Database`] is not thread-safe and should be used from a single thread during construction.
+//! [`ReadDatabase`] can be freely shared across threads for concurrent read access.
+
+use std::borrow::Cow;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use foldhash::HashMap;
+use foldhash::HashMapExt;
+use rayon::iter::IntoParallelIterator;
+use rayon::iter::ParallelIterator;
+
+use crate::change::Change;
+use crate::change::ChangeLog;
+use crate::error::DatabaseError;
+use crate::exclusion::Exclusion;
+use crate::file::File;
+use crate::file::FileId;
+use crate::file::FileType;
+use crate::file::line_starts;
+use crate::operation::FilesystemOperation;
+
+mod utils;
+
+pub mod change;
+pub mod error;
+pub mod exclusion;
+pub mod file;
+#[cfg(feature = "loader")]
+pub mod loader;
+pub mod matcher;
+#[cfg(feature = "loader")]
+pub mod membership;
+#[cfg(feature = "watcher")]
+pub mod watcher;
+
+mod operation;
+
+/// Configuration for database loading and watching.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DatabaseConfiguration<'config> {
+    pub workspace: Cow<'config, Path>,
+    /// Paths or glob patterns for source files.
+    /// Can be directory paths (e.g., "src") or glob patterns (e.g., "src/**/*.php")
+    pub paths: Vec<Cow<'config, [u8]>>,
+    /// Paths or glob patterns for included files.
+    /// Can be directory paths (e.g., "vendor") or glob patterns (e.g., "vendor/**/*.php")
+    pub includes: Vec<Cow<'config, [u8]>>,
+    pub patches: Vec<Cow<'config, [u8]>>,
+    pub excludes: Vec<Exclusion<'config>>,
+    pub extensions: Vec<Cow<'config, [u8]>>,
+    /// Settings for glob pattern matching behavior.
+    pub glob: GlobSettings,
+}
+
+/// Settings for glob pattern matching behavior.
+///
+/// All defaults match the `globset` crate defaults for backwards compatibility.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct GlobSettings {
+    /// Match patterns case-insensitively.
+    ///
+    /// Default: `false`.
+    pub case_insensitive: bool,
+    /// When `true`, a single `*` does not match path separators (`/`).
+    /// This makes `src/*/Test` match only `src/foo/Test`, not `src/foo/bar/Test`.
+    /// Use `**` for recursive matching.
+    ///
+    /// Default: `false`.
+    pub literal_separator: bool,
+    /// Whether `\` escapes special characters in patterns.
+    ///
+    /// Default: `true`.
+    pub backslash_escape: bool,
+    /// Whether an empty case in alternates is allowed (e.g., `{,a}` matches `""` and `"a"`).
+    ///
+    /// Default: `false`.
+    pub empty_alternates: bool,
+}
+
+impl Default for GlobSettings {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            case_insensitive: false,
+            literal_separator: false,
+            backslash_escape: !std::path::is_separator('\\'),
+            empty_alternates: false,
+        }
+    }
+}
+
+impl<'config> DatabaseConfiguration<'config> {
+    #[inline]
+    #[must_use]
+    pub fn new(
+        workspace: &'config Path,
+        paths: Vec<&'config [u8]>,
+        includes: Vec<&'config [u8]>,
+        excludes: Vec<Exclusion<'config>>,
+        extensions: Vec<&'config [u8]>,
+    ) -> Self {
+        let paths = paths.into_iter().map(Cow::Borrowed).collect();
+        let includes = includes.into_iter().map(Cow::Borrowed).collect();
+
+        let excludes = excludes
+            .into_iter()
+            .filter_map(|exclusion| match exclusion {
+                Exclusion::Path(p) => Some(if p.is_absolute() {
+                    Exclusion::Path(p)
+                } else {
+                    workspace.join(p).canonicalize().ok().map(Cow::Owned).map(Exclusion::Path)?
+                }),
+                Exclusion::Pattern(pat) => Some(Exclusion::Pattern(pat)),
+            })
+            .collect();
+
+        let extensions = extensions.into_iter().map(Cow::Borrowed).collect();
+
+        Self {
+            workspace: Cow::Borrowed(workspace),
+            paths,
+            includes,
+            patches: Vec::new(),
+            excludes,
+            extensions,
+            glob: GlobSettings::default(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn into_static(self) -> DatabaseConfiguration<'static> {
+        DatabaseConfiguration {
+            workspace: Cow::Owned(self.workspace.into_owned()),
+            paths: self.paths.into_iter().map(|s| Cow::Owned(s.into_owned())).collect(),
+            includes: self.includes.into_iter().map(|s| Cow::Owned(s.into_owned())).collect(),
+            patches: self.patches.into_iter().map(|s| Cow::Owned(s.into_owned())).collect(),
+            excludes: self
+                .excludes
+                .into_iter()
+                .map(|e| match e {
+                    Exclusion::Path(p) => Exclusion::Path(Cow::Owned(p.into_owned())),
+                    Exclusion::Pattern(pat) => Exclusion::Pattern(Cow::Owned(pat.into_owned())),
+                })
+                .collect(),
+            extensions: self.extensions.into_iter().map(|s| Cow::Owned(s.into_owned())).collect(),
+            glob: self.glob,
+        }
+    }
+}
+
+/// Mutable database for managing project files with add/update/delete operations.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[allow(clippy::field_scoped_visibility_modifiers)]
+pub struct Database<'config> {
+    files: HashMap<Cow<'static, [u8]>, Arc<File>>,
+    id_to_name: HashMap<FileId, Cow<'static, [u8]>>,
+    #[cfg_attr(not(feature = "loader"), allow(dead_code, reason = "the loader and the watcher read it"))]
+    pub(crate) configuration: DatabaseConfiguration<'config>,
+}
+
+/// Immutable, read-optimized snapshot of the database.
+#[derive(Debug)]
+pub struct ReadDatabase {
+    files: Vec<Arc<File>>,
+    id_to_index: HashMap<FileId, usize>,
+    name_to_index: HashMap<Cow<'static, [u8]>, usize>,
+    path_to_index: HashMap<PathBuf, usize>,
+}
+
+impl<'config> Database<'config> {
+    #[inline]
+    #[must_use]
+    pub fn new(configuration: DatabaseConfiguration<'config>) -> Self {
+        Self { files: HashMap::default(), id_to_name: HashMap::default(), configuration }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn single(file: File, configuration: DatabaseConfiguration<'config>) -> Self {
+        let mut db = Self::new(configuration);
+        db.add(file);
+        db
+    }
+
+    /// Converts the database into one that owns its configuration.
+    #[inline]
+    #[must_use]
+    pub fn into_static(self) -> Database<'static> {
+        Database { files: self.files, id_to_name: self.id_to_name, configuration: self.configuration.into_static() }
+    }
+
+    /// Reserves capacity for at least `additional` more files.
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.files.reserve(additional);
+        self.id_to_name.reserve(additional);
+    }
+
+    /// Adds files from a base database without replacing files already present in this database.
+    ///
+    /// This is useful when project files and a built-in prelude are loaded independently: project
+    /// files retain precedence while missing built-in files are moved into the project database.
+    #[inline]
+    pub fn merge_base(&mut self, base: Database<'_>) {
+        let Database { files, mut id_to_name, configuration: _ } = base;
+        self.reserve(files.len());
+
+        for (name, file) in files {
+            if self.files.contains_key(name.as_ref()) {
+                continue;
+            }
+
+            let id = file.id;
+            let id_name = id_to_name.remove(&id).unwrap_or_else(|| name.clone());
+            self.files.insert(name, file);
+            self.id_to_name.insert(id, id_name);
+        }
+    }
+
+    #[inline]
+    pub fn add(&mut self, file: File) -> FileId {
+        let name = file.name.clone();
+        let id = file.id;
+
+        if let Some(old_file) = self.files.insert(name.clone(), Arc::new(file)) {
+            self.id_to_name.remove(&old_file.id);
+        }
+
+        self.id_to_name.insert(id, name);
+
+        id
+    }
+
+    /// Updates a file's content using its stable `FileId`.
+    ///
+    /// This recalculates derived data like file size, line endings, and `FileRevision`.
+    /// If another `ReadDatabase` snapshot holds a reference to the file (preventing in-place
+    /// mutation), a new `Arc<File>` is created with the updated contents.
+    ///
+    /// Returns `true` if a file with the given ID was found and updated.
+    #[inline]
+    pub fn update(&mut self, id: FileId, new_contents: Cow<'static, [u8]>) -> bool {
+        let Some(name) = self.id_to_name.get(&id) else {
+            return false;
+        };
+
+        let Some(arc) = self.files.get_mut(name) else {
+            return false;
+        };
+
+        if let Some(file) = Arc::get_mut(arc) {
+            file.contents = new_contents;
+            file.size = file.contents.len() as u32;
+            file.lines = line_starts(file.contents.as_ref());
+        } else {
+            // other Arc clones exist (e.g., from a ReadDatabase snapshot).
+            // Create a new File with updated contents and replace the Arc.
+            let old = &**arc;
+            let mut file = File::new(old.name.clone(), old.file_type, old.path.clone(), new_contents);
+            file.is_standard_library = old.is_standard_library;
+            *arc = Arc::new(file);
+        }
+
+        true
+    }
+
+    /// Deletes a file from the database using its stable `FileId`.
+    ///
+    /// Returns `true` if a file with the given ID was found and removed.
+    #[inline]
+    pub fn delete(&mut self, id: FileId) -> bool {
+        if let Some(name) = self.id_to_name.remove(&id) { self.files.remove(&name).is_some() } else { false }
+    }
+
+    /// Commits a [`ChangeLog`], applying all its recorded operations to the database
+    /// and optionally writing them to the filesystem.
+    ///
+    /// # Arguments
+    ///
+    /// * `change_log`: The log of changes to apply.
+    /// * `write_to_disk`: If `true`, changes for files that have a filesystem
+    ///   path will be written to disk in parallel.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DatabaseError`] if the log cannot be consumed or if any
+    /// filesystem operation fails.
+    #[inline]
+    pub fn commit(&mut self, change_log: ChangeLog, write_to_disk: bool) -> Result<(), DatabaseError> {
+        let changes = change_log.into_inner()?;
+        let mut fs_operations = Vec::new();
+
+        for change in changes {
+            match change {
+                Change::Add(file) => {
+                    if write_to_disk && let Some(path) = &file.path {
+                        fs_operations.push(FilesystemOperation::Write(path.clone(), file.contents.clone()));
+                    }
+
+                    self.add(file);
+                }
+                Change::Update(id, contents) => {
+                    if write_to_disk
+                        && let Ok(file) = self.get(&id)
+                        && let Some(path) = &file.path
+                    {
+                        fs_operations.push(FilesystemOperation::Write(path.clone(), contents.clone()));
+                    }
+
+                    self.update(id, contents);
+                }
+                Change::Delete(id) => {
+                    if write_to_disk
+                        && let Ok(file) = self.get(&id)
+                        && let Some(path) = &file.path
+                    {
+                        fs_operations.push(FilesystemOperation::Delete(path.clone()));
+                    }
+
+                    self.delete(id);
+                }
+            }
+        }
+
+        if write_to_disk {
+            fs_operations.into_par_iter().try_for_each(|op| -> Result<(), DatabaseError> { op.execute() })?;
+        }
+
+        Ok(())
+    }
+
+    /// Creates an independent, immutable snapshot of the database.
+    ///
+    /// This is a potentially expensive one-time operation as it **clones** all file
+    /// data. The resulting [`ReadDatabase`] is highly optimized for fast reads and
+    /// guarantees a deterministic iteration order. The original `Database` is not
+    /// consumed and can continue to be used.
+    #[inline]
+    #[must_use]
+    pub fn read_only(&self) -> ReadDatabase {
+        let mut files_vec: Vec<Arc<File>> = self.files.values().cloned().collect();
+        files_vec.sort_unstable_by_key(|f| f.id);
+
+        let mut id_to_index = HashMap::with_capacity(files_vec.len());
+        let mut name_to_index = HashMap::with_capacity(files_vec.len());
+        let mut path_to_index = HashMap::with_capacity(files_vec.len());
+
+        for (index, file) in files_vec.iter().enumerate() {
+            id_to_index.insert(file.id, index);
+            name_to_index.insert(file.name.clone(), index);
+            if let Some(path) = &file.path {
+                path_to_index.insert(path.clone(), index);
+            }
+        }
+
+        ReadDatabase { files: files_vec, id_to_index, name_to_index, path_to_index }
+    }
+}
+
+impl ReadDatabase {
+    #[inline]
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            files: Vec::new(),
+            id_to_index: HashMap::new(),
+            name_to_index: HashMap::new(),
+            path_to_index: HashMap::new(),
+        }
+    }
+
+    /// Creates a new `ReadDatabase` containing only a single file.
+    ///
+    /// This is a convenience constructor for situations, such as testing or
+    /// single-file tools, where an operation requires a [`DatabaseReader`]
+    /// implementation but only needs to be aware of one file.
+    ///
+    /// # Arguments
+    ///
+    /// * `file`: The single `File` to include in the database.
+    #[inline]
+    #[must_use]
+    pub fn single(file: File) -> Self {
+        let mut id_to_index = HashMap::with_capacity(1);
+        let mut name_to_index = HashMap::with_capacity(1);
+        let mut path_to_index = HashMap::with_capacity(1);
+
+        id_to_index.insert(file.id, 0);
+        name_to_index.insert(file.name.clone(), 0);
+        if let Some(path) = &file.path {
+            path_to_index.insert(path.clone(), 0);
+        }
+
+        Self { files: vec![Arc::new(file)], id_to_index, name_to_index, path_to_index }
+    }
+}
+
+/// A universal interface for reading data from any database implementation.
+///
+/// This trait provides a common API for querying file data, abstracting over
+/// whether the underlying source is the mutable [`Database`] or the read-optimized
+/// [`ReadDatabase`]. This allows for writing generic code that can operate on either.
+pub trait DatabaseReader {
+    /// Retrieves a file's stable ID using its logical name.
+    fn get_id(&self, name: &[u8]) -> Option<FileId>;
+
+    /// Retrieves a reference to a file using its stable `FileId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DatabaseError::FileNotFound` if no file with the given ID exists.
+    fn get(&self, id: &FileId) -> Result<Arc<File>, DatabaseError>;
+
+    /// Retrieves a reference to a file using its stable `FileId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DatabaseError::FileNotFound` if no file with the given ID exists.
+    fn get_ref(&self, id: &FileId) -> Result<&File, DatabaseError>;
+
+    /// Retrieves a reference to a file using its logical name.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DatabaseError::FileNotFound` if no file with the given name exists.
+    fn get_by_name(&self, name: &[u8]) -> Result<Arc<File>, DatabaseError>;
+
+    /// Retrieves a reference to a file by its absolute filesystem path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DatabaseError::FileNotFound` if no file with the given path exists.
+    fn get_by_path(&self, path: &Path) -> Result<Arc<File>, DatabaseError>;
+
+    /// Returns an iterator over all files in the database.
+    ///
+    /// The order is not guaranteed for `Database`, but is sorted by `FileId`
+    /// for `ReadDatabase`, providing deterministic iteration.
+    fn files(&self) -> impl Iterator<Item = Arc<File>>;
+
+    /// Returns an iterator over all files of a specific `FileType`.
+    #[inline]
+    fn files_with_type(&self, file_type: FileType) -> impl Iterator<Item = Arc<File>> {
+        self.files().filter(move |file| file.file_type == file_type)
+    }
+
+    /// Returns an iterator over all files that do not match a specific `FileType`.
+    #[inline]
+    fn files_without_type(&self, file_type: FileType) -> impl Iterator<Item = Arc<File>> {
+        self.files().filter(move |file| file.file_type != file_type)
+    }
+
+    /// Returns an iterator over the stable IDs of all files in the database.
+    #[inline]
+    fn file_ids(&self) -> impl Iterator<Item = FileId> {
+        self.files().map(|file| file.id)
+    }
+
+    /// Returns an iterator over the stable IDs of all files of a specific `FileType`.
+    #[inline]
+    fn file_ids_with_type(&self, file_type: FileType) -> impl Iterator<Item = FileId> {
+        self.files_with_type(file_type).map(|file| file.id)
+    }
+
+    /// Returns an iterator over the stable IDs of all files that do not match a specific `FileType`.
+    #[inline]
+    fn file_ids_without_type(&self, file_type: FileType) -> impl Iterator<Item = FileId> {
+        self.files_without_type(file_type).map(|file| file.id)
+    }
+
+    /// Returns the total number of files in the database.
+    fn len(&self) -> usize;
+
+    /// Returns `true` if the database contains no files.
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl DatabaseReader for Database<'_> {
+    #[inline]
+    fn get_id(&self, name: &[u8]) -> Option<FileId> {
+        self.files.get(name).map(|f| f.id)
+    }
+
+    #[inline]
+    fn get(&self, id: &FileId) -> Result<Arc<File>, DatabaseError> {
+        let name = self.id_to_name.get(id).ok_or(DatabaseError::FileNotFound)?;
+        let file = self.files.get(name).ok_or(DatabaseError::FileNotFound)?;
+
+        Ok(Arc::clone(file))
+    }
+
+    #[inline]
+    fn get_ref(&self, id: &FileId) -> Result<&File, DatabaseError> {
+        let name = self.id_to_name.get(id).ok_or(DatabaseError::FileNotFound)?;
+        self.files.get(name).map(std::convert::AsRef::as_ref).ok_or(DatabaseError::FileNotFound)
+    }
+
+    #[inline]
+    fn get_by_name(&self, name: &[u8]) -> Result<Arc<File>, DatabaseError> {
+        self.files.get(name).cloned().ok_or(DatabaseError::FileNotFound)
+    }
+
+    #[inline]
+    fn get_by_path(&self, path: &Path) -> Result<Arc<File>, DatabaseError> {
+        self.files.values().find(|file| file.path.as_deref() == Some(path)).cloned().ok_or(DatabaseError::FileNotFound)
+    }
+
+    #[inline]
+    fn files(&self) -> impl Iterator<Item = Arc<File>> {
+        self.files.values().cloned()
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.files.len()
+    }
+}
+
+impl DatabaseReader for ReadDatabase {
+    #[inline]
+    fn get_id(&self, name: &[u8]) -> Option<FileId> {
+        self.name_to_index.get(name).and_then(|&i| self.files.get(i)).map(|f| f.id)
+    }
+
+    #[inline]
+    fn get(&self, id: &FileId) -> Result<Arc<File>, DatabaseError> {
+        let index = self.id_to_index.get(id).ok_or(DatabaseError::FileNotFound)?;
+
+        self.files.get(*index).cloned().ok_or(DatabaseError::FileNotFound)
+    }
+
+    #[inline]
+    fn get_ref(&self, id: &FileId) -> Result<&File, DatabaseError> {
+        let index = self.id_to_index.get(id).ok_or(DatabaseError::FileNotFound)?;
+
+        self.files.get(*index).map(std::convert::AsRef::as_ref).ok_or(DatabaseError::FileNotFound)
+    }
+
+    #[inline]
+    fn get_by_name(&self, name: &[u8]) -> Result<Arc<File>, DatabaseError> {
+        self.name_to_index.get(name).and_then(|&i| self.files.get(i)).cloned().ok_or(DatabaseError::FileNotFound)
+    }
+
+    #[inline]
+    fn get_by_path(&self, path: &Path) -> Result<Arc<File>, DatabaseError> {
+        self.path_to_index.get(path).and_then(|&i| self.files.get(i)).cloned().ok_or(DatabaseError::FileNotFound)
+    }
+
+    #[inline]
+    fn files(&self) -> impl Iterator<Item = Arc<File>> {
+        self.files.iter().cloned()
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.files.len()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn configuration() -> DatabaseConfiguration<'static> {
+        DatabaseConfiguration::new(Path::new("/"), vec![], vec![], vec![], vec![]).into_static()
+    }
+
+    #[test]
+    fn merge_base_adds_missing_files_without_replacing_project_files() {
+        let mut base = Database::new(configuration());
+        base.add(File::new(Cow::Borrowed(b"shared.php"), FileType::Builtin, None, Cow::Borrowed(b"base")));
+        base.add(File::new(Cow::Borrowed(b"builtin.php"), FileType::Builtin, None, Cow::Borrowed(b"builtin")));
+
+        let mut project = Database::new(configuration());
+        project.add(File::new(Cow::Borrowed(b"shared.php"), FileType::Host, None, Cow::Borrowed(b"project")));
+        project.add(File::new(Cow::Borrowed(b"project.php"), FileType::Host, None, Cow::Borrowed(b"project-only")));
+
+        project.merge_base(base);
+
+        assert_eq!(project.len(), 3);
+        let shared = project.get_by_name(b"shared.php").unwrap();
+        assert_eq!(shared.file_type, FileType::Host);
+        assert_eq!(shared.contents.as_ref(), b"project");
+
+        let builtin = project.get_by_name(b"builtin.php").unwrap();
+        assert_eq!(builtin.file_type, FileType::Builtin);
+        assert_eq!(project.get(&builtin.id).unwrap().name.as_ref(), b"builtin.php");
+    }
+
+    #[test]
+    fn an_update_keeps_a_standard_library_file_marked_while_a_snapshot_holds_it() {
+        let mut database = Database::new(configuration());
+        let mut file = File::new(Cow::Borrowed(b"library/Sharp/Text.sharp"), FileType::Host, None, Cow::Borrowed(b"a"));
+        file.is_standard_library = true;
+        let id = database.add(file);
+        let snapshot = database.read_only();
+
+        assert!(database.update(id, Cow::Borrowed(b"b")));
+        assert!(database.get(&id).unwrap().is_standard_library);
+        assert_eq!(snapshot.get(&id).unwrap().contents.as_ref(), b"a");
+    }
+}

@@ -1,0 +1,846 @@
+use mago_allocator::Arena;
+use std::rc::Rc;
+
+use mago_codex::assertion::Assertion;
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_null;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::NullSafePropertyAccess;
+use mago_syntax::cst::PropertyAccess;
+use mago_word::Word;
+use mago_word::concat_word;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
+use crate::resolver::property::resolve_instance_properties;
+use crate::utils::expression::get_block_expression_id;
+use crate::utils::expression::get_property_access_expression_id;
+use crate::utils::expression::is_this;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for PropertyAccess<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        analyze_property_access(
+            context,
+            block_context,
+            artifacts,
+            self.span(),
+            self.object,
+            self.arrow.span(),
+            &self.property,
+            false,
+        )
+    }
+}
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for NullSafePropertyAccess<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        analyze_property_access(
+            context,
+            block_context,
+            artifacts,
+            self.span(),
+            self.object,
+            self.question_mark_arrow.span(),
+            &self.property,
+            true,
+        )
+    }
+}
+
+#[inline]
+fn analyze_property_access<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    span: Span,
+    object: &'ast Expression<'arena>,
+    arrow_span: Span,
+    property_selector: &'ast ClassLikeMemberSelector<'arena>,
+    is_null_safe: bool,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let property_access_id = get_property_access_expression_id(
+        object,
+        property_selector,
+        is_null_safe,
+        block_context.scope.get_class_like_name(),
+        context.resolved_names,
+        Some(context.codebase),
+    );
+
+    if context.settings.memoize_properties
+        && let Some(property_access_id) = &property_access_id
+        && let Some(existing_type) = block_context.locals.get(property_access_id).cloned()
+    {
+        // The receiver still gets its type, which the PHP# lowering reads and the reference below looks up.
+        object.analyze(context, block_context, artifacts)?;
+        add_memoized_property_reference(context, block_context, artifacts, object, property_selector)?;
+
+        artifacts.set_rc_expression_type(&span, existing_type);
+
+        return Ok(());
+    }
+
+    let resolution_result = resolve_instance_properties(
+        context,
+        block_context,
+        artifacts,
+        object,
+        property_selector,
+        arrow_span,
+        is_null_safe,
+        false, // `for_assignment`
+    )?;
+
+    let mut resulting_expression_type = None;
+    if !resolution_result.has_error_path {
+        for resolved_property in resolution_result.properties {
+            resulting_expression_type = Some(add_optional_union_type(
+                resolved_property.property_type,
+                resulting_expression_type.as_ref(),
+                context.codebase,
+            ));
+        }
+
+        if resolution_result.has_ambiguous_path
+            || resolution_result.encountered_mixed
+            || resolution_result.has_possibly_defined_property
+        {
+            resulting_expression_type =
+                Some(add_optional_union_type(get_mixed(), resulting_expression_type.as_ref(), context.codebase));
+        }
+
+        if resolution_result.has_invalid_path || resolution_result.encountered_null {
+            resulting_expression_type =
+                Some(add_optional_union_type(get_null(), resulting_expression_type.as_ref(), context.codebase));
+        }
+    }
+
+    let narrowed_from_non_nullsafe = if is_null_safe
+        && let Some(object_type) = artifacts.get_rc_expression_type(object)
+        && !object_type.can_be_null()
+        && !object_type.possibly_undefined()
+        && let Some(non_nullsafe_id) = get_property_access_expression_id(
+            object,
+            property_selector,
+            false,
+            block_context.scope.get_class_like_name(),
+            context.resolved_names,
+            Some(context.codebase),
+        ) {
+        block_context.locals.get(&non_nullsafe_id).cloned()
+    } else {
+        None
+    };
+
+    if is_null_safe && let Some(var_id) = get_block_expression_id(object, context, block_context) {
+        artifacts
+            .true_branch_only_assertions
+            .entry((span.start.offset, span.end.offset))
+            .or_default()
+            .entry(var_id)
+            .or_default()
+            .push(vec![Assertion::IsNotType(TAtomic::Null)]);
+    }
+
+    if let Some(narrowed_rc) = narrowed_from_non_nullsafe {
+        if let Some(property_access_id) = property_access_id {
+            block_context.locals.insert(property_access_id, Rc::clone(&narrowed_rc));
+        }
+
+        artifacts.set_rc_expression_type(&span, narrowed_rc);
+        return Ok(());
+    }
+
+    let refused_object = artifacts.get_expression_type(object).filter(|object_type| is_refused_type(object_type));
+    let mut resulting_type = refused_object.cloned().or(resulting_expression_type).unwrap_or_else(get_never);
+    let object_has_nullsafe_null = artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null());
+    if resolution_result.all_properties_non_nullable
+        && ((is_null_safe && resolution_result.encountered_null) || object_has_nullsafe_null)
+    {
+        resulting_type.set_nullsafe_null(true);
+    }
+
+    expand_union(
+        context.codebase,
+        &mut resulting_type,
+        &TypeExpansionOptions {
+            self_class: block_context.scope.get_class_like_name(),
+            static_class_type: if let Some(calling_class) = block_context.scope.get_class_like_name() {
+                StaticClassType::Name(calling_class)
+            } else {
+                StaticClassType::None
+            },
+            ..Default::default()
+        },
+    );
+
+    let resulting_type = Rc::new(resulting_type);
+    if let Some(property_access_id) = property_access_id {
+        block_context.locals.insert(property_access_id, Rc::clone(&resulting_type));
+    }
+
+    artifacts.set_rc_expression_type(&span, resulting_type);
+
+    Ok(())
+}
+
+/// Adds symbol reference for a memoized property access.
+///
+/// When property access is memoized, we still need to track the symbol reference
+/// so that unused property detection works correctly.
+fn add_memoized_property_reference<'ctx, 'ast, 'arena, A>(
+    context: &Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    object: &'ast Expression<'arena>,
+    property_selector: &'ast ClassLikeMemberSelector<'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let property_name = match property_selector {
+        ClassLikeMemberSelector::Identifier(ident) => concat_word!(b"$", ident.value),
+        _ => return Ok(()),
+    };
+
+    let mut declaring_classes: Vec<Word> = Vec::new();
+
+    if is_this(object, context.resolved_names) {
+        if let Some(class_name) = block_context.scope.get_class_like_name()
+            && let Some(declaring_class) =
+                context.codebase.get_declaring_property_class(class_name.as_bytes(), property_name.as_bytes())
+        {
+            declaring_classes.push(declaring_class);
+        }
+    } else if let Some(object_type) = artifacts.get_rc_expression_type(object) {
+        for atomic in object_type.types.iter() {
+            for class_name in atomic.get_all_object_names() {
+                if let Some(declaring_class) =
+                    context.codebase.get_declaring_property_class(class_name.as_bytes(), property_name.as_bytes())
+                {
+                    declaring_classes.push(declaring_class);
+                }
+            }
+        }
+    }
+
+    // Add references (after releasing the immutable borrow)
+    for declaring_class in declaring_classes {
+        artifacts.symbol_references.add_reference_for_property_read(
+            &block_context.scope,
+            declaring_class,
+            property_name,
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::code::IssueCode;
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = accessing_generic_property,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @template K
+             * @template V
+             */
+            class Collection
+            {
+                /**
+                 * @var array<K, V>
+                 */
+                public $items = [];
+            }
+
+            /**
+             * @param Collection<int, non-empty-string> $collection
+             *
+             * @return null|non-empty-string
+             */
+            function read_entries(Collection $collection, int $key): null|string {
+                return $collection->items[$key] ?? null;
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = accessing_string_enum_properties,
+        code = indoc! {"
+            <?php
+
+            enum Color: string {
+                case Red = 'red';
+                case Green = 'green';
+                case Blue = 'blue';
+            }
+
+            /**
+             * @return 'Red'|'Green'|'Blue'
+             */
+            function get_color_name(Color $color): string {
+                return $color->name;
+            }
+
+            /**
+             * @return 'red'|'green'|'blue'
+             */
+            function get_color_value(Color $color): string {
+                return $color->value;
+            }
+
+            /**
+             * @return 'Red'
+             */
+            function get_specific_case_name(): string {
+                return Color::Red->name;
+            }
+
+            /**
+             * @return 'red'
+             */
+            function get_specific_case_value(): string {
+                return Color::Red->value;
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = accessing_int_enum_properties,
+        code = indoc! {"
+            <?php
+
+            enum Color: int {
+                case Red = 0;
+                case Green = 1;
+                case Blue = 2;
+            }
+
+            /**
+             * @return 'Red'|'Green'|'Blue'
+             */
+            function get_color_name(Color $color): string {
+                return $color->name;
+            }
+
+            /**
+             * @return 0|1|2
+             */
+            function get_color_value(Color $color): int {
+                return $color->value;
+            }
+
+            /**
+             * @return 'Red'
+             */
+            function get_specific_case_name(): string {
+                return Color::Red->name;
+            }
+
+            /**
+             * @return 0
+             */
+            function get_specific_case_value(): int {
+                return Color::Red->value;
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = accessing_enum_properties,
+        code = indoc! {"
+            <?php
+
+            enum Color {
+                case Red;
+                case Green;
+                case Blue;
+            }
+
+            /**
+             * @return 'Red'|'Green'|'Blue'
+             */
+            function get_color_name(Color $color): string {
+                return $color->name;
+            }
+
+            /**
+             * @return 'Red'
+             */
+            function get_specific_case_name(): string {
+                return Color::Red->name;
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = redundant_nullsafe_property_access,
+        code = indoc! {"
+            <?php
+
+            class Foo {
+                public string $bar = '';
+            }
+
+            function test(Foo $foo): void {
+                echo $foo?->bar;
+            }
+        "},
+        issues = [
+            IssueCode::RedundantNullsafeOperator,
+        ]
+    }
+
+    test_analysis! {
+        name = accessing_property_on_null,
+        code = indoc! {"
+            <?php
+
+            class Foo {
+                public string $bar = '';
+            }
+
+            function test(?Foo $foo): void {
+                echo $foo->bar;
+            }
+        "},
+        issues = [
+            IssueCode::PossiblyNullPropertyAccess,
+        ]
+    }
+
+    test_analysis! {
+        name = accessing_property_on_null_inside_coalescing,
+        code = indoc! {"
+            <?php
+
+            class Foo {
+                public string $bar = '';
+            }
+
+            function test(?Foo $foo): void {
+                $bar = $foo->bar ?? 'default';
+
+                echo $bar;
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = accessing_property_on_null_inside_isset,
+        code = indoc! {r#"
+            <?php
+
+            class Foo {
+                public string $bar = '';
+            }
+
+            function test(?Foo $foo): void {
+                if (isset($foo->bar)) {
+                    echo "Property exists";
+                }
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = accessing_property_on_nullsafe,
+        code = indoc! {"
+            <?php
+
+            class Foo {
+                public string $bar = '';
+            }
+
+            function test(?Foo $foo): void {
+                echo $foo?->bar;
+            }
+        "},
+        issues = []
+    }
+
+    test_analysis! {
+        name = accessing_property_on_mixed,
+        code = indoc! {"
+            <?php
+
+            function test(mixed $value): void {
+                echo $value->bar;
+            }
+        "},
+        issues = [
+            IssueCode::MixedPropertyAccess,
+            IssueCode::MixedArgument,
+        ]
+    }
+
+    test_analysis! {
+        name = accessing_property_on_non_object,
+        code = indoc! {"
+            <?php
+
+            function test(int $value): void {
+                echo $value->bar;
+            }
+        "},
+        issues = [
+            IssueCode::InvalidPropertyAccess,
+        ]
+    }
+
+    test_analysis! {
+        name = accessing_non_existent_property,
+        code = indoc! {"
+            <?php
+
+            class Foo {
+                public string $bar = '';
+            }
+
+            function i_take_null(null $_): void {}
+
+            function test(Foo $foo): void {
+                i_take_null($foo->baz);
+            }
+        "},
+        issues = [
+            IssueCode::NonExistentProperty,
+            IssueCode::MixedArgument,
+        ]
+    }
+
+    test_analysis! {
+        name = accessing_property_on_generic_object,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @template T
+             */
+            class GenericClass {
+                /**
+                 * @var T
+                 */
+                public $value;
+            }
+
+            /**
+             * @param GenericClass<int> $generic
+             *
+             * @return int
+             */
+            function test(GenericClass $generic): int {
+                return $generic->value;
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = property_access_definite_null_error,
+        code = indoc! {"
+            <?php
+
+            function test(): null {
+                $obj = null;
+                $value = $obj->property;
+                return $value;
+            }
+        "},
+        issues = [
+            IssueCode::NullPropertyAccess,
+        ]
+    }
+
+    test_analysis! {
+        name = property_access_dynamic_name_unknown_type,
+        code = indoc! {r#"
+            <?php
+
+            class Foo { public string $known = "val"; }
+
+            function test(): string {
+                $obj = new Foo();
+                return $obj->{$propName};
+             }
+        "#},
+        issues = [
+            IssueCode::UndefinedVariable,
+            IssueCode::InvalidMemberSelector,
+            IssueCode::MixedReturnStatement,
+        ]
+    }
+
+    test_analysis! {
+        name = property_access_dynamic_name_literal_string,
+        code = indoc! {r#"
+            <?php
+            class Foo { public string $known = "val"; }
+
+            function test(): string {
+                $obj = new Foo();
+                $propName = "k" . "nown";
+                return $obj->{$propName};
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = property_access_dynamic_numeric_name,
+        code = indoc! {r#"
+            <?php
+
+            class Foo { public string $known = "val"; }
+
+            function test(): string {
+                $obj = new Foo();
+                $propName = 123;
+                return $obj->{$propName};
+            }
+        "#},
+        issues = [
+            IssueCode::NonExistentProperty,
+            IssueCode::MixedReturnStatement,
+        ]
+    }
+
+    test_analysis! {
+        name = property_access_on_generic_object_type_error,
+        code = indoc! {"
+            <?php
+
+            function get_prop(object $obj): mixed {
+                return $obj->some_property;
+            }
+        "},
+        issues = [IssueCode::AmbiguousObjectPropertyAccess]
+    }
+
+    test_analysis! {
+        name = property_access_nullsafe_on_nullable_union_valid,
+        code = indoc! {r#"
+            <?php
+            class Bar { public string $prop = "value"; }
+
+            function get_prop_safe(Bar|null $obj): ?string {
+                return $obj?->prop;
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = property_access_on_interface_variable,
+        code = indoc! {"
+            <?php
+
+            interface MyInterface {}
+
+            function get_prop_from_interface(MyInterface $iface): null {
+                return $iface->some_prop;
+            }
+        "},
+        issues = [
+            IssueCode::NonExistentProperty,
+            IssueCode::MixedReturnStatement,
+        ]
+    }
+
+    test_analysis! {
+        name = property_access_on_enum_variable,
+        code = indoc! {"
+            <?php
+
+            enum X {}
+
+            function get_prop_from_enum(X $x): null {
+                return $x->some_prop;
+            }
+        "},
+        issues = [
+            IssueCode::NonExistentProperty,
+        ]
+    }
+
+    test_analysis! {
+        name = property_access_on_final_class_variable,
+        code = indoc! {"
+            <?php
+
+            final class X {}
+
+            function get_prop_from_final_class(X $x): null {
+                return $x->some_prop;
+            }
+        "},
+        issues = [
+            IssueCode::NonExistentProperty,
+        ]
+    }
+
+    test_analysis! {
+        name = property_access_chain_intermediate_possibly_null,
+        code = indoc! {r#"
+            <?php
+
+            class A { public ?B $b_prop = null; }
+            class B { public string $c_prop = "value"; }
+
+            function get_nested(A $a): ?string {
+                return $a->b_prop->c_prop;
+            }
+        "#},
+        issues = [
+            IssueCode::PossiblyNullPropertyAccess
+        ]
+    }
+
+    test_analysis! {
+        name = property_access_chain_nullsafe_intermediate,
+        code = indoc! {r#"
+            <?php
+
+            class A { public ?B $b_prop = null; }
+            class B { public string $c_prop = "value"; }
+
+            function get_nested_safe(A $a): ?string {
+                return $a->b_prop?->c_prop;
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = property_access_on_void_function_result,
+        code = indoc! {"
+            <?php
+
+            function returns_void(): void {}
+
+            $result = returns_void();
+            echo $result->property;
+        "},
+        issues = [
+            IssueCode::NullPropertyAccess,
+        ]
+    }
+
+    test_analysis! {
+        name = property_access_multiple_selectors,
+        code = indoc! {"
+            <?php
+
+            class a
+            {
+                public string $x = '';
+                public bool $y = false;
+            }
+
+            class b
+            {
+                public int $x = 1;
+                public float $y = 1.2;
+            }
+
+            /**
+             * @template T of scalar
+             */
+            class c
+            {
+                /**
+                 * @var list<T>
+                 */
+                public array $x = [];
+
+                public false $y = false;
+            }
+
+            /**
+             * @param a|b|c<int> $o
+             * @param 'x'|'y' $p
+             * @return bool|float|string|int|list<int>
+             */
+            function get(a|b|c $o, string $p): bool|float|string|int|array
+            {
+                return $o->{$p};
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = accessing_non_existent_class_property,
+        code = indoc! {"
+            <?php
+
+            function example($class): void {
+                if ($class instanceof NonExistingClass) {
+                    $class->bar;
+                }
+            }
+        "},
+        issues = [
+            IssueCode::NonExistentClassLike,
+            IssueCode::NonExistentClassLike,
+            IssueCode::UnusedStatement,
+        ]
+    }
+
+    test_analysis! {
+        name = trait_property_access,
+        code = indoc! {r#"
+            <?php
+
+            trait A {
+                private string $x = "hello 1";
+                protected string $y = "hello 2";
+            }
+
+            class B {
+                use A;
+
+                public function c(): void {
+                    echo $this->x; // private property access
+                    echo $this->y; // protected property access
+                }
+            }
+
+            new B()->c();
+        "#},
+    }
+}

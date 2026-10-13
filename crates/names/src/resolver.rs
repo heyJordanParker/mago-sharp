@@ -1,0 +1,51 @@
+use mago_allocator::prelude::*;
+use mago_syntax::cst::Program;
+use mago_syntax::walker::MutWalker;
+
+use crate::ResolvedNames;
+use crate::internal::context::NameResolutionContext;
+use crate::internal::walker::NameWalker;
+
+/// Orchestrates the process of resolving names within a PHP Concrete Syntax Tree (CST).
+///
+/// This struct acts as the main entry point for the name resolution pass.
+/// It requires an arena to store resolved names.
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct NameResolver<'arena, A>
+where
+    A: Arena,
+{
+    arena: &'arena A,
+}
+
+impl<'arena, A> NameResolver<'arena, A>
+where
+    A: Arena,
+{
+    /// Creates a new `NameResolver` instance.
+    pub fn new(arena: &'arena A) -> Self {
+        NameResolver { arena }
+    }
+
+    /// Resolves names within the provided PHP CST `Program`.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - A reference to the root `Program` CST node. The lifetime `'ast`
+    ///   ensures the CST outlives the borrowing done within this method.
+    ///
+    /// # Returns
+    ///
+    /// A `ResolvedNames` struct containing the mapping of original names/nodes
+    /// to their resolved fully qualified names.
+    #[must_use]
+    pub fn resolve<'ast>(&self, program: &'ast Program<'arena>) -> ResolvedNames<'arena> {
+        let mut context = NameResolutionContext::new(self.arena);
+        let mut walker = NameWalker::new(program);
+
+        walker.walk_program(program, &mut context);
+
+        walker.resolved_names
+    }
+}

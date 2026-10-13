@@ -1,0 +1,2456 @@
+use mago_allocator::Arena;
+use std::ops::Deref;
+use std::rc::Rc;
+
+use foldhash::HashSet;
+use indexmap::IndexMap;
+use itertools::Itertools;
+use mago_word::Word;
+use mago_word::WordMap;
+use mago_word::WordSet;
+
+use mago_algebra::clause::Clause;
+use mago_algebra::disjoin_clauses;
+use mago_algebra::find_satisfying_assignments;
+use mago_algebra::saturate_clauses;
+use mago_codex::assertion::Assertion;
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::If;
+use mago_syntax::cst::Statement;
+use mago_syntax::cst::UnaryPrefix;
+use mago_syntax::cst::UnaryPrefixOperator;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::common::synthetic::new_synthetic_call;
+use crate::common::synthetic::new_synthetic_negation;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::context::scope::conditional_scope::IfConditionalScope;
+use crate::context::scope::control_action::ControlAction;
+use crate::context::scope::control_action::ControlActionSet;
+use crate::context::scope::if_scope::IfScope;
+use crate::context::scope::var_has_root;
+use crate::context::scope::var_references_dynamic;
+use crate::context::utils::inherit_branch_context_properties;
+use crate::error::AnalysisError;
+use crate::formula;
+use crate::formula::negate_or_synthesize;
+use crate::reconciler::reconcile_keyed_types;
+use crate::statement::analyze_statements;
+use crate::utils::conditional;
+use crate::utils::expression::is_derived_access_path;
+use crate::utils::misc::check_for_paradox;
+use crate::utils::symbol_existence::extract_function_constant_existence;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for If<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let mut if_scope = IfScope::new();
+
+        let needs_post_leaving_context = is_obvious_boolean_condition(self.condition) && {
+            let final_actions =
+                ControlAction::from_statements(self.body.statements().iter().collect(), vec![], Some(artifacts), true);
+
+            final_actions.len() == 1 && final_actions.contains(ControlAction::End)
+                || (!final_actions.is_empty() && !final_actions.contains(ControlAction::None))
+        };
+
+        let (if_conditional_scope, applied_block_context) =
+            conditional::analyze(context, block_context.clone(), artifacts, &mut if_scope, self.condition, true)?;
+        *block_context = applied_block_context;
+        context.report_non_bool_condition(self.condition, artifacts.get_expression_type(self.condition), "if");
+
+        if needs_post_leaving_context {
+            if_scope.post_leaving_if_context = Some(block_context.clone());
+        }
+
+        let mut if_block_context = if_conditional_scope.if_body_context.clone();
+
+        let post_if_block_context = if_conditional_scope.post_if_context.clone();
+
+        let mut mixed_variables = vec![];
+        for (variable_id, variable_type) in &if_block_context.locals {
+            if variable_type.is_mixed() && block_context.locals.contains_key(variable_id) {
+                mixed_variables.push(*variable_id);
+            }
+        }
+
+        let mut if_clauses = formula::get_formula(
+            self.condition.span(),
+            self.condition.span(),
+            self.condition,
+            context.get_assertion_context_from_block(block_context),
+            artifacts,
+            &context.settings.algebra_thresholds(),
+            context.settings.formula_size_threshold,
+        ).unwrap_or_else(|| {
+            context.collector.report_with_code(
+                IssueCode::ConditionIsTooComplex,
+                Issue::warning("Condition is too complex for precise type analysis.")
+                    .with_annotation(
+                        Annotation::primary(self.condition.span())
+                            .with_message("This `if` condition is too complex for the analyzer to fully understand"),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(self.body.span())
+                            .with_message("Type inference within this branch may be inaccurate as a result"),
+                    )
+                    .with_note(
+                        "The analyzer limits the number of logical paths it explores for a single condition to prevent performance issues."
+                    )
+                    .with_note(
+                        "Because this limit was exceeded, type assertions from the condition will not be applied inside the `if` block, which may lead to incorrect type information."
+                    )
+                    .with_help(
+                        "Consider refactoring this complex condition into smaller, intermediate boolean variables or nested `if` statements.",
+                    ),
+            );
+
+            vec![]
+        });
+
+        for clause in &mut if_clauses {
+            let keys: WordSet = clause.possibilities.keys().copied().collect();
+            mixed_variables.retain(|i| !keys.contains(i));
+
+            'outer: for key in keys.iter().copied() {
+                for mixed_var_id in &mixed_variables {
+                    if is_derived_access_path(key, *mixed_var_id) {
+                        let has_explicit_type_assertion = clause
+                            .possibilities
+                            .get(&key)
+                            .is_some_and(|assertions| assertions.values().any(|a| !matches!(a, Assertion::Truthy)));
+
+                        if has_explicit_type_assertion {
+                            continue;
+                        }
+
+                        *clause = Clause::new(
+                            IndexMap::default(),
+                            self.condition.span(),
+                            self.condition.span(),
+                            Some(true),
+                            Some(true),
+                            Some(false),
+                        );
+
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        check_for_paradox(context, &block_context.clauses, &if_clauses, self.condition.span());
+
+        if_clauses = saturate_clauses(if_clauses.iter(), &context.settings.algebra_thresholds());
+        let combined_clauses = if block_context.clauses.is_empty() {
+            if_clauses.clone()
+        } else {
+            saturate_clauses(
+                if_clauses.iter().chain(block_context.clauses.iter().map(Rc::deref)),
+                &context.settings.algebra_thresholds(),
+            )
+        };
+
+        if_block_context.clauses = combined_clauses.into_iter().map(Rc::new).collect();
+
+        // Extract function_exists/defined assertions.
+        extract_function_constant_existence(self.condition, artifacts, &mut if_block_context, false);
+
+        if !if_block_context.reconciled_expression_clauses.is_empty() {
+            if_block_context.clauses.retain(|clause| !if_block_context.reconciled_expression_clauses.contains(clause));
+
+            if if_block_context.clauses.len() == 1
+                && if_block_context.clauses[0].wedge
+                && if_block_context.clauses[0].possibilities.is_empty()
+            {
+                if_block_context.clauses.clear();
+                if_block_context.reconciled_expression_clauses.clear();
+            }
+        }
+
+        if_scope.reasonable_clauses.clone_from(&if_block_context.clauses);
+        let mut saved_if_clauses = if_clauses.clone();
+        if_scope.negated_clauses = negate_or_synthesize(
+            if_clauses,
+            self.condition,
+            context.get_assertion_context_from_block(block_context),
+            artifacts,
+            &context.settings.algebra_thresholds(),
+            context.settings.formula_size_threshold,
+        );
+
+        let all_negated_clauses = saturate_clauses(
+            block_context.clauses.iter().map(Rc::deref).chain(if_scope.negated_clauses.iter()),
+            &context.settings.algebra_thresholds(),
+        );
+
+        if_scope.negated_types =
+            find_satisfying_assignments(all_negated_clauses.iter().as_slice(), None, &mut WordSet::default()).0;
+
+        let mut temporary_else_context = post_if_block_context.clone();
+        let mut changed_variable_ids: WordSet = WordSet::default();
+
+        if !if_scope.negated_types.is_empty() {
+            reconcile_keyed_types(
+                context,
+                &if_scope.negated_types,
+                IndexMap::new(),
+                &mut temporary_else_context,
+                &mut changed_variable_ids,
+                &WordSet::default(),
+                &self.condition.span(),
+                false,
+                false,
+            );
+        }
+
+        let pre_assignment_else_redefined_locals: WordMap<Rc<TUnion>> = temporary_else_context
+            .get_redefined_locals(&if_block_context.locals, true, &mut WordSet::default())
+            .into_iter()
+            .filter(|(k, _)| changed_variable_ids.contains(k))
+            .collect();
+
+        analyze_if_statement_block(
+            context,
+            &mut if_scope,
+            &if_conditional_scope,
+            if_block_context,
+            block_context,
+            artifacts,
+            &pre_assignment_else_redefined_locals,
+            self,
+        )?;
+
+        let if_body_assigned_ids: WordSet = if_scope
+            .assigned_variable_ids
+            .iter()
+            .flat_map(|ids| ids.keys().copied())
+            .chain(if_scope.possibly_assigned_variable_ids.iter().copied())
+            .collect();
+        let mut if_body_redefined_snapshot = if_scope.redefined_variables.clone().unwrap_or_default();
+        if let Some(new_vars) = &if_scope.new_variables {
+            if_body_redefined_snapshot.extend(new_vars.iter().map(|(key, ty)| (*key, Rc::clone(ty))));
+        }
+
+        let mut else_block_context = if let Some(post_leaving_if_context) = if_scope.post_leaving_if_context.take() {
+            post_leaving_if_context
+        } else {
+            post_if_block_context
+        };
+        else_block_context
+            .stable_method_call_assertions
+            .clone_from(&temporary_else_context.stable_method_call_assertions);
+        else_block_context
+            .definitely_uninitialized_property_ids
+            .clone_from(&temporary_else_context.definitely_uninitialized_property_ids);
+
+        else_block_context.clauses = saturate_clauses(
+            else_block_context.clauses.iter().map(Rc::deref).chain(if_scope.negated_clauses.iter()),
+            &context.settings.algebra_thresholds(),
+        )
+        .into_iter()
+        .map(Rc::new)
+        .collect();
+
+        for clause in self.body.else_if_clauses() {
+            analyze_else_if_clause(context, &mut if_scope, &mut else_block_context, block_context, artifacts, clause)?;
+        }
+
+        analyze_else_statements(
+            context,
+            &mut if_scope,
+            &mut else_block_context,
+            block_context,
+            artifacts,
+            self.body.else_statements(),
+            self.span(),
+        )?;
+
+        if_body_redefined_snapshot.retain(|variable_id, _| {
+            if_body_assigned_ids.contains(variable_id)
+                || else_block_context.assigned_variable_ids.contains_key(variable_id)
+        });
+        for variable_id in else_block_context.assigned_variable_ids.keys() {
+            if if_body_assigned_ids.iter().any(|assigned_id| {
+                var_has_root(*variable_id, *assigned_id) || var_references_dynamic(*variable_id, *assigned_id)
+            }) {
+                continue;
+            }
+
+            if let Some(variable_type) = if_conditional_scope.if_body_context.locals.get(variable_id) {
+                if_body_redefined_snapshot.entry(*variable_id).or_insert_with(|| Rc::clone(variable_type));
+            }
+        }
+
+        let discriminator_clauses = if if_body_redefined_snapshot.is_empty() || self.body.has_else_if_clauses() {
+            vec![]
+        } else {
+            let unchanged_clause = |clause: &Clause| {
+                clause.possibilities.iter().all(|(variable_id, assertions)| {
+                    if_scope
+                        .possibly_assigned_variable_ids
+                        .iter()
+                        .chain(if_body_assigned_ids.iter())
+                        .chain(else_block_context.assigned_variable_ids.keys())
+                        .all(|assigned_id| {
+                            !var_has_root(*variable_id, *assigned_id)
+                                && !var_references_dynamic(*variable_id, *assigned_id)
+                                && !assertions.values().any(|assertion| {
+                                    assertion.referenced_variable().is_some_and(|referenced_id| {
+                                        var_has_root(referenced_id, *assigned_id)
+                                            || var_references_dynamic(referenced_id, *assigned_id)
+                                    })
+                                })
+                        })
+                })
+            };
+
+            saved_if_clauses.retain(&unchanged_clause);
+            if_scope.negated_clauses.retain(unchanged_clause);
+            synthesize_branch_discriminator_clauses(
+                &if_body_redefined_snapshot,
+                &else_block_context,
+                &saved_if_clauses,
+                &if_scope.negated_clauses,
+                self.condition.span(),
+                &context.settings.algebra_thresholds(),
+                context.settings.formula_size_threshold,
+            )
+        };
+
+        let has_returned = !if_scope.final_actions.contains(ControlAction::None);
+
+        if !if_scope.if_actions.is_empty()
+            && !if_scope.if_actions.contains(ControlAction::None)
+            && !self.body.has_else_if_clauses()
+        {
+            block_context.clauses = else_block_context.clauses;
+            block_context.stable_method_call_assertions.clone_from(&else_block_context.stable_method_call_assertions);
+            for (variable_id, variable_type) in else_block_context.locals {
+                block_context.locals.insert(variable_id, variable_type);
+            }
+
+            extract_function_constant_existence(self.condition, artifacts, block_context, true);
+
+            // When the if-body exits and the condition involved isset/empty checks on array keys,
+            // the post-if code knows the keys exist. Remove empty array variants from base variables
+            // since the array must be non-empty for the key to exist.
+            for changed_var_id in &if_scope.conditionally_changed_variable_ids {
+                let key_bytes = changed_var_id.as_bytes();
+                if let Some(bracket_pos) = memchr::memchr(b'[', key_bytes) {
+                    let base_var = &key_bytes[..bracket_pos];
+                    let base_atom = mago_word::word(base_var);
+                    if let Some(var_type) = block_context.locals.get(&base_atom).cloned()
+                        && var_type.types.iter().any(|t| matches!(t, TAtomic::Array(a) if a.is_empty()))
+                    {
+                        let mut narrowed = (*var_type).clone();
+                        narrowed.types.to_mut().retain(|t| !matches!(t, TAtomic::Array(a) if a.is_empty()));
+                        if !narrowed.types.is_empty() {
+                            block_context.locals.insert(base_atom, Rc::new(narrowed));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(loop_scope) = artifacts.loop_scope.as_mut() {
+            loop_scope.final_actions.extend(if_scope.final_actions);
+        }
+
+        block_context.variables_possibly_in_scope.extend(if_scope.new_variables_possibly_in_scope);
+        block_context.possibly_assigned_variable_ids.extend(if_scope.possibly_assigned_variable_ids);
+        block_context.assigned_variable_ids.extend(if_scope.assigned_variable_ids.unwrap_or_default());
+
+        for (variable_id, variable_type) in if_scope.possibly_defined_variable_types {
+            if block_context.locals.contains_key(&variable_id) {
+                continue;
+            }
+
+            let mut variable_type = Rc::unwrap_or_clone(variable_type);
+            variable_type.set_possibly_undefined(true, None);
+            block_context.locals.insert(variable_id, Rc::new(variable_type));
+            block_context.possibly_undefined_variable_ids.insert(variable_id);
+        }
+
+        if let Some(new_variables) = if_scope.new_variables {
+            for (variable_id, variable_type) in new_variables {
+                block_context.locals.insert(variable_id, variable_type);
+                block_context.possibly_undefined_variable_ids.remove(&variable_id);
+            }
+        }
+
+        if let Some(redefined_variables) = if_scope.redefined_variables {
+            for (variable_id, variable_type) in redefined_variables {
+                block_context.locals.insert(variable_id, variable_type);
+
+                if !if_scope.reasonable_clauses.is_empty() {
+                    if_scope.reasonable_clauses = BlockContext::filter_clauses(
+                        context,
+                        variable_id,
+                        if_scope.reasonable_clauses,
+                        block_context.locals.get(&variable_id).map(std::convert::AsRef::as_ref),
+                    );
+                }
+
+                if_scope.updated_variables.insert(variable_id);
+            }
+        }
+
+        let if_body_always_exits =
+            !if_scope.if_actions.is_empty() && !if_scope.if_actions.contains(ControlAction::None);
+
+        if if_body_always_exits
+            && !if_scope.reasonable_clauses.is_empty()
+            && (if_scope.reasonable_clauses.len() > 1 || !if_scope.reasonable_clauses[0].wedge)
+        {
+            block_context.clauses = saturate_clauses(
+                if_scope.reasonable_clauses.iter().map(Rc::deref).chain(block_context.clauses.iter().map(Rc::deref)),
+                &context.settings.algebra_thresholds(),
+            )
+            .into_iter()
+            .map(Rc::new)
+            .collect();
+        }
+
+        for (variable_id, variable_type) in if_scope.possibly_redefined_variables {
+            let Some(existing_type) = block_context.locals.remove(&variable_id).map(Rc::unwrap_or_clone) else {
+                continue;
+            };
+
+            if if_scope.updated_variables.contains(&variable_id) {
+                block_context.locals.insert(variable_id, Rc::new(existing_type));
+
+                continue;
+            }
+
+            let new_type =
+                combine_union_types(&existing_type, &variable_type, context.codebase, CombinerOptions::default());
+
+            if !new_type.eq(&existing_type) {
+                block_context.remove_descendants(context, variable_id, &existing_type, Some(&new_type));
+            }
+
+            block_context.locals.insert(variable_id, Rc::new(new_type));
+        }
+
+        block_context.clauses.extend(discriminator_clauses);
+        if has_returned {
+            block_context.flags.set_has_returned(true);
+        }
+
+        // Propagate initialization results back to outer context
+        if block_context.flags.collect_initializations() {
+            if let Some(props) = if_scope.definitely_initialized_properties.take() {
+                block_context.definitely_initialized_properties.extend(props);
+            }
+
+            if let Some(methods) = if_scope.definitely_called_methods.take() {
+                block_context.definitely_called_methods.extend(methods);
+            }
+        }
+
+        if let Some(property_ids) = if_scope.definitely_uninitialized_property_ids.take() {
+            block_context.definitely_uninitialized_property_ids = property_ids;
+        }
+
+        Ok(())
+    }
+}
+
+#[inline]
+const fn is_obvious_boolean_condition(condition: &Expression) -> bool {
+    match condition {
+        Expression::Binary(_) => true,
+        Expression::UnaryPrefix(UnaryPrefix { operand, operator: UnaryPrefixOperator::Not(_) }) => {
+            is_obvious_boolean_condition(operand)
+        }
+        _ => false,
+    }
+}
+
+fn analyze_if_statement_block<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    if_scope: &mut IfScope<'ctx>,
+    if_conditional_scope: &IfConditionalScope<'ctx>,
+    mut if_block_context: BlockContext<'ctx>,
+    outer_block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    pre_assignment_else_redefined_locals: &WordMap<Rc<TUnion>>,
+    if_statement: &If<'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let mut conditionally_referenced_variable_ids = if_block_context.conditionally_referenced_variable_ids.clone();
+    let (reconcilable_if_types, active_if_types) = find_satisfying_assignments(
+        if_block_context.clauses.iter().map(Rc::as_ref).cloned().collect_vec().as_slice(),
+        Some(if_statement.condition.span()),
+        &mut conditionally_referenced_variable_ids,
+    );
+
+    if outer_block_context.clauses.iter().any(|clause| !clause.possibilities.is_empty()) {
+        let mut omit_keys = WordSet::default();
+        for clause in &outer_block_context.clauses {
+            omit_keys.extend(clause.possibilities.keys());
+        }
+
+        let (outer_truthes, _) = find_satisfying_assignments(
+            outer_block_context.clauses.iter().map(Rc::as_ref).cloned().collect_vec().as_slice(),
+            None,
+            &mut WordSet::default(),
+        );
+
+        omit_keys.retain(|key| !outer_truthes.contains_key(key));
+        conditionally_referenced_variable_ids.retain(|key| !omit_keys.contains(key));
+    }
+
+    if !reconcilable_if_types.is_empty() {
+        let mut changed_variable_ids = WordSet::default();
+
+        reconcile_keyed_types(
+            context,
+            &reconcilable_if_types,
+            active_if_types,
+            &mut if_block_context,
+            &mut changed_variable_ids,
+            &conditionally_referenced_variable_ids,
+            &if_statement.condition.span(),
+            false,
+            false,
+        );
+
+        for (variable_id, _) in &reconcilable_if_types {
+            if_block_context.variables_possibly_in_scope.insert(*variable_id);
+        }
+
+        if !changed_variable_ids.is_empty() {
+            if_block_context.clauses = BlockContext::remove_reconciled_clauses(
+                &if_block_context.clauses.iter().map(Rc::deref).cloned().collect(),
+                &changed_variable_ids,
+            )
+            .0
+            .into_iter()
+            .map(Rc::new)
+            .collect();
+
+            let mut variables_to_remove = vec![];
+            for changed_variable_id in &changed_variable_ids {
+                for variable_id in if_block_context.locals.keys() {
+                    if is_derived_access_path(*variable_id, *changed_variable_id)
+                        && !changed_variable_ids.contains(variable_id)
+                        && !conditionally_referenced_variable_ids.contains(variable_id)
+                    {
+                        variables_to_remove.push(*variable_id);
+                    }
+                }
+            }
+
+            for variable_id in variables_to_remove {
+                if_block_context.remove_possible_reference(variable_id.as_bytes());
+            }
+        }
+
+        if_scope.conditionally_changed_variable_ids = changed_variable_ids;
+    }
+
+    if_block_context.reconciled_expression_clauses = vec![];
+    outer_block_context
+        .variables_possibly_in_scope
+        .extend(if_block_context.variables_possibly_in_scope.iter().copied());
+
+    let old_if_block_context = if_block_context.clone();
+    let assigned_variable_ids = std::mem::take(&mut if_block_context.assigned_variable_ids);
+    let possibly_assigned_variable_ids = std::mem::take(&mut if_block_context.possibly_assigned_variable_ids);
+
+    analyze_statements(if_statement.body.statements(), context, &mut if_block_context, artifacts)?;
+
+    for variable_id in &if_block_context.parent_conflicting_clause_variables {
+        outer_block_context.remove_variable_from_conflicting_clauses(context, *variable_id, None);
+    }
+
+    let final_actions = ControlAction::from_statements(
+        if_statement.body.statements().iter().collect::<Vec<_>>(),
+        vec![],
+        Some(artifacts),
+        true,
+    );
+
+    let has_ending_statements = final_actions.len() == 1 && final_actions.contains(ControlAction::End);
+    let has_break_statement = final_actions.len() == 1 && final_actions.contains(ControlAction::Break);
+    let has_continue_statement = final_actions.len() == 1 && final_actions.contains(ControlAction::Continue);
+    let has_leaving_statements =
+        has_ending_statements || (!final_actions.is_empty() && !final_actions.contains(ControlAction::None));
+
+    if_scope.if_actions = final_actions;
+    if_scope.final_actions = final_actions;
+
+    let new_assigned_variable_ids = if_block_context.assigned_variable_ids.clone();
+    let new_possibly_assigned_variable_ids = if_block_context.possibly_assigned_variable_ids.clone();
+
+    if_block_context.assigned_variable_ids.extend(assigned_variable_ids);
+    if_block_context.possibly_assigned_variable_ids.extend(possibly_assigned_variable_ids);
+
+    inherit_branch_context_properties(context, outer_block_context, &if_block_context);
+
+    if !has_leaving_statements {
+        let new_assigned_variable_ids_keys = new_assigned_variable_ids.keys().copied().collect::<Vec<Word>>();
+
+        update_if_scope(
+            context,
+            if_scope,
+            &mut if_block_context,
+            outer_block_context,
+            new_assigned_variable_ids,
+            new_possibly_assigned_variable_ids,
+            &if_scope.conditionally_changed_variable_ids.clone(),
+            true,
+        );
+
+        if !if_scope.reasonable_clauses.is_empty() {
+            for variable_id in new_assigned_variable_ids_keys {
+                let previous_clauses = std::mem::take(&mut if_scope.reasonable_clauses);
+                if_scope.reasonable_clauses = BlockContext::filter_clauses(
+                    context,
+                    variable_id,
+                    previous_clauses,
+                    if_block_context.locals.get(&variable_id).map(std::convert::AsRef::as_ref),
+                );
+            }
+        }
+    } else if !has_break_statement {
+        if_scope.reasonable_clauses = vec![];
+
+        if let Some(post_leaving_if_context) = if_scope.post_leaving_if_context.as_mut()
+            && !if_conditional_scope.assigned_in_conditional_variable_ids.is_empty()
+        {
+            add_conditionally_assigned_variables_to_context(
+                context,
+                artifacts,
+                post_leaving_if_context,
+                outer_block_context,
+                if_statement.condition,
+                &if_conditional_scope.assigned_in_conditional_variable_ids,
+            )?;
+        }
+    }
+
+    if !if_scope.negated_types.is_empty() {
+        let variables_to_update = if_scope
+            .negated_types
+            .keys()
+            .filter(|key| pre_assignment_else_redefined_locals.contains_key(key))
+            .copied()
+            .collect::<WordSet>();
+
+        outer_block_context.update(
+            context,
+            &old_if_block_context,
+            &mut if_block_context,
+            has_leaving_statements,
+            &variables_to_update,
+            &mut if_scope.updated_variables,
+        );
+    }
+
+    if !has_ending_statements {
+        let variables_possibly_in_scope = if_block_context
+            .variables_possibly_in_scope
+            .iter()
+            .filter(|id| !outer_block_context.variables_possibly_in_scope.contains(*id))
+            .copied()
+            .collect::<WordSet>();
+
+        if let Some(loop_scope) = artifacts.loop_scope.as_mut() {
+            if !has_continue_statement && !has_break_statement {
+                if_scope.new_variables_possibly_in_scope = variables_possibly_in_scope.clone();
+            }
+
+            loop_scope.variables_possibly_in_scope.extend(variables_possibly_in_scope);
+        } else if !has_leaving_statements {
+            if_scope.new_variables_possibly_in_scope = variables_possibly_in_scope;
+        }
+    }
+
+    outer_block_context.update_references_possibly_from_confusing_scope(&if_block_context);
+
+    Ok(())
+}
+
+fn analyze_else_if_clause<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    if_scope: &mut IfScope<'ctx>,
+    else_block_context: &mut BlockContext<'ctx>,
+    outer_block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    else_if_clause: (&'ast Expression<'arena>, &'ast [Statement<'arena>]),
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let (if_conditional_scope, applied_else_block_context) =
+        conditional::analyze(context, else_block_context.clone(), artifacts, if_scope, else_if_clause.0, true)?;
+    *else_block_context = applied_else_block_context;
+    context.report_non_bool_condition(else_if_clause.0, artifacts.get_expression_type(else_if_clause.0), "else if");
+
+    let mut else_if_block_context = if_conditional_scope.if_body_context;
+    let mut conditionally_referenced_variable_ids = if_conditional_scope.conditionally_referenced_variable_ids;
+    let assigned_in_conditional_variable_ids = if_conditional_scope.assigned_in_conditional_variable_ids;
+
+    let mut mixed_variables = vec![];
+    for (variable_id, variable_type) in &else_if_block_context.locals {
+        if variable_type.is_mixed() && outer_block_context.locals.contains_key(variable_id) {
+            mixed_variables.push(*variable_id);
+        }
+    }
+
+    let mut else_if_clauses = formula::get_formula(
+        else_if_clause.0.span(),
+        else_if_clause.0.span(),
+        else_if_clause.0,
+        context.get_assertion_context_from_block(&else_if_block_context),
+        artifacts,
+        &context.settings.algebra_thresholds(),
+        context.settings.formula_size_threshold,
+    ).unwrap_or_else(|| {
+        let clauses_statements_span = match (else_if_clause.1.first(), else_if_clause.1.last()) {
+            (Some(first_statement), Some(last_statement)) => Some(first_statement.span().join(last_statement.span())),
+            _ => None,
+        };
+
+        if let Some(clauses_statements_span) = clauses_statements_span {
+            context.collector.report_with_code(
+                IssueCode::ConditionIsTooComplex,
+                Issue::warning("Condition is too complex for precise type analysis.")
+                    .with_annotation(
+                        Annotation::primary(else_if_clause.0.span())
+                            .with_message("This `elseif` condition is too complex for the analyzer to fully understand"),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(clauses_statements_span)
+                            .with_message("Type inference within this branch may be inaccurate as a result"),
+                    )
+                    .with_note(
+                        "The analyzer limits the number of logical paths it explores for a single condition to prevent performance issues."
+                    )
+                    .with_note(
+                        "Because this limit was exceeded, type assertions from the condition will not be applied to the following code, which may lead to incorrect type information."
+                    )
+                    .with_help(
+                        "Consider refactoring this complex condition into smaller, intermediate boolean variables or nested `if` statements.",
+                    ),
+            );
+        }
+
+        vec![]
+    });
+
+    for clause in &mut else_if_clauses {
+        let keys: WordSet = clause.possibilities.keys().copied().collect();
+        mixed_variables.retain(|i| !keys.contains(i));
+
+        'outer: for key in keys.iter().copied() {
+            for mixed_var_id in &mixed_variables {
+                if !is_derived_access_path(key, *mixed_var_id) {
+                    continue;
+                }
+
+                *clause = Clause::new(
+                    IndexMap::default(),
+                    else_if_clause.0.span(),
+                    else_if_clause.0.span(),
+                    Some(true),
+                    Some(true),
+                    Some(false),
+                );
+
+                break 'outer;
+            }
+        }
+    }
+
+    let mut entry_clauses = vec![];
+    for mut clause in if_conditional_scope.entry_clauses {
+        'set_clause: for key in clause.possibilities.keys() {
+            for conditional_assigned_variable_id in assigned_in_conditional_variable_ids.keys() {
+                if key != conditional_assigned_variable_id
+                    && !is_derived_access_path(*key, *conditional_assigned_variable_id)
+                {
+                    continue;
+                }
+
+                clause = Clause::new(
+                    IndexMap::default(),
+                    else_if_clause.0.span(),
+                    else_if_clause.0.span(),
+                    Some(true),
+                    Some(true),
+                    Some(false),
+                );
+
+                break 'set_clause;
+            }
+        }
+
+        entry_clauses.push(Rc::new(clause));
+    }
+
+    check_for_paradox(context, &entry_clauses, &else_if_clauses, else_if_clause.0.span());
+
+    let else_if_clauses = saturate_clauses(else_if_clauses.iter(), &context.settings.algebra_thresholds());
+    else_if_block_context.clauses = saturate_clauses(
+        else_if_clauses
+            .iter()
+            .chain(entry_clauses.iter().map(Rc::deref))
+            .chain(else_if_block_context.clauses.iter().map(Rc::deref)),
+        &context.settings.algebra_thresholds(),
+    )
+    .into_iter()
+    .map(Rc::new)
+    .collect();
+
+    if !else_if_block_context.reconciled_expression_clauses.is_empty() {
+        let reconciled_expression_clauses = else_if_block_context
+            .reconciled_expression_clauses
+            .iter()
+            .map(|clause| clause.hash)
+            .collect::<HashSet<u32>>();
+
+        else_if_block_context.clauses.retain(|clause| !reconciled_expression_clauses.contains(&clause.hash));
+    }
+
+    if entry_clauses.iter().any(|clause| !clause.possibilities.is_empty()) {
+        let omit_keys =
+            entry_clauses.iter().flat_map(|clause| clause.possibilities.keys()).copied().collect::<WordSet>();
+
+        let (outer_truthes, _) = find_satisfying_assignments(
+            outer_block_context.clauses.iter().map(Rc::as_ref).cloned().collect_vec().as_slice(),
+            None,
+            &mut WordSet::default(),
+        );
+
+        let omit_keys = omit_keys.into_iter().filter(|key| !outer_truthes.contains_key(key)).collect::<WordSet>();
+
+        conditionally_referenced_variable_ids.retain(|key| !omit_keys.contains(key));
+    }
+
+    let (reconcilable_else_if_types, active_else_if_types) = find_satisfying_assignments(
+        else_if_block_context.clauses.iter().map(Rc::as_ref).cloned().collect_vec().as_slice(),
+        Some(else_if_clause.0.span()),
+        &mut conditionally_referenced_variable_ids,
+    );
+
+    let negated_if_clauses = negate_or_synthesize(
+        else_if_clauses.clone(),
+        else_if_clause.0,
+        context.get_assertion_context_from_block(&else_if_block_context),
+        artifacts,
+        &context.settings.algebra_thresholds(),
+        context.settings.formula_size_threshold,
+    );
+
+    let (negated_else_if_types, _) =
+        find_satisfying_assignments(negated_if_clauses.as_slice(), None, &mut WordSet::default());
+
+    let all_negated_variables =
+        negated_else_if_types.keys().copied().chain(if_scope.negated_types.keys().copied()).collect::<HashSet<_>>();
+
+    for negated_variable_id in all_negated_variables {
+        if let Some(negated_variable_type_assertions) = negated_else_if_types.get(&negated_variable_id) {
+            if let Some(negated_elseif_type_assertions) = if_scope.negated_types.swap_remove(&negated_variable_id) {
+                if_scope.negated_types.insert(
+                    negated_variable_id,
+                    negated_variable_type_assertions.iter().cloned().chain(negated_elseif_type_assertions).collect(),
+                );
+            } else {
+                if_scope.negated_types.insert(negated_variable_id, negated_variable_type_assertions.clone());
+            }
+        }
+    }
+
+    let mut newly_reconciled_variable_ids = WordSet::default();
+    if !reconcilable_else_if_types.is_empty() {
+        reconcile_keyed_types(
+            context,
+            &reconcilable_else_if_types,
+            active_else_if_types,
+            &mut else_if_block_context,
+            &mut newly_reconciled_variable_ids,
+            &conditionally_referenced_variable_ids,
+            &else_if_clause.0.span(),
+            false,
+            false,
+        );
+
+        if !newly_reconciled_variable_ids.is_empty() {
+            else_if_block_context.clauses = BlockContext::remove_reconciled_clauses(
+                &else_if_block_context.clauses.iter().map(Rc::deref).cloned().collect(),
+                &newly_reconciled_variable_ids,
+            )
+            .0
+            .into_iter()
+            .map(Rc::new)
+            .collect();
+
+            let mut variables_to_remove = vec![];
+            for (changed_variable_id, _) in &reconcilable_else_if_types {
+                for variable_id in else_if_block_context.locals.keys() {
+                    if is_derived_access_path(*variable_id, *changed_variable_id)
+                        && !newly_reconciled_variable_ids.contains(variable_id)
+                        && !conditionally_referenced_variable_ids.contains(variable_id)
+                    {
+                        variables_to_remove.push(*variable_id);
+                    }
+                }
+            }
+
+            for variable_id in variables_to_remove {
+                else_if_block_context.remove_possible_reference(variable_id.as_bytes());
+            }
+        }
+    }
+
+    let pre_assigned_variable_ids = std::mem::take(&mut else_if_block_context.assigned_variable_ids);
+    let pre_possibly_assigned_variable_ids = std::mem::take(&mut else_if_block_context.possibly_assigned_variable_ids);
+
+    analyze_statements(else_if_clause.1, context, &mut else_if_block_context, artifacts)?;
+
+    for variable_id in &else_if_block_context.parent_conflicting_clause_variables {
+        outer_block_context.remove_variable_from_conflicting_clauses(context, *variable_id, None);
+    }
+
+    let new_assigned_variable_ids = else_if_block_context.assigned_variable_ids.clone();
+    let new_possibly_assigned_variable_ids = else_if_block_context.possibly_assigned_variable_ids.clone();
+    else_if_block_context.assigned_variable_ids.extend(pre_assigned_variable_ids);
+    else_if_block_context.possibly_assigned_variable_ids.extend(pre_possibly_assigned_variable_ids);
+
+    inherit_branch_context_properties(context, outer_block_context, &else_if_block_context);
+
+    let final_actions =
+        ControlAction::from_statements(else_if_clause.1.iter().collect(), vec![], Some(artifacts), true);
+
+    let (has_ending_statements, has_break_statement, has_continue_statement, has_leaving_statements) =
+        get_branch_control_flags(final_actions);
+
+    if_scope.if_actions.extend(final_actions);
+
+    if has_leaving_statements {
+        if_scope.reasonable_clauses = vec![];
+
+        if !negated_else_if_types.is_empty() {
+            let mut implied_outer_context = else_if_block_context.clone();
+
+            reconcile_keyed_types(
+                context,
+                &negated_else_if_types,
+                IndexMap::new(),
+                &mut implied_outer_context,
+                &mut WordSet::default(),
+                &WordSet::default(),
+                &else_if_clause.0.span(),
+                false,
+                false,
+            );
+        }
+    } else {
+        update_if_scope(
+            context,
+            if_scope,
+            &mut else_if_block_context,
+            outer_block_context,
+            new_assigned_variable_ids.into_iter().chain(assigned_in_conditional_variable_ids).collect(),
+            new_possibly_assigned_variable_ids.clone(),
+            &newly_reconciled_variable_ids,
+            false,
+        );
+
+        if if_scope.reasonable_clauses.is_empty() || else_if_clauses.is_empty() {
+            if_scope.reasonable_clauses = vec![];
+        } else {
+            let previous_clauses = std::mem::take(&mut if_scope.reasonable_clauses);
+
+            if_scope.reasonable_clauses = disjoin_clauses(
+                previous_clauses.into_iter().map(Rc::unwrap_or_clone).collect(),
+                else_if_clauses.clone(),
+                else_if_clause.0.span(),
+                &context.settings.algebra_thresholds(),
+            )
+            .into_iter()
+            .map(Rc::new)
+            .collect();
+        }
+    }
+
+    if !has_ending_statements {
+        let variables_possibly_in_scope = else_if_block_context
+            .variables_possibly_in_scope
+            .iter()
+            .filter(|id| !outer_block_context.variables_possibly_in_scope.contains(*id))
+            .copied()
+            .collect::<WordSet>();
+
+        let possibly_assigned_variable_ids = new_possibly_assigned_variable_ids;
+
+        if let Some(loop_scope) = artifacts.loop_scope.as_mut() {
+            if has_leaving_statements {
+                if !has_continue_statement && !has_break_statement {
+                    if_scope.new_variables_possibly_in_scope.extend(variables_possibly_in_scope.iter().copied());
+                    if_scope.possibly_assigned_variable_ids.extend(possibly_assigned_variable_ids);
+                }
+
+                loop_scope.variables_possibly_in_scope.extend(variables_possibly_in_scope);
+            }
+        } else if !has_leaving_statements {
+            if_scope.new_variables_possibly_in_scope.extend(variables_possibly_in_scope);
+            if_scope.possibly_assigned_variable_ids.extend(possibly_assigned_variable_ids);
+        }
+    }
+
+    let negated_formula = negate_or_synthesize(
+        else_if_clauses,
+        else_if_clause.0,
+        context.get_assertion_context_from_block(&else_if_block_context),
+        artifacts,
+        &context.settings.algebra_thresholds(),
+        context.settings.formula_size_threshold,
+    );
+
+    if_scope.negated_clauses = saturate_clauses(
+        if_scope.negated_clauses.iter().chain(negated_formula.iter()),
+        &context.settings.algebra_thresholds(),
+    );
+
+    outer_block_context.update_references_possibly_from_confusing_scope(&else_if_block_context);
+
+    Ok(())
+}
+
+fn analyze_else_statements<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    if_scope: &mut IfScope<'ctx>,
+    else_block_context: &mut BlockContext<'ctx>,
+    outer_block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    else_statements: Option<&[Statement<'arena>]>,
+    if_span: Span,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    if else_statements.is_none() && if_scope.negated_clauses.is_empty() && else_block_context.clauses.is_empty() {
+        if_scope.final_actions.insert(ControlAction::None);
+        if_scope.assigned_variable_ids = None;
+        if_scope.new_variables = None;
+        if_scope.redefined_variables = None;
+        if_scope.reasonable_clauses = vec![];
+
+        // No else branch means we can't guarantee initialization - clear intersection sets
+        if outer_block_context.flags.collect_initializations() {
+            if_scope.definitely_initialized_properties = None;
+            if_scope.definitely_called_methods = None;
+        }
+
+        merge_definitely_uninitialized_property_ids(if_scope, else_block_context);
+
+        return Ok(());
+    }
+
+    let else_span = match else_statements {
+        Some(else_statements) => match (else_statements.first(), else_statements.last()) {
+            (Some(first_statement), Some(last_statement)) => first_statement.span().join(last_statement.span()),
+            _ => if_span,
+        },
+        None => if_span,
+    };
+
+    else_block_context.clauses = saturate_clauses(
+        else_block_context.clauses.iter().map(Rc::deref).chain(if_scope.negated_clauses.iter()),
+        &context.settings.algebra_thresholds(),
+    )
+    .into_iter()
+    .map(Rc::new)
+    .collect();
+
+    let (else_types, _) = find_satisfying_assignments(
+        else_block_context.clauses.iter().map(Rc::deref).cloned().collect_vec().as_slice(),
+        None,
+        &mut WordSet::default(),
+    );
+
+    let mut original_context = else_block_context.clone();
+
+    if !else_types.is_empty() {
+        let mut changed_variable_ids = WordSet::default();
+
+        reconcile_keyed_types(
+            context,
+            &else_types,
+            IndexMap::new(),
+            else_block_context,
+            &mut changed_variable_ids,
+            &WordSet::default(),
+            &else_span,
+            false,
+            false,
+        );
+
+        else_block_context.clauses = BlockContext::remove_reconciled_clauses(
+            &else_block_context.clauses.iter().map(Rc::deref).cloned().collect(),
+            &changed_variable_ids,
+        )
+        .0
+        .into_iter()
+        .map(Rc::new)
+        .collect();
+
+        let mut variables_to_remove = vec![];
+        for changed_variable_id in &changed_variable_ids {
+            for variable_id in else_block_context.locals.keys() {
+                if variable_id.eq(changed_variable_id) {
+                    continue;
+                }
+
+                if is_derived_access_path(*variable_id, *changed_variable_id)
+                    && !changed_variable_ids.contains(variable_id)
+                {
+                    variables_to_remove.push(*variable_id);
+                }
+            }
+        }
+
+        for variable_id in variables_to_remove {
+            else_block_context.remove_possible_reference(variable_id.as_bytes());
+        }
+    }
+
+    // Check if any variable has become `never` after reconciliation, indicating the else clause is unreachable
+    let is_unreachable =
+        else_types.keys().any(|var_id| else_block_context.locals.get(var_id).is_some_and(|t| t.is_never()));
+
+    if is_unreachable {
+        if else_statements.is_some() {
+            context.collector.report_with_code(
+                IssueCode::UnreachableElseClause,
+                Issue::error("Unreachable else clause")
+                    .with_annotation(Annotation::primary(else_span).with_message("this else clause is unreachable"))
+                    .with_annotation(
+                        Annotation::secondary(if_span)
+                            .with_message("all possible values have been handled by the preceding conditions"),
+                    )
+                    .with_note(
+                        "The preceding `if` and `elseif` conditions have exhausted all possible values, making this `else` clause unreachable.",
+                    )
+                    .with_help("Remove this `else` clause or adjust the preceding conditions."),
+            );
+        }
+
+        if_scope.final_actions.insert(ControlAction::None);
+
+        return Ok(());
+    }
+
+    let old_else_context = else_block_context.clone();
+    let pre_assigned_variable_ids = std::mem::take(&mut else_block_context.assigned_variable_ids);
+    let pre_possibly_assigned_variable_ids = std::mem::take(&mut else_block_context.possibly_assigned_variable_ids);
+
+    if let Some(statements) = else_statements {
+        analyze_statements(statements, context, else_block_context, artifacts)?;
+    }
+
+    for variable_id in &else_block_context.parent_conflicting_clause_variables {
+        outer_block_context.remove_variable_from_conflicting_clauses(context, *variable_id, None);
+    }
+
+    let new_assigned_variable_ids = else_block_context.assigned_variable_ids.clone();
+    let new_possibly_assigned_variable_ids = else_block_context.possibly_assigned_variable_ids.clone();
+    else_block_context.assigned_variable_ids.extend(pre_assigned_variable_ids);
+    else_block_context.possibly_assigned_variable_ids.extend(pre_possibly_assigned_variable_ids);
+
+    if else_statements.is_some() {
+        inherit_branch_context_properties(context, outer_block_context, else_block_context);
+    }
+
+    let final_actions = match else_statements {
+        Some(else_statements) => {
+            ControlAction::from_statements(else_statements.iter().collect(), vec![], Some(artifacts), true)
+        }
+        None => ControlActionSet::from_single(ControlAction::None),
+    };
+
+    let (has_ending_statements, has_break_statement, has_continue_statement, has_leaving_statements) =
+        get_branch_control_flags(final_actions);
+
+    if_scope.final_actions.extend(final_actions);
+
+    if !has_leaving_statements {
+        update_if_scope(
+            context,
+            if_scope,
+            else_block_context,
+            &mut original_context,
+            new_assigned_variable_ids,
+            new_possibly_assigned_variable_ids.clone(),
+            &if_scope.conditionally_changed_variable_ids.clone(),
+            true,
+        );
+
+        if_scope.reasonable_clauses = vec![];
+    }
+
+    if !if_scope.negated_types.is_empty() {
+        let variables_to_update = if_scope
+            .negated_types
+            .keys()
+            .copied()
+            .filter(|var| outer_block_context.locals.contains_key(var))
+            .collect::<WordSet>();
+
+        outer_block_context.update(
+            context,
+            &old_else_context,
+            else_block_context,
+            has_leaving_statements,
+            &variables_to_update,
+            &mut if_scope.updated_variables,
+        );
+    }
+
+    if !has_ending_statements {
+        let variables_possibly_in_scope = else_block_context
+            .variables_possibly_in_scope
+            .iter()
+            .filter(|&id| !outer_block_context.variables_possibly_in_scope.contains(id))
+            .copied()
+            .collect::<WordSet>();
+
+        if has_leaving_statements {
+            if let Some(loop_scope) = artifacts.loop_scope.as_mut() {
+                if !has_continue_statement && !has_break_statement {
+                    if_scope.new_variables_possibly_in_scope.extend(variables_possibly_in_scope.iter().copied());
+                }
+
+                loop_scope.variables_possibly_in_scope.extend(variables_possibly_in_scope);
+            }
+        } else {
+            if_scope.new_variables_possibly_in_scope.extend(variables_possibly_in_scope.iter().copied());
+            if_scope.possibly_assigned_variable_ids.extend(new_possibly_assigned_variable_ids);
+        }
+    }
+
+    outer_block_context.update_references_possibly_from_confusing_scope(else_block_context);
+
+    Ok(())
+}
+
+fn add_conditionally_assigned_variables_to_context<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    artifacts: &mut AnalysisArtifacts,
+    post_leaving_if_block_context: &mut BlockContext<'ctx>,
+    post_if_block_context: &mut BlockContext<'ctx>,
+    condition: &Expression<'arena>,
+    assigned_in_conditional_variable_ids: &WordMap<u32>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    if assigned_in_conditional_variable_ids.is_empty() {
+        return Ok(());
+    }
+
+    let old_expression_types = artifacts.expression_types.clone();
+    let expressions = get_definitely_evaluated_ored_expressions(condition);
+
+    let (result, _) = context.record(|context| {
+        for expression in expressions {
+            let negated_expression = new_synthetic_negation(context.arena, expression);
+            let assertion = new_synthetic_call(context.arena, "assert", negated_expression);
+
+            let was_inside_negation = post_leaving_if_block_context.flags.inside_negation();
+            post_leaving_if_block_context.flags.set_inside_negation(true);
+
+            assertion.analyze(context, post_leaving_if_block_context, artifacts)?;
+
+            post_leaving_if_block_context.flags.set_inside_negation(was_inside_negation);
+        }
+
+        Result::<_, AnalysisError>::Ok(())
+    });
+
+    result?;
+
+    artifacts.expression_types = old_expression_types;
+
+    for variable_id in assigned_in_conditional_variable_ids.keys() {
+        if let Some(variable_type) = post_leaving_if_block_context.locals.get(variable_id) {
+            post_if_block_context.locals.insert(*variable_id, Rc::clone(variable_type));
+        }
+    }
+
+    Ok(())
+}
+
+fn update_if_scope<'ctx, A>(
+    context: &Context<'ctx, '_, A>,
+    if_scope: &mut IfScope<'ctx>,
+    if_block_context: &mut BlockContext<'ctx>,
+    outer_block_context: &mut BlockContext<'ctx>,
+    new_assigned_variable_ids: WordMap<u32>,
+    new_possibly_assigned_variable_ids: WordSet,
+    newly_reconciled_variable_ids: &WordSet,
+    update_new_variables: bool,
+) where
+    A: Arena,
+{
+    merge_definitely_uninitialized_property_ids(if_scope, if_block_context);
+
+    // Handle definitely_initialized_properties with INTERSECTION semantics
+    if outer_block_context.flags.collect_initializations() {
+        let branch_initialized = std::mem::take(&mut if_block_context.definitely_initialized_properties);
+        match &mut if_scope.definitely_initialized_properties {
+            Some(existing) => {
+                // Intersection: keep only properties initialized in BOTH branches
+                existing.retain(|p| branch_initialized.contains(p));
+            }
+            None => {
+                // First branch: initialize with this branch's set
+                if_scope.definitely_initialized_properties = Some(branch_initialized);
+            }
+        }
+
+        // Union semantics for possibly_initialized
+        outer_block_context
+            .possibly_initialized_properties
+            .extend(if_block_context.possibly_initialized_properties.iter().copied());
+
+        // Same for method calls
+        let branch_called = std::mem::take(&mut if_block_context.definitely_called_methods);
+        match &mut if_scope.definitely_called_methods {
+            Some(existing) => {
+                existing.retain(|m| branch_called.contains(m));
+            }
+            None => {
+                if_scope.definitely_called_methods = Some(branch_called);
+            }
+        }
+
+        outer_block_context.called_methods.extend(if_block_context.called_methods.iter().copied());
+    }
+    let mut redefined_variables =
+        if_block_context.get_redefined_locals(&outer_block_context.locals, false, &mut WordSet::default());
+
+    for (variable_id, variable_type) in &if_block_context.locals {
+        if outer_block_context.locals.contains_key(variable_id) {
+            continue;
+        }
+
+        let variable_id_bytes = variable_id.as_bytes();
+        if !variable_id_bytes.starts_with(b"$")
+            || variable_id_bytes.contains(&b'[')
+            || memchr::memmem::find(variable_id_bytes, b"->").is_some()
+            || memchr::memmem::find(variable_id_bytes, b"::").is_some()
+            || variable_id_bytes.ends_with(b"()")
+        {
+            continue;
+        }
+
+        let combined = add_optional_union_type(
+            (**variable_type).clone(),
+            if_scope.possibly_defined_variable_types.get(variable_id).map(Rc::as_ref),
+            context.codebase,
+        );
+        if_scope.possibly_defined_variable_types.insert(*variable_id, Rc::new(combined));
+    }
+
+    match &mut if_scope.new_variables {
+        Some(new_variables) => {
+            let mut to_remove = vec![];
+            for (new_variable, new_variable_type) in new_variables.iter_mut() {
+                if !if_block_context.has_variable(new_variable.as_bytes()) {
+                    to_remove.push(*new_variable);
+                } else {
+                    *new_variable_type = Rc::new(combine_union_types(
+                        new_variable_type,
+                        // SAFETY: has_variable returned true
+                        unsafe { if_block_context.locals.get(new_variable).unwrap_unchecked() },
+                        context.codebase,
+                        CombinerOptions::default(),
+                    ));
+                }
+            }
+
+            for new_variable in to_remove {
+                new_variables.remove(&new_variable);
+            }
+        }
+        None => {
+            if update_new_variables {
+                if_scope.new_variables = Some(
+                    if_block_context
+                        .locals
+                        .iter()
+                        .filter(|(variable_id, _)| !outer_block_context.locals.contains_key(*variable_id))
+                        .map(|(variable_id, variable_type)| (*variable_id, Rc::clone(variable_type)))
+                        .collect(),
+                );
+            }
+        }
+    }
+
+    let mut possibly_redefined_variables = WordMap::default();
+    for (variable_id, variable_type) in &redefined_variables {
+        if new_possibly_assigned_variable_ids.contains(variable_id)
+            || !newly_reconciled_variable_ids.contains(variable_id)
+        {
+            possibly_redefined_variables.insert(*variable_id, Rc::clone(variable_type));
+        }
+    }
+
+    match &mut if_scope.assigned_variable_ids {
+        Some(assigned_variable_ids) => {
+            assigned_variable_ids.extend(new_assigned_variable_ids);
+        }
+        None => {
+            if_scope.assigned_variable_ids = Some(new_assigned_variable_ids);
+        }
+    }
+
+    if_scope.possibly_assigned_variable_ids.extend(new_possibly_assigned_variable_ids);
+
+    if let Some(redefined_scope_variables) = &mut if_scope.redefined_variables {
+        let mut variables_to_remove: Vec<Word> = vec![];
+        for (redefined_variable, variable_type) in redefined_scope_variables.iter_mut() {
+            let Some(redefined_type) = redefined_variables.remove(redefined_variable) else {
+                variables_to_remove.push(*redefined_variable);
+                continue;
+            };
+
+            *variable_type = Rc::new(combine_union_types(
+                &redefined_type,
+                variable_type,
+                context.codebase,
+                CombinerOptions::default(),
+            ));
+        }
+
+        for variable in variables_to_remove {
+            redefined_scope_variables.remove(&variable);
+        }
+
+        for (variable_id, variable_type) in possibly_redefined_variables {
+            let resulting_type = match if_scope.possibly_redefined_variables.get(&variable_id) {
+                Some(existing_type) => Rc::new(combine_union_types(
+                    &variable_type,
+                    existing_type,
+                    context.codebase,
+                    CombinerOptions::default(),
+                )),
+                None => variable_type,
+            };
+
+            if_scope.possibly_redefined_variables.insert(variable_id, resulting_type);
+        }
+    } else {
+        if_scope.redefined_variables = Some(redefined_variables);
+        if_scope.possibly_redefined_variables = possibly_redefined_variables;
+    }
+}
+
+fn merge_definitely_uninitialized_property_ids(if_scope: &mut IfScope<'_>, branch_context: &BlockContext<'_>) {
+    match &mut if_scope.definitely_uninitialized_property_ids {
+        Some(existing) => {
+            existing.retain(|property_id| branch_context.definitely_uninitialized_property_ids.contains(property_id));
+        }
+        None => {
+            if_scope.definitely_uninitialized_property_ids =
+                Some(branch_context.definitely_uninitialized_property_ids.clone());
+        }
+    }
+}
+
+fn get_definitely_evaluated_ored_expressions<'ast, 'arena>(
+    expression: &'ast Expression<'arena>,
+) -> Vec<&'ast Expression<'arena>> {
+    if let Expression::Binary(Binary {
+        lhs,
+        operator: BinaryOperator::Or(_) | BinaryOperator::LowOr(_) | BinaryOperator::LowXor(_),
+        rhs,
+    }) = expression
+    {
+        return get_definitely_evaluated_ored_expressions(lhs)
+            .into_iter()
+            .chain(get_definitely_evaluated_ored_expressions(rhs))
+            .collect();
+    }
+
+    vec![expression]
+}
+
+fn synthesize_branch_discriminator_clauses(
+    if_body_redefined: &WordMap<Rc<TUnion>>,
+    else_block_context: &BlockContext<'_>,
+    if_clauses: &[mago_algebra::clause::Clause],
+    negated_clauses: &[mago_algebra::clause::Clause],
+    condition_span: Span,
+    algebra_thresholds: &mago_algebra::AlgebraThresholds,
+    formula_size_threshold: u16,
+) -> Vec<Rc<Clause>> {
+    if if_body_redefined.is_empty() {
+        return vec![];
+    }
+
+    if if_clauses.is_empty() && negated_clauses.is_empty() {
+        return vec![];
+    }
+
+    let mut clauses = vec![];
+    for (variable_id, if_type) in if_body_redefined {
+        let Some(else_type) = else_block_context.locals.get(variable_id) else {
+            continue;
+        };
+
+        let if_truthy = if_type.is_always_truthy();
+        let if_falsy = if_type.is_always_falsy();
+        let else_truthy = else_type.is_always_truthy();
+        let else_falsy = else_type.is_always_falsy();
+
+        let (truthy_side_clauses, falsy_side_clauses) = if if_truthy && else_falsy {
+            (if_clauses, negated_clauses)
+        } else if if_falsy && else_truthy {
+            (negated_clauses, if_clauses)
+        } else {
+            continue;
+        };
+
+        if truthy_side_clauses.is_empty() && falsy_side_clauses.is_empty() {
+            continue;
+        }
+
+        if !truthy_side_clauses.is_empty() {
+            let mut possibilities = IndexMap::default();
+            possibilities.insert(*variable_id, IndexMap::from([(Assertion::Falsy.to_hash(), Assertion::Falsy)]));
+
+            let head = vec![mago_algebra::clause::Clause::new(
+                possibilities,
+                condition_span,
+                condition_span,
+                None,
+                None,
+                None,
+            )];
+
+            let combined = disjoin_clauses(head, truthy_side_clauses.to_vec(), condition_span, algebra_thresholds);
+            if combined.len() <= usize::from(formula_size_threshold) {
+                clauses.extend(combined.into_iter().map(Rc::new));
+            }
+        }
+
+        if !falsy_side_clauses.is_empty() {
+            let mut possibilities = IndexMap::default();
+            possibilities.insert(*variable_id, IndexMap::from([(Assertion::Truthy.to_hash(), Assertion::Truthy)]));
+
+            let head = vec![mago_algebra::clause::Clause::new(
+                possibilities,
+                condition_span,
+                condition_span,
+                None,
+                None,
+                None,
+            )];
+
+            let combined = disjoin_clauses(head, falsy_side_clauses.to_vec(), condition_span, algebra_thresholds);
+            if combined.len() <= usize::from(formula_size_threshold) {
+                clauses.extend(combined.into_iter().map(Rc::new));
+            }
+        }
+    }
+
+    clauses
+}
+
+fn get_branch_control_flags(final_actions: ControlActionSet) -> (bool, bool, bool, bool) {
+    if final_actions.is_empty() {
+        return (false, false, false, false);
+    }
+
+    let has_ending_statements = final_actions.len() == 1 && final_actions.contains(ControlAction::End);
+    let has_break_statement = final_actions.len() == 1 && final_actions.contains(ControlAction::Break);
+    let has_continue_statement = final_actions.len() == 1 && final_actions.contains(ControlAction::Continue);
+    let has_leaving_statements = has_ending_statements || !final_actions.contains(ControlAction::None);
+
+    (has_ending_statements, has_break_statement, has_continue_statement, has_leaving_statements)
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use crate::code::IssueCode;
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = conditional_negation,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @param int<0, max> $offset
+             *
+             * @return false|int<0, max>
+             */
+            function strpos(string $haystack, string $needle, int $offset = 0): false|int
+            {
+                return strpos($haystack, $needle, $offset);
+            }
+
+            /**
+             * @param int<0, max> $offset
+             *
+             * @return null|int<0, max>
+             */
+            function search1(string $haystack, string $needle, int $offset = 0): null|int
+            {
+                if ('' === $needle) {
+                    return null;
+                }
+
+                if (false === ($pos = strpos($haystack, $needle, $offset))) {
+                    return null;
+                } else {
+                    return $pos;
+                }
+            }
+
+            /**
+             * @param int<0, max> $offset
+             *
+             * @return null|int<0, max>
+             */
+            function search2(string $haystack, string $needle, int $offset = 0): null|int
+            {
+                if ('' === $needle) {
+                    return null;
+                }
+
+                if (false === ($pos = strpos($haystack, $needle, $offset))) {
+                    $_tmp = null;
+                } else {
+                    $_tmp = $pos;
+                }
+
+                return $_tmp;
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = simple_if_statement,
+        code = indoc! {r#"
+            <?php
+
+            $a = 1;
+            $b = 2;
+
+            if ($a > $b) {
+                echo "a is greater than b";
+            } elseif ($a < $b) {
+                echo "a is less than b";
+            } else {
+                echo "a is equal to b";
+            }
+        "#},
+        issues = [
+            IssueCode::ImpossibleCondition, // `if ($a > $b)` is never executed
+            IssueCode::RedundantComparison, // `$a > $b` is always false
+            IssueCode::RedundantCondition, // `if ($a < $b)` is always executed
+            IssueCode::RedundantComparison, // `$a < $b` is always true
+        ],
+    }
+
+    test_analysis! {
+        name = if_narrowing_string_or_null_to_string,
+        code = indoc! {"
+            <?php
+            function takes_string(string $_s): void {}
+
+            function process_string_or_null(?string $input): void {
+                if ($input !== null) {
+                    takes_string($input);
+                }
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = if_else_different_assignments_widening,
+        code = indoc! {r#"
+            <?php
+
+            /** @param int|string $_is */
+            function takes_int_or_string(mixed $_is): void {}
+
+            function get_int_or_string(bool $condition): void {
+                if ($condition) {
+                    $value = "hello";
+                } else {
+                    $value = 123;
+                }
+
+                takes_int_or_string($value);
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = if_var_becomes_never_due_to_impossible_condition,
+        code = indoc! {"
+            <?php
+            function takes_string(string $_s): void {}
+
+            /** @param 'a' $input */
+            function test_var_becomes_never(string $input): void {
+                if ($input !== 'a') {
+                    // $input is 'a' and $input is not 'a' => impossible
+                    // so $input is 'never' in this block
+                    takes_string($input);
+                }
+            }
+        "},
+        issues = [
+            IssueCode::RedundantComparison,
+            IssueCode::ImpossibleCondition,
+            IssueCode::NoValue,
+        ],
+    }
+
+    test_analysis! {
+        name = if_var_narrowed_then_used_after_with_original_possibilities,
+        code = indoc! {"
+            <?php
+            /** @param 'a'|'b' $_ab */
+            function expect_a_or_b(string $_ab): void {
+                if ($_ab === 'a') {
+                    expect_a($_ab);
+                } else {
+                    expect_b($_ab);
+                }
+
+                expect_a_or_b($_ab); // $_ab is still 'a'|'b' here
+            }
+
+            /** @param 'a' $_a */
+            function expect_a(string $_a): void {}
+
+            /** @param 'b' $_b */
+            function expect_b(string $_b): void {}
+
+        "},
+    }
+
+    test_analysis! {
+        name = if_assign_in_condition_and_used_after,
+        code = indoc! {r#"
+            <?php
+
+            /** @param 'hello' $_s */
+            function takes_string(string $_s): void {}
+
+            /** @param null $_n */
+            function takes_null($_n): void {}
+
+            /** @param 'hello'|null $_sn */
+            function takes_string_or_null(?string $_sn): void {
+                if ($_sn !== null) {
+                    takes_string($_sn);
+                } else {
+                    takes_null($_sn);
+                }
+            }
+
+            /** @param bool $cond */
+            function test_assign_in_cond_used_after(bool $cond): void {
+                if ($cond) {
+                    $val = "hello";
+                } else {
+                    $val = null;
+                }
+
+                if ($val) {
+                    takes_string($val); // $val is "hello" here
+                }
+
+                takes_string_or_null($val); // $val is "hello"|null here
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = if_condition_on_array_element_type,
+        code = indoc! {r#"
+            <?php
+            /** @param string $_s */
+            function takes_string(string $_s): void {}
+
+            /** @param array{'data': string|int} $arr */
+            function test_array_element_condition(array $arr): void {
+                if ($arr['data'] === "text") {
+                    takes_string($arr['data']);
+                }
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = if_array_is_not_empty_narrowing,
+        code = indoc! {"
+            <?php
+            /** @param non-empty-array<int, string> $_non_empty_arr */
+            function expect_non_empty_arr(array $_non_empty_arr): void {}
+
+            /** @param array<int, string> $input_arr */
+            function process_array_check_not_empty(array $input_arr): void {
+                if ($input_arr !== []) {
+                    expect_non_empty_arr($input_arr);
+                }
+            }
+        "},
+        issues = []
+    }
+
+    test_analysis! {
+        name = if_array_is_empty_narrowing,
+        code = indoc! {"
+            <?php
+
+            /** @param array{} $_empty_arr */
+            function expect_empty_arr(array $_empty_arr): void {}
+
+            /** @param array<int, string> $input_arr */
+            function process_array_check_empty(array $input_arr): void {
+                if ($input_arr === []) {
+                    expect_empty_arr($input_arr);
+                }
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = if_else_both_define_var_type_is_union,
+        code = indoc! {"
+            <?php
+            /** @param 1|2 $_one_or_two */
+            function expect_one_or_two(int $_one_or_two): void {}
+
+            function test_defined_in_both_if_else(bool $condition): void {
+                if ($condition) {
+                    $num = 1;
+                } else {
+                    $num = 2;
+                }
+
+                expect_one_or_two($num);
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = if_variable_defined_only_in_if_is_possibly_undefined_after,
+        code = indoc! {r#"
+            <?php
+            /** @param string|null $_s */
+            function expect_string_or_null(?string $_s): void {}
+
+            function test_defined_in_if(bool $condition): void {
+                if ($condition) {
+                    $message = "defined";
+                } else {
+                    $message = null;
+                }
+
+                expect_string_or_null($message);
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = if_not_exhaustive_union_remains_union,
+        code = indoc! {r#"
+            <?php
+            /** @param 'a'|'b'|'c' $_abc */
+            function expect_abc(string $_abc): void {}
+
+            /** @param 'a' $_a */
+            function expect_a(string $_a): void {}
+
+            /** @param 'a'|'b'|'c' $input */
+            function test_not_exhaustive_union(string $input): void {
+                if ($input === "a") {
+                    expect_a($input);
+                }
+
+                // $input is still 'a'|'b'|'c' after this if block
+                expect_abc($input);
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = if_else_exhaustive_literal_union,
+        code = indoc! {"
+            <?php
+
+            /** @param 'x'|'y' $_s */
+            function expect_x_or_y(string $_s): void {}
+
+            /** @param 'z' $_z_only */
+            function expect_z_only(string $_z_only): void {}
+
+            /** @param 'x'|'y'|'z' $_xyz */
+            function expect_xyz(string $_xyz): void {}
+
+            /** @param 'x'|'y'|'z' $input */
+            function test_exhaustive_literal_union(string $input): void {
+                if ($input === 'x' || $input === 'y') {
+                    $result = $input;
+                    expect_x_or_y($result);
+                } else {
+                    $result = 'z';
+                    expect_z_only($input);
+                }
+
+                expect_xyz($result);
+                expect_x_or_y($result);
+            }
+        "},
+        issues = [
+            IssueCode::PossiblyInvalidArgument, // `expect_x_or_y` expects 'x'|'y', but $result is 'x'|'y'|'z'
+        ]
+    }
+
+    test_analysis! {
+        name = if_or_condition_lhs,
+        code = indoc! {"
+            <?php
+
+            /** @param 'text'|'other' $_s */
+            function takes_string(string $_s): void
+            {
+            }
+
+            /** @param string|int $input */
+            function test_or_lhs_true($input): void
+            {
+                if ($input === 'other' || $input === 'text') {
+                    takes_string($input);
+                }
+
+                if ($input === 'text') {
+                    takes_string($input);
+                }
+
+                if ($input === 'other') {
+                    takes_string($input);
+
+                    if ($input === 'text') {
+                        takes_string($input);
+                    }
+                }
+            }
+
+            test_or_lhs_true('text');
+        "},
+        issues = [
+            IssueCode::RedundantComparison, // `$input === 'text'` is always true
+            IssueCode::ImpossibleCondition, // `if ($input === 'text')` is never executed
+            IssueCode::NoValue, // `takes_string($input)` is called with 'never' type
+        ]
+    }
+
+    test_analysis! {
+        name = if_and_condition_lhs_false_makes_whole_false,
+        code = indoc! {r#"
+            <?php
+            /** @param 'text' $_s */
+            function takes_string_unreachable(string $_s): void {}
+
+            /** @param string|null $input */
+            function test_and_lhs_false($input): void {
+                if ($input !== null && $input === "text") {
+                    takes_string_unreachable($input);
+                }
+            }
+
+            test_and_lhs_false(null);
+        "#}
+    }
+
+    test_analysis! {
+        name = if_assignment_in_condition_nullable_string,
+        code = indoc! {"
+            <?php
+
+            function get_string_or_null(): null|string
+            {
+                return null;
+            }
+
+            function takes_string(string $_s): void
+            {
+            }
+
+            function takes_null(null $_n): void
+            {
+            }
+
+            function takes_string_or_null(null|string $_s): void
+            {
+            }
+
+            function test_assignment_in_condition_is_maybe_null(): void
+            {
+                if (($message = get_string_or_null()) !== null) {
+                    takes_string($message);
+                } else {
+                    takes_null($message);
+                }
+
+                takes_string_or_null($message);
+            }
+        "},
+        issues = []
+    }
+
+    test_analysis! {
+        name = if_assignment_in_condition_always_false_literal_empty_string,
+        code = indoc! {r#"
+            <?php
+
+            /** @param non-empty-string $_s */
+            function takes_non_empty_string(string $_s): void
+            {
+            }
+
+            /** @param '' $_s */
+            function takes_empty_string(string $_s): void
+            {
+            }
+
+            function test_assignment_in_condition_is_falsy(): void
+            {
+                if ($message = "") {
+                    takes_non_empty_string($message);
+                } else {
+                    takes_empty_string($message);
+                }
+            }
+        "#},
+        issues = [
+            IssueCode::ImpossibleCondition, // `if ($message = "")` is never executed
+            IssueCode::NoValue, // `takes_string($message)` is called with 'never' type
+        ]
+    }
+
+    test_analysis! {
+        name = nested_if_deep_narrowing_nullable_union,
+        code = indoc! {"
+            <?php
+
+            /** @param 'target' $_s */
+            function expect_target_string(string $_s): void {}
+
+            /** @param array{'data': array{'value': 'target'|'other'|null }|null}|null $obj */
+            function process_deep_nullable_union($obj): void {
+                if ($obj !== null) {
+                    if ($obj['data'] !== null) {
+                        if ($obj['data']['value'] === 'target') {
+                            expect_target_string($obj['data']['value']);
+                        }
+                    }
+                }
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = if_impossible_condition_literal_false,
+        code = indoc! {r#"
+            <?php
+            /** @param string $_s */
+            function takes_string_unreachable(string $_s): void {}
+
+            function test_impossible_literal_false(): void {
+                if (false) {
+                    takes_string_unreachable("unreachable");
+                }
+            }
+        "#},
+        issues = [
+            IssueCode::ImpossibleCondition, // `if (false)` is never executed
+        ]
+    }
+
+    test_analysis! {
+        name = if_redundant_condition_literal_true,
+        code = indoc! {r#"
+            <?php
+            /** @param string $_s */
+            function takes_string_reachable(string $_s): void {}
+            function test_redundant_literal_true(): void {
+                if (true) {
+                    takes_string_reachable("always_reached");
+                }
+            }
+        "#},
+        issues = [
+            IssueCode::RedundantCondition, // `if (true)` is always executed
+        ]
+    }
+
+    test_analysis! {
+        name = if_impossible_condition_var_is_a_and_b,
+        code = indoc! {r#"
+            <?php
+            /** @param string $_s */
+            function takes_string_unreachable(string $_s): void {}
+
+            /** @param 'a'|'b' $input */
+            function test_var_a_and_b(string $input): void {
+                if ($input === 'a' && $input === 'b') {
+                    takes_string_unreachable("unreachable");
+                }
+            }
+        "#},
+        issues = [
+            IssueCode::RedundantComparison, // `$input === 'b'` is always false after `$input === 'a'`
+            IssueCode::RedundantLogicalOperation, // `$input === 'a' && $input === 'b'` is false because `$input === 'b'` is false.
+            IssueCode::ImpossibleCondition, // `if ($input === 'a' && $input === 'b')` is never executed
+        ]
+    }
+
+    test_analysis! {
+        name = if_else_redundant_check_in_else_for_null,
+        code = indoc! {r#"
+            <?php
+            /** @param string $_s */
+            function takes_string_unreachable(string $_s): void {}
+
+            /** @param string|null $input */
+            function test_redundant_else_check_is_null($input): void {
+                if ($input === null) {
+                    // $input is null
+                } else {
+                    // $input is string here
+                    if ($input === null) { // Impossible here
+                        takes_string_unreachable("unreachable_in_else");
+                    }
+                }
+            }
+        "#},
+        issues = [
+            IssueCode::RedundantComparison, // `$input === null` is always false in the else block
+            IssueCode::ImpossibleCondition, // `if ($input === null)` in the else block is never executed
+        ]
+    }
+
+    test_analysis! {
+        name = if_always_falsy_type_is_null,
+        code = indoc! {r#"
+            <?php
+            /** @param string $_s */
+            function takes_string_unreachable(string $_s): void {}
+            function test_always_falsy_is_null(): void {
+                $val = null;
+                if ($val) { // null is always falsy
+                    takes_string_unreachable("unreachable");
+                }
+            }
+        "#},
+        issues = [
+            IssueCode::ImpossibleCondition, // `if ($val)` is never executed because $val is null
+        ]
+    }
+
+    test_analysis! {
+        name = if_always_truthy_type_is_non_empty_string_literal,
+        code = indoc! {r#"
+            <?php
+            /** @param string $_s */
+            function takes_string_reachable(string $_s): void {}
+            function test_always_truthy_non_empty_string(): void {
+                $val = "hello";
+                if ($val) { // "hello" is always truthy
+                    takes_string_reachable("always_reached");
+                }
+            }
+        "#},
+        issues = [
+            IssueCode::RedundantCondition, // `if ($val)` is always executed because $val is truthy
+        ]
+    }
+
+    test_analysis! {
+        name = formula_generated,
+        code = indoc! {"
+            <?php
+
+            final class Tokenizer
+            {
+                public static function isSpecial(string $char): bool
+                {
+                    if (
+                        $char === '<' ||
+                            $char === '>' ||
+                            $char === '|' ||
+                            $char === '?' ||
+                            $char === ',' ||
+                            $char === '{' ||
+                            $char === '}' ||
+                            $char === '[' ||
+                            $char === ']' ||
+                            $char === '(' ||
+                            $char === ')' ||
+                            $char === ' ' ||
+                            $char === '&' ||
+                            $char === '='
+                    ) {
+                        return true;
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = eliminate_null_from_variable,
+        code = indoc! {"
+            <?php
+
+            function get_maybe_null(): ?string {
+                return null;
+            }
+
+            /**
+             * @template T
+             * @param T $value
+             * @return T
+             */
+            function identity(mixed $value): mixed {
+                return $value;
+            }
+
+            function eliminate_null1(): string {
+                $var = get_maybe_null();
+                if ($var === null) {
+                    return '';
+                }
+
+                return identity($var);
+            }
+
+            function eliminate_null2(): string {
+                $var = get_maybe_null();
+                if (null === $var) {
+                    return '';
+                }
+
+                return identity($var);
+            }
+
+            function eliminate_null3(): string {
+                $var = get_maybe_null();
+                if ($var !== null) {
+                    return identity($var);
+                }
+
+                return '';
+            }
+
+            function eliminate_null4(): string {
+                $var = get_maybe_null();
+                if (null !== $var) {
+                    return identity($var);
+                }
+
+                return '';
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = remove_enum_case_in_else,
+        code = indoc! {r#"
+            <?php
+
+            enum Color
+            {
+                case Transparent;
+                case Black;
+                case White;
+                case Red;
+                case Green;
+                case Blue;
+            }
+
+            function get_rgba_1(Color $color): string
+            {
+                if ($color === Color::Transparent) {
+                    return 'rgba(0, 0, 0, 0)';
+                }
+
+                [$r, $g, $b] = match ($color) {
+                    Color::Black => ['0', '0', '0'],
+                    Color::White => ['255', '255', '255'],
+                    Color::Red => ['255', '0', '0'],
+                    Color::Green => ['0', '255', '0'],
+                    Color::Blue => ['0', '0', '255'],
+                };
+
+                return "rgba($r, $g, $b, 1)";
+            }
+
+            function get_rgba_2(Color $color): string
+            {
+                if (Color::Transparent === $color) {
+                    return 'rgba(0, 0, 0, 0)';
+                }
+
+                [$r, $g, $b] = match ($color) {
+                    Color::Black => ['0', '0', '0'],
+                    Color::White => ['255', '255', '255'],
+                    Color::Red => ['255', '0', '0'],
+                    Color::Green => ['0', '255', '0'],
+                    Color::Blue => ['0', '0', '255'],
+                };
+
+                return "rgba($r, $g, $b, 1)";
+            }
+
+            function get_rgba_3(Color $color): string
+            {
+                if (Color::Transparent !== $color) {
+                    [$r, $g, $b] = match ($color) {
+                        Color::Black => ['0', '0', '0'],
+                        Color::White => ['255', '255', '255'],
+                        Color::Red => ['255', '0', '0'],
+                        Color::Green => ['0', '255', '0'],
+                        Color::Blue => ['0', '0', '255'],
+                    };
+
+                    return "rgba($r, $g, $b, 1)";
+                }
+
+                return 'rgba(0, 0, 0, 0)';
+            }
+
+            function get_rgba_4(Color $color): string
+            {
+                if ($color !== Color::Transparent) {
+                    [$r, $g, $b] = match ($color) {
+                        Color::Black => ['0', '0', '0'],
+                        Color::White => ['255', '255', '255'],
+                        Color::Red => ['255', '0', '0'],
+                        Color::Green => ['0', '255', '0'],
+                        Color::Blue => ['0', '0', '255'],
+                    };
+
+                    return "rgba($r, $g, $b, 1)";
+                }
+
+                return 'rgba(0, 0, 0, 0)';
+            }
+        "#},
+    }
+
+    test_analysis! {
+        name = if_condition_is_too_complex,
+        code = indoc! {"
+            <?php
+
+            function is_special_case(int $id, int $count, float $score, float $threshold, bool $is_active, bool $is_admin, string $name, string $role, string $permission, string $category): bool {
+                if (
+                    ($id > 1000 && $count < 5 || $score >= 99.5 && $threshold < $score || $name === 'azjezz' && $role !== 'guest') &&
+                    ($is_active && !$is_admin || $permission === 'write' && ($category === 'critical' || $category === 'urgent')) ||
+                    !($count === 0 || $id < 0) && (
+                        $role === 'admin' && $is_admin ||
+                        $name !== 'guest' && $permission !== 'none' ||
+                        ($score - $threshold) > 5.0 && $count > 1
+                    ) && (
+                        $category === 'general' || $category === 'special' ||
+                        ($is_active && $is_admin && $id % 2 === 0) ||
+                        ($name !== 'system' && $role !== 'user' && $score < 50.0)
+                    ) || (
+                        $id < 0 && $count > 100 ||
+                        ($score < 10.0 && $threshold > 20.0) ||
+                        ($is_active && $is_admin && $name === 'root') ||
+                        ($role === 'guest' && $permission === 'read' && $category === 'public')
+                    )
+                ) {
+                    return true;
+                }
+
+                return false;
+            }
+        "},
+        issues = [
+            IssueCode::ConditionIsTooComplex,
+        ]
+    }
+
+    test_analysis! {
+        name = elseif_condition_is_too_complex,
+        code = indoc! {"
+            <?php
+
+            function is_special_case(int $id, int $count, float $score, float $threshold, bool $is_active, bool $is_admin, string $name, string $role, string $permission, string $category): bool {
+                if ($id === 0 && $name === 'admin' && $role === 'system') {
+                    return true;
+                } elseif (
+                    ($id > 1000 && $count < 5 || $score >= 99.5 && $threshold < $score || $name === 'azjezz' && $role !== 'guest') &&
+                    ($is_active && !$is_admin || $permission === 'write' && ($category === 'critical' || $category === 'urgent')) ||
+                    !($count === 0 || $id < 0) && (
+                        $role === 'admin' && $is_admin ||
+                        $name !== 'guest' && $permission !== 'none' ||
+                        ($score - $threshold) > 5.0 && $count > 1
+                    ) && (
+                        $category === 'general' || $category === 'special' ||
+                        ($is_active && $is_admin && $id % 2 === 0) ||
+                        ($name !== 'system' && $role !== 'user' && $score < 50.0)
+                    ) || (
+                        $id < 0 && $count > 100 ||
+                        ($score < 10.0 && $threshold > 20.0) ||
+                        ($is_active && $is_admin && $name === 'root') ||
+                        ($role === 'guest' && $permission === 'read' && $category === 'public')
+                    )
+                ) {
+                    return true;
+                }
+
+                return false;
+            }
+        "},
+        issues = [
+            IssueCode::ConditionIsTooComplex,
+        ]
+    }
+}

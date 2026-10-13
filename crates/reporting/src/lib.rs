@@ -1,0 +1,1325 @@
+#![allow(clippy::pub_use, clippy::exhaustive_enums)]
+
+//! Issue reporting and formatting for Mago.
+//!
+//! This crate provides functionality for reporting code issues identified by the linter and analyzer.
+//! It includes support for multiple output formats, baseline filtering, and rich terminal output.
+//!
+//! # Core Types
+//!
+//! - [`Issue`]: Represents a single code issue with severity level, annotations, and optional fixes
+//! - [`IssueCollection`]: A collection of issues with filtering and sorting capabilities
+//! - [`reporter::Reporter`]: Handles formatting and outputting issues in various formats
+//! - [`baseline::Baseline`]: Manages baseline files to filter out known issues
+
+use std::cmp::Ordering;
+use std::iter::Once;
+use std::str::FromStr;
+
+use foldhash::HashMap;
+use foldhash::HashMapExt;
+use regex::Regex;
+use schemars::JsonSchema;
+use strum::Display;
+use strum::VariantNames;
+
+use mago_database::GlobSettings;
+use mago_database::file::FileId;
+use mago_database::matcher::ExclusionMatcher;
+use mago_span::Span;
+use mago_text_edit::TextEdit;
+
+#[cfg(feature = "renderers")]
+mod formatter;
+#[cfg(all(feature = "serde", feature = "renderers"))]
+mod internal;
+
+pub mod baseline;
+#[cfg(feature = "renderers")]
+pub mod color;
+#[cfg(feature = "renderers")]
+pub mod error;
+#[cfg(feature = "renderers")]
+pub mod output;
+#[cfg(feature = "renderers")]
+pub mod reporter;
+
+#[cfg(feature = "renderers")]
+pub use color::ColorChoice;
+#[cfg(feature = "renderers")]
+pub use formatter::ReportingFormat;
+#[cfg(feature = "renderers")]
+pub use formatter::utils::osc8_file_hyperlink;
+#[cfg(feature = "renderers")]
+pub use formatter::utils::osc8_hyperlink;
+#[cfg(feature = "renderers")]
+pub use output::ReportingTarget;
+
+/// Represents an entry in the analyzer's `ignore` configuration.
+///
+/// One of three shapes:
+///
+/// * A plain code string ignored everywhere: `"code1"`.
+/// * A code scoped to one or more paths/globs:
+///   `{ code = "code2", in = ["tests/", "src/**/*.php"] }`.
+/// * A regex pattern matched against the issue's textual content
+///   (title, notes, help, and annotation messages), optionally narrowed
+///   by `code` and/or `in`:
+///   `{ pattern = "Symfony", code = "mixed-assignment" }`.
+///
+/// Path entries accept both plain directory/file prefixes (e.g. `"tests/"`,
+/// `"src/Legacy.php"`) and glob patterns (e.g. `"src/**/*.php"`); entries
+/// containing any of `*`, `?`, `[`, `{` are matched with [`ExclusionMatcher`].
+///
+/// The `pattern` field is a [bare Rust regex](https://docs.rs/regex/) — use
+/// `(?i)` for case-insensitive matching. No surrounding delimiters.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
+pub enum IgnoreEntry {
+    /// Ignore a code everywhere: `"code1"`
+    Code(String),
+    /// Ignore by regex against issue text, with optional code and path scoping:
+    /// `{ pattern = "Symfony", code = "mixed-assignment", in = ["src/Bridge/"] }`.
+    Pattern {
+        /// A bare regex tested against the issue's title, annotation messages,
+        /// notes, and help message, in that order. First match short-circuits.
+        /// The most instance-specific text is searched first (title,
+        /// annotations); notes and help are tested last because they are
+        /// typically templated per rule.
+        pattern: String,
+        /// Optional code to narrow the match. When set, only issues with this
+        /// code are tested against the pattern.
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        code: Option<String>,
+        /// Optional paths/globs to narrow the match.
+        #[cfg_attr(
+            feature = "serde",
+            serde(
+                rename = "in",
+                default,
+                skip_serializing_if = "Option::is_none",
+                deserialize_with = "opt_one_or_many"
+            )
+        )]
+        paths: Option<Vec<String>>,
+    },
+    /// Ignore a code in specific paths or glob patterns:
+    /// `{ code = "code2", in = ["tests/", "src/**/*.php"] }`
+    Scoped {
+        code: String,
+        #[cfg_attr(feature = "serde", serde(rename = "in", deserialize_with = "one_or_many"))]
+        paths: Vec<String>,
+    },
+}
+
+#[cfg(feature = "serde")]
+fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(untagged))]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    match <OneOrMany as serde::Deserialize>::deserialize(deserializer)? {
+        OneOrMany::One(s) => Ok(vec![s]),
+        OneOrMany::Many(v) => Ok(v),
+    }
+}
+
+#[cfg(feature = "serde")]
+fn opt_one_or_many<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(one_or_many(deserializer)?))
+}
+
+/// Pre-compiled ignore entries ready for use by [`IssueCollection::filter_out_ignored`].
+///
+/// Build once per analysis (regex compilation and glob building are non-trivial),
+/// then reuse across watch-mode rebuilds and LSP analyses. Entries with invalid
+/// regex or invalid glob patterns are logged and skipped — a bad config line
+/// silently drops that entry rather than crashing the run.
+#[derive(Debug, Default)]
+pub struct CompiledIgnoreSet {
+    entries: Vec<CompiledIgnoreEntry>,
+}
+
+#[derive(Debug)]
+enum CompiledIgnoreEntry {
+    Code(String),
+    Scoped { code: String, matcher: ExclusionMatcher<String> },
+    Pattern { regex: Regex, code: Option<String>, matcher: Option<ExclusionMatcher<String>> },
+}
+
+/// Represents the kind of annotation associated with an issue.
+#[derive(Debug, PartialEq, Eq, Ord, Copy, Clone, Hash, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub enum AnnotationKind {
+    /// A primary annotation, typically highlighting the main source of the issue.
+    Primary,
+    /// A secondary annotation, providing additional context or related information.
+    Secondary,
+}
+
+/// An annotation associated with an issue, providing additional context or highlighting specific code spans.
+#[derive(Debug, PartialEq, Eq, Ord, Clone, Hash, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct Annotation {
+    /// An optional message associated with the annotation.
+    pub message: Option<String>,
+    /// The kind of annotation.
+    pub kind: AnnotationKind,
+    /// The code span that the annotation refers to.
+    pub span: Span,
+}
+
+/// Represents the severity level of an issue.
+#[derive(Debug, PartialEq, Eq, Ord, Copy, Clone, Hash, PartialOrd, Display, VariantNames, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[strum(serialize_all = "lowercase")]
+pub enum Level {
+    /// A note, providing additional information or context.
+    #[cfg_attr(feature = "serde", serde(alias = "note"))]
+    Note,
+    /// A help message, suggesting possible solutions or further actions.
+    #[cfg_attr(feature = "serde", serde(alias = "help"))]
+    Help,
+    /// A warning, indicating a potential problem that may need attention.
+    #[cfg_attr(feature = "serde", serde(alias = "warning", alias = "warn"))]
+    Warning,
+    /// An error, indicating a problem that prevents the code from functioning correctly.
+    #[cfg_attr(feature = "serde", serde(alias = "error", alias = "err"))]
+    Error,
+}
+
+impl FromStr for Level {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "note" => Ok(Self::Note),
+            "help" => Ok(Self::Help),
+            "warning" => Ok(Self::Warning),
+            "error" => Ok(Self::Error),
+            _ => Err(()),
+        }
+    }
+}
+
+type IssueEdits = Vec<TextEdit>;
+type IssueEditBatches = Vec<(Option<String>, IssueEdits)>;
+
+/// Represents an issue identified in the code.
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Issue {
+    /// The severity level of the issue.
+    pub level: Level,
+    /// An optional code associated with the issue.
+    pub code: Option<String>,
+    /// The main message describing the issue.
+    pub message: String,
+    /// Additional notes related to the issue.
+    pub notes: Vec<String>,
+    /// An optional help message suggesting possible solutions or further actions.
+    pub help: Option<String>,
+    /// An optional link to external resources for more information about the issue.
+    pub link: Option<String>,
+    /// Annotations associated with the issue, providing additional context or highlighting specific code spans.
+    pub annotations: Vec<Annotation>,
+    /// Text edits that can be applied to fix the issue, grouped by file.
+    pub edits: HashMap<FileId, IssueEdits>,
+}
+
+/// The code of [`Issue::unsuppressible_error`].
+pub const UNSUPPRESSIBLE_ERROR: &str = "unsuppressible-error";
+
+/// A collection of issues.
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct IssueCollection {
+    issues: Vec<Issue>,
+}
+
+impl AnnotationKind {
+    /// Returns `true` if this annotation kind is primary.
+    #[inline]
+    #[must_use]
+    pub const fn is_primary(&self) -> bool {
+        matches!(self, AnnotationKind::Primary)
+    }
+
+    /// Returns `true` if this annotation kind is secondary.
+    #[inline]
+    #[must_use]
+    pub const fn is_secondary(&self) -> bool {
+        matches!(self, AnnotationKind::Secondary)
+    }
+}
+
+impl CompiledIgnoreSet {
+    /// Compiles the given ignore entries into a reusable matcher set.
+    ///
+    /// Bad regex/glob entries are reported via `tracing::error!` and skipped;
+    /// the returned set still contains the valid entries.
+    #[must_use]
+    pub fn compile(entries: &[IgnoreEntry], glob: GlobSettings) -> Self {
+        let mut compiled = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match entry {
+                IgnoreEntry::Code(code) => compiled.push(CompiledIgnoreEntry::Code(code.clone())),
+                IgnoreEntry::Scoped { code, paths } => match ExclusionMatcher::compile(paths.iter().cloned(), glob) {
+                    Ok(matcher) => compiled.push(CompiledIgnoreEntry::Scoped { code: code.clone(), matcher }),
+                    Err(err) => {
+                        tracing::error!("Failed to compile ignore patterns for `{code}`: {err}. Entry will be skipped.")
+                    }
+                },
+                IgnoreEntry::Pattern { pattern, code, paths } => {
+                    let regex = match Regex::new(pattern) {
+                        Ok(regex) => regex,
+                        Err(err) => {
+                            tracing::error!(
+                                "Failed to compile ignore regex `{pattern}`: {err}. Entry will be skipped."
+                            );
+
+                            continue;
+                        }
+                    };
+
+                    let matcher = match paths {
+                        Some(paths) => match ExclusionMatcher::compile(paths.iter().cloned(), glob) {
+                            Ok(matcher) => Some(matcher),
+                            Err(err) => {
+                                tracing::error!(
+                                    "Failed to compile ignore paths for regex `{pattern}`: {err}. Entry will be skipped."
+                                );
+
+                                continue;
+                            }
+                        },
+                        None => None,
+                    };
+
+                    compiled.push(CompiledIgnoreEntry::Pattern { regex, code: code.clone(), matcher });
+                }
+            }
+        }
+
+        Self { entries: compiled }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn matches(&self, issue: &Issue, mut file_name: impl FnMut() -> Option<String>) -> bool {
+        self.entries.iter().any(|entry| match entry {
+            CompiledIgnoreEntry::Code(ignored_code) => issue.code.as_ref() == Some(ignored_code),
+            CompiledIgnoreEntry::Scoped { code: ignored_code, matcher } => {
+                issue.code.as_ref() == Some(ignored_code) && file_name().is_some_and(|name| matcher.is_match(&name))
+            }
+            CompiledIgnoreEntry::Pattern { regex, code: ignored_code, matcher } => {
+                ignored_code.as_ref().is_none_or(|ignored_code| issue.code.as_ref() == Some(ignored_code))
+                    && matcher.as_ref().is_none_or(|matcher| file_name().is_some_and(|name| matcher.is_match(&name)))
+                    && issue_text_matches(issue, regex)
+            }
+        })
+    }
+}
+
+impl Annotation {
+    /// Creates a new annotation with the given kind and span.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::{Annotation, AnnotationKind};
+    /// use mago_database::file::FileId;
+    /// use mago_span::Span;
+    /// use mago_span::Position;
+    ///
+    /// let file = FileId::zero();
+    /// let start = Position::new(0);
+    /// let end = Position::new(5);
+    /// let span = Span::new(file, start, end);
+    /// let annotation = Annotation::new(AnnotationKind::Primary, span);
+    /// ```
+    #[must_use]
+    pub fn new(kind: AnnotationKind, span: Span) -> Self {
+        Self { message: None, kind, span }
+    }
+
+    /// Creates a new primary annotation with the given span.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::{Annotation, AnnotationKind};
+    /// use mago_database::file::FileId;
+    /// use mago_span::Span;
+    /// use mago_span::Position;
+    ///
+    /// let file = FileId::zero();
+    /// let start = Position::new(0);
+    /// let end = Position::new(5);
+    /// let span = Span::new(file, start, end);
+    /// let annotation = Annotation::primary(span);
+    /// ```
+    #[must_use]
+    pub fn primary(span: Span) -> Self {
+        Self::new(AnnotationKind::Primary, span)
+    }
+
+    /// Creates a new secondary annotation with the given span.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::{Annotation, AnnotationKind};
+    /// use mago_database::file::FileId;
+    /// use mago_span::Span;
+    /// use mago_span::Position;
+    ///
+    /// let file = FileId::zero();
+    /// let start = Position::new(0);
+    /// let end = Position::new(5);
+    /// let span = Span::new(file, start, end);
+    /// let annotation = Annotation::secondary(span);
+    /// ```
+    #[must_use]
+    pub fn secondary(span: Span) -> Self {
+        Self::new(AnnotationKind::Secondary, span)
+    }
+
+    /// Sets the message of this annotation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::{Annotation, AnnotationKind};
+    /// use mago_database::file::FileId;
+    /// use mago_span::Span;
+    /// use mago_span::Position;
+    ///
+    /// let file = FileId::zero();
+    /// let start = Position::new(0);
+    /// let end = Position::new(5);
+    /// let span = Span::new(file, start, end);
+    /// let annotation = Annotation::primary(span).with_message("This is a primary annotation");
+    /// ```
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+
+        self
+    }
+
+    /// Returns `true` if this annotation is a primary annotation.
+    #[must_use]
+    pub fn is_primary(&self) -> bool {
+        self.kind == AnnotationKind::Primary
+    }
+}
+
+impl Level {
+    /// Downgrades the level to the next lower severity.
+    ///
+    /// This function maps levels to their less severe counterparts:
+    ///
+    /// - `Error` becomes `Warning`
+    /// - `Warning` becomes `Help`
+    /// - `Help` becomes `Note`
+    /// - `Note` remains as `Note`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::Level;
+    ///
+    /// let level = Level::Error;
+    /// assert_eq!(level.downgrade(), Level::Warning);
+    ///
+    /// let level = Level::Warning;
+    /// assert_eq!(level.downgrade(), Level::Help);
+    ///
+    /// let level = Level::Help;
+    /// assert_eq!(level.downgrade(), Level::Note);
+    ///
+    /// let level = Level::Note;
+    /// assert_eq!(level.downgrade(), Level::Note);
+    /// ```
+    #[must_use]
+    pub fn downgrade(&self) -> Self {
+        match self {
+            Level::Error => Level::Warning,
+            Level::Warning => Level::Help,
+            Level::Help | Level::Note => Level::Note,
+        }
+    }
+}
+
+impl Issue {
+    /// Creates a new issue with the given level and message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::{Issue, Level};
+    ///
+    /// let issue = Issue::new(Level::Error, "This is an error");
+    /// ```
+    pub fn new(level: Level, message: impl Into<String>) -> Self {
+        Self {
+            level,
+            code: None,
+            message: message.into(),
+            annotations: Vec::new(),
+            notes: Vec::new(),
+            help: None,
+            link: None,
+            edits: HashMap::default(),
+        }
+    }
+
+    /// Creates a new error issue with the given message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::Issue;
+    ///
+    /// let issue = Issue::error("This is an error");
+    /// ```
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(Level::Error, message)
+    }
+
+    /// Creates a new warning issue with the given message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::Issue;
+    ///
+    /// let issue = Issue::warning("This is a warning");
+    /// ```
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::new(Level::Warning, message)
+    }
+
+    /// Creates a new help issue with the given message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::Issue;
+    ///
+    /// let issue = Issue::help("This is a help message");
+    /// ```
+    pub fn help(message: impl Into<String>) -> Self {
+        Self::new(Level::Help, message)
+    }
+
+    /// Creates a new note issue with the given message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::Issue;
+    ///
+    /// let issue = Issue::note("This is a note");
+    /// ```
+    pub fn note(message: impl Into<String>) -> Self {
+        Self::new(Level::Note, message)
+    }
+
+    /// Adds a code to this issue.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::{Issue, Level};
+    ///
+    /// let issue = Issue::error("This is an error").with_code("E0001");
+    /// ```
+    #[must_use]
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+
+        self
+    }
+
+    /// Add an annotation to this issue.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::{Issue, Annotation, AnnotationKind};
+    /// use mago_database::file::FileId;
+    /// use mago_span::Span;
+    /// use mago_span::Position;
+    ///
+    /// let file = FileId::zero();
+    /// let start = Position::new(0);
+    /// let end = Position::new(5);
+    /// let span = Span::new(file, start, end);
+    ///
+    /// let issue = Issue::error("This is an error").with_annotation(Annotation::primary(span));
+    /// ```
+    #[must_use]
+    pub fn with_annotation(mut self, annotation: Annotation) -> Self {
+        self.annotations.push(annotation);
+
+        self
+    }
+
+    #[must_use]
+    pub fn with_annotations(mut self, annotation: impl IntoIterator<Item = Annotation>) -> Self {
+        self.annotations.extend(annotation);
+
+        self
+    }
+
+    /// Returns the deterministic primary annotation for this issue.
+    ///
+    /// If multiple primary annotations exist, the one with the smallest span is returned.
+    #[must_use]
+    pub fn primary_annotation(&self) -> Option<&Annotation> {
+        self.annotations.iter().filter(|annotation| annotation.is_primary()).min_by_key(|annotation| annotation.span)
+    }
+
+    /// Returns the deterministic primary span for this issue.
+    #[must_use]
+    pub fn primary_span(&self) -> Option<Span> {
+        self.primary_annotation().map(|annotation| annotation.span)
+    }
+
+    /// Returns `true` when a suppression may hide this issue in the file named `file_name`.
+    ///
+    /// This is the one place Mago decides it. An error in a PHP# file keeps the file from running, so nothing hides
+    /// it: not an `@mago-ignore` or `@mago-expect` pragma, not an analyzer `ignore` entry, not a baseline entry.
+    /// Every other issue may be suppressed.
+    #[must_use]
+    pub fn can_be_suppressed_in(&self, file_name: &[u8]) -> bool {
+        self.level < Level::Error || !file_name.ends_with(b".sharp")
+    }
+
+    /// The warning that a suppression targets an error in a PHP# file, which it can't hide. The `annotations` point
+    /// at the suppression and the error.
+    #[must_use]
+    pub fn unsuppressible_error(annotations: impl IntoIterator<Item = Annotation>) -> Self {
+        Self::warning("An error can't be suppressed in PHP#.")
+            .with_code(UNSUPPRESSIBLE_ERROR)
+            .with_annotations(annotations)
+            .with_help("Fix the error, then remove the suppression.")
+    }
+
+    /// Add a note to this issue.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::Issue;
+    ///
+    /// let issue = Issue::error("This is an error").with_note("This is a note");
+    /// ```
+    #[must_use]
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+
+        self
+    }
+
+    /// Add a help message to this issue.
+    ///
+    /// This is useful for providing additional context to the user on how to resolve the issue.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::Issue;
+    ///
+    /// let issue = Issue::error("This is an error").with_help("This is a help message");
+    /// ```
+    #[must_use]
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+
+        self
+    }
+
+    /// Add a link to this issue.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mago_reporting::Issue;
+    ///
+    /// let issue = Issue::error("This is an error").with_link("https://example.com");
+    /// ```
+    #[must_use]
+    pub fn with_link(mut self, link: impl Into<String>) -> Self {
+        self.link = Some(link.into());
+
+        self
+    }
+
+    /// Add a single edit to this issue.
+    #[must_use]
+    pub fn with_edit(mut self, file_id: FileId, edit: TextEdit) -> Self {
+        self.edits.entry(file_id).or_default().push(edit);
+
+        self
+    }
+
+    /// Add multiple edits to this issue.
+    #[must_use]
+    pub fn with_file_edits(mut self, file_id: FileId, edits: IssueEdits) -> Self {
+        if !edits.is_empty() {
+            self.edits.entry(file_id).or_default().extend(edits);
+        }
+
+        self
+    }
+
+    /// Take the edits from this issue.
+    #[must_use]
+    pub fn take_edits(&mut self) -> HashMap<FileId, IssueEdits> {
+        std::mem::replace(&mut self.edits, HashMap::new())
+    }
+}
+
+impl IssueCollection {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { issues: Vec::new() }
+    }
+
+    pub fn from(issues: impl IntoIterator<Item = Issue>) -> Self {
+        Self { issues: issues.into_iter().collect() }
+    }
+
+    pub fn push(&mut self, issue: Issue) {
+        self.issues.push(issue);
+    }
+
+    pub fn extend(&mut self, issues: impl IntoIterator<Item = Issue>) {
+        self.issues.extend(issues);
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.issues.reserve(additional);
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.issues.shrink_to_fit();
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.issues.len()
+    }
+
+    /// Filters the issues in the collection to only include those with a severity level
+    /// lower than or equal to the given level.
+    #[must_use]
+    pub fn with_maximum_level(self, level: Level) -> Self {
+        Self { issues: self.issues.into_iter().filter(|issue| issue.level <= level).collect() }
+    }
+
+    /// Filters the issues in the collection to only include those with a severity level
+    ///  higher than or equal to the given level.
+    #[must_use]
+    pub fn with_minimum_level(self, level: Level) -> Self {
+        Self { issues: self.issues.into_iter().filter(|issue| issue.level >= level).collect() }
+    }
+
+    /// Returns `true` if the collection contains any issues with a severity level
+    ///  higher than or equal to the given level.
+    #[must_use]
+    pub fn has_minimum_level(&self, level: Level) -> bool {
+        self.issues.iter().any(|issue| issue.level >= level)
+    }
+
+    /// Returns the number of issues in the collection with the given severity level.
+    #[must_use]
+    pub fn get_level_count(&self, level: Level) -> usize {
+        self.issues.iter().filter(|issue| issue.level == level).count()
+    }
+
+    /// Returns the highest severity level of the issues in the collection.
+    #[must_use]
+    pub fn get_highest_level(&self) -> Option<Level> {
+        self.issues.iter().map(|issue| issue.level).max()
+    }
+
+    /// Returns the lowest severity level of the issues in the collection.
+    #[must_use]
+    pub fn get_lowest_level(&self) -> Option<Level> {
+        self.issues.iter().map(|issue| issue.level).min()
+    }
+
+    pub fn filter_out_ignored<F>(&mut self, set: &CompiledIgnoreSet, resolve_file_name: F)
+    where
+        F: Fn(FileId) -> Option<String>,
+    {
+        if set.is_empty() {
+            return;
+        }
+
+        for issue in std::mem::take(&mut self.issues) {
+            let mut cached_path: Option<Option<String>> = None;
+            let mut resolve_path = || -> Option<String> {
+                cached_path
+                    .get_or_insert_with(|| issue.primary_span().and_then(|span| resolve_file_name(span.file_id)))
+                    .clone()
+            };
+
+            if set.matches(&issue, &mut resolve_path) {
+                if resolve_path().is_none_or(|name| issue.can_be_suppressed_in(name.as_bytes())) {
+                    continue;
+                }
+
+                if let Some(span) = issue.primary_span() {
+                    self.issues.push(Issue::unsuppressible_error([Annotation::primary(span)
+                        .with_message("An analyzer `ignore` entry in the configuration matches this error.")]));
+                }
+            }
+
+            self.issues.push(issue);
+        }
+    }
+
+    pub fn filter_retain_codes(&mut self, retain_codes: &[String]) {
+        self.issues.retain(|issue| if let Some(code) = &issue.code { retain_codes.contains(code) } else { false });
+    }
+
+    pub fn take_edits(&mut self) -> impl Iterator<Item = (FileId, IssueEdits)> + '_ {
+        self.issues.iter_mut().flat_map(|issue| issue.take_edits().into_iter())
+    }
+
+    /// Filters the issues in the collection to only include those that have associated edits.
+    #[must_use]
+    pub fn with_edits(self) -> Self {
+        Self { issues: self.issues.into_iter().filter(|issue| !issue.edits.is_empty()).collect() }
+    }
+
+    /// Sorts the issues in the collection.
+    ///
+    /// The issues are sorted by severity level in ascending order,
+    /// then by code in ascending order, and finally by the primary annotation span.
+    #[must_use]
+    pub fn sorted(self) -> Self {
+        let mut issues = self.issues;
+
+        issues.sort_by(|a, b| match a.level.cmp(&b.level) {
+            Ordering::Greater => Ordering::Greater,
+            Ordering::Less => Ordering::Less,
+            Ordering::Equal => match a.code.as_deref().cmp(&b.code.as_deref()) {
+                Ordering::Less => Ordering::Less,
+                Ordering::Greater => Ordering::Greater,
+                Ordering::Equal => {
+                    let a_span = a.primary_span();
+                    let b_span = b.primary_span();
+
+                    match (a_span, b_span) {
+                        (Some(a_span), Some(b_span)) => a_span.cmp(&b_span),
+                        (Some(_), None) => Ordering::Less,
+                        (None, Some(_)) => Ordering::Greater,
+                        (None, None) => Ordering::Equal,
+                    }
+                }
+            },
+        });
+
+        Self { issues }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Issue> {
+        self.issues.iter()
+    }
+
+    /// Converts the collection into a map of edit batches grouped by file.
+    ///
+    /// Each batch contains all edits from a single issue along with the rule code.
+    /// All edits from an issue must be applied together as a batch to maintain code validity.
+    ///
+    /// Returns `HashMap<FileId, Vec<(Option<String>, IssueEdits)>>` where each tuple
+    /// is (rule_code, edits_for_that_issue).
+    #[must_use]
+    pub fn to_edit_batches(self) -> HashMap<FileId, IssueEditBatches> {
+        let mut result: HashMap<FileId, Vec<(Option<String>, IssueEdits)>> = HashMap::default();
+        for issue in self.issues.into_iter().filter(|issue| !issue.edits.is_empty()) {
+            let code = issue.code;
+            for (file_id, edit_list) in issue.edits {
+                result.entry(file_id).or_default().push((code.clone(), edit_list));
+            }
+        }
+
+        result
+    }
+}
+
+/// Returns `true` when any of the issue's textual fields matches the regex.
+///
+/// Tested in order: title, annotation messages, notes, help. The most
+/// instance-specific fields are searched first; notes and help are last
+/// because they are typically templated per rule.
+fn issue_text_matches(issue: &Issue, regex: &Regex) -> bool {
+    if regex.is_match(&issue.message) {
+        return true;
+    }
+
+    if issue
+        .annotations
+        .iter()
+        .any(|annotation| annotation.message.as_ref().is_some_and(|message| regex.is_match(message)))
+    {
+        return true;
+    }
+
+    if issue.notes.iter().any(|note| regex.is_match(note)) {
+        return true;
+    }
+
+    issue.help.as_ref().is_some_and(|help| regex.is_match(help))
+}
+
+impl IntoIterator for IssueCollection {
+    type Item = Issue;
+
+    type IntoIter = std::vec::IntoIter<Issue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.issues.into_iter()
+    }
+}
+
+impl<'collection> IntoIterator for &'collection IssueCollection {
+    type Item = &'collection Issue;
+
+    type IntoIter = std::slice::Iter<'collection, Issue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.issues.iter()
+    }
+}
+
+impl Default for IssueCollection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IntoIterator for Issue {
+    type Item = Issue;
+    type IntoIter = Once<Issue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::iter::once(self)
+    }
+}
+
+impl FromIterator<Issue> for IssueCollection {
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = Issue>,
+    {
+        Self { issues: iter.into_iter().collect() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    pub fn test_highest_collection_level() {
+        let mut collection = IssueCollection::from(vec![]);
+        assert_eq!(collection.get_highest_level(), None);
+
+        collection.push(Issue::note("note"));
+        assert_eq!(collection.get_highest_level(), Some(Level::Note));
+
+        collection.push(Issue::help("help"));
+        assert_eq!(collection.get_highest_level(), Some(Level::Help));
+
+        collection.push(Issue::warning("warning"));
+        assert_eq!(collection.get_highest_level(), Some(Level::Warning));
+
+        collection.push(Issue::error("error"));
+        assert_eq!(collection.get_highest_level(), Some(Level::Error));
+    }
+
+    #[test]
+    pub fn test_level_downgrade() {
+        assert_eq!(Level::Error.downgrade(), Level::Warning);
+        assert_eq!(Level::Warning.downgrade(), Level::Help);
+        assert_eq!(Level::Help.downgrade(), Level::Note);
+        assert_eq!(Level::Note.downgrade(), Level::Note);
+    }
+
+    #[test]
+    pub fn test_issue_collection_with_maximum_level() {
+        let mut collection = IssueCollection::from(vec![
+            Issue::error("error"),
+            Issue::warning("warning"),
+            Issue::help("help"),
+            Issue::note("note"),
+        ]);
+
+        collection = collection.with_maximum_level(Level::Warning);
+        assert_eq!(collection.len(), 3);
+        assert_eq!(
+            collection.iter().map(|issue| issue.level).collect::<Vec<_>>(),
+            vec![Level::Warning, Level::Help, Level::Note]
+        );
+    }
+
+    #[test]
+    pub fn test_issue_collection_with_minimum_level() {
+        let mut collection = IssueCollection::from(vec![
+            Issue::error("error"),
+            Issue::warning("warning"),
+            Issue::help("help"),
+            Issue::note("note"),
+        ]);
+
+        collection = collection.with_minimum_level(Level::Warning);
+        assert_eq!(collection.len(), 2);
+        assert_eq!(collection.iter().map(|issue| issue.level).collect::<Vec<_>>(), vec![Level::Error, Level::Warning,]);
+    }
+
+    #[test]
+    pub fn test_issue_collection_has_minimum_level() {
+        let mut collection = IssueCollection::from(vec![]);
+
+        assert!(!collection.has_minimum_level(Level::Error));
+        assert!(!collection.has_minimum_level(Level::Warning));
+        assert!(!collection.has_minimum_level(Level::Help));
+        assert!(!collection.has_minimum_level(Level::Note));
+
+        collection.push(Issue::note("note"));
+
+        assert!(!collection.has_minimum_level(Level::Error));
+        assert!(!collection.has_minimum_level(Level::Warning));
+        assert!(!collection.has_minimum_level(Level::Help));
+        assert!(collection.has_minimum_level(Level::Note));
+
+        collection.push(Issue::help("help"));
+
+        assert!(!collection.has_minimum_level(Level::Error));
+        assert!(!collection.has_minimum_level(Level::Warning));
+        assert!(collection.has_minimum_level(Level::Help));
+        assert!(collection.has_minimum_level(Level::Note));
+
+        collection.push(Issue::warning("warning"));
+
+        assert!(!collection.has_minimum_level(Level::Error));
+        assert!(collection.has_minimum_level(Level::Warning));
+        assert!(collection.has_minimum_level(Level::Help));
+        assert!(collection.has_minimum_level(Level::Note));
+
+        collection.push(Issue::error("error"));
+
+        assert!(collection.has_minimum_level(Level::Error));
+        assert!(collection.has_minimum_level(Level::Warning));
+        assert!(collection.has_minimum_level(Level::Help));
+        assert!(collection.has_minimum_level(Level::Note));
+    }
+
+    #[test]
+    pub fn test_issue_collection_level_count() {
+        let mut collection = IssueCollection::from(vec![]);
+
+        assert_eq!(collection.get_level_count(Level::Error), 0);
+        assert_eq!(collection.get_level_count(Level::Warning), 0);
+        assert_eq!(collection.get_level_count(Level::Help), 0);
+        assert_eq!(collection.get_level_count(Level::Note), 0);
+
+        collection.push(Issue::error("error"));
+
+        assert_eq!(collection.get_level_count(Level::Error), 1);
+        assert_eq!(collection.get_level_count(Level::Warning), 0);
+        assert_eq!(collection.get_level_count(Level::Help), 0);
+        assert_eq!(collection.get_level_count(Level::Note), 0);
+
+        collection.push(Issue::warning("warning"));
+
+        assert_eq!(collection.get_level_count(Level::Error), 1);
+        assert_eq!(collection.get_level_count(Level::Warning), 1);
+        assert_eq!(collection.get_level_count(Level::Help), 0);
+        assert_eq!(collection.get_level_count(Level::Note), 0);
+
+        collection.push(Issue::help("help"));
+
+        assert_eq!(collection.get_level_count(Level::Error), 1);
+        assert_eq!(collection.get_level_count(Level::Warning), 1);
+        assert_eq!(collection.get_level_count(Level::Help), 1);
+        assert_eq!(collection.get_level_count(Level::Note), 0);
+
+        collection.push(Issue::note("note"));
+
+        assert_eq!(collection.get_level_count(Level::Error), 1);
+        assert_eq!(collection.get_level_count(Level::Warning), 1);
+        assert_eq!(collection.get_level_count(Level::Help), 1);
+        assert_eq!(collection.get_level_count(Level::Note), 1);
+    }
+
+    #[test]
+    pub fn test_primary_span_is_deterministic() {
+        let file = FileId::zero();
+        let span_later = Span::new(file, 20u32.into(), 25u32.into());
+        let span_earlier = Span::new(file, 5u32.into(), 10u32.into());
+
+        let issue = Issue::error("x")
+            .with_annotation(Annotation::primary(span_later))
+            .with_annotation(Annotation::primary(span_earlier));
+
+        assert_eq!(issue.primary_span(), Some(span_earlier));
+    }
+
+    fn ignore_fixture() -> (IssueCollection, HashMap<FileId, &'static [u8]>) {
+        let file_id = |name: &[u8]| FileId::new(name);
+
+        let paths: [&[u8]; 4] =
+            [b"src/App.php", b"tests/Unit/FooTest.php", b"modules/auth/views/login.tpl", b"types/user/form.tpl"];
+
+        let mut mapping = HashMap::new();
+        let issues: Vec<Issue> = paths
+            .iter()
+            .map(|p| {
+                let id = file_id(p);
+                mapping.insert(id, *p);
+                Issue::error("oops").with_code("invalid-global").with_annotation(Annotation::primary(Span::new(
+                    id,
+                    0u32.into(),
+                    1u32.into(),
+                )))
+            })
+            .collect();
+
+        (IssueCollection::from(issues), mapping)
+    }
+
+    fn resolve<'mapping>(
+        mapping: &'mapping HashMap<FileId, &'static [u8]>,
+    ) -> impl Fn(FileId) -> Option<String> + 'mapping {
+        move |id| mapping.get(&id).map(|s| String::from_utf8_lossy(s).into_owned())
+    }
+
+    fn remaining_paths(collection: &IssueCollection, mapping: &HashMap<FileId, &'static [u8]>) -> Vec<String> {
+        collection
+            .iter()
+            .filter_map(|issue| issue.primary_span().and_then(|s| mapping.get(&s.file_id)).copied())
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect()
+    }
+
+    #[test]
+    pub fn test_filter_out_ignored_with_plain_prefix() {
+        let (mut collection, mapping) = ignore_fixture();
+        let entries =
+            vec![IgnoreEntry::Scoped { code: "invalid-global".to_string(), paths: vec!["tests/".to_string()] }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(
+            remaining_paths(&collection, &mapping),
+            vec![
+                "src/App.php".to_string(),
+                "modules/auth/views/login.tpl".to_string(),
+                "types/user/form.tpl".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    pub fn test_filter_out_ignored_with_glob_pattern() {
+        let (mut collection, mapping) = ignore_fixture();
+        let entries = vec![IgnoreEntry::Scoped {
+            code: "invalid-global".to_string(),
+            paths: vec!["modules/*/*/*.tpl".to_string(), "types/*/*.tpl".to_string()],
+        }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(
+            remaining_paths(&collection, &mapping),
+            vec!["src/App.php".to_string(), "tests/Unit/FooTest.php".to_string()]
+        );
+    }
+
+    #[test]
+    pub fn test_filter_out_ignored_mixes_plain_and_glob() {
+        let (mut collection, mapping) = ignore_fixture();
+        let entries = vec![IgnoreEntry::Scoped {
+            code: "invalid-global".to_string(),
+            paths: vec!["tests/".to_string(), "modules/*/*/*.tpl".to_string(), "types/*/*.tpl".to_string()],
+        }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(remaining_paths(&collection, &mapping), vec!["src/App.php".to_string()]);
+    }
+
+    #[test]
+    pub fn test_filter_out_ignored_respects_code_scope() {
+        let (mut collection, mapping) = ignore_fixture();
+        let entries = vec![IgnoreEntry::Scoped { code: "different-code".to_string(), paths: vec!["**/*".to_string()] }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(collection.len(), 4);
+    }
+
+    fn pattern_fixture() -> (IssueCollection, HashMap<FileId, &'static [u8]>) {
+        let paths: [&[u8]; 3] = [b"src/App.php", b"src/Bridge/Symfony.php", b"tests/Unit/FooTest.php"];
+        let mut mapping = HashMap::new();
+        let mut issues: Vec<Issue> = Vec::new();
+
+        let id0 = FileId::new(blake3::hash(paths[0]).as_bytes());
+        mapping.insert(id0, paths[0]);
+        issues.push(
+            Issue::error("Saw type `mixed` in Symfony bridge.")
+                .with_code("mixed-assignment")
+                .with_annotation(Annotation::primary(Span::new(id0, 0u32.into(), 1u32.into()))),
+        );
+
+        let id1 = FileId::new(blake3::hash(paths[1]).as_bytes());
+        mapping.insert(id1, paths[1]);
+        issues.push(
+            Issue::error("Could not infer a precise return type.")
+                .with_code("mixed-assignment")
+                .with_note("Originates from Symfony vendor stubs.")
+                .with_annotation(Annotation::primary(Span::new(id1, 0u32.into(), 1u32.into()))),
+        );
+
+        let id2 = FileId::new(blake3::hash(paths[2]).as_bytes());
+        mapping.insert(id2, paths[2]);
+        issues.push(
+            Issue::error("Unused variable.")
+                .with_code("unused-variable")
+                .with_annotation(Annotation::primary(Span::new(id2, 0u32.into(), 1u32.into()))),
+        );
+
+        (IssueCollection::from(issues), mapping)
+    }
+
+    #[test]
+    pub fn test_pattern_matches_title_and_note() {
+        let (mut collection, mapping) = pattern_fixture();
+        let entries = vec![IgnoreEntry::Pattern {
+            pattern: "Symfony".to_string(),
+            code: Some("mixed-assignment".to_string()),
+            paths: None,
+        }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(remaining_paths(&collection, &mapping), vec!["tests/Unit/FooTest.php".to_string()]);
+    }
+
+    #[test]
+    pub fn test_pattern_without_code_matches_across_codes() {
+        let (mut collection, mapping) = pattern_fixture();
+        let entries = vec![IgnoreEntry::Pattern { pattern: "Symfony".to_string(), code: None, paths: None }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(remaining_paths(&collection, &mapping), vec!["tests/Unit/FooTest.php".to_string()]);
+    }
+
+    #[test]
+    pub fn test_pattern_with_path_scope() {
+        let (mut collection, mapping) = pattern_fixture();
+        let entries = vec![IgnoreEntry::Pattern {
+            pattern: "Symfony".to_string(),
+            code: None,
+            paths: Some(vec!["src/Bridge/".to_string()]),
+        }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(
+            remaining_paths(&collection, &mapping),
+            vec!["src/App.php".to_string(), "tests/Unit/FooTest.php".to_string()]
+        );
+    }
+
+    #[test]
+    pub fn test_pattern_case_insensitive_with_flag() {
+        let (mut collection, mapping) = pattern_fixture();
+        let entries = vec![IgnoreEntry::Pattern { pattern: "(?i)symfony".to_string(), code: None, paths: None }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(remaining_paths(&collection, &mapping), vec!["tests/Unit/FooTest.php".to_string()]);
+    }
+
+    #[test]
+    pub fn test_pattern_invalid_regex_is_skipped() {
+        let (mut collection, mapping) = pattern_fixture();
+        let entries = vec![
+            IgnoreEntry::Pattern { pattern: "[unterminated".to_string(), code: None, paths: None },
+            IgnoreEntry::Code("unused-variable".to_string()),
+        ];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        assert_eq!(set.len(), 1);
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert_eq!(
+            remaining_paths(&collection, &mapping),
+            vec!["src/App.php".to_string(), "src/Bridge/Symfony.php".to_string()]
+        );
+    }
+
+    #[test]
+    pub fn test_pattern_matches_help_message() {
+        let id = FileId::new(blake3::hash(b"src/foo.php").as_bytes());
+        let mut mapping: HashMap<FileId, &'static [u8]> = HashMap::new();
+        mapping.insert(id, &b"src/foo.php"[..]);
+        let mut collection = IssueCollection::from(vec![
+            Issue::error("Title.")
+                .with_code("some-code")
+                .with_help("Consider migrating off legacy Symfony bridge.")
+                .with_annotation(Annotation::primary(Span::new(id, 0u32.into(), 1u32.into()))),
+        ]);
+
+        let entries = vec![IgnoreEntry::Pattern { pattern: "Symfony".to_string(), code: None, paths: None }];
+        let set = CompiledIgnoreSet::compile(&entries, GlobSettings::default());
+
+        collection.filter_out_ignored(&set, resolve(&mapping));
+
+        assert!(collection.is_empty());
+    }
+}

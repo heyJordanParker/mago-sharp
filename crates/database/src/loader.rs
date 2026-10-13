@@ -1,0 +1,1179 @@
+//! Database loader for scanning and loading project files.
+
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
+use std::ffi::OsString;
+use std::path::Path;
+use std::path::PathBuf;
+
+use foldhash::HashMap;
+use foldhash::HashSet;
+use globset::GlobSet;
+use rayon::prelude::*;
+use walkdir::WalkDir;
+
+use crate::Database;
+use crate::DatabaseConfiguration;
+use crate::error::DatabaseError;
+use crate::exclusion::Exclusion;
+use crate::file::File;
+use crate::file::FileId;
+use crate::file::FileType;
+use crate::matcher::build_glob_set;
+use crate::utils::bytes_to_os_str;
+use crate::utils::bytes_to_path;
+use crate::utils::bytes_to_string_lossy;
+use crate::utils::read_file;
+
+/// Holds a file along with the specificity of the pattern that matched it.
+///
+/// Specificity is used to resolve conflicts when a file matches both `paths` and `includes`.
+/// Higher specificity values indicate more specific matches (e.g., exact file paths have higher
+/// specificity than directory patterns).
+#[derive(Debug)]
+struct FileWithSpecificity {
+    file: File,
+    specificity: usize,
+}
+
+/// Builder for loading files into a Database from the filesystem and memory.
+pub struct DatabaseLoader<'config> {
+    database: Option<Database<'config>>,
+    configuration: DatabaseConfiguration<'config>,
+    memory_sources: Vec<(&'static [u8], &'static [u8], FileType)>,
+    stdin_override: Option<(Cow<'config, [u8]>, Vec<u8>)>,
+}
+
+impl<'config> DatabaseLoader<'config> {
+    #[inline]
+    #[must_use]
+    pub fn new(configuration: DatabaseConfiguration<'config>) -> Self {
+        Self { configuration, memory_sources: vec![], database: None, stdin_override: None }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn with_database(mut self, database: Database<'config>) -> Self {
+        self.database = Some(database);
+        self
+    }
+
+    /// When set, the file with this logical name (workspace-relative path) will use the given
+    /// content instead of being read from disk. The logical name is used for baseline and reporting.
+    ///
+    /// `content` is raw bytes: PHP source is binary-safe, so a buffer piped in via `--stdin-input`
+    /// may not be valid UTF-8.
+    #[inline]
+    #[must_use]
+    pub fn with_stdin_override(mut self, logical_name: impl AsRef<[u8]>, content: Vec<u8>) -> Self {
+        self.stdin_override = Some((Cow::Owned(logical_name.as_ref().to_vec()), content));
+        self
+    }
+
+    #[inline]
+    pub fn add_memory_source(&mut self, name: &'static str, contents: &'static str, file_type: FileType) {
+        self.memory_sources.push((name.as_bytes(), contents.as_bytes(), file_type));
+    }
+
+    /// Loads files from disk into the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DatabaseError`] if:
+    /// - A glob pattern is invalid
+    /// - File system operations fail (reading directories, files)
+    /// - A file exceeds the maximum supported size
+    #[inline]
+    pub fn load(mut self) -> Result<Database<'config>, DatabaseError> {
+        let mut db = self.database.take().unwrap_or_else(|| Database::new(self.configuration.clone()));
+
+        // Update database configuration to use the loader's configuration
+        // (fixes workspace path when merging with prelude database)
+        db.configuration = self.configuration.clone();
+
+        let extensions_set: HashSet<OsString> =
+            self.configuration.extensions.iter().map(|s| bytes_to_os_str(s.as_ref()).into_owned()).collect();
+
+        let glob_exclude_patterns: Vec<&str> = self
+            .configuration
+            .excludes
+            .iter()
+            .filter_map(|ex| match ex {
+                Exclusion::Pattern(pat) => Some(pat.as_ref()),
+                Exclusion::Path(_) => None,
+            })
+            .collect();
+
+        let glob_excludes = build_glob_set(glob_exclude_patterns.iter().copied(), self.configuration.glob)?;
+        let dir_prune_patterns: Vec<&str> = glob_exclude_patterns
+            .iter()
+            .filter_map(|pat| {
+                let stripped =
+                    pat.strip_suffix("/**/*").or_else(|| pat.strip_suffix("/**")).or_else(|| pat.strip_suffix("/*"))?;
+                if stripped.is_empty() || stripped == "*" || stripped == "**" {
+                    return None;
+                }
+                Some(stripped)
+            })
+            .collect();
+
+        let dir_prune_globs = build_glob_set(dir_prune_patterns.iter().copied(), self.configuration.glob)?;
+
+        let path_excludes: HashSet<_> = self
+            .configuration
+            .excludes
+            .iter()
+            .filter_map(|ex| match ex {
+                Exclusion::Path(p) => Some(p),
+                Exclusion::Pattern(_) => None,
+            })
+            .collect();
+
+        let (host_files_with_spec, (vendored_files_with_spec, patch_files_with_spec)) = rayon::join(
+            || {
+                self.load_paths(
+                    &self.configuration.paths,
+                    FileType::Host,
+                    &extensions_set,
+                    &glob_excludes,
+                    &dir_prune_globs,
+                    &path_excludes,
+                )
+            },
+            || {
+                rayon::join(
+                    || {
+                        self.load_paths(
+                            &self.configuration.includes,
+                            FileType::Vendored,
+                            &extensions_set,
+                            &glob_excludes,
+                            &dir_prune_globs,
+                            &path_excludes,
+                        )
+                    },
+                    || {
+                        self.load_paths(
+                            &self.configuration.patches,
+                            FileType::Patch,
+                            &extensions_set,
+                            &glob_excludes,
+                            &dir_prune_globs,
+                            &path_excludes,
+                        )
+                    },
+                )
+            },
+        );
+        let host_files_with_spec = host_files_with_spec?;
+        let vendored_files_with_spec = vendored_files_with_spec?;
+        let patch_files_with_spec = patch_files_with_spec?;
+
+        let mut all_files: HashMap<FileId, File> = HashMap::default();
+        // Per-file maximum specificity for each tier the file matched. `None` in a slot means
+        // the file did not match any configured pattern in that tier; otherwise it carries the
+        // best specificity score that tier could offer, scored by `calculate_pattern_specificity`.
+        type TierSpecs = (Option<usize>, Option<usize>, Option<usize>);
+        let mut tier_specs: HashMap<FileId, TierSpecs> = HashMap::default();
+
+        // Process host files (from paths)
+        for file_with_spec in host_files_with_spec {
+            let file_id = file_with_spec.file.id;
+            let specificity = file_with_spec.specificity;
+
+            all_files.insert(file_id, file_with_spec.file);
+            bump_spec(&mut tier_specs.entry(file_id).or_insert((None, None, None)).0, specificity);
+        }
+
+        // When stdin override is set, ensure that the file is in the database
+        // (covers new/unsaved files, not on disk). Excluded paths are skipped
+        // so that editor integrations using `--stdin-input` honor the same
+        // exclude rules as a regular filesystem scan.
+        if let Some((name, content)) = &self.stdin_override {
+            let virtual_path = self.configuration.workspace.join(bytes_to_path(name.as_ref()).as_ref());
+            let virtual_path_canonical = virtual_path.canonicalize().unwrap_or_else(|_| virtual_path.clone());
+            let virtual_path_str = virtual_path_canonical.to_string_lossy();
+
+            let matched_glob = !glob_excludes.is_empty()
+                && (glob_excludes.is_match(virtual_path_canonical.as_path())
+                    || glob_excludes.is_match(bytes_to_path(name.as_ref()).as_ref()));
+
+            let matched_path = path_excludes.iter().any(|excl| {
+                let canonical = if Path::new(excl.as_ref()).is_absolute() {
+                    excl.as_ref().to_path_buf()
+                } else {
+                    self.configuration.workspace.join(excl.as_ref())
+                };
+                let canonical = canonical.canonicalize().unwrap_or(canonical);
+                let canonical_str = canonical.to_string_lossy();
+
+                virtual_path_str.starts_with(canonical_str.as_ref())
+                    && matches!(virtual_path_str.as_bytes().get(canonical_str.len()), None | Some(&b'/' | &b'\\'))
+            });
+
+            if !matched_glob && !matched_path {
+                let file = File::ephemeral(Cow::Owned(name.as_ref().to_vec()), Cow::Owned(content.clone()));
+                let file_id = file.id;
+                if let Entry::Vacant(e) = all_files.entry(file_id) {
+                    e.insert(file);
+
+                    bump_spec(&mut tier_specs.entry(file_id).or_insert((None, None, None)).0, usize::MAX);
+                }
+            }
+        }
+
+        for file_with_spec in vendored_files_with_spec {
+            let file_id = file_with_spec.file.id;
+            let vendored_specificity = file_with_spec.specificity;
+
+            all_files.entry(file_id).or_insert(file_with_spec.file);
+            bump_spec(&mut tier_specs.entry(file_id).or_insert((None, None, None)).1, vendored_specificity);
+        }
+
+        for file_with_spec in patch_files_with_spec {
+            let file_id = file_with_spec.file.id;
+            let specificity = file_with_spec.specificity;
+            all_files.entry(file_id).or_insert(file_with_spec.file);
+            bump_spec(&mut tier_specs.entry(file_id).or_insert((None, None, None)).2, specificity);
+        }
+
+        db.reserve(tier_specs.len() + self.memory_sources.len());
+
+        let mut standard_library_directories = HashMap::default();
+        for (file_id, (host_spec, vendored_spec, patch_spec)) in tier_specs {
+            if let Some(mut file) = all_files.remove(&file_id) {
+                file.file_type = resolve_file_type(host_spec, vendored_spec, patch_spec);
+                file.is_standard_library =
+                    is_standard_library(&file, &self.configuration.workspace, &mut standard_library_directories);
+                db.add(file);
+            }
+        }
+
+        for (name, contents, file_type) in self.memory_sources {
+            let file = File::new(Cow::Borrowed(name), file_type, None, Cow::Borrowed(contents));
+
+            db.add(file);
+        }
+
+        Ok(db)
+    }
+
+    /// Discovers and reads all files from a set of root paths or glob patterns in parallel.
+    ///
+    /// Supports both:
+    /// - Directory paths (e.g., "src", "tests") - recursively walks all files
+    /// - Glob patterns (e.g., "src/**/*.php", "tests/Unit/*Test.php") - matches files using glob syntax
+    ///
+    /// Returns files along with their pattern specificity for conflict resolution.
+    fn load_paths(
+        &self,
+        roots: &[Cow<'config, [u8]>],
+        file_type: FileType,
+        extensions: &HashSet<OsString>,
+        glob_excludes: &GlobSet,
+        dir_prune_globs: &GlobSet,
+        path_excludes: &HashSet<&Cow<'config, Path>>,
+    ) -> Result<Vec<FileWithSpecificity>, DatabaseError> {
+        // Canonicalize the workspace once.  All WalkDir roots are canonicalized
+        // before traversal so their paths inherit the canonical prefix without
+        // any per-file syscalls.
+        let canonical_workspace =
+            self.configuration.workspace.canonicalize().unwrap_or_else(|_| self.configuration.workspace.to_path_buf());
+
+        // Pre-canonicalize path excludes once as strings.  A plain byte-string
+        // prefix check is then sufficient in the parallel section, replacing the
+        // per-file canonicalize() + Path::starts_with (Components iteration).
+        let canonical_excludes: Vec<String> = path_excludes
+            .iter()
+            .filter_map(|ex| {
+                let p = if Path::new(ex.as_ref()).is_absolute() {
+                    ex.as_ref().to_path_buf()
+                } else {
+                    self.configuration.workspace.join(ex.as_ref())
+                };
+
+                p.canonicalize().ok()?.into_os_string().into_string().ok()
+            })
+            .collect();
+
+        // The bool flags a path that was named exactly (a literal file on disk) rather than
+        // discovered by walking a configured directory. Such paths bypass the extension filter.
+        let mut paths_to_process: Vec<(PathBuf, usize, bool)> = Vec::new();
+        let mut directory_roots: Vec<(PathBuf, usize)> = Vec::new();
+
+        for root in roots {
+            // Check if this is a glob pattern (contains glob metacharacters).
+            // First check if it's an actual file/directory on disk. if so, treat it
+            // as a literal path even if the name contains glob metacharacters like `[]`.
+            let root_path = bytes_to_path(root.as_ref());
+            let resolved_path = if root_path.is_absolute() {
+                root_path.as_ref().to_path_buf()
+            } else {
+                self.configuration.workspace.join(root_path.as_ref())
+            };
+
+            let is_glob_pattern = !resolved_path.exists()
+                && (root.contains(&b'*') || root.contains(&b'?') || root.contains(&b'[') || root.contains(&b'{'));
+
+            let specificity = calculate_pattern_specificity(root.as_ref());
+            if is_glob_pattern {
+                // Handle as glob pattern
+                let pattern = if root_path.is_absolute() {
+                    bytes_to_string_lossy(root.as_ref()).into_owned()
+                } else {
+                    // Make relative patterns absolute by prepending workspace
+                    self.configuration.workspace.join(root_path.as_ref()).to_string_lossy().to_string()
+                };
+
+                match glob::glob(&pattern) {
+                    Ok(entries) => {
+                        for entry in entries {
+                            match entry {
+                                Ok(path) => {
+                                    if path.is_file() {
+                                        // Canonicalize so the path shares the same prefix as
+                                        // `canonical_workspace` (important on macOS where
+                                        // TempDir / glob return /var/… but canonicalize gives
+                                        // /private/var/…).  Fall back to the original on error.
+                                        let canonical = path.canonicalize().unwrap_or(path);
+                                        paths_to_process.push((canonical, specificity, false));
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to read glob entry: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(DatabaseError::Glob(e.to_string()));
+                    }
+                }
+            } else {
+                let canonical_root = resolved_path.canonicalize().unwrap_or(resolved_path);
+
+                // A path that resolves to a regular file was named explicitly rather than
+                // discovered by walking a directory. Honor it verbatim, bypassing the extension
+                // filter so extensionless PHP files (e.g. `bin/console`) can be loaded.
+                if canonical_root.is_file() {
+                    paths_to_process.push((canonical_root, specificity, true));
+                    continue;
+                }
+
+                for entry in WalkDir::new(&canonical_root).follow_links(true).max_depth(1) {
+                    match entry {
+                        Ok(entry) => {
+                            if entry.depth() == 0 {
+                                continue;
+                            }
+
+                            if entry.file_type().is_dir() {
+                                if !is_pruned_directory(
+                                    entry.path(),
+                                    canonical_workspace.as_path(),
+                                    &canonical_excludes,
+                                    dir_prune_globs,
+                                ) {
+                                    directory_roots.push((entry.into_path(), specificity));
+                                }
+                            } else {
+                                paths_to_process.push((entry.into_path(), specificity, false));
+                            }
+                        }
+                        Err(err) => warn_walk_error(&err, canonical_root.as_path()),
+                    }
+                }
+            }
+        }
+
+        let has_path_excludes = !canonical_excludes.is_empty();
+        let has_glob_excludes = !glob_excludes.is_empty();
+        let load_path = |(path, specificity, skip_ext_check): (PathBuf, usize, bool)| {
+            if has_glob_excludes
+                && (glob_excludes.is_match(&path)
+                    || glob_excludes.is_match(workspace_relative_string(&path, canonical_workspace.as_path())))
+            {
+                return None;
+            }
+
+            if !skip_ext_check {
+                let ext = path.extension()?;
+                if !extensions.contains(ext) {
+                    return None;
+                }
+            }
+
+            if has_path_excludes {
+                let excluded = path.to_str().is_some_and(|s| {
+                    canonical_excludes.iter().any(|excl| {
+                        s.starts_with(excl.as_str())
+                            && matches!(s.as_bytes().get(excl.len()), None | Some(&b'/' | &b'\\'))
+                    })
+                });
+
+                if excluded {
+                    return None;
+                }
+            }
+
+            let workspace = canonical_workspace.as_path();
+            #[cfg(windows)]
+            let logical_name =
+                path.strip_prefix(workspace).unwrap_or(path.as_path()).to_string_lossy().replace('\\', "/");
+            #[cfg(not(windows))]
+            let logical_name = path.strip_prefix(workspace).unwrap_or(path.as_path()).to_string_lossy().into_owned();
+
+            if let Some((override_name, override_content)) = &self.stdin_override
+                && override_name.as_ref() == logical_name.as_bytes()
+            {
+                let file = File::new(
+                    Cow::Owned(logical_name.into_bytes()),
+                    file_type,
+                    Some(path),
+                    Cow::Owned(override_content.clone()),
+                );
+
+                return Some(Ok(FileWithSpecificity { file, specificity }));
+            }
+
+            match read_file(workspace, &path, file_type) {
+                Ok(file) => Some(Ok(FileWithSpecificity { file, specificity })),
+                Err(e) => Some(Err(e)),
+            }
+        };
+
+        let (direct_files, directory_files) = rayon::join(
+            || paths_to_process.into_par_iter().filter_map(&load_path).collect::<Result<Vec<FileWithSpecificity>, _>>(),
+            || {
+                directory_roots
+                    .into_par_iter()
+                    .map(|(root, specificity)| {
+                        let walker = WalkDir::new(&root).follow_links(true).into_iter().filter_entry(|entry| {
+                            entry.depth() == 0
+                                || !entry.file_type().is_dir()
+                                || !is_pruned_directory(
+                                    entry.path(),
+                                    canonical_workspace.as_path(),
+                                    &canonical_excludes,
+                                    dir_prune_globs,
+                                )
+                        });
+
+                        let mut files = Vec::new();
+                        for entry in walker {
+                            match entry {
+                                Ok(entry) if !entry.file_type().is_dir() => {
+                                    if let Some(file) = load_path((entry.into_path(), specificity, false)) {
+                                        files.push(file?);
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(err) => warn_walk_error(&err, root.as_path()),
+                            }
+                        }
+
+                        Ok(files)
+                    })
+                    .collect::<Result<Vec<Vec<FileWithSpecificity>>, DatabaseError>>()
+            },
+        );
+
+        let mut files = direct_files?;
+        files.extend(directory_files?.into_iter().flatten());
+
+        Ok(files)
+    }
+}
+
+fn workspace_relative_string(path: &Path, workspace: &Path) -> String {
+    let relative = path.strip_prefix(workspace).unwrap_or(path).to_string_lossy();
+    #[cfg(windows)]
+    {
+        relative.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        relative.into_owned()
+    }
+}
+
+fn is_pruned_directory(
+    path: &Path,
+    workspace: &Path,
+    canonical_excludes: &[String],
+    dir_prune_globs: &GlobSet,
+) -> bool {
+    if let Some(path) = path.to_str()
+        && canonical_excludes.iter().any(|excluded| {
+            path.starts_with(excluded.as_str())
+                && matches!(path.as_bytes().get(excluded.len()), None | Some(&b'/' | &b'\\'))
+        })
+    {
+        return true;
+    }
+
+    !dir_prune_globs.is_empty()
+        && (dir_prune_globs.is_match(path) || dir_prune_globs.is_match(workspace_relative_string(path, workspace)))
+}
+
+fn warn_walk_error(error: &walkdir::Error, fallback: &Path) {
+    let path = error.path().unwrap_or(fallback).display();
+    if let Some(ancestor) = error.loop_ancestor() {
+        tracing::warn!("Skipping symlink loop at `{path}`: link cycles back to `{}`.", ancestor.display());
+    } else {
+        tracing::warn!("Failed to walk `{path}`: {error}. Entry will be skipped.");
+    }
+}
+
+fn bump_spec(slot: &mut Option<usize>, s: usize) {
+    *slot = Some(slot.map_or(s, |e| e.max(s)));
+}
+
+/// The package name in the standard library's `composer.json`.
+const STANDARD_LIBRARY_PACKAGE: &str = "heyjordanparker/php-sharp-composer";
+
+/// Whether a file is a PHP# source of the standard library: a `.sharp` file whose nearest `composer.json` names the
+/// standard library's package, vendored or in the package's own repository. `directories` holds the answer of every
+/// directory already looked up, so each directory's `composer.json` is read once.
+pub(crate) fn is_standard_library(file: &File, workspace: &Path, directories: &mut HashMap<PathBuf, bool>) -> bool {
+    if !file.name.ends_with(b".sharp") {
+        return false;
+    }
+
+    let joined;
+    let path = match &file.path {
+        Some(path) => path.as_path(),
+        None => {
+            joined = workspace.join(bytes_to_path(&file.name));
+            joined.as_path()
+        }
+    };
+
+    path.parent().is_some_and(|directory| is_standard_library_directory(directory, directories))
+}
+
+fn is_standard_library_directory(directory: &Path, directories: &mut HashMap<PathBuf, bool>) -> bool {
+    if let Some(&is_library) = directories.get(directory) {
+        return is_library;
+    }
+
+    let manifest = directory.join("composer.json");
+    let is_library = match std::fs::read(&manifest) {
+        Ok(contents) => match serde_json::from_slice::<serde_json::Value>(&contents) {
+            Ok(package) => package.get("name").and_then(serde_json::Value::as_str) == Some(STANDARD_LIBRARY_PACKAGE),
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to parse `{}`: {error}. Its files are not the standard library.",
+                    manifest.display()
+                );
+
+                false
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            directory.parent().is_some_and(|parent| is_standard_library_directory(parent, directories))
+        }
+        Err(error) => {
+            tracing::warn!("Failed to read `{}`: {error}. Its files are not the standard library.", manifest.display());
+
+            false
+        }
+    };
+
+    directories.insert(directory.to_path_buf(), is_library);
+
+    is_library
+}
+
+/// Picks the final [`FileType`] for a file that matched configured base paths in one or
+/// more tiers.
+///
+/// Each argument carries the maximum specificity of any matching base path in that tier, or
+/// `None` if no base path in that tier matched. Vendored wins over Host at equal-or-more
+/// specificity; Host wins only when strictly more specific. Patch beats Vendored
+/// unconditionally; Patch beats Host only when strictly more specific. When nothing matches
+/// the result is `Host`.
+pub(crate) fn resolve_file_type(
+    host_spec: Option<usize>,
+    vendored_spec: Option<usize>,
+    patch_spec: Option<usize>,
+) -> FileType {
+    let mut decision: Option<(FileType, usize)> = host_spec.map(|s| (FileType::Host, s));
+
+    if let Some(v) = vendored_spec {
+        decision = match decision {
+            Some((FileType::Host, h)) if v < h => decision,
+            _ => Some((FileType::Vendored, v)),
+        };
+    }
+
+    if let Some(p) = patch_spec {
+        decision = match decision {
+            Some((FileType::Host | FileType::Patch, e)) if p <= e => decision,
+            _ => Some((FileType::Patch, p)),
+        };
+    }
+
+    decision.map(|(ft, _)| ft).unwrap_or(FileType::Host)
+}
+
+/// Calculates how specific a configured base path or glob pattern is for conflict resolution.
+///
+/// Examples:
+///
+/// - "src/b.php" matching src/b.php: ~2000 (exact file, 2 components)
+/// - "src/" matching src/b.php: ~100 (directory, 1 component)
+/// - "src" matching src/b.php: ~100 (directory, 1 component)
+pub(crate) fn calculate_pattern_specificity(pattern: &[u8]) -> usize {
+    let pattern_path = bytes_to_path(pattern);
+
+    let component_count = pattern_path.components().count();
+    let is_glob =
+        pattern.contains(&b'*') || pattern.contains(&b'?') || pattern.contains(&b'[') || pattern.contains(&b'{');
+
+    if is_glob {
+        let non_wildcard_components = pattern_path
+            .components()
+            .filter(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                !s.contains('*') && !s.contains('?') && !s.contains('[') && !s.contains('{')
+            })
+            .count();
+        non_wildcard_components * 10
+    } else if pattern_path.is_file()
+        || pattern_path.extension().is_some()
+        || pattern.rsplit(|&b| b == b'.').next().is_some_and(|ext| ext.eq_ignore_ascii_case(b"php"))
+    {
+        component_count * 1000
+    } else {
+        component_count * 100
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_host_when_nothing_matches() {
+        assert_eq!(resolve_file_type(None, None, None), FileType::Host);
+    }
+
+    #[test]
+    fn host_only_match_yields_host() {
+        assert_eq!(resolve_file_type(Some(100), None, None), FileType::Host);
+    }
+
+    #[test]
+    fn vendored_only_match_yields_vendored() {
+        assert_eq!(resolve_file_type(None, Some(100), None), FileType::Vendored);
+    }
+
+    #[test]
+    fn patch_only_match_yields_patch() {
+        assert_eq!(resolve_file_type(None, None, Some(100)), FileType::Patch);
+    }
+
+    #[test]
+    fn vendored_beats_host_at_equal_specificity() {
+        assert_eq!(resolve_file_type(Some(100), Some(100), None), FileType::Vendored);
+    }
+
+    #[test]
+    fn vendored_beats_host_when_more_specific() {
+        assert_eq!(resolve_file_type(Some(100), Some(2000), None), FileType::Vendored);
+    }
+
+    #[test]
+    fn host_beats_vendored_only_when_strictly_more_specific() {
+        assert_eq!(resolve_file_type(Some(2000), Some(100), None), FileType::Host);
+    }
+
+    #[test]
+    fn patch_beats_vendored_unconditionally() {
+        assert_eq!(resolve_file_type(None, Some(2000), Some(100)), FileType::Patch);
+    }
+
+    #[test]
+    fn host_beats_patch_at_equal_specificity() {
+        assert_eq!(resolve_file_type(Some(100), None, Some(100)), FileType::Host);
+    }
+
+    #[test]
+    fn patch_beats_host_when_strictly_more_specific() {
+        assert_eq!(resolve_file_type(Some(100), None, Some(2000)), FileType::Patch);
+    }
+
+    #[test]
+    fn patch_beats_host_that_won_over_vendored() {
+        assert_eq!(resolve_file_type(Some(100), Some(2000), Some(50)), FileType::Patch);
+    }
+
+    #[test]
+    fn exact_file_path_beats_directory_at_same_component_count() {
+        assert!(calculate_pattern_specificity(b"src/foo.php") > calculate_pattern_specificity(b"src/foo"));
+    }
+
+    #[test]
+    fn directory_beats_glob_at_same_non_wildcard_count() {
+        assert!(calculate_pattern_specificity(b"src/") > calculate_pattern_specificity(b"src/**/*.php"));
+    }
+
+    #[test]
+    fn deeper_path_beats_shallower_at_same_kind() {
+        assert!(calculate_pattern_specificity(b"src/inner/") > calculate_pattern_specificity(b"src/"));
+    }
+
+    #[test]
+    fn extensionless_phpish_pattern_treated_as_file() {
+        assert_eq!(calculate_pattern_specificity(b"src/foo.PHP"), calculate_pattern_specificity(b"src/foo.php"),);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::DatabaseReader;
+    use crate::GlobSettings;
+    use std::borrow::Cow;
+    use tempfile::TempDir;
+
+    fn create_test_config(temp_dir: &TempDir, paths: Vec<&str>, includes: Vec<&str>) -> DatabaseConfiguration<'static> {
+        create_test_config_with_patches(temp_dir, paths, includes, vec![])
+    }
+
+    fn create_test_config_with_patches(
+        temp_dir: &TempDir,
+        paths: Vec<&str>,
+        includes: Vec<&str>,
+        patches: Vec<&str>,
+    ) -> DatabaseConfiguration<'static> {
+        // Normalize path separators to platform-specific separators
+        let normalize = |s: &str| s.replace('/', std::path::MAIN_SEPARATOR_STR);
+
+        DatabaseConfiguration {
+            workspace: Cow::Owned(temp_dir.path().to_path_buf()),
+            paths: paths.into_iter().map(|s| Cow::Owned(normalize(s).into_bytes())).collect(),
+            includes: includes.into_iter().map(|s| Cow::Owned(normalize(s).into_bytes())).collect(),
+            patches: patches.into_iter().map(|s| Cow::Owned(normalize(s).into_bytes())).collect(),
+            excludes: vec![],
+            extensions: vec![Cow::Borrowed(b"php")],
+            glob: GlobSettings::default(),
+        }
+    }
+
+    /// Returns the file's logical name as a lossy UTF-8 string for assertion matching.
+    fn name_str(name: &[u8]) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(name)
+    }
+
+    fn create_test_file(temp_dir: &TempDir, relative_path: &str, content: &str) {
+        let file_path = temp_dir.path().join(relative_path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(file_path, content).unwrap();
+    }
+
+    #[test]
+    fn test_exact_file_vs_directory() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "src/b.php", "<?php");
+        create_test_file(&temp_dir, "src/a.php", "<?php");
+
+        let config = create_test_config(&temp_dir, vec!["src/b.php"], vec!["src/"]);
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let b_file = db.files().find(|f| name_str(&f.name).contains("b.php")).unwrap();
+        assert_eq!(b_file.file_type, FileType::Host, "src/b.php should be Host (exact file beats directory)");
+
+        let a_file = db.files().find(|f| name_str(&f.name).contains("a.php")).unwrap();
+        assert_eq!(a_file.file_type, FileType::Vendored, "src/a.php should be Vendored");
+    }
+
+    #[test]
+    fn test_deeper_vs_shallower_directory() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "src/foo/bar.php", "<?php");
+
+        let config = create_test_config(&temp_dir, vec!["src/foo/"], vec!["src/"]);
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).contains("bar.php")).unwrap();
+        assert_eq!(file.file_type, FileType::Host, "Deeper directory pattern should win");
+    }
+
+    #[test]
+    fn test_exact_file_vs_glob() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "src/b.php", "<?php");
+
+        let config = create_test_config(&temp_dir, vec!["src/b.php"], vec!["src/*.php"]);
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).contains("b.php")).unwrap();
+        assert_eq!(file.file_type, FileType::Host, "Exact file should beat glob pattern");
+    }
+
+    #[test]
+    fn test_equal_specificity_includes_wins() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "src/a.php", "<?php");
+
+        let config = create_test_config(&temp_dir, vec!["src/"], vec!["src/"]);
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).contains("a.php")).unwrap();
+        assert_eq!(file.file_type, FileType::Vendored, "Equal specificity: includes should win");
+    }
+
+    #[test]
+    fn test_complex_scenario_from_bug_report() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "src/a.php", "<?php");
+        create_test_file(&temp_dir, "src/b.php", "<?php");
+        create_test_file(&temp_dir, "src/c/d.php", "<?php");
+        create_test_file(&temp_dir, "src/c/e.php", "<?php");
+        create_test_file(&temp_dir, "vendor/lib1.php", "<?php");
+        create_test_file(&temp_dir, "vendor/lib2.php", "<?php");
+
+        let config = create_test_config(&temp_dir, vec!["src/b.php"], vec!["vendor", "src/c", "src/"]);
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let b_file = db
+            .files()
+            .find(|f| name_str(&f.name).contains("src/b.php") || name_str(&f.name).ends_with("b.php"))
+            .unwrap();
+        assert_eq!(b_file.file_type, FileType::Host, "src/b.php should be Host in bug scenario");
+
+        let d_file = db.files().find(|f| name_str(&f.name).contains("d.php")).unwrap();
+        assert_eq!(d_file.file_type, FileType::Vendored, "src/c/d.php should be Vendored");
+
+        let lib_file = db.files().find(|f| name_str(&f.name).contains("lib1.php")).unwrap();
+        assert_eq!(lib_file.file_type, FileType::Vendored, "vendor/lib1.php should be Vendored");
+    }
+
+    #[test]
+    fn test_files_only_in_paths() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "src/a.php", "<?php");
+
+        let config = create_test_config(&temp_dir, vec!["src/"], vec![]);
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).contains("a.php")).unwrap();
+        assert_eq!(file.file_type, FileType::Host, "File only in paths should be Host");
+    }
+
+    #[test]
+    fn test_files_only_in_includes() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "vendor/lib.php", "<?php");
+
+        let config = create_test_config(&temp_dir, vec![], vec!["vendor/"]);
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).contains("lib.php")).unwrap();
+        assert_eq!(file.file_type, FileType::Vendored, "File only in includes should be Vendored");
+    }
+
+    #[test]
+    fn test_stdin_override_replaces_file_content() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/foo.php", "<?php\n// on disk");
+
+        let config = create_test_config(&temp_dir, vec!["src/"], vec![]);
+        let loader = DatabaseLoader::new(config).with_stdin_override("src/foo.php", b"<?php\n// from stdin".to_vec());
+        let db = loader.load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).contains("foo.php")).unwrap();
+        assert_eq!(
+            file.contents.as_ref(),
+            b"<?php\n// from stdin",
+            "stdin override content should be used instead of disk"
+        );
+    }
+
+    #[test]
+    fn test_glob_excludes_match_workspace_relative_paths() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "src/Absences/Foo/Foo.php", "<?php");
+        create_test_file(&temp_dir, "src/Absences/Test/Faker/Provider/AbsencesProvider.php", "<?php");
+        create_test_file(&temp_dir, "src/Calendar/Test/Helper.php", "<?php");
+
+        let mut config = create_test_config(&temp_dir, vec!["src"], vec![]);
+        config.excludes = vec![Exclusion::Pattern(Cow::Borrowed("src/*/Test/**"))];
+
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let names: Vec<String> = db.files().map(|f| name_str(&f.name).into_owned()).collect();
+        assert!(names.iter().any(|n| n.ends_with("src/Absences/Foo/Foo.php")), "non-Test file should be loaded");
+        assert!(
+            !names.iter().any(|n| n.contains("src/Absences/Test/")),
+            "files under src/*/Test/** should be excluded, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("src/Calendar/Test/")),
+            "files under src/*/Test/** should be excluded, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_glob_excludes_match_legacy_absolute_prefix_patterns() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "packages/foo/src/main.php", "<?php");
+        create_test_file(&temp_dir, "packages/foo/vendor/lib.php", "<?php");
+
+        let mut config = create_test_config(&temp_dir, vec!["packages"], vec![]);
+        config.excludes = vec![Exclusion::Pattern(Cow::Borrowed("*/packages/**/vendor/*"))];
+
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let names: Vec<String> = db.files().map(|f| name_str(&f.name).into_owned()).collect();
+        assert!(names.iter().any(|n| n.ends_with("packages/foo/src/main.php")));
+        assert!(
+            !names.iter().any(|n| n.contains("/vendor/")),
+            "legacy `*/packages/**/vendor/*` style should still exclude vendor files, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_glob_dir_prune_skips_relative_directories() {
+        let temp_dir = TempDir::new().unwrap();
+
+        create_test_file(&temp_dir, "vendor/slevomat/coding-standard/main.php", "<?php");
+        create_test_file(&temp_dir, "vendor/slevomat/coding-standard/tests/Sniffs/Foo.php", "<?php");
+        create_test_file(&temp_dir, "vendor/another/lib.php", "<?php");
+
+        let mut config = create_test_config(&temp_dir, vec![], vec!["vendor"]);
+        config.excludes = vec![Exclusion::Pattern(Cow::Borrowed("vendor/**/tests/**"))];
+
+        let loader = DatabaseLoader::new(config);
+        let db = loader.load().unwrap();
+
+        let names: Vec<String> = db.files().map(|f| name_str(&f.name).into_owned()).collect();
+        assert!(names.iter().any(|n| n.ends_with("vendor/slevomat/coding-standard/main.php")));
+        assert!(names.iter().any(|n| n.ends_with("vendor/another/lib.php")));
+        assert!(
+            !names.iter().any(|n| n.contains("/tests/")),
+            "files under vendor/**/tests/** should be pruned, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_stdin_override_adds_file_when_not_on_disk() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/.gitkeep", "");
+
+        let config = create_test_config(&temp_dir, vec!["src/"], vec![]);
+        let loader =
+            DatabaseLoader::new(config).with_stdin_override("src/unsaved.php", b"<?php\n// unsaved buffer".to_vec());
+        let db = loader.load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).contains("unsaved.php")).unwrap();
+        assert_eq!(file.file_type, FileType::Host);
+        assert_eq!(file.contents.as_ref(), b"<?php\n// unsaved buffer");
+    }
+
+    #[test]
+    fn test_stdin_override_accepts_non_utf8_content() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/.gitkeep", "");
+
+        let config = create_test_config(&temp_dir, vec!["src/"], vec![]);
+        // PHP identifiers are binary-safe, so a buffer piped in via `--stdin-input` may not
+        // be valid UTF-8. The loaded file must carry those bytes through verbatim.
+        let content = b"<?php\n\nfunction f\xC9\xFF(): void {}\n".to_vec();
+        assert!(std::str::from_utf8(&content).is_err(), "test buffer must contain non-UTF-8 bytes");
+
+        let loader = DatabaseLoader::new(config).with_stdin_override("src/buffer.php", content.clone());
+        let db = loader.load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).contains("buffer.php")).unwrap();
+        assert_eq!(file.contents.as_ref(), content.as_slice());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlinked_file_under_include_is_loaded() {
+        let temp_dir = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+
+        create_test_file(&external, "Bar.php", "<?php class Bar {}\n");
+        std::fs::create_dir_all(temp_dir.path().join("vendor")).unwrap();
+        std::os::unix::fs::symlink(external.path().join("Bar.php"), temp_dir.path().join("vendor/Bar.php")).unwrap();
+
+        let config = create_test_config(&temp_dir, vec![], vec!["vendor/"]);
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let bar = db.files().find(|f| name_str(&f.name).contains("Bar.php"));
+        assert!(bar.is_some(), "symlinked Bar.php should be loaded via include = ['vendor/']");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlinked_directory_under_include_is_descended() {
+        let temp_dir = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+
+        create_test_file(&external, "src/Foo.php", "<?php class Foo {}\n");
+        create_test_file(&external, "src/Bar.php", "<?php class Bar {}\n");
+
+        std::fs::create_dir_all(temp_dir.path().join("vendor")).unwrap();
+        std::os::unix::fs::symlink(external.path(), temp_dir.path().join("vendor/example-package")).unwrap();
+
+        let config = create_test_config(&temp_dir, vec![], vec!["vendor/"]);
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        assert!(db.files().any(|f| name_str(&f.name).contains("Foo.php")), "Foo.php inside symlinked dir not found");
+        assert!(db.files().any(|f| name_str(&f.name).contains("Bar.php")), "Bar.php inside symlinked dir not found");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_cycle_is_warned_and_skipped() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/Real.php", "<?php class Real {}\n");
+        std::os::unix::fs::symlink(temp_dir.path().join("src"), temp_dir.path().join("src/loop")).unwrap();
+
+        let config = create_test_config(&temp_dir, vec![], vec!["src/"]);
+        let db = DatabaseLoader::new(config).load().expect("symlink cycle should not abort the load");
+
+        assert!(
+            db.files().any(|f| name_str(&f.name).contains("Real.php")),
+            "Real.php still reachable despite the loop"
+        );
+    }
+
+    #[test]
+    fn test_exact_extensionless_file_is_loaded() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "bin/console", "<?php\n// entrypoint");
+
+        // `bin/console` has no extension, so it would be filtered out when discovered by
+        // walking a directory. Naming it exactly must bypass the extension requirement.
+        let config = create_test_config(&temp_dir, vec!["bin/console"], vec![]);
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let file = db.files().find(|f| name_str(&f.name).ends_with("bin/console")).unwrap();
+        assert_eq!(file.file_type, FileType::Host);
+        assert_eq!(file.contents.as_ref(), b"<?php\n// entrypoint");
+    }
+
+    #[test]
+    fn test_extensionless_file_in_directory_is_skipped() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "bin/console", "<?php");
+        create_test_file(&temp_dir, "bin/run.php", "<?php");
+
+        // Walking the directory must still honor the extension filter: only `run.php` loads.
+        let config = create_test_config(&temp_dir, vec!["bin"], vec![]);
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let names: Vec<String> = db.files().map(|f| name_str(&f.name).into_owned()).collect();
+        assert!(names.iter().any(|n| n.ends_with("bin/run.php")), "run.php should be loaded, got {names:?}");
+        assert!(!names.iter().any(|n| n.ends_with("bin/console")), "extensionless console should be skipped");
+    }
+
+    #[test]
+    fn test_patch_beats_vendored_at_equal_specificity() {
+        // A file covered by both patches and includes at the same directory-level specificity
+        // should be classified as Patch, not Vendored.
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "lib/Foo.php", "<?php");
+
+        let config = create_test_config_with_patches(&temp_dir, vec![], vec!["lib/"], vec!["lib/"]);
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let file = db.files().find(|f| String::from_utf8_lossy(&f.name).contains("Foo.php")).unwrap();
+        assert_eq!(file.file_type, FileType::Patch, "patch should beat vendored at equal specificity");
+    }
+
+    #[test]
+    fn test_host_beats_patch_at_equal_specificity() {
+        // When a file is covered by both paths and patches at the same directory-level specificity,
+        // the host (paths) classification wins.  Patches only override host when strictly more specific.
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/Foo.php", "<?php");
+
+        let config = create_test_config_with_patches(&temp_dir, vec!["src/"], vec![], vec!["src/"]);
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let file = db.files().find(|f| String::from_utf8_lossy(&f.name).contains("Foo.php")).unwrap();
+        assert_eq!(file.file_type, FileType::Host, "host should beat patch at equal specificity");
+    }
+
+    #[test]
+    fn test_patch_beats_host_when_strictly_more_specific() {
+        // An exact-file patch pattern has higher specificity than a directory paths pattern,
+        // so the patch wins and the file is treated as Patch rather than Host.
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/Foo.php", "<?php");
+        create_test_file(&temp_dir, "src/Bar.php", "<?php");
+
+        // Patch covers only Foo.php exactly; paths covers the whole directory.
+        let config = create_test_config_with_patches(&temp_dir, vec!["src/"], vec![], vec!["src/Foo.php"]);
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let foo = db.files().find(|f| String::from_utf8_lossy(&f.name).contains("Foo.php")).unwrap();
+        assert_eq!(foo.file_type, FileType::Patch, "exact-file patch should beat directory-level host pattern");
+
+        let bar = db.files().find(|f| String::from_utf8_lossy(&f.name).contains("Bar.php")).unwrap();
+        assert_eq!(bar.file_type, FileType::Host, "file not covered by patch should remain Host");
+    }
+
+    #[test]
+    fn a_sharp_file_belongs_to_the_standard_library_when_its_nearest_composer_json_names_the_package() {
+        let temp_dir = TempDir::new().unwrap();
+        let library = "vendor/heyjordanparker/php-sharp-composer";
+        create_test_file(&temp_dir, "composer.json", r#"{"name": "acme/app"}"#);
+        create_test_file(&temp_dir, "src/App/Page.sharp", "");
+        create_test_file(
+            &temp_dir,
+            &format!("{library}/composer.json"),
+            r#"{"name": "heyjordanparker/php-sharp-composer"}"#,
+        );
+        create_test_file(&temp_dir, &format!("{library}/autoload.php"), "<?php");
+        create_test_file(&temp_dir, &format!("{library}/library/Sharp/Text/Text.sharp"), "");
+        create_test_file(&temp_dir, &format!("{library}/library/Sharp/Text/Slug.sharp"), "");
+        create_test_file(&temp_dir, &format!("{library}/library/Sharp/Text.sharp"), "");
+        create_test_file(&temp_dir, &format!("{library}/vendor/acme/tools/composer.json"), r#"{"name": "acme/tools"}"#);
+        create_test_file(&temp_dir, &format!("{library}/vendor/acme/tools/Sharp/Tools.sharp"), "");
+
+        let mut config = create_test_config(&temp_dir, vec!["src"], vec!["vendor"]);
+        config.extensions = vec![Cow::Borrowed(b"php"), Cow::Borrowed(b"sharp")];
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let mut in_library: Vec<String> =
+            db.files().filter(|file| file.is_standard_library).map(|file| name_str(&file.name).into_owned()).collect();
+        in_library.sort();
+
+        assert_eq!(
+            in_library,
+            [
+                format!("{library}/library/Sharp/Text.sharp"),
+                format!("{library}/library/Sharp/Text/Slug.sharp"),
+                format!("{library}/library/Sharp/Text/Text.sharp"),
+            ]
+        );
+    }
+}

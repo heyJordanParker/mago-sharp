@@ -1,0 +1,238 @@
+use indoc::indoc;
+use mago_allocator::Arena;
+use mago_text_edit::Safety;
+use mago_text_edit::TextEdit;
+use schemars::JsonSchema;
+
+use mago_php_version::PHPVersion;
+use mago_php_version::PHPVersionRange;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_reporting::Level;
+use mago_span::HasSpan;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::FullOpeningTag;
+use mago_syntax::cst::Inline;
+use mago_syntax::cst::InlineKind;
+use mago_syntax::cst::Literal;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
+use mago_syntax::cst::OpeningTag;
+use mago_syntax::cst::ShortOpeningTag;
+use mago_syntax::cst::Statement;
+
+use crate::category::Category;
+use crate::context::LintContext;
+use crate::requirements::RuleRequirements;
+use crate::rule::Config;
+use crate::rule::LintRule;
+use crate::rule_meta::RuleMeta;
+use crate::settings::RuleSettings;
+
+const STRICT_TYPES_DIRECTIVE: &[u8] = b"strict_types";
+
+#[derive(Debug, Clone)]
+pub struct StrictTypesRule {
+    meta: &'static RuleMeta,
+    cfg: StrictTypesConfig,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "kebab-case", deny_unknown_fields))]
+pub struct StrictTypesConfig {
+    pub level: Level,
+    #[cfg_attr(feature = "serde", serde(alias = "allow-disabling"))]
+    pub allow_disabling: bool,
+}
+
+impl Default for StrictTypesConfig {
+    fn default() -> Self {
+        Self { level: Level::Warning, allow_disabling: false }
+    }
+}
+
+impl Config for StrictTypesConfig {
+    fn level(&self) -> Level {
+        self.level
+    }
+}
+
+impl LintRule for StrictTypesRule {
+    type Config = StrictTypesConfig;
+
+    fn meta() -> &'static RuleMeta {
+        const META: RuleMeta = RuleMeta {
+            name: "Strict Types",
+            code: "strict-types",
+            description: indoc! {"
+                Detects missing `declare(strict_types=1);` statement at the beginning of the file.
+            "},
+            good_example: indoc! {r#"
+                <?php
+
+                declare(strict_types=1);
+
+                echo "Hello, World!";
+            "#},
+            bad_example: indoc! {r#"
+                <?php
+
+                echo "Hello, World!";
+            "#},
+            category: Category::Correctness,
+            requirements: RuleRequirements::PHPVersion(PHPVersionRange::from(PHPVersion::PHP70)),
+        };
+
+        &META
+    }
+
+    fn targets() -> &'static [NodeKind] {
+        const TARGETS: &[NodeKind] = &[NodeKind::Program];
+
+        TARGETS
+    }
+
+    fn build(settings: &RuleSettings<Self::Config>) -> Self {
+        Self { meta: Self::meta(), cfg: settings.config }
+    }
+
+    fn check<'arena, A>(&self, ctx: &mut LintContext<'_, 'arena, A>, node: Node<'_, 'arena>)
+    where
+        A: Arena,
+    {
+        let Node::Program(program) = node else {
+            return;
+        };
+
+        let mut found = false;
+        let mut has_useful_statements = false;
+        for statement in &program.statements {
+            let Statement::Declare(declare) = statement else {
+                has_useful_statements |= !matches!(
+                    statement,
+                    Statement::OpeningTag(_) | Statement::ClosingTag(_) | Statement::Inline(_) | Statement::Noop(_)
+                );
+
+                continue;
+            };
+
+            for item in &declare.items {
+                if item.name.value != STRICT_TYPES_DIRECTIVE {
+                    continue;
+                }
+
+                if let Expression::Literal(Literal::Integer(integer)) = &item.value {
+                    if integer.value == Some(0) && !self.cfg.allow_disabling {
+                        let issue = Issue::new(self.cfg.level(), "The `strict_types` directive is disabled.")
+                            .with_code(self.meta.code)
+                            .with_annotation(
+                                Annotation::primary(item.span()).with_message("The `strict_types` is disabled here"),
+                            )
+                            .with_note("Disabling `strict_types` can lead to type safety issues.")
+                            .with_help("Consider setting `strict_types` to `1` to enforce strict typing.");
+
+                        ctx.collector.report(issue);
+                    }
+                } else {
+                    // ignore other values, as they will be caught by the semantics checker
+                }
+
+                found = true;
+            }
+        }
+
+        if !has_useful_statements {
+            // empty file or file with only opening/closing tags, inline HTML, or no-op statements
+            return;
+        }
+
+        if !found {
+            let annotation_span = program
+                .statements
+                .iter()
+                .find_map(|s| match s {
+                    Statement::OpeningTag(tag) => Some(tag.span()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| program.span());
+
+            let issue = Issue::new(
+                self.cfg.level(),
+                "Missing `declare(strict_types=1);` statement at the beginning of the file.",
+            )
+            .with_code(self.meta.code)
+            .with_annotation(Annotation::primary(annotation_span))
+            .with_note("The `strict_types` directive enforces strict type checking, which can prevent subtle bugs.")
+            .with_help("Add `declare(strict_types=1);` at the top of your file.");
+
+            ctx.collector.propose(issue, |edits| {
+                let Some(mut first_statement) = program.statements.first() else {
+                    // The file is completely empty, insert an opening tag and declare statement
+                    // This change is safe because the file is empty.
+                    edits.push(TextEdit::insert(0, "<?php\n\ndeclare(strict_types=1);\n"));
+
+                    return;
+                };
+
+                // If the first statement is a shebang.
+                if let Statement::Inline(Inline { kind: InlineKind::Shebang, value, span }) = first_statement {
+                    // Skip the shebang and look for the first PHP statement.
+                    first_statement = if let Some(statement) = program.statements.get(1) {
+                        statement
+                    } else {
+                        let ends_in_newline = value.ends_with(b"\n");
+
+                        // If there are no statements after the shebang, insert an opening tag and declare statement.
+                        let content = if ends_in_newline {
+                            "<?php\n\ndeclare(strict_types=1);\n"
+                        } else {
+                            "\n<?php\n\ndeclare(strict_types=1);\n"
+                        };
+
+                        // This is safe because the shebang is the only statement in the file.
+                        edits.push(TextEdit::insert(span.end_offset(), content));
+
+                        return;
+                    };
+                }
+
+                match first_statement {
+                    Statement::Inline(inline) => {
+                        // If the first statement is an inline statement, insert the declare statement before it.
+                        let starts_with_newline = inline.value.starts_with(b"\n");
+                        let content = if starts_with_newline {
+                            "<?php\n\ndeclare(strict_types=1);\n\n?>"
+                        } else {
+                            "<?php\n\ndeclare(strict_types=1);\n\n?>\n"
+                        };
+
+                        edits.push(
+                            TextEdit::insert(inline.span.start_offset(), content)
+                                .with_safety(Safety::PotentiallyUnsafe),
+                        );
+                    }
+                    Statement::OpeningTag(
+                        OpeningTag::Full(FullOpeningTag { span, .. }) | OpeningTag::Short(ShortOpeningTag { span }),
+                    ) => {
+                        // If the first statement is an opening tag, insert the declare statement after it.
+                        edits.push(
+                            TextEdit::insert(span.end_offset(), "\n\ndeclare(strict_types=1);\n")
+                                .with_safety(Safety::PotentiallyUnsafe),
+                        );
+                    }
+                    Statement::EchoTag(echo_tag) => {
+                        // If the first statement is an echo opening tag, insert an opening tag and declare statement
+                        // and a closing tag before it.
+                        edits.push(
+                            TextEdit::insert(echo_tag.tag.start_offset(), "<?php\n\ndeclare(strict_types=1);\n\n?>\n")
+                                .with_safety(Safety::PotentiallyUnsafe),
+                        );
+                    }
+                    #[allow(clippy::unreachable)]
+                    _ => unreachable!(),
+                }
+            });
+        }
+    }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "mago-documentation-tooling",
+  "private": true,
+  "version": "0.1.0",
+  "devDependencies": {
+    "pagefind": "^1.1.1"
+  }
+}

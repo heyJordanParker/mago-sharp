@@ -1,0 +1,37 @@
+[package]
+name = "mago-formatter"
+description = "Reformats PHP source code according to configurable style rules, ensuring consistent code style across a project or organization."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mago-syntax = { workspace = true }
+mago-database = { workspace = true }
+mago-span = { workspace = true }
+mago-php-version = { workspace = true }
+foldhash = { workspace = true }
+memchr = { workspace = true }
+serde = { workspace = true, optional = true }
+unicode-width = { workspace = true }
+mago-allocator = { workspace = true }
+schemars = { workspace = true }
+
+[features]
+default = []
+serde = [
+    "dep:serde",
+]
+
+[dev-dependencies]
+indoc = { workspace = true }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+mago-bytes = { workspace = true }

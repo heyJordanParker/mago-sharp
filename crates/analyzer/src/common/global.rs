@@ -1,0 +1,372 @@
+use std::collections::BTreeMap;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::LazyLock;
+
+use foldhash::HashMap;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::key::ArrayKey;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::array::list::TList;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::int::TInteger;
+use mago_codex::ttype::atomic::scalar::string::TString;
+use mago_codex::ttype::get_bool;
+use mago_codex::ttype::get_float;
+use mago_codex::ttype::get_int_range;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_non_empty_string;
+use mago_codex::ttype::get_non_negative_int;
+use mago_codex::ttype::get_one_int;
+use mago_codex::ttype::get_positive_int;
+use mago_codex::ttype::get_string;
+use mago_codex::ttype::get_truthy_string;
+use mago_codex::ttype::union::TUnion;
+use mago_word::word;
+
+std::thread_local! {
+    static SUPERGLOBALS_MAP: LazyLock<HashMap<&'static str, Rc<TUnion>>> = LazyLock::new(|| {
+        let mut map = HashMap::default();
+
+        map.insert("$argv", Rc::new({
+            let mut type_union = TUnion::from_vec(vec![
+                TAtomic::Null,
+                TAtomic::Array(TArray::List(TList::new_non_empty(Arc::new(get_string())))),
+            ]);
+
+            type_union.set_ignore_nullable_issues(true);
+            type_union
+        }));
+
+        map.insert("$argc", Rc::new({
+            let mut type_union = get_one_int();
+
+            type_union.set_ignore_nullable_issues(true);
+            type_union
+        }));
+
+        map.insert("$http_response_header", Rc::new({
+            let mut type_union =
+                TUnion::from_atomic(TAtomic::Array(TArray::List(TList::new_non_empty(Arc::new(get_truthy_string())))));
+
+            type_union.set_possibly_undefined(true, None);
+            type_union
+        }));
+
+        map.insert("$GLOBALS", Rc::new({
+            let mut known_items = BTreeMap::new();
+            known_items.insert(ArrayKey::String(word("argc")), (true, get_positive_int()));
+            known_items.insert(
+                ArrayKey::String(word("argv")),
+                (true, TUnion::from_atomic(TAtomic::Array(TArray::List(TList::new_non_empty(Arc::new(get_string())))))),
+            );
+
+            TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray {
+                known_items: Some(known_items),
+                parameters: Some((Arc::new(get_non_empty_string()), Arc::new(get_mixed()))),
+                non_empty: true,
+                known_non_list: false,
+            })))
+        }));
+
+        let user_input_type_union = Rc::new(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+            Arc::new(TUnion::from_vec(vec![
+                TAtomic::Scalar(TScalar::non_empty_string()),
+                TAtomic::Scalar(TScalar::int()),
+            ])),
+            Arc::new(TUnion::from_vec(vec![
+                TAtomic::Scalar(TScalar::string()),
+                TAtomic::Array(TArray::Keyed(
+                    TKeyedArray::new_with_parameters(
+                        Arc::new(TUnion::from_vec(vec![
+                            TAtomic::Scalar(TScalar::non_empty_string()),
+                            TAtomic::Scalar(TScalar::int()),
+                        ])),
+                        Arc::new(TUnion::from_vec(vec![
+                            TAtomic::Scalar(TScalar::string()),
+                            TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                                Arc::new(TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::non_empty_string()),
+                                    TAtomic::Scalar(TScalar::int()),
+                                ])),
+                                Arc::new(get_mixed()),
+                            ))),
+                        ])),
+                    )
+                    .with_non_empty(true),
+                )),
+            ])),
+        )))));
+
+        map.insert("$_GET", Rc::clone(&user_input_type_union));
+        map.insert("$_POST", Rc::clone(&user_input_type_union));
+        map.insert("$_REQUEST", Rc::clone(&user_input_type_union));
+        map.insert("$_COOKIE", user_input_type_union);
+
+        map.insert("$_SERVER", Rc::new({
+            // Use a fixed timestamp to ensure deterministic type representations.
+            // This value (1764191486) was chosen at the time of implementation and has no special meaning.
+            // Using a dynamic timestamp would cause baseline matching to fail since error messages
+            // include the type, and the type would change on every run.
+            const REQUEST_TIME_MIN: i64 = 1_764_191_486;
+
+            let mut known_items = BTreeMap::new();
+            // Standard CGI/1.1 and PHP variables
+            known_items.insert(ArrayKey::String(word("PHP_SELF")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("GATEWAY_INTERFACE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SERVER_ADDR")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SERVER_NAME")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SERVER_SOFTWARE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SERVER_PROTOCOL")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("REQUEST_METHOD")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("REQUEST_TIME")), (true, get_int_range(Some(REQUEST_TIME_MIN), None)));
+            known_items.insert(ArrayKey::String(word("REQUEST_TIME_FLOAT")), (true, get_float()));
+            known_items.insert(ArrayKey::String(word("QUERY_STRING")), (true, get_string()));
+            known_items.insert(ArrayKey::String(word("DOCUMENT_ROOT")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_ACCEPT")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_ACCEPT_CHARSET")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_ACCEPT_ENCODING")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_ACCEPT_LANGUAGE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_CONNECTION")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_HOST")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_REFERER")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_USER_AGENT")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTPS")), (true, get_string()));
+            known_items.insert(ArrayKey::String(word("REMOTE_ADDR")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("REMOTE_HOST")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("REMOTE_PORT")), (true, get_string()));
+            known_items.insert(ArrayKey::String(word("REMOTE_USER")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("REDIRECT_REMOTE_USER")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SCRIPT_FILENAME")), (false, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SERVER_ADMIN")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SERVER_PORT")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SERVER_SIGNATURE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("PATH_TRANSLATED")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SCRIPT_NAME")), (false, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("REQUEST_URI")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("PHP_AUTH_DIGEST")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("PHP_AUTH_USER")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("PHP_AUTH_PW")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("AUTH_TYPE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("PATH_INFO")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("ORIG_PATH_INFO")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("CONTENT_LENGTH")), (true, get_string()));
+            known_items.insert(ArrayKey::String(word("CONTENT_TYPE")), (true, get_string()));
+            // Common, miscellaneous variables
+            known_items.insert(ArrayKey::String(word("FCGI_ROLE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HOME")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_CACHE_CONTROL")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_COOKIE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_PRIORITY")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("PATH")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("REDIRECT_STATUS")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("REQUEST_SCHEME")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("USER")), (true, get_non_empty_string()));
+            // Common proxy and CDN headers
+            known_items.insert(
+                ArrayKey::String(word("HTTP_UPGRADE_INSECURE_REQUESTS")),
+                (true, get_non_empty_string()),
+            );
+            known_items
+                .insert(ArrayKey::String(word("HTTP_X_FORWARDED_PROTO")), (true, get_non_empty_string()));
+                known_items.insert(ArrayKey::String(word("HTTP_CLIENT_IP")), (true, get_non_empty_string()));
+                known_items.insert(ArrayKey::String(word("HTTP_X_REAL_IP")), (true, get_non_empty_string()));
+                known_items.insert(ArrayKey::String(word("HTTP_X_FORWARDED_FOR")), (true, get_non_empty_string()));
+            known_items
+                .insert(ArrayKey::String(word("HTTP_CF_CONNECTING_IP")), (true, get_non_empty_string()));
+                known_items.insert(ArrayKey::String(word("HTTP_CF_IPCOUNTRY")), (true, get_non_empty_string()));
+                known_items.insert(ArrayKey::String(word("HTTP_CF_VISITOR")), (true, get_non_empty_string()));
+                known_items.insert(ArrayKey::String(word("HTTP_CDN_LOOP")), (true, get_non_empty_string()));
+            // Common Sec-Fetch headers
+            known_items.insert(ArrayKey::String(word("HTTP_DNT")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_SEC_FETCH_DEST")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_SEC_FETCH_USER")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_SEC_FETCH_MODE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HTTP_SEC_FETCH_SITE")), (true, get_non_empty_string()));
+            known_items
+                .insert(ArrayKey::String(word("HTTP_SEC_CH_UA_PLATFORM")), (true, get_non_empty_string()));
+            known_items
+                .insert(ArrayKey::String(word("HTTP_SEC_CH_UA_MOBILE")), (true, get_non_empty_string()));
+                known_items.insert(ArrayKey::String(word("HTTP_SEC_CH_UA")), (true, get_non_empty_string()));
+
+            // Common framework and application variables (e.g., Symfony, PHPUnit, Laravel)
+            known_items.insert(ArrayKey::String(word("APP_DEBUG")), (true, get_bool()));
+            known_items.insert(ArrayKey::String(word("APP_ENV")), (true, get_string()));
+            known_items.insert(ArrayKey::String(word("APP_NAME")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_URL")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_KEY")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_SECRET")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SECRET")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_LOCALE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_FALLBACK_LOCALE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DATABASE_URL")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("CACHE_DRIVER")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_CONNECTION")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_HOST")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_PORT")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_DATABASE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_USERNAME")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_PASSWORD")), (true, get_string()));
+
+            known_items.insert(ArrayKey::String(word("argc")), (true, get_positive_int()));
+            known_items.insert(
+                ArrayKey::String(word("argv")),
+                (true, TUnion::from_atomic(TAtomic::Array(TArray::List(TList::new_non_empty(Arc::new(get_string())))))),
+            );
+
+            TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray {
+                known_items: Some(known_items),
+                parameters: Some((Arc::new(get_non_empty_string()), Arc::new(get_string()))),
+                non_empty: true,
+                known_non_list: false,
+            })))
+        }));
+
+        map.insert("$_ENV", Rc::new({
+            let mut known_items = BTreeMap::new();
+
+            // Standard environment variables
+            known_items.insert(ArrayKey::String(word("PATH")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("HOME")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("USER")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SHELL")), (true, get_non_empty_string()));
+
+            // Common framework and application variables (e.g., Symfony, PHPUnit, Laravel)
+            known_items.insert(ArrayKey::String(word("APP_DEBUG")), (true, get_bool()));
+            known_items.insert(ArrayKey::String(word("APP_ENV")), (true, get_string()));
+            known_items.insert(ArrayKey::String(word("APP_NAME")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_URL")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_KEY")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_SECRET")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("SECRET")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_LOCALE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("APP_FALLBACK_LOCALE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DATABASE_URL")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("CACHE_DRIVER")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_CONNECTION")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_HOST")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_PORT")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_DATABASE")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_USERNAME")), (true, get_non_empty_string()));
+            known_items.insert(ArrayKey::String(word("DB_PASSWORD")), (true, get_string()));
+
+            TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray {
+                known_items: Some(known_items),
+                parameters: Some((Arc::new(get_non_empty_string()), Arc::new(get_string()))),
+                non_empty: true,
+                known_non_list: false,
+            })))
+        }));
+
+        map.insert("$_FILES", Rc::new(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray {
+            known_items: None,
+            parameters: Some((
+                Arc::new(get_non_empty_string()),
+                Arc::new(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray {
+                    known_items: Some(BTreeMap::from([
+                        (
+                            ArrayKey::String(word("name")),
+                            (
+                                true,
+                                TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::String(TString::non_empty())),
+                                    TAtomic::Array(TArray::List(TList::new_non_empty(
+                                        Arc::new(get_non_empty_string()),
+                                    ))),
+                                ]),
+                            ),
+                        ),
+                        (
+                            ArrayKey::String(word("type")),
+                            (
+                                true,
+                                TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::String(TString::non_empty())),
+                                    TAtomic::Array(TArray::List(TList::new_non_empty(
+                                        Arc::new(get_non_empty_string()),
+                                    ))),
+                                ]),
+                            ),
+                        ),
+                        (
+                            ArrayKey::String(word("tmp_name")),
+                            (
+                                true,
+                                TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::String(TString::non_empty())),
+                                    TAtomic::Array(TArray::List(TList::new_non_empty(
+                                        Arc::new(get_non_empty_string()),
+                                    ))),
+                                ]),
+                            ),
+                        ),
+                        (
+                            ArrayKey::String(word("full_path")),
+                            (
+                                true,
+                                TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::String(TString::non_empty())),
+                                    TAtomic::Array(TArray::List(TList::new_non_empty(
+                                        Arc::new(get_non_empty_string()),
+                                    ))),
+                                ]),
+                            ),
+                        ),
+                        (
+                            ArrayKey::String(word("error")),
+                            (
+                                true,
+                                TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::Integer(TInteger::Range(0, 8))),
+                                    TAtomic::Array(TArray::List(TList::new_non_empty(Arc::new(TUnion::from_atomic(
+                                        TAtomic::Scalar(TScalar::Integer(TInteger::Range(0, 8))),
+                                    ))))),
+                                ]),
+                            ),
+                        ),
+                        (
+                            ArrayKey::String(word("size")),
+                            (
+                                true,
+                                TUnion::from_vec(vec![
+                                    TAtomic::Scalar(TScalar::Integer(TInteger::From(0))),
+                                    TAtomic::Array(TArray::List(TList::new_non_empty(
+                                        Arc::new(get_non_negative_int()),
+                                    ))),
+                                ]),
+                            ),
+                        ),
+                    ])),
+                    parameters: None,
+                    non_empty: true,
+                    known_non_list: false,
+                })))),
+            )),
+            non_empty: false,
+            known_non_list: false,
+        })))));
+
+        map.insert("$_SESSION", Rc::new({
+            let mut type_union = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                Arc::new(get_non_empty_string()),
+                Arc::new(get_mixed()),
+            ))));
+
+            type_union.set_possibly_undefined(true, None);
+            type_union
+        }));
+
+        map
+    });
+}
+
+/// Return a read reference to the superglobals map.
+pub fn get_super_globals() -> impl Iterator<Item = (&'static str, Rc<TUnion>)> {
+    SUPERGLOBALS_MAP.with(|map| map.iter().map(|(k, v)| (*k, Rc::clone(v))).collect::<Vec<_>>().into_iter())
+}
+
+pub fn get_global_variable_type(variable_name: &[u8]) -> Option<Rc<TUnion>> {
+    let key = std::str::from_utf8(variable_name).ok()?;
+    SUPERGLOBALS_MAP.with(|map| map.get(key).cloned())
+}

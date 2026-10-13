@@ -1,0 +1,105 @@
+use std::borrow::Cow;
+
+use mago_allocator::LocalArena;
+
+use mago_database::file::File;
+use mago_linter::Linter;
+use mago_linter::integration::IntegrationSet;
+use mago_linter::registry::RuleRegistry;
+use mago_linter::rule::DisallowedEntry;
+use mago_linter::rule::DisallowedFunctionsConfig;
+use mago_linter::rule::DisallowedTypeEntry;
+use mago_linter::rule::DisallowedTypeInstantiationConfig;
+use mago_linter::settings::RuleSettings;
+use mago_linter::settings::RulesSettings;
+use mago_linter::settings::Settings;
+use mago_names::resolver::NameResolver;
+use mago_syntax::parser::parse_file;
+
+#[test]
+fn test_all_rule_examples() {
+    let settings = Settings::default();
+    let registry = RuleRegistry::build(&settings, None, true);
+    let rules = registry.rules();
+
+    let mut failures = Vec::new();
+
+    for rule in rules {
+        let rule_code = rule.code();
+        let rule_meta = rule.meta();
+
+        let bad_result = test_code_snippet(rule_code, rule_meta.bad_example, true);
+        if let Err(e) = bad_result {
+            failures.push(format!("Rule '{rule_code}': Bad example issue - {e}"));
+        }
+
+        let good_result = test_code_snippet(rule_code, rule_meta.good_example, false);
+        if let Err(e) = good_result {
+            failures.push(format!("Rule '{rule_code}': Good example issue - {e}"));
+        }
+    }
+
+    assert!(failures.is_empty(), "\n\n{} rule example(s) failed:\n\n{}\n\n", failures.len(), failures.join("\n"));
+}
+
+/// Test a code snippet and verify it produces (or doesn't produce) issues
+fn test_code_snippet(rule_code: &str, code: &str, should_have_issues: bool) -> Result<(), String> {
+    let arena = LocalArena::new();
+
+    let file = File::ephemeral(Cow::Owned(b"test.php".to_vec()), Cow::Owned(code.as_bytes().to_vec()));
+
+    let program = parse_file(&arena, &file);
+    if program.has_errors() {
+        return Err("Failed to parse code snippet.".to_string());
+    }
+
+    let resolver = NameResolver::new(&arena);
+    let resolved_names = resolver.resolve(program);
+
+    let settings = Settings {
+        integrations: IntegrationSet::all(),
+        rules: RulesSettings {
+            disallowed_functions: RuleSettings {
+                config: DisallowedFunctionsConfig {
+                    extensions: vec![DisallowedEntry::Simple("curl".to_string())],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            disallowed_type_instantiation: RuleSettings {
+                config: DisallowedTypeInstantiationConfig {
+                    types: vec![
+                        DisallowedTypeEntry::Simple("HttpService\\Client".to_string()),
+                        DisallowedTypeEntry::Simple("DatabaseConnection".to_string()),
+                    ],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..RulesSettings::default()
+        },
+        ..Settings::default()
+    };
+
+    let php_version = settings.php_version;
+    let registry = RuleRegistry::build(&settings, Some(&[rule_code.to_string()]), true);
+    if registry.rules().is_empty() {
+        return Err(format!("No rules found for code '{rule_code}'"));
+    }
+
+    let linter = Linter::from_registry(&arena, std::sync::Arc::new(registry), php_version);
+
+    let issues = linter.lint(&file, program, &resolved_names);
+
+    let has_issues = !issues.is_empty();
+
+    if should_have_issues && !has_issues {
+        return Err("Expected bad example to produce issues, but none were found.".to_string());
+    }
+
+    if !should_have_issues && has_issues {
+        return Err(format!("Expected good example to NOT produce issues, but found {} issue(s).", issues.len(),));
+    }
+
+    Ok(())
+}

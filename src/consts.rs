@@ -1,0 +1,139 @@
+use std::path::PathBuf;
+use std::sync::LazyLock;
+
+use tracing::error;
+
+use mago_php_version::PHPVersion;
+
+/// Targets for which official pre-built binaries are provided.
+///
+/// This list must match the build matrix in `.github/workflows/cd.yml`.
+pub const SUPPORTED_TARGETS: &[&str] = &[
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-gnu",
+    "x86_64-unknown-freebsd",
+    "arm-unknown-linux-gnueabi",
+    "arm-unknown-linux-gnueabihf",
+    "arm-unknown-linux-musleabi",
+    "arm-unknown-linux-musleabihf",
+    "armv7-unknown-linux-gnueabihf",
+    "armv7-unknown-linux-musleabihf",
+];
+
+/// The current version of mago.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The `version` pin this binary satisfies. Below 1.0 a minor release may break the
+/// configuration, as in Cargo's caret rule, so the pin names the minor there.
+pub fn version_pin() -> String {
+    pin_for(env!("CARGO_PKG_VERSION_MAJOR"), env!("CARGO_PKG_VERSION_MINOR"))
+}
+
+fn pin_for(major: &str, minor: &str) -> String {
+    if major == "0" { format!("{major}.{minor}") } else { major.to_owned() }
+}
+
+/// The target triple for the current build.
+pub const TARGET: &str = env!("TARGET");
+
+/// The name of the binary.
+pub const BIN: &str = env!("CARGO_PKG_NAME");
+
+/// The extension for the archive file for the current platform.
+#[cfg(target_os = "windows")]
+pub const ARCHIVE_EXTENSION: &str = "zip";
+#[cfg(not(target_os = "windows"))]
+pub const ARCHIVE_EXTENSION: &str = "tar.gz";
+
+/// The extension for PHP files.
+pub const PHP_EXTENSION: &str = "php";
+
+/// The extension for PHP# files.
+pub const SHARP_EXTENSION: &str = "sharp";
+
+/// The name of the repository owner.
+pub const REPO_OWNER: &str = "heyJordanParker";
+
+/// The name of the repository.
+pub const REPO_NAME: &str = "mago-sharp";
+
+/// The URL for creating new issues.
+pub const ISSUE_URL: &str = "https://github.com/heyJordanParker/mago-sharp/issues/new";
+
+/// The name of the environment variable prefix for mago.
+pub const ENVIRONMENT_PREFIX: &str = "MAGO";
+
+/// The name of the configuration file for mago.
+pub const CONFIGURATION_FILE_NAME: &str = "mago";
+
+/// The name of the distributed configuration file for mago.
+pub const CONFIGURATION_DIST_FILE_NAME: &str = "mago.dist";
+
+/// The name of `composer.json` file.
+pub const COMPOSER_JSON_FILE: &str = "composer.json";
+
+/// The minimum stack size for each thread (8 MB).
+pub const MINIMUM_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+/// The default stack size for each thread (12 MB).
+pub const DEFAULT_STACK_SIZE: usize = 12 * 1024 * 1024;
+
+/// The maximum stack size for each thread (256 MB).
+pub const MAXIMUM_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// The default php version.
+pub const DEFAULT_PHP_VERSION: PHPVersion = PHPVersion::LATEST;
+
+/// The minimum supported PHP version.
+pub const MINIMUM_PHP_VERSION: PHPVersion = PHPVersion::PHP80;
+
+/// The maximum supported PHP version.
+pub const MAXIMUM_PHP_VERSION: PHPVersion = PHPVersion::NEXT;
+
+/// The number of logical CPUs on the system.
+pub static LOGICAL_CPUS: LazyLock<usize> = LazyLock::new(|| {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or_else(|e| {
+        error!("Failed to get the number of logical CPUs: {}", e);
+        error!("Falling back to 1 logical CPU. This might result in slower performance.");
+        error!("Need help? Open an issue at {}.", ISSUE_URL);
+
+        1
+    })
+});
+
+/// The current working directory.
+pub static CURRENT_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::current_dir().unwrap_or_else(|e| {
+        error!("Failed to get the current working directory: {}", e);
+        error!("This might occur if the directory has been deleted or if the process lacks the necessary permissions.");
+        error!("Please ensure that the directory exists and that you have the required permissions to access it.");
+        error!("Need help? Open an issue at {}.", ISSUE_URL);
+
+        std::process::exit(1);
+    })
+});
+
+pub const PRELUDE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/prelude.bin"));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_pin_names_the_minor_below_one() {
+        assert_eq!(pin_for("0", "2"), "0.2");
+        assert_eq!(pin_for("0", "13"), "0.13");
+    }
+
+    #[test]
+    fn test_version_pin_names_only_the_major_from_one() {
+        assert_eq!(pin_for("1", "0"), "1");
+        assert_eq!(pin_for("2", "5"), "2");
+    }
+}

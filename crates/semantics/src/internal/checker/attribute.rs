@@ -1,0 +1,90 @@
+use mago_bytes::BytesDisplay;
+use mago_php_version::feature::Feature;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::PartialArgument;
+
+use crate::internal::checker::partial_application;
+use crate::internal::context::Context;
+
+#[inline]
+pub fn check_attribute_list(attribute_list: &AttributeList, context: &mut Context<'_, '_, '_>) {
+    if !context.version.is_supported(Feature::Attributes) {
+        context.report(
+            Issue::error("Attributes are only available in PHP 8.0 and above.")
+                .with_annotation(Annotation::primary(attribute_list.span()).with_message("Attribute list used here."))
+                .with_help("Upgrade to PHP 8.0 or above to use attributes."),
+        );
+    }
+
+    // In PHP#, `check_slice` refuses every argument outside its constant expressions, which PHP takes as constant.
+    let checks_constants = !context.program.dialect.is_sharp();
+
+    for attr in &attribute_list.attributes {
+        let name = BytesDisplay(attr.name.value());
+
+        if let Some(list) = &attr.argument_list {
+            for argument in &list.arguments {
+                match &argument {
+                    PartialArgument::Positional(arg) => {
+                        if let Some(ellipsis) = arg.ellipsis {
+                            context.report(
+                                Issue::error("Cannot use argument unpacking in attribute arguments.")
+                                    .with_annotation(
+                                        Annotation::primary(ellipsis).with_message("Argument unpacking used here."),
+                                    )
+                                    .with_annotation(
+                                        Annotation::secondary(attr.name.span())
+                                            .with_message(format!("Attribute `{name}` defined here.")),
+                                    )
+                                    .with_note("Unpacking arguments is not allowed in attribute arguments."),
+                            );
+                        }
+
+                        if checks_constants && !arg.value.is_constant(&context.version, true) {
+                            context.report(
+                                Issue::error(format!(
+                                    "Attribute `{name}` argument contains a non-constant expression."
+                                ))
+                                .with_annotations([
+                                    Annotation::primary(arg.value.span())
+                                        .with_message("Non-constant expression used here."),
+                                    Annotation::secondary(attr.name.span())
+                                        .with_message(format!("Attribute `{name}` defined here.")),
+                                ])
+                                .with_note("Attribute arguments must be constant expressions."),
+                            );
+                        }
+                    }
+                    PartialArgument::Named(arg) => {
+                        if checks_constants && !arg.value.is_constant(&context.version, true) {
+                            context.report(
+                                Issue::error(format!(
+                                    "Attribute `{name}` argument contains a non-constant expression."
+                                ))
+                                .with_annotations([
+                                    Annotation::primary(arg.value.span())
+                                        .with_message("Non-constant expression used here."),
+                                    Annotation::secondary(attr.name.span())
+                                        .with_message(format!("Attribute `{name}` defined here.")),
+                                ])
+                                .with_note("Attribute arguments must be constant expressions."),
+                            );
+                        }
+                    }
+                    _ => {
+                        partial_application::report_disallowed_partial_argument(
+                            argument,
+                            "attribute arguments",
+                            attr.name.span(),
+                            format!("Attribute `{name}` defined here."),
+                            context,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

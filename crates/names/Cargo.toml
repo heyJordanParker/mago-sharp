@@ -1,0 +1,33 @@
+[package]
+name = "mago-names"
+description = "Resolves and normalizes identifiers (classes, functions, constants) within PHP code."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mago-span = { workspace = true }
+mago-syntax = { workspace = true }
+mago-word = { workspace = true }
+serde = { workspace = true, optional = true }
+strum = { workspace = true }
+foldhash = { workspace = true }
+mago-allocator = { workspace = true }
+memchr = { workspace = true }
+
+[dev-dependencies]
+mago-database = { workspace = true }
+
+[features]
+default = []
+serde = [
+    "dep:serde",
+    "mago-span/serde",
+]

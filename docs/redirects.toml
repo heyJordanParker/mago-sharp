@@ -1,0 +1,8 @@
+# Legacy URL redirects. Each entry emits a static stub at `dist/<from>/index.html`
+# that redirects to `to`, optionally preserving the URL hash and query string.
+
+[[redirect]]
+from = "/docs"
+to = "/latest/en/"
+preserve_hash = false
+preserve_query = false

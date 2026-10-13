@@ -1,0 +1,12 @@
+name = "sharp"
+defaultTargets = ["Sharp", "sharp-lean"]
+
+[[lean_lib]]
+name = "Sharp"
+roots = ["Sharp.Lean.Int", "Sharp.Lean.Law", "Sharp.Lean.String"]
+
+# Imports the proof modules Mago names, so it exports its own symbols to Lean's interpreter.
+[[lean_exe]]
+name = "sharp-lean"
+root = "Sharp.Lean.Runner"
+supportInterpreter = true

@@ -1,0 +1,1636 @@
+use mago_allocator::Arena;
+use std::cell::OnceCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use indexmap::IndexMap;
+
+use mago_algebra::assertion_set::AssertionSet;
+use mago_algebra::assertion_set::Conjunction;
+use mago_algebra::assertion_set::Disjunction;
+use mago_algebra::assertion_set::add_and_assertion;
+use mago_algebra::assertion_set::add_and_clause;
+use mago_algebra::clause::Clause;
+use mago_algebra::find_satisfying_assignments;
+use mago_algebra::saturate_clauses;
+use mago_codex::assertion::Assertion;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::resource::TResource;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::bool::TBool;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
+use mago_codex::ttype::comparator::union_comparator::is_contained_by;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Literal;
+use mago_word::Word;
+use mago_word::WordMap;
+use mago_word::WordSet;
+use mago_word::concat_word;
+
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::context::block::ReferenceConstraint;
+use crate::context::block::ReferenceConstraintSource;
+use crate::error::AnalysisError;
+use crate::expression::assignment::PropertyWriteKind;
+use crate::expression::assignment::assign_to_expression;
+use crate::formula::get_formula;
+use crate::formula::negate_or_synthesize;
+use crate::invocation::Invocation;
+use crate::invocation::InvocationArgumentsSource;
+use crate::invocation::arguments::is_argument_mutated_by_reference;
+use crate::invocation::arguments::is_argument_referenceable;
+use crate::invocation::arguments::is_array_multisort;
+use crate::invocation::resolver::resolve_invocation_type;
+use crate::plugin::provider::assertion::InvocationAssertions;
+use crate::reconciler;
+use crate::reconciler::assertion_reconciler::intersect_union_with_union;
+use crate::utils::expression::get_block_expression_id;
+use crate::utils::expression::get_non_nullsafe_expression_id;
+use crate::utils::expression::get_nullsafe_base_expressions;
+use crate::utils::misc::unwrap_expression;
+use crate::utils::names::display_atomic;
+use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_member;
+use crate::utils::names::display_type;
+use crate::utils::names::display_variable_name;
+
+pub fn post_invocation_process<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    invoication: &Invocation<'ctx, '_, 'arena>,
+    this_variable: Option<&[u8]>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+    apply_assertions: bool,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    update_by_reference_argument_types(context, block_context, artifacts, invoication, template_result, parameters)?;
+    clear_object_property_narrowings(context, block_context, invoication, this_variable);
+
+    let Some(identifier) = invoication.target.get_function_like_identifier() else {
+        return Ok(());
+    };
+
+    let Some(metadata) = invoication.target.get_function_like_metadata() else {
+        return Ok(());
+    };
+
+    let callable_kind_str = match identifier {
+        FunctionLikeIdentifier::Function(_) => "function",
+        FunctionLikeIdentifier::Method(_, _) => "method",
+        FunctionLikeIdentifier::Closure(_) => "closure",
+    };
+    let full_callable_name = OnceCell::new();
+
+    if metadata.flags.is_deprecated() {
+        let full_callable_name =
+            full_callable_name.get_or_init(|| display_callable_name(context, identifier, metadata.original_name));
+        let issue_kind = match identifier {
+            FunctionLikeIdentifier::Function(_) => IssueCode::DeprecatedFunction,
+            FunctionLikeIdentifier::Method(_, _) => IssueCode::DeprecatedMethod,
+            FunctionLikeIdentifier::Closure(_) => IssueCode::DeprecatedClosure,
+        };
+
+        context.collector.report_with_code(
+            issue_kind,
+            Issue::warning(format!("Call to deprecated {callable_kind_str}: {full_callable_name}."))
+                .with_annotation(
+                    Annotation::primary(invoication.target.span()).with_message(format!("This {callable_kind_str} is deprecated")),
+                )
+                .with_note(format!(
+                    "The {callable_kind_str} {full_callable_name} is marked as deprecated and may be removed or its behavior changed in future versions."
+                ))
+                .with_help(format!(
+                    "Consult the documentation for {full_callable_name} for alternatives or migration instructions."
+                )),
+        );
+    }
+
+    // Report if named arguments are used where not allowed
+    if metadata.flags.forbids_named_arguments()
+        && let InvocationArgumentsSource::ArgumentList(argument_list) = invoication.arguments_source
+    {
+        for argument in &argument_list.arguments {
+            let Argument::Named(_) = argument else {
+                continue; // Skip if it's not a named argument
+            };
+            let full_callable_name =
+                full_callable_name.get_or_init(|| display_callable_name(context, identifier, metadata.original_name));
+
+            context.collector.report_with_code(
+                IssueCode::NamedArgumentNotAllowed,
+                Issue::error(format!("Named arguments are not allowed for {full_callable_name}."))
+                    .with_annotation(Annotation::primary(argument.span()).with_message("Named argument used here"))
+                    .with_annotation(Annotation::secondary(invoication.target.span()).with_message(format!(
+                        "The {callable_kind_str} {full_callable_name} only accepts positional arguments"
+                    )))
+                    .with_help("Convert this named argument to a positional argument."),
+            );
+        }
+    }
+
+    if context.check_throws() {
+        let thrown_types = context.codebase.get_function_like_thrown_types(
+            invoication.target.get_method_context().map(|context| context.class_like_metadata),
+            metadata,
+        );
+
+        for thrown_exception_type in thrown_types {
+            let resolved_exception_type = resolve_invocation_type(
+                context,
+                invoication,
+                template_result,
+                parameters,
+                thrown_exception_type.type_union.clone(),
+            );
+
+            for exception_atomic in resolved_exception_type.types.into_owned() {
+                for exception in exception_atomic.get_all_object_names() {
+                    block_context.possibly_thrown_exceptions.entry(exception).or_default().insert(invoication.span);
+                }
+            }
+        }
+
+        collect_plugin_throw_types(context, block_context, artifacts, invoication, identifier);
+    }
+
+    if !apply_assertions {
+        return Ok(());
+    }
+
+    let range = (invoication.span.start.offset, invoication.span.end.offset);
+
+    let resolved_if_true_assertions = resolve_invocation_assertion(
+        context,
+        block_context,
+        artifacts,
+        invoication,
+        this_variable,
+        &metadata.if_true_assertions,
+        template_result,
+        parameters,
+        false,
+    );
+
+    block_context
+        .stable_method_calls
+        .extend(resolved_if_true_assertions.keys().filter(|variable| variable.as_bytes().ends_with(b"()")).copied());
+
+    for (variable, assertions) in resolved_if_true_assertions {
+        artifacts.if_true_assertions.entry(range).or_default().entry(variable).or_default().extend(assertions);
+    }
+
+    let resolved_if_false_assertions = resolve_invocation_assertion(
+        context,
+        block_context,
+        artifacts,
+        invoication,
+        this_variable,
+        &metadata.if_false_assertions,
+        template_result,
+        parameters,
+        false,
+    );
+
+    block_context
+        .stable_method_calls
+        .extend(resolved_if_false_assertions.keys().filter(|variable| variable.as_bytes().ends_with(b"()")).copied());
+
+    for (variable, assertions) in resolved_if_false_assertions {
+        artifacts.if_false_assertions.entry(range).or_default().entry(variable).or_default().extend(assertions);
+    }
+
+    apply_assertion_to_call_context(
+        context,
+        block_context,
+        artifacts,
+        invoication,
+        this_variable,
+        &metadata.assertions,
+        template_result,
+        parameters,
+    );
+
+    apply_plugin_assertions(
+        context,
+        block_context,
+        artifacts,
+        invoication,
+        identifier,
+        this_variable,
+        template_result,
+        parameters,
+        range,
+    )?;
+
+    Ok(())
+}
+
+fn display_callable_name<A>(
+    context: &Context<'_, '_, A>,
+    identifier: &FunctionLikeIdentifier,
+    original_name: Word,
+) -> String
+where
+    A: Arena,
+{
+    match identifier {
+        FunctionLikeIdentifier::Function(_) => format!("`{original_name}`"),
+        FunctionLikeIdentifier::Method(class_name, _) => {
+            format!("`{}`", display_member(context, display_class_like_name(context, *class_name), original_name))
+        }
+        FunctionLikeIdentifier::Closure(name) => format!("`{name}`"),
+    }
+}
+
+fn apply_assertion_to_call_context<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    this_variable: Option<&[u8]>,
+    assertions: &BTreeMap<Word, Conjunction<Assertion>>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+) where
+    A: Arena,
+{
+    let type_assertions = resolve_invocation_assertion(
+        context,
+        block_context,
+        artifacts,
+        invocation,
+        this_variable,
+        assertions,
+        template_result,
+        parameters,
+        true,
+    );
+
+    if type_assertions.is_empty() {
+        return;
+    }
+
+    block_context
+        .stable_method_calls
+        .extend(type_assertions.keys().filter(|variable| variable.as_bytes().ends_with(b"()")).copied());
+
+    let referenced_variable_ids: WordSet = type_assertions.keys().copied().collect();
+    let mut changed_variable_ids: WordSet = WordSet::default();
+    let mut active_type_assertions = IndexMap::new();
+    for (variable, type_assertion) in &type_assertions {
+        active_type_assertions.insert(*variable, (1..type_assertion.len()).collect());
+    }
+
+    reconciler::reconcile_keyed_types(
+        context,
+        &type_assertions,
+        active_type_assertions,
+        block_context,
+        &mut changed_variable_ids,
+        &referenced_variable_ids,
+        &invocation.span,
+        true,
+        false,
+    );
+}
+
+fn update_by_reference_argument_types<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let constraint_type = invocation.target.is_method_call();
+
+    for (parameter_offset, parameter_ref) in invocation.target.iter_parameters().enumerate() {
+        if !parameter_ref.is_by_reference() {
+            continue;
+        }
+
+        let (argument, argument_id) = get_argument_for_parameter(
+            context,
+            block_context,
+            invocation,
+            Some(parameter_offset),
+            parameter_ref.get_name().map(|name| name.0),
+        );
+
+        if let Some(argument) = argument {
+            let argument_type = artifacts.get_expression_type(argument).cloned().unwrap_or_else(get_mixed);
+            if !is_argument_mutated_by_reference(
+                &invocation.target,
+                parameter_offset,
+                &argument_type,
+                parameter_ref.is_by_reference(),
+            ) {
+                continue;
+            }
+
+            if is_array_multisort(&invocation.target)
+                && !is_argument_referenceable(argument, &argument_type, context.resolved_names)
+            {
+                continue;
+            }
+
+            let declared_had_templates = parameter_ref
+                .get_out_type()
+                .or_else(|| parameter_ref.get_type())
+                .is_some_and(|declared| declared.has_template_types());
+
+            let mut new_type = if parameter_offset > 0 && is_array_multisort(&invocation.target) {
+                argument_type
+            } else {
+                parameter_ref
+                    .get_out_type()
+                    .or_else(|| parameter_ref.get_type())
+                    .cloned()
+                    .map_or_else(get_mixed, |new_type| {
+                        resolve_invocation_type(context, invocation, template_result, parameters, new_type)
+                    })
+            };
+
+            // If the argument's current type is `never`, this call is unreachable
+            // its by-reference effect cannot happen, so the variable's type must
+            // remain `never`. Without this guard, calling a template-generic
+            // function (e.g. `array_pop`) on a `never` argument resolves the
+            // templates to their constraints (e.g `mixed`), and that widened
+            // out-type leaks through loop widening into reachable iterations.
+            if let Some(argument_id) = &argument_id
+                && let Some(existing_type) = block_context.locals.get(argument_id)
+                && existing_type.is_never()
+            {
+                continue;
+            }
+
+            if declared_had_templates
+                && !invocation.target.get_function_like_metadata().is_some_and(|metadata| metadata.flags.is_built_in())
+            {
+                new_type.widen_literals();
+            }
+
+            new_type.set_by_reference(true);
+
+            let new_type = Rc::new(new_type);
+            if constraint_type && let Some(argument_id) = argument_id {
+                if let Some(existing_type) = block_context.locals.get(&argument_id).cloned() {
+                    block_context.remove_descendants(context, argument_id, &existing_type, Some(&new_type));
+                }
+
+                block_context.remove_variable_from_conflicting_clauses(context, argument_id, None);
+
+                assign_to_expression(
+                    context,
+                    block_context,
+                    artifacts,
+                    argument,
+                    Some(argument_id),
+                    Some(argument),
+                    Rc::clone(&new_type),
+                    false,
+                    PropertyWriteKind::Mutation,
+                )?;
+
+                block_context.assigned_variable_ids.insert(argument_id, argument.start_offset());
+                block_context.by_reference_constraints.insert(
+                    argument_id,
+                    ReferenceConstraint::new(
+                        argument.span(),
+                        ReferenceConstraintSource::Argument,
+                        Some(Rc::clone(&new_type)),
+                    ),
+                );
+
+                record_by_reference_mutation_in_loop(artifacts, argument_id, new_type);
+            } else {
+                if let Some(argument_id) = &argument_id
+                    && let Some(existing_type) = block_context.locals.get(argument_id).cloned()
+                {
+                    block_context.remove_descendants(context, *argument_id, &existing_type, Some(&new_type));
+                    block_context.remove_variable_from_conflicting_clauses(context, *argument_id, None);
+                }
+
+                assign_to_expression(
+                    context,
+                    block_context,
+                    artifacts,
+                    argument,
+                    argument_id,
+                    Some(argument),
+                    Rc::clone(&new_type),
+                    false,
+                    PropertyWriteKind::Mutation,
+                )?;
+
+                if let Some(argument_id) = argument_id {
+                    block_context.assigned_variable_ids.insert(argument_id, argument.start_offset());
+                    record_by_reference_mutation_in_loop(artifacts, argument_id, new_type);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Records a by-reference mutation in the enclosing loop scope so the multi-pass
+/// analysis widens the variable's type on the next pass.
+fn record_by_reference_mutation_in_loop(artifacts: &mut AnalysisArtifacts, variable_id: Word, new_type: Rc<TUnion>) {
+    let Some(loop_scope) = artifacts.get_loop_scope_mut() else {
+        return;
+    };
+
+    if loop_scope.parent_context_variables.contains_key(&variable_id) {
+        loop_scope.possibly_redefined_loop_parent_variables.insert(variable_id, Rc::clone(&new_type));
+        loop_scope.by_reference_loop_mutations.insert(variable_id, new_type);
+    }
+}
+
+/// Clears narrowed property types after an invocation.
+///
+/// When an object is passed to a method or function, its properties could be modified,
+/// and objects reachable through that argument could also be affected. We conservatively
+/// remove all narrowed property types for all local object variables when any argument
+/// is an object type. We also clear any clauses that reference property accesses to prevent
+/// stale narrowing from influencing subsequent assertion resolution.
+fn clear_object_property_narrowings<'ctx, 'arena, A>(
+    context: &Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    receiver_variable: Option<&[u8]>,
+) where
+    A: Arena,
+{
+    let metadata = invocation.target.get_function_like_metadata();
+
+    let preserves_stable_method_results = metadata.is_some_and(|metadata| {
+        (metadata.flags.is_pure() || metadata.flags.is_mutation_free()) && !metadata.flags.suspends_fiber()
+    });
+    if !preserves_stable_method_results {
+        block_context.stable_method_call_assertions.clear();
+        block_context.stable_method_calls.clear();
+        let references_method_call_key = |key: Word| memchr::memmem::find(key.as_bytes(), b"()").is_some();
+        let references_method_call =
+            |clause: &Rc<Clause>| clause.possibilities.keys().copied().any(references_method_call_key);
+        block_context.locals.retain(|key, _| !references_method_call_key(*key));
+        block_context.clauses.retain(|clause| !references_method_call(clause));
+        block_context.reconciled_expression_clauses.retain(|clause| !references_method_call(clause));
+        block_context.retain_valid_class_type_relations();
+    }
+
+    if let Some(metadata) = metadata
+        && (metadata.flags.is_pure() || metadata.flags.is_mutation_free() || metadata.flags.is_external_mutation_free())
+        && !metadata.flags.suspends_fiber()
+    {
+        // Mutation free functions are guaranteed not to have side effects, so we can skip clearing property narrowings.
+        // Exception: @suspends-fiber functions can yield, allowing other fibers to modify properties.
+        return;
+    }
+
+    let this_property_is_readonly = |property_name: &[u8]| -> bool {
+        let Some(class_metadata) = block_context.scope.get_class_like() else {
+            return false;
+        };
+
+        if class_metadata.flags.is_readonly() {
+            return true;
+        }
+
+        let Some(property_metadata) = class_metadata.properties.get(&Word::new(property_name)) else {
+            return false;
+        };
+
+        property_metadata.flags.is_readonly()
+    };
+
+    let preserves_this_property = |var_id: Word| -> bool {
+        let s = var_id.as_bytes();
+        let Some(rest) = s.strip_prefix(b"$this->") else {
+            return false;
+        };
+
+        if memchr::memmem::find(rest, b"->").is_some() || rest.contains(&b'[') {
+            return false;
+        }
+
+        this_property_is_readonly(rest)
+    };
+
+    // When a function is marked @suspends-fiber, it can yield execution to other fibers
+    // that may modify any $this property. Always clear $this-> memoized properties,
+    // except for readonly ones, readonly properties can never be reassigned by
+    // any concurrently running fiber either.
+    let suspends_fiber = metadata.is_some_and(|m| m.flags.suspends_fiber());
+    if suspends_fiber {
+        let resource_ids: WordSet = block_context
+            .locals
+            .iter()
+            .filter_map(|(var_id, current_type)| {
+                current_type
+                    .types
+                    .iter()
+                    .any(|atomic| matches!(atomic, TAtomic::Resource(resource) if resource.is_open()))
+                    .then_some(*var_id)
+            })
+            .collect();
+
+        for resource_id in &resource_ids {
+            let Some(current_type) = block_context.locals.get(resource_id).cloned() else {
+                continue;
+            };
+
+            let mut widened = (*current_type).clone();
+            for atomic in widened.types.to_mut() {
+                if let TAtomic::Resource(resource) = atomic
+                    && resource.is_open()
+                {
+                    *resource = TResource::new(None);
+                }
+            }
+
+            block_context.locals.insert(*resource_id, Rc::new(widened));
+        }
+
+        if !resource_ids.is_empty() {
+            block_context.clauses.retain(|clause| {
+                clause.wedge || !clause.possibilities.keys().copied().any(|var_id| resource_ids.contains(&var_id))
+            });
+
+            block_context.reconciled_expression_clauses.retain(|clause| {
+                clause.wedge || !clause.possibilities.keys().copied().any(|var_id| resource_ids.contains(&var_id))
+            });
+        }
+    }
+
+    if suspends_fiber && block_context.scope.get_class_like_name().is_some() {
+        let keys_to_remove: Vec<_> = block_context
+            .locals
+            .keys()
+            .copied()
+            .filter(|var_id| var_id.as_bytes().starts_with(b"$this->") && !preserves_this_property(*var_id))
+            .collect();
+
+        for key in &keys_to_remove {
+            block_context.locals.remove(key);
+        }
+
+        block_context.clauses.retain(|clause| {
+            clause.wedge
+                || !clause
+                    .possibilities
+                    .keys()
+                    .copied()
+                    .any(|k| k.as_bytes().starts_with(b"$this->") && !preserves_this_property(k))
+        });
+
+        block_context.reconciled_expression_clauses.retain(|clause| {
+            clause.wedge
+                || !clause
+                    .possibilities
+                    .keys()
+                    .copied()
+                    .any(|k| k.as_bytes().starts_with(b"$this->") && !preserves_this_property(k))
+        });
+    }
+
+    let is_self_method_call = matches!(receiver_variable, Some(v) if v == b"$this")
+        && match invocation.target.get_function_like_identifier() {
+            Some(FunctionLikeIdentifier::Method(class_name, _)) => block_context
+                .scope
+                .get_class_like_name()
+                .is_some_and(|current_class| current_class.as_bytes().eq_ignore_ascii_case(class_name.as_bytes())),
+            _ => false,
+        };
+
+    if is_self_method_call {
+        block_context.definitely_uninitialized_property_ids.clear();
+
+        let keys_to_remove: Vec<_> = block_context
+            .locals
+            .keys()
+            .copied()
+            .filter(|var_id| var_id.as_bytes().starts_with(b"$this->") && !preserves_this_property(*var_id))
+            .collect();
+
+        for key in &keys_to_remove {
+            block_context.locals.remove(key);
+        }
+
+        block_context.clauses.retain(|clause| {
+            clause.wedge
+                || !clause
+                    .possibilities
+                    .keys()
+                    .copied()
+                    .any(|k| k.as_bytes().starts_with(b"$this->") && !preserves_this_property(k))
+        });
+
+        block_context.reconciled_expression_clauses.retain(|clause| {
+            clause.wedge
+                || !clause
+                    .possibilities
+                    .keys()
+                    .copied()
+                    .any(|k| k.as_bytes().starts_with(b"$this->") && !preserves_this_property(k))
+        });
+    }
+
+    // Superglobal array entries (`$_SESSION['x']`, `$_GET['y']`, ...) are reachable from
+    // every function body, so any non-pure call can mutate them whether or not it was
+    // passed any arguments. Reset each superglobal variable in locals back to its
+    // declared type (wiping the caller's narrowed known-items), and drop any clauses
+    // or separately-keyed index entries that refer to them.
+    block_context.locals.retain(|var_id, current_type| {
+        if is_superglobal_index_key(*var_id) {
+            return false;
+        }
+
+        if is_superglobal_name(var_id.as_bytes()) {
+            if let Some(declared) = crate::common::global::get_global_variable_type(var_id.as_bytes()) {
+                *current_type = declared;
+                return true;
+            }
+
+            return false;
+        }
+
+        true
+    });
+
+    let touches_superglobal = |var: Word| {
+        let s = var.as_bytes();
+        is_superglobal_index_key(var) || is_superglobal_name(s)
+    };
+    block_context
+        .clauses
+        .retain(|clause| clause.wedge || !clause.possibilities.keys().copied().any(touches_superglobal));
+    block_context
+        .reconciled_expression_clauses
+        .retain(|clause| clause.wedge || !clause.possibilities.keys().copied().any(touches_superglobal));
+
+    // If the callee imports any variables via `global $x;` anywhere in its body, it can
+    // reassign them in the caller's global scope. Widen any literal narrowings we were
+    // holding for those specific variables so later checks don't assume stale values.
+    if let Some(metadata) = metadata
+        && !metadata.globals_accessed.is_empty()
+    {
+        let mut touched_globals: foldhash::HashSet<Word> = foldhash::HashSet::default();
+        for name in &metadata.globals_accessed {
+            if let Some(existing) = block_context.locals.get(name).cloned() {
+                let mut widened = (*existing).clone();
+                widened.widen_scalars();
+                block_context.locals.insert(*name, Rc::new(widened));
+                touched_globals.insert(*name);
+            }
+        }
+
+        if !touched_globals.is_empty() {
+            block_context.clauses.retain(|clause| {
+                clause.wedge || !clause.possibilities.keys().copied().any(|k| touched_globals.contains(&k))
+            });
+            block_context.reconciled_expression_clauses.retain(|clause| {
+                clause.wedge || !clause.possibilities.keys().copied().any(|k| touched_globals.contains(&k))
+            });
+        }
+    }
+
+    let mut this_escapes = matches!(receiver_variable, Some(v) if v == b"$this");
+    let mut escaped_roots: Vec<Word> = Vec::new();
+    let mut container_escapes = false;
+    let mut has_object_argument = false;
+    for argument in invocation.arguments_source.iter_arguments() {
+        let Some(expression) = argument.value() else {
+            continue;
+        };
+
+        let Some(argument_id) = get_block_expression_id(expression, context, block_context) else {
+            continue;
+        };
+
+        let is_object = block_context.locals.get(&argument_id).is_some_and(|t| t.has_object_type());
+
+        if argument_id.as_bytes() == b"$this" {
+            this_escapes = true;
+            has_object_argument = has_object_argument || is_object;
+
+            continue;
+        }
+
+        if is_object {
+            has_object_argument = true;
+
+            if is_plain_variable(argument_id) {
+                container_escapes = true;
+            } else {
+                escaped_roots.push(argument_id);
+            }
+        }
+    }
+
+    if !has_object_argument {
+        block_context.retain_valid_class_type_relations();
+
+        return;
+    }
+
+    if this_escapes {
+        block_context.definitely_uninitialized_property_ids.clear();
+        escaped_roots.push(Word::new(b"$this"));
+    }
+
+    let preserved: WordSet = block_context
+        .locals
+        .keys()
+        .copied()
+        .filter(|var_id| {
+            is_property_or_index_key(*var_id) && property_root_is_immutable(context, block_context, *var_id)
+        })
+        .collect();
+
+    let should_wipe = |var_id: Word| -> bool {
+        if !is_property_or_index_key(var_id) {
+            return false;
+        }
+
+        if preserved.contains(&var_id) {
+            return false;
+        }
+
+        if container_escapes {
+            if !this_escapes && var_id.as_bytes().starts_with(b"$this->") {
+                return false;
+            }
+
+            return true;
+        }
+
+        is_descendant_of_any(var_id, &escaped_roots)
+    };
+
+    block_context.locals.retain(|var_id, _| !should_wipe(*var_id));
+
+    block_context.clauses.retain(|clause| clause.wedge || !clause.possibilities.keys().copied().any(should_wipe));
+    block_context
+        .reconciled_expression_clauses
+        .retain(|clause| clause.wedge || !clause.possibilities.keys().copied().any(should_wipe));
+    block_context.retain_valid_class_type_relations();
+}
+
+fn is_property_or_index_key(var_id: Word) -> bool {
+    let s = var_id.as_bytes();
+    memchr::memmem::find(s, b"->").is_some() || (s.starts_with(b"$") && s.contains(&b'['))
+}
+
+fn is_plain_variable(var_id: Word) -> bool {
+    let s = var_id.as_bytes();
+    s.starts_with(b"$") && !s.contains(&b'[') && memchr::memmem::find(s, b"->").is_none()
+}
+
+fn is_descendant_of_any(var_id: Word, roots: &[Word]) -> bool {
+    let key = var_id.as_bytes();
+    roots.iter().any(|root| {
+        let root = root.as_bytes();
+        let Some(rest) = key.strip_prefix(root) else {
+            return false;
+        };
+
+        rest.starts_with(b"->") || rest.first() == Some(&b'[')
+    })
+}
+
+fn property_root_is_immutable<A>(context: &Context<'_, '_, A>, block_context: &BlockContext<'_>, var_id: Word) -> bool
+where
+    A: Arena,
+{
+    let bytes = var_id.as_bytes();
+    let Some(mut arrow) = memchr::memmem::find(bytes, b"->") else {
+        return false;
+    };
+
+    loop {
+        let property_start = arrow + 2;
+        let next_arrow = memchr::memmem::find(&bytes[property_start..], b"->").map(|offset| property_start + offset);
+        let property_end = next_arrow.unwrap_or(bytes.len());
+        let property = &bytes[property_start..property_end];
+        if property.contains(&b'[') {
+            return false;
+        }
+
+        let Some(root_type) = block_context.locals.get(&Word::new(&bytes[..arrow])) else {
+            return false;
+        };
+
+        if root_type.types.is_empty()
+            || !root_type.types.iter().all(|atom| atom_property_is_immutable(context, atom, property))
+        {
+            return false;
+        }
+
+        let Some(next_arrow) = next_arrow else {
+            return true;
+        };
+
+        arrow = next_arrow;
+    }
+}
+
+fn atom_property_is_immutable<A>(context: &Context<'_, '_, A>, atom: &TAtomic, property: &[u8]) -> bool
+where
+    A: Arena,
+{
+    let TAtomic::Object(object) = atom else {
+        return false;
+    };
+
+    let Some(class_name) = object.get_name() else {
+        return false;
+    };
+
+    let Some(class_metadata) = context.codebase.get_class_like(class_name.as_bytes()) else {
+        return false;
+    };
+
+    if class_metadata.flags.is_readonly() || class_metadata.flags.is_mutation_free() {
+        return true;
+    }
+
+    class_metadata
+        .properties
+        .get(&Word::new(property))
+        .is_some_and(|property_metadata| property_metadata.flags.is_readonly())
+}
+
+/// A variable ID like `$_SESSION['user_id']` - an index access rooted at a PHP
+/// superglobal. These are reachable from any function body, so a non-pure call
+/// might mutate them regardless of its arguments.
+fn is_superglobal_index_key(var_id: Word) -> bool {
+    let s = var_id.as_bytes();
+    let Some(bracket_pos) = memchr::memchr(b'[', s) else {
+        return false;
+    };
+
+    is_superglobal_name(&s[..bracket_pos])
+}
+
+fn is_superglobal_name(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"$_SESSION"
+            | b"$_GET"
+            | b"$_POST"
+            | b"$_COOKIE"
+            | b"$_SERVER"
+            | b"$_ENV"
+            | b"$_FILES"
+            | b"$_REQUEST"
+            | b"$GLOBALS"
+    )
+}
+
+fn resolve_invocation_assertion<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    this_variable: Option<&[u8]>,
+    assertions: &BTreeMap<Word, Conjunction<Assertion>>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+    is_unconditional_assert: bool,
+) -> IndexMap<Word, AssertionSet>
+where
+    A: Arena,
+{
+    let mut type_assertions: IndexMap<Word, AssertionSet> = IndexMap::new();
+    if assertions.is_empty() {
+        return type_assertions;
+    }
+
+    let mut pending_redundant_issues = Vec::new();
+    let mut has_non_redundant_assertion = false;
+
+    for (parameter_id, variable_assertions) in assertions {
+        let (assertion_expression, assertion_variable) =
+            resolve_argument_or_special_target(context, block_context, invocation, *parameter_id, this_variable);
+
+        match assertion_variable {
+            Some(assertion_variable) => {
+                let non_nullsafe_assertion_variable = get_non_nullsafe_expression_id(assertion_variable);
+                let assertion_variable = non_nullsafe_assertion_variable.unwrap_or(assertion_variable);
+                let assertion_name = display_variable_name(context, assertion_variable.as_bytes());
+                let mut new_variable_possibilities: AssertionSet = vec![];
+                let mut resolved_or_clause: Disjunction<Assertion> = Vec::new();
+
+                let asserted_type = block_context.locals.get(&assertion_variable).map(Rc::as_ref).or_else(|| {
+                    non_nullsafe_assertion_variable
+                        .and(assertion_expression)
+                        .and_then(|expression| artifacts.get_expression_type(expression))
+                });
+                let mut any_possible = false;
+                let mut has_resolved_types = false;
+                let mut all_negated = true;
+                let mut always_redundant = true;
+
+                for variable_assertion in variable_assertions {
+                    all_negated = all_negated && variable_assertion.is_negation();
+
+                    if variable_assertion.has_equality() {
+                        always_redundant = false;
+                    }
+
+                    let Some(assertion_atomic) = variable_assertion.get_type() else {
+                        add_and_assertion(&mut new_variable_possibilities, variable_assertion.clone());
+                        always_redundant = false;
+
+                        continue;
+                    };
+
+                    let resolved_assertion_type = resolve_invocation_type(
+                        context,
+                        invocation,
+                        template_result,
+                        parameters,
+                        TUnion::from_atomic(assertion_atomic.to_owned()),
+                    );
+
+                    if !resolved_assertion_type.is_never() {
+                        has_resolved_types = true;
+
+                        if !any_possible
+                            && let Some(asserted_type) = &asserted_type
+                            && (can_expression_types_be_identical(
+                                context.codebase,
+                                asserted_type,
+                                &resolved_assertion_type,
+                                false,
+                                false,
+                            ) || generic_keyed_array_can_be_list(asserted_type, &resolved_assertion_type))
+                        {
+                            any_possible = true;
+                        }
+
+                        let assertion_loses_template_precision =
+                            derived_assertion_loses_template_precision(assertion_atomic);
+
+                        if always_redundant
+                            && let Some(asserted_type) = &asserted_type
+                            && !asserted_type.is_mixed()
+                            && !resolved_assertion_type.has_template()
+                            && !assertion_loses_template_precision
+                        {
+                            let mut comparison_result = ComparisonResult::default();
+                            let is_subtype = is_contained_by(
+                                context.codebase,
+                                asserted_type,
+                                &resolved_assertion_type,
+                                false,
+                                false,
+                                true,
+                                &mut comparison_result,
+                            );
+
+                            if !is_subtype {
+                                always_redundant = false;
+                            }
+                        } else {
+                            always_redundant = false;
+                        }
+
+                        for resolved_atomic in resolved_assertion_type.types.into_owned() {
+                            resolved_or_clause.push(variable_assertion.with_type(resolved_atomic));
+                        }
+                    } else if let Some(asserted_type) = &asserted_type {
+                        always_redundant = false;
+                        match variable_assertion {
+                            Assertion::IsType(_)
+                                if !can_expression_types_be_identical(
+                                    context.codebase,
+                                    asserted_type,
+                                    &resolved_assertion_type,
+                                    false,
+                                    false,
+                                ) =>
+                            {
+                                let asserted_type_id = display_type(context, asserted_type);
+                                let expected_type_id = display_type(context, &resolved_assertion_type);
+
+                                context.collector.report_with_code(
+                                        IssueCode::ImpossibleTypeComparison,
+                                        Issue::error(format!(
+                                            "Impossible type assertion: `{assertion_name}` of type `{asserted_type_id}` can never be `{expected_type_id}`."
+                                        ))
+                                        .with_annotation(
+                                            Annotation::primary(invocation.span)
+                                                .with_message(format!("Argument `{assertion_name}` has type `{asserted_type_id}`")),
+                                        )
+                                        .with_note(format!(
+                                            "The assertion expects `{assertion_name}` to be `{expected_type_id}`, but no value of type `{asserted_type_id}` can satisfy this."
+                                        ))
+                                        .with_help("Check that the correct variable is being passed, or update the assertion type."),
+                                    );
+                            }
+                            Assertion::IsIdentical(_) => {
+                                let intersection = if let Some(intersection) =
+                                    intersect_union_with_union(context, asserted_type, &resolved_assertion_type)
+                                {
+                                    intersection
+                                } else {
+                                    let asserted_type_id = display_type(context, asserted_type);
+                                    let expected_type_id = display_type(context, &resolved_assertion_type);
+
+                                    context.collector.report_with_code(
+                                        IssueCode::ImpossibleTypeComparison,
+                                        Issue::error(format!(
+                                            "Impossible type assertion: `{assertion_name}` of type `{asserted_type_id}` can never be identical to `{expected_type_id}`."
+                                        ))
+                                        .with_annotation(
+                                            Annotation::primary(invocation.span)
+                                                .with_message(format!("Argument `{assertion_name}` has type `{asserted_type_id}`")),
+                                        )
+                                        .with_note(format!(
+                                            "The assertion expects `{assertion_name}` to be identical to `{expected_type_id}`, but no value of type `{asserted_type_id}` can satisfy this."
+                                        ))
+                                        .with_help("Check that the correct variable is being passed, or update the assertion type."),
+                                    );
+
+                                    get_never()
+                                };
+
+                                for intersection_atomic in intersection.types.into_owned() {
+                                    add_and_assertion(
+                                        &mut new_variable_possibilities,
+                                        Assertion::IsIdentical(intersection_atomic),
+                                    );
+                                }
+                            }
+                            _ => {
+                                // ignore
+                            }
+                        }
+                    }
+                }
+
+                if has_resolved_types
+                    && (!any_possible || always_redundant)
+                    && let Some(asserted_type) = &asserted_type
+                {
+                    let asserted_type_id = display_type(context, asserted_type);
+                    let expected_type_id = resolved_or_clause
+                        .iter()
+                        .filter_map(|a| a.get_type().map(|t| display_atomic(context, t)))
+                        .collect::<Vec<_>>()
+                        .join("|");
+
+                    let suppress_redundant = is_unconditional_assert
+                        && (!invocation.target.is_pure_or_mutation_free()
+                            || invocation.target.get_return_type().is_some_and(|t| !t.is_void() && !t.is_never()));
+
+                    if all_negated {
+                        if !any_possible && !suppress_redundant {
+                            pending_redundant_issues.push(
+                                Issue::warning(format!(
+                                    "Redundant type assertion: `{assertion_name}` of type `{asserted_type_id}` is always not `{expected_type_id}`."
+                                ))
+                                .with_annotation(
+                                    Annotation::primary(invocation.span)
+                                        .with_message(format!("Argument `{assertion_name}` has type `{asserted_type_id}`")),
+                                )
+                                .with_note(format!(
+                                    "The negated assertion against `{expected_type_id}` always holds because `{assertion_name}` is `{asserted_type_id}`."
+                                ))
+                                .with_help("Consider removing this assertion as it has no effect."),
+                            );
+                        }
+                    } else if always_redundant {
+                        if suppress_redundant {
+                            // Side effects or a meaningful return value mean removing the call
+                            // would lose behavior. Skip the redundant warning.
+                        } else {
+                            pending_redundant_issues.push(
+                                Issue::warning(format!(
+                                    "Redundant type assertion: `{assertion_name}` is already `{asserted_type_id}`."
+                                ))
+                                .with_annotation(
+                                    Annotation::primary(invocation.span)
+                                        .with_message(format!("Argument `{assertion_name}` already has type `{asserted_type_id}`")),
+                                )
+                                .with_note(format!(
+                                    "The assertion against `{expected_type_id}` always holds because `{assertion_name}` is `{asserted_type_id}`."
+                                ))
+                                .with_help("Consider removing this assertion or replacing it with `default` if used in a `match` arm."),
+                            );
+                        }
+                    } else {
+                        context.collector.report_with_code(
+                            IssueCode::ImpossibleTypeComparison,
+                            Issue::error(format!(
+                                "Impossible type assertion: `{assertion_name}` of type `{asserted_type_id}` can never be `{expected_type_id}`."
+                            ))
+                            .with_annotation(
+                                Annotation::primary(invocation.span)
+                                    .with_message(format!("Argument `{assertion_name}` has type `{asserted_type_id}`")),
+                            )
+                            .with_note(format!(
+                                "The assertion expects `{assertion_name}` to be `{expected_type_id}`, but no value of type `{asserted_type_id}` can satisfy this."
+                            ))
+                            .with_help("Check that the correct variable is being passed, or update the assertion type."),
+                        );
+                    }
+                }
+
+                let assertion_is_redundant =
+                    has_resolved_types && if all_negated { !any_possible } else { always_redundant };
+                if !assertion_is_redundant {
+                    has_non_redundant_assertion = true;
+                }
+
+                if !resolved_or_clause.is_empty() {
+                    let resolved_clause_is_conjunction = resolved_or_clause.iter().all(Assertion::is_negation);
+                    let excludes_null = if resolved_clause_is_conjunction {
+                        resolved_or_clause.iter().any(assertion_excludes_null)
+                    } else {
+                        resolved_or_clause.iter().all(assertion_excludes_null)
+                    };
+
+                    if excludes_null && let Some(assertion_expression) = assertion_expression {
+                        for base in get_nullsafe_base_expressions(assertion_expression) {
+                            let Some(base_id) = get_block_expression_id(base, context, block_context) else {
+                                continue;
+                            };
+
+                            let base_id = get_non_nullsafe_expression_id(base_id).unwrap_or(base_id);
+                            add_and_assertion(
+                                type_assertions.entry(base_id).or_default(),
+                                Assertion::IsNotType(TAtomic::Null),
+                            );
+                        }
+                    }
+
+                    if resolved_clause_is_conjunction {
+                        for assertion in resolved_or_clause {
+                            add_and_assertion(&mut new_variable_possibilities, assertion);
+                        }
+                    } else {
+                        add_and_clause(&mut new_variable_possibilities, &resolved_or_clause);
+                    }
+                }
+
+                if !new_variable_possibilities.is_empty() {
+                    type_assertions.entry(assertion_variable).or_default().extend(new_variable_possibilities);
+                }
+            }
+            None => {
+                if let Some(assertion_expression) = assertion_expression {
+                    if variable_assertions.len() != 1 {
+                        continue; // We only support single assertions for expressions
+                        // maybe we should support more? idk for now, we are following
+                        // psalm implementation.
+                    }
+
+                    let variable_assertion = &variable_assertions[0];
+
+                    let clauses = match variable_assertion {
+                        Assertion::IsNotType(TAtomic::Scalar(TScalar::Bool(TBool { value: Some(false) })))
+                        | Assertion::IsType(TAtomic::Scalar(TScalar::Bool(TBool { value: Some(true) })))
+                        | Assertion::Truthy => get_formula(
+                            assertion_expression.span(),
+                            assertion_expression.span(),
+                            assertion_expression,
+                            context.get_assertion_context_from_block(block_context),
+                            artifacts,
+                            &context.settings.algebra_thresholds(),
+                            context.settings.formula_size_threshold,
+                        ),
+                        Assertion::IsNotType(TAtomic::Scalar(TScalar::Bool(TBool { value: Some(true) })))
+                        | Assertion::IsType(TAtomic::Scalar(TScalar::Bool(TBool { value: Some(false) })))
+                        | Assertion::Falsy => get_formula(
+                            assertion_expression.span(),
+                            assertion_expression.span(),
+                            assertion_expression,
+                            context.get_assertion_context_from_block(block_context),
+                            artifacts,
+                            &context.settings.algebra_thresholds(),
+                            context.settings.formula_size_threshold,
+                        )
+                        .map(|clauses| {
+                            negate_or_synthesize(
+                                clauses,
+                                assertion_expression,
+                                context.get_assertion_context_from_block(block_context),
+                                artifacts,
+                                &context.settings.algebra_thresholds(),
+                                context.settings.formula_size_threshold,
+                            )
+                        }),
+
+                        _ => {
+                            continue; // Unsupported assertion kind for expression
+                        }
+                    };
+
+                    let new_clauses = clauses.unwrap_or_default();
+                    if !new_clauses.is_empty() {
+                        has_non_redundant_assertion = true;
+                    }
+
+                    for clause in &new_clauses {
+                        block_context.clauses.push(Rc::new(clause.clone()));
+                    }
+
+                    let clauses = saturate_clauses(
+                        block_context.clauses.iter().map(Rc::as_ref),
+                        &context.settings.algebra_thresholds(),
+                    );
+
+                    let (truths, _) = find_satisfying_assignments(&clauses, None, &mut WordSet::default());
+                    for (variable, assertions) in truths {
+                        type_assertions.entry(variable).or_default().extend(assertions);
+                    }
+                }
+            }
+        }
+    }
+
+    if !has_non_redundant_assertion {
+        for issue in pending_redundant_issues {
+            context.collector.report_with_code(IssueCode::RedundantTypeComparison, issue);
+        }
+    }
+
+    type_assertions
+}
+
+fn assertion_excludes_null(assertion: &Assertion) -> bool {
+    match assertion {
+        Assertion::IsType(atomic) | Assertion::IsIdentical(atomic) => !atomic.is_null(),
+        Assertion::IsNotType(atomic) | Assertion::IsNotIdentical(atomic) | Assertion::IsNotEqual(atomic) => {
+            atomic.is_null()
+        }
+        Assertion::Truthy | Assertion::IsIsset | Assertion::IsEqualIsset | Assertion::NonEmpty => true,
+        _ => false,
+    }
+}
+
+fn generic_keyed_array_can_be_list(asserted_type: &TUnion, assertion_type: &TUnion) -> bool {
+    if !assertion_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)))) {
+        return false;
+    }
+
+    asserted_type.types.iter().any(|atomic| {
+        let TAtomic::Array(TArray::Keyed(keyed)) = atomic else {
+            return false;
+        };
+
+        let Some((key_type, _)) = keyed.parameters.as_ref() else {
+            return false;
+        };
+
+        key_type.types.iter().any(|key_atomic| {
+            matches!(key_atomic, TAtomic::GenericParameter(parameter) if parameter.constraint.is_array_key())
+        })
+    })
+}
+
+fn derived_assertion_loses_template_precision(assertion: &TAtomic) -> bool {
+    let TAtomic::Derived(derived) = assertion else {
+        return false;
+    };
+
+    derived.get_target_type().is_some_and(TUnion::has_template_types)
+}
+
+/// Resolves an argument or a special assertion target from an invocation.
+///
+/// This function serves as a convenient wrapper that orchestrates the logic for handling
+/// both special assertion targets (like `$this`) and standard function arguments.
+///
+/// It first attempts to resolve the target as a special `$this` or `self::` reference
+/// using `resolve_special_assertion_target`. If successful, it returns the resolved ID,
+/// and the expression part of the tuple will be `None`.
+///
+/// If the target is not a special reference, it then calls `get_argument_for_parameter`
+/// to find the corresponding argument passed to the function call and returns its result.
+///
+/// # Arguments
+/// * `context`: The analysis context.
+/// * `block_context`: The context of the current block.
+/// * `invocation`: The invocation being analyzed.
+/// * `parameter_offset`: The zero-based index of the parameter.
+/// * `parameter_name`: The name of the parameter or assertion target.
+/// * `this_variable`: The name of the variable holding the object instance (`$this`), if any.
+///
+/// # Returns
+/// A tuple `(Option<&'a Expression>, Option<Word>)`.
+/// * If a special target is resolved, the tuple is `(None, Some(resolved_id))`.
+/// * If a regular argument is found, it returns the result from `get_argument_for_parameter`.
+/// * If nothing is found, it returns `(None, None)`.
+fn resolve_argument_or_special_target<'ctx, 'ast, 'arena, A>(
+    context: &Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    invocation: &Invocation<'ctx, 'ast, 'arena>,
+    parameter_name: Word,
+    this_variable: Option<&[u8]>,
+) -> (Option<&'ast Expression<'arena>>, Option<Word>)
+where
+    A: Arena,
+{
+    // First, check if the name refers to a special assertion target like `$this->...`
+    if let Some(resolved_id) = resolve_special_assertion_target(block_context, parameter_name, this_variable) {
+        return (None, Some(resolved_id));
+    }
+
+    if let Some(offset) = memchr::memmem::find(parameter_name.as_bytes(), b"->") {
+        let parameter = Word::new(&parameter_name.as_bytes()[..offset]);
+        let suffix = &parameter_name.as_bytes()[offset..];
+        let (expression, argument) =
+            get_argument_for_parameter(context, block_context, invocation, None, Some(parameter));
+
+        return (expression, argument.map(|argument| concat_word!(argument.as_bytes(), suffix)));
+    }
+
+    // If not a special target, treat it as a regular parameter and find its argument.
+    get_argument_for_parameter(context, block_context, invocation, None, Some(parameter_name))
+}
+
+/// Resolves special assertion targets like `$this->...` or `self::...`.
+///
+/// This function checks if the provided target name corresponds to a property or constant
+/// on the current object (`$this`) or class (`self`). If it matches, it rewrites the
+/// target string with the appropriate contextual variable name (e.g., `$instance->...`).
+/// It should be called before attempting to find an argument for a parameter, as these
+/// targets do not correspond to passed arguments.
+///
+/// # Arguments
+/// * `block_context`: The context of the current block, used to get class scope information.
+/// * `target_name`: The string identifier for the assertion target (e.g., `'$this->prop'`).
+/// * `this_variable`: The name of the variable holding the object instance (`$this`), if any.
+///
+/// # Returns
+/// * `Some(Word)`: If the target is a special `$this` or `self` reference, containing the resolved variable ID.
+/// * `None`: If the target is not a special reference and should be treated as a regular parameter.
+fn resolve_special_assertion_target(
+    block_context: &BlockContext<'_>,
+    target_name: Word,
+    this_variable: Option<&[u8]>,
+) -> Option<Word> {
+    let target_bytes = target_name.as_bytes();
+    if let Some(this_variable) = this_variable
+        && (target_bytes == InvocationAssertions::RECEIVER || target_bytes.starts_with(b"$this->"))
+    {
+        let mut out: Vec<u8> = Vec::with_capacity(target_bytes.len() - 5 + this_variable.len());
+        out.extend_from_slice(this_variable);
+        out.extend_from_slice(&target_bytes[5..]);
+        return Some(Word::from(out.as_slice()));
+    }
+
+    if let Some(class) = block_context.scope.get_class_like_name()
+        && target_bytes.starts_with(b"self::")
+    {
+        let class_bytes = class.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(target_bytes.len() - 6 + class_bytes.len());
+        out.extend_from_slice(class_bytes);
+        out.extend_from_slice(&target_bytes[6..]);
+        return Some(Word::from(out.as_slice()));
+    }
+
+    None
+}
+
+/// Finds the argument expression passed to a function for a specific parameter.
+///
+/// This function is designed to robustly identify the argument for a given parameter,
+/// mirroring PHP's own argument resolution rules. The caller can provide the parameter's
+/// name, its zero-based offset, or both.
+///
+/// # Arguments
+///
+/// * `context`: The analysis context, needed for `get_expression_id`.
+/// * `block_context`: The context of the current block, needed for `get_expression_id`.
+/// * `invocation`: The invocation being analyzed, which contains the arguments.
+/// * `metadata`: The metadata of the invoked function, used to look up parameter details.
+/// * `parameter_offset`: An optional zero-based index of the parameter.
+/// * `parameter_name`: An optional name of the parameter.
+///
+/// # Returns
+/// A tuple containing:
+/// * `Option<&'a Expression>`: The argument's expression CST node, if found.
+/// * `Option<Word>`: The unique ID of the argument expression (e.g., a variable name), if it can be determined.
+fn get_argument_for_parameter<'ctx, 'ast, 'arena, A>(
+    context: &Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    invocation: &Invocation<'ctx, 'ast, 'arena>,
+    mut parameter_offset: Option<usize>,
+    mut parameter_name: Option<Word>,
+) -> (Option<&'ast Expression<'arena>>, Option<Word>)
+where
+    A: Arena,
+{
+    // If neither name nor offset is provided, we can't do anything.
+    if parameter_name.is_none() && parameter_offset.is_none() {
+        return (None, None);
+    }
+
+    // Step 1: Ensure we have both the name and offset for the parameter.
+    if parameter_name.is_none() {
+        if let Some(parameter_ref) = parameter_offset.and_then(|offset| invocation.target.get_parameter(offset)) {
+            parameter_name = parameter_ref.get_name().map(|name| name.0);
+        }
+    } else if parameter_offset.is_none()
+        && let Some(name) = parameter_name
+    {
+        parameter_offset = invocation
+            .target
+            .iter_parameters()
+            .position(|parameter| parameter.get_name().is_some_and(|name_variable| name_variable.0 == name));
+    }
+
+    // After attempting to fill in missing info, if we still lack a name or an offset,
+    // the parameter is invalid for this function.
+    let (_, Some(offset)) = (parameter_name, parameter_offset) else {
+        return (None, None);
+    };
+
+    // Step 2: Resolve the argument with the correct precedence.
+    let arguments = invocation.arguments_source;
+
+    // a. Look for a named argument first.
+    let find_by_name = || {
+        let variable = parameter_name?;
+        let variable_bytes = variable.as_bytes();
+        let variable_name: &[u8] =
+            if let Some(stripped) = variable_bytes.strip_prefix(b"$") { stripped } else { variable_bytes };
+
+        arguments.iter_arguments().find(|argument| {
+            if let Some(named_argument) = argument.get_named_argument() {
+                named_argument.name.value == variable_name
+            } else {
+                false
+            }
+        })
+    };
+
+    // b. If not found by name, look for a positional argument at the correct offset.
+    let find_by_position = || arguments.get_argument(offset).filter(|argument| argument.is_positional());
+
+    let argument = find_by_name().or_else(find_by_position);
+
+    let Some(argument) = argument else {
+        // The corresponding argument could not be found.
+        return (None, None);
+    };
+
+    let Some(argument_expression) = argument.value() else {
+        // The argument is a placeholder, no expression to analyze
+        return (None, None);
+    };
+
+    // If an argument was found, resolve its expression ID.
+    let argument_id = get_block_expression_id(argument_expression, context, block_context);
+    let argument_id = match argument_id {
+        Some(id) => Some(id),
+        None => {
+            if let Expression::Binary(binary) = unwrap_expression(argument_expression)
+                && matches!(binary.operator, BinaryOperator::NullCoalesce(_))
+                && matches!(unwrap_expression(binary.rhs), Expression::Literal(Literal::Null(_)))
+            {
+                get_block_expression_id(binary.lhs, context, block_context)
+            } else {
+                None
+            }
+        }
+    };
+
+    (Some(argument_expression), argument_id)
+}
+
+fn collect_plugin_throw_types<'ctx, 'arena, A>(
+    context: &Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    identifier: &FunctionLikeIdentifier,
+) where
+    A: Arena,
+{
+    let exceptions = match identifier {
+        FunctionLikeIdentifier::Function(name) => context.plugin_registry.get_function_thrown_exceptions(
+            context.codebase,
+            context.source_file,
+            block_context,
+            artifacts,
+            name.as_bytes(),
+            invocation,
+        ),
+        FunctionLikeIdentifier::Method(class_name, method_name) => {
+            context.plugin_registry.get_method_thrown_exceptions(
+                context.codebase,
+                context.source_file,
+                block_context,
+                artifacts,
+                class_name.as_bytes(),
+                method_name.as_bytes(),
+                invocation,
+            )
+        }
+        FunctionLikeIdentifier::Closure(_) => return,
+    };
+
+    for exception in exceptions {
+        block_context.possibly_thrown_exceptions.entry(exception).or_default().insert(invocation.span);
+    }
+}
+
+fn apply_plugin_assertions<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    identifier: &FunctionLikeIdentifier,
+    this_variable: Option<&[u8]>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+    range: (u32, u32),
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let Some(assertions) = context.plugin_registry.get_function_like_assertions(
+        context.codebase,
+        context.source_file,
+        block_context,
+        artifacts,
+        identifier,
+        invocation,
+        context.external_analysis_session,
+    ) else {
+        return Ok(());
+    };
+
+    let resolved_if_true_assertions = resolve_invocation_assertion(
+        context,
+        block_context,
+        artifacts,
+        invocation,
+        this_variable,
+        &assertions.if_true,
+        template_result,
+        parameters,
+        false,
+    );
+
+    for (variable, assertion_set) in resolved_if_true_assertions {
+        artifacts.if_true_assertions.entry(range).or_default().entry(variable).or_default().extend(assertion_set);
+    }
+
+    let resolved_if_false_assertions = resolve_invocation_assertion(
+        context,
+        block_context,
+        artifacts,
+        invocation,
+        this_variable,
+        &assertions.if_false,
+        template_result,
+        parameters,
+        false,
+    );
+
+    for (variable, assertion_set) in resolved_if_false_assertions {
+        artifacts.if_false_assertions.entry(range).or_default().entry(variable).or_default().extend(assertion_set);
+    }
+
+    apply_assertion_to_call_context(
+        context,
+        block_context,
+        artifacts,
+        invocation,
+        this_variable,
+        &assertions.type_assertions,
+        template_result,
+        parameters,
+    );
+
+    Ok(())
+}

@@ -1,0 +1,493 @@
+use mago_allocator::Arena;
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use mago_codex::assertion::Assertion;
+use mago_codex::consts::MAX_ENUM_CASES_FOR_ANALYSIS;
+use mago_word::Word;
+use mago_word::WordSet;
+
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::r#enum::TEnum;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::bool::TBool;
+use mago_codex::ttype::atomic::scalar::string::TString;
+use mago_codex::ttype::combiner;
+use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::atomic_comparator;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::get_arraykey;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_placeholder;
+use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
+use mago_span::Span;
+
+use crate::reconciler::Context;
+use crate::reconciler::assertion_reconciler::intersect_atomic_with_atomic;
+use crate::reconciler::simple_negated_assertion_reconciler;
+use crate::reconciler::trigger_issue_for_impossible;
+
+pub(crate) fn reconcile<A>(
+    context: &mut Context<'_, '_, A>,
+    assertion: &Assertion,
+    existing_var_type: &TUnion,
+    key: Option<&[u8]>,
+    old_var_type_atom: Word,
+    span: Option<&Span>,
+    negated: bool,
+) -> TUnion
+where
+    A: Arena,
+{
+    let is_equality = assertion.has_equality();
+    if is_equality && assertion.has_literal_value() {
+        if existing_var_type.is_mixed() {
+            return existing_var_type.clone();
+        }
+
+        return handle_literal_negated_equality(
+            context,
+            assertion,
+            existing_var_type,
+            key,
+            old_var_type_atom,
+            span,
+            negated,
+        );
+    }
+
+    let simple_negated_type =
+        simple_negated_assertion_reconciler::reconcile(context, assertion, existing_var_type, key, span, negated);
+
+    if let Some(simple_negated_type) = simple_negated_type {
+        return simple_negated_type;
+    }
+
+    let mut existing_var_type = existing_var_type.clone();
+
+    if let Some(assertion_type) = assertion.get_type() {
+        if !is_equality {
+            let mut has_changes = false;
+            subtract_complex_type(context, assertion_type, &mut existing_var_type, &mut has_changes);
+
+            if (!has_changes || existing_var_type.is_never())
+                && let Some(key) = &key
+                && let Some(pos) = span
+            {
+                trigger_issue_for_impossible(context, old_var_type_atom, key, assertion, !has_changes, negated, pos);
+            }
+        } else if let Some(key) = &key
+            && let Some(pos) = span
+            && !union_comparator::can_expression_types_be_identical(
+                context.codebase,
+                &existing_var_type,
+                &wrap_atomic(assertion_type.clone()),
+                true,
+                false,
+            )
+        {
+            trigger_issue_for_impossible(context, old_var_type_atom, key, assertion, false, negated, pos);
+        }
+    }
+
+    if existing_var_type.types.is_empty() && !is_equality {
+        if let Some(key) = &key
+            && let Some(pos) = span
+        {
+            trigger_issue_for_impossible(context, old_var_type_atom, key, assertion, false, negated, pos);
+        }
+
+        return get_never();
+    }
+
+    existing_var_type
+}
+
+fn subtract_complex_type<A>(
+    context: &mut Context<'_, '_, A>,
+    assertion_type: &TAtomic,
+    existing_var_type: &mut TUnion,
+    can_be_disjunct: &mut bool,
+) where
+    A: Arena,
+{
+    let mut acceptable_types = vec![];
+
+    let existing_atomic_types = std::mem::take(existing_var_type.types.to_mut());
+
+    for existing_atomic in existing_atomic_types {
+        if &existing_atomic == assertion_type {
+            *can_be_disjunct = true;
+
+            continue;
+        }
+
+        if matches!(assertion_type, TAtomic::GenericParameter(_)) {
+            if atomic_comparator::is_contained_by(
+                context.codebase,
+                assertion_type,
+                &existing_atomic,
+                true,
+                &mut ComparisonResult::new(),
+            ) {
+                *can_be_disjunct = true;
+            }
+
+            acceptable_types.push(existing_atomic);
+            continue;
+        }
+
+        if atomic_comparator::is_contained_by(
+            context.codebase,
+            &existing_atomic,
+            assertion_type,
+            true,
+            &mut ComparisonResult::new(),
+        ) {
+            *can_be_disjunct = true;
+
+            // don't add as acceptable
+            continue;
+        }
+
+        if atomic_comparator::is_contained_by(
+            context.codebase,
+            assertion_type,
+            &existing_atomic,
+            true,
+            &mut ComparisonResult::new(),
+        ) {
+            *can_be_disjunct = true;
+        }
+
+        match (&existing_atomic, assertion_type) {
+            (
+                TAtomic::Object(TObject::Named(existing_named_object)),
+                TAtomic::Object(TObject::Named(assertion_named_object)),
+            ) => {
+                let existing_classlike_name = existing_named_object.get_name();
+                let assertion_classlike_name = assertion_named_object.get_name();
+
+                if let Some(class_like_metadata) = context.codebase.get_class_like(existing_classlike_name.as_bytes()) {
+                    // handle __Sealed classes, negating where possible
+                    if let Some(child_classlikes) = class_like_metadata.child_class_likes.as_ref()
+                        && child_classlikes.contains(&assertion_classlike_name)
+                    {
+                        handle_negated_class(
+                            context,
+                            child_classlikes,
+                            &existing_atomic,
+                            assertion_classlike_name,
+                            &mut acceptable_types,
+                        );
+
+                        *can_be_disjunct = true;
+
+                        continue;
+                    }
+                }
+
+                if (context.codebase.interface_exists(assertion_classlike_name.as_bytes())
+                    || context.codebase.interface_exists(existing_classlike_name.as_bytes()))
+                    && assertion_classlike_name != existing_classlike_name
+                {
+                    *can_be_disjunct = true;
+                }
+
+                acceptable_types.push(existing_atomic);
+            }
+            (TAtomic::Array(first), TAtomic::Array(second)) if first.is_keyed() && second.is_keyed() => {
+                *can_be_disjunct = true;
+                // todo subtract assertion keyed array from existing
+                acceptable_types.push(existing_atomic);
+            }
+            (
+                TAtomic::Object(TObject::Enum(TEnum { name: existing_enum_name, case: None })),
+                TAtomic::Object(TObject::Enum(TEnum { name: assertion_enum_name, case: Some(assertion_case) })),
+            ) if context.codebase.is_instance_of(assertion_enum_name.as_bytes(), existing_enum_name.as_bytes()) => {
+                *can_be_disjunct = true;
+
+                let Some(enum_metadata) = context.codebase.get_enum(existing_enum_name.as_bytes()) else {
+                    acceptable_types.push(existing_atomic);
+                    continue;
+                };
+
+                // Enum is too large, do not subtract anything
+                if enum_metadata.enum_cases.len() > MAX_ENUM_CASES_FOR_ANALYSIS {
+                    acceptable_types.push(existing_atomic);
+                    continue;
+                }
+
+                for enum_case in enum_metadata.enum_cases.keys() {
+                    if enum_case == assertion_case {
+                        continue;
+                    }
+
+                    acceptable_types.push(TAtomic::Object(TObject::Enum(TEnum {
+                        name: *existing_enum_name,
+                        case: Some(*enum_case),
+                    })));
+                }
+            }
+            (TAtomic::Object(TObject::Enum(_)), TAtomic::Object(TObject::Enum(_))) => {
+                *can_be_disjunct = true;
+                acceptable_types.push(existing_atomic);
+            }
+            (TAtomic::Iterable(iterable), TAtomic::Object(TObject::Named(assertion_named)))
+                if assertion_named.name.as_bytes().eq_ignore_ascii_case(b"Traversable") =>
+            {
+                *can_be_disjunct = true;
+
+                let key_type = if iterable.key_type.is_always_array_key(false) {
+                    Arc::clone(&iterable.key_type)
+                } else {
+                    Arc::new(get_arraykey())
+                };
+
+                acceptable_types.push(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                    key_type,
+                    Arc::clone(&iterable.value_type),
+                ))));
+            }
+            _ => {
+                acceptable_types.push(existing_atomic);
+            }
+        }
+    }
+
+    if acceptable_types.is_empty() {
+        acceptable_types.push(TAtomic::Never);
+    } else if acceptable_types.len() > 1 && *can_be_disjunct {
+        acceptable_types = combiner::combine(acceptable_types, context.codebase, CombinerOptions::default());
+    }
+
+    existing_var_type.types = Cow::Owned(acceptable_types);
+}
+
+fn handle_negated_class<A>(
+    context: &mut Context<'_, '_, A>,
+    child_classlikes: &WordSet,
+    existing_atomic: &TAtomic,
+    assertion_classlike_name: Word,
+    acceptable_types: &mut Vec<TAtomic>,
+) where
+    A: Arena,
+{
+    for child_classlike in child_classlikes {
+        if *child_classlike != assertion_classlike_name {
+            let alternate_class =
+                TAtomic::Object(TObject::Named(TNamedObject::new(*child_classlike).with_type_parameters(
+                    if let Some(child_metadata) = context.codebase.get_class_like(child_classlike.as_bytes()) {
+                        let placeholder_params =
+                            child_metadata.template_types.iter().map(|_| get_placeholder()).collect::<Vec<_>>();
+
+                        if placeholder_params.is_empty() { None } else { Some(placeholder_params) }
+                    } else {
+                        None
+                    },
+                )));
+
+            if let Some(acceptable_alternate_class) =
+                intersect_atomic_with_atomic(context, existing_atomic, &alternate_class)
+            {
+                acceptable_types.push(acceptable_alternate_class);
+            }
+        }
+    }
+}
+
+fn handle_literal_negated_equality<A>(
+    context: &mut Context<'_, '_, A>,
+    assertion: &Assertion,
+    existing_var_type: &TUnion,
+    key: Option<&[u8]>,
+    old_var_type_atom: Word,
+    span: Option<&Span>,
+    negated: bool,
+) -> TUnion
+where
+    A: Arena,
+{
+    let Some(assertion_type) = assertion.get_type() else {
+        return get_never();
+    };
+
+    let assertion_is_falsy = matches!(assertion, Assertion::IsNotEqual(_)) && assertion_type.is_falsy();
+
+    let mut did_remove_type = false;
+    let mut new_var_type = existing_var_type.clone();
+    let mut acceptable_types = vec![];
+
+    for existing_atomic_type in new_var_type.types.to_mut().drain(..) {
+        if assertion_is_falsy
+            && existing_atomic_type.is_falsy()
+            && falsy_atomics_loose_equal(assertion_type, &existing_atomic_type)
+        {
+            did_remove_type = true;
+            continue;
+        }
+
+        match &existing_atomic_type {
+            TAtomic::Scalar(TScalar::String(existing_string)) => {
+                let existing_literal_string = existing_atomic_type.get_literal_string_value();
+                let assertion_literal_string = assertion_type.get_literal_string_value();
+
+                if existing_literal_string.is_none() && assertion_type.is_literal_class_string() {
+                    did_remove_type = true;
+                    acceptable_types.push(existing_atomic_type);
+                    continue;
+                }
+
+                match (existing_literal_string, assertion_literal_string) {
+                    (Some(existing_value), Some(assertion_value)) if existing_value == assertion_value => {
+                        did_remove_type = true;
+                    }
+                    (None, Some(assertion_value)) => {
+                        did_remove_type = true;
+
+                        if assertion_value.is_empty() {
+                            acceptable_types.push(TAtomic::Scalar(TScalar::String(TString::general_with_props(
+                                existing_string.is_numeric,
+                                existing_string.is_truthy,
+                                true,
+                                existing_string.is_callable,
+                                existing_string.casing,
+                            ))));
+                        } else {
+                            acceptable_types.push(existing_atomic_type);
+                        }
+                    }
+                    _ => {
+                        acceptable_types.push(existing_atomic_type);
+                    }
+                }
+            }
+            TAtomic::Scalar(TScalar::Integer(_)) => {
+                let existing_integer = existing_atomic_type.get_integer();
+                let assertion_integer = assertion_type.get_integer();
+
+                match (existing_integer, assertion_integer) {
+                    (Some(existing_integer), Some(assertion_integer)) => {
+                        did_remove_type = true;
+
+                        acceptable_types.extend(
+                            existing_integer
+                                .difference(assertion_integer, false)
+                                .into_iter()
+                                .map(|remaining_integer| TAtomic::Scalar(TScalar::Integer(remaining_integer))),
+                        );
+                    }
+                    _ => {
+                        acceptable_types.push(existing_atomic_type);
+                    }
+                }
+            }
+            TAtomic::Scalar(TScalar::Float(_)) => {
+                let existing_value = existing_atomic_type.get_literal_float_value();
+                let assertion_value = assertion_type.get_literal_float_value();
+
+                match (existing_value, assertion_value) {
+                    (Some(existing_value), Some(assertion_value)) if existing_value == assertion_value => {
+                        did_remove_type = true;
+                    }
+                    (None, Some(_)) => {
+                        did_remove_type = true;
+                        acceptable_types.push(existing_atomic_type);
+                    }
+                    _ => {
+                        acceptable_types.push(existing_atomic_type);
+                    }
+                }
+            }
+            TAtomic::Scalar(TScalar::ArrayKey) => {
+                if let TAtomic::Scalar(scalar) = assertion_type
+                    && (scalar.is_known_literal_string() || scalar.is_literal_int())
+                {
+                    did_remove_type = true;
+                }
+
+                acceptable_types.push(existing_atomic_type);
+            }
+            TAtomic::Scalar(TScalar::ClassLikeString(_)) => {
+                let existing_classlike_string = existing_atomic_type.get_class_string_value();
+                let assertion_value = assertion_type.get_class_string_value();
+
+                match (existing_classlike_string, assertion_value) {
+                    (Some(existing_value), Some(assertion_value)) if existing_value == assertion_value => {
+                        did_remove_type = true;
+                    }
+                    (None, Some(_)) => {
+                        did_remove_type = true;
+                        acceptable_types.push(existing_atomic_type);
+                    }
+                    _ => {
+                        acceptable_types.push(existing_atomic_type);
+                    }
+                }
+            }
+            _ => {
+                acceptable_types.push(existing_atomic_type);
+            }
+        }
+    }
+
+    if let Some(key) = &key
+        && let Some(pos) = span
+        && (!did_remove_type || acceptable_types.is_empty())
+    {
+        trigger_issue_for_impossible(context, old_var_type_atom, key, assertion, !did_remove_type, negated, pos);
+    }
+
+    if acceptable_types.is_empty() {
+        return get_never();
+    }
+
+    new_var_type.types = Cow::Owned(acceptable_types);
+    new_var_type
+}
+
+/// Returns `true` when two PHP-falsy atomics are equal under PHP 8's loose `==` semantics.
+///
+/// Both inputs must already satisfy [`TAtomic::is_falsy`]. `null` and `false` are loose-equal to
+/// every other falsy value. Numeric falsies (`0`, `0.0`) loose-equal each other but not `""`;
+/// the empty string falsy class doesn't loose-equal numeric falsies. Other falsy shapes (empty
+/// arrays, closed resources, …) only loose-equal `null`/`false`.
+const fn falsy_atomics_loose_equal(left: &TAtomic, right: &TAtomic) -> bool {
+    if is_null_or_literal_false(left) || is_null_or_literal_false(right) {
+        return true;
+    }
+
+    match (falsy_class(left), falsy_class(right)) {
+        (Some(left_class), Some(right_class)) => {
+            matches!(
+                (left_class, right_class),
+                (FalsyClass::Numeric, FalsyClass::Numeric) | (FalsyClass::EmptyString, FalsyClass::EmptyString)
+            )
+        }
+        _ => false,
+    }
+}
+
+const fn is_null_or_literal_false(atomic: &TAtomic) -> bool {
+    matches!(atomic, TAtomic::Null) || matches!(atomic, TAtomic::Scalar(TScalar::Bool(TBool { value: Some(false) })))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FalsyClass {
+    Numeric,
+    EmptyString,
+}
+
+const fn falsy_class(atomic: &TAtomic) -> Option<FalsyClass> {
+    match atomic {
+        TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_)) => Some(FalsyClass::Numeric),
+        TAtomic::Scalar(TScalar::String(_)) => Some(FalsyClass::EmptyString),
+        _ => None,
+    }
+}

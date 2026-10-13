@@ -1,0 +1,41 @@
+[package]
+name = "mago-reporting"
+description = "Structured error and diagnostic reporting utilities."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mago-span = { workspace = true }
+mago-database = { workspace = true }
+mago-text-edit = { workspace = true }
+foldhash = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+codespan-reporting = { workspace = true, optional = true }
+termcolor = { workspace = true, optional = true }
+strum = { workspace = true }
+blake3 = { workspace = true }
+ariadne = { workspace = true, optional = true }
+serde-sarif = { workspace = true, optional = true }
+schemars = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+
+[features]
+default = ["renderers"]
+renderers = ["dep:codespan-reporting", "dep:termcolor", "dep:ariadne"]
+serde = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:serde-sarif",
+    "mago-span/serde",
+    "mago-text-edit/serde",
+]

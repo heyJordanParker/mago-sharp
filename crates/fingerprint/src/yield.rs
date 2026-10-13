@@ -1,0 +1,77 @@
+use mago_names::ResolvedNames;
+use mago_syntax::cst::Yield;
+use mago_syntax::cst::YieldFrom;
+use mago_syntax::cst::YieldPair;
+use mago_syntax::cst::YieldValue;
+
+use crate::FingerprintOptions;
+use crate::Fingerprintable;
+use std::hash::Hash;
+
+impl Fingerprintable for Yield<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        use Yield::From;
+        use Yield::Pair;
+        use Yield::Value;
+
+        match self {
+            Value(y) => y.fingerprint_with_hasher(hasher, resolved_names, options),
+            Pair(y) => y.fingerprint_with_hasher(hasher, resolved_names, options),
+            From(y) => y.fingerprint_with_hasher(hasher, resolved_names, options),
+        }
+    }
+}
+
+impl Fingerprintable for YieldValue<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "yield".hash(hasher);
+        self.value.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for YieldPair<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "yield_pair".hash(hasher);
+        self.key.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.value.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for YieldFrom<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "yield_from".hash(hasher);
+        self.iterator.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}

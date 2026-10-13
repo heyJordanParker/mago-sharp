@@ -1,0 +1,900 @@
+use mago_allocator::Arena;
+use mago_allocator::vec_in;
+use std::cmp::Ordering;
+
+use mago_allocator::vec::Vec;
+
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::ArrayAccess;
+use mago_syntax::cst::ArrayElement;
+use mago_syntax::cst::Attribute;
+use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::Call;
+use mago_syntax::cst::CompositeString;
+use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Instantiation;
+use mago_syntax::cst::Keyword;
+use mago_syntax::cst::Literal;
+use mago_syntax::cst::Modifier;
+use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Statement;
+use mago_syntax::cst::StringPart;
+use mago_syntax::cst::Terminator;
+use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Variable;
+use mago_syntax::cst::Yield;
+
+use crate::document::BreakMode;
+use crate::document::Document;
+use crate::document::Group;
+use crate::document::IndentIfBreak;
+use crate::document::Line;
+use crate::document::Separator;
+use crate::internal::FormatterState;
+use crate::internal::comment::CommentFlags;
+use crate::internal::format::Format;
+use crate::internal::format::call_arguments::promote_argument_list_to_partial;
+use crate::internal::format::call_arguments::should_break_all_arguments;
+use crate::internal::format::format_token;
+use crate::internal::format::member_access::collect_member_access_chain;
+use crate::internal::format::statement::print_statement_sequence;
+use crate::internal::utils::string_width;
+use crate::settings::BraceStyle;
+use crate::settings::SortOrder;
+
+use super::block::block_is_empty;
+
+/// Check if there is a newline character within a specified range of text.
+#[inline(always)]
+pub(super) fn has_new_line_in_range(text: &[u8], start: u32, end: u32) -> bool {
+    text[start as usize..end as usize].contains(&b'\n')
+}
+
+pub(crate) fn get_document_width<A>(doc: &Document<'_, A>) -> usize
+where
+    A: Arena,
+{
+    match doc {
+        Document::String(s) => string_width(s),
+        Document::Array(docs) => docs.iter().map(get_document_width).sum(),
+        Document::Group(group) => group.contents.iter().map(get_document_width).sum(),
+        Document::Indent(docs) => docs.iter().map(get_document_width).sum(),
+        Document::Line(_) => 1,
+        Document::IfBreak(if_break) => {
+            get_document_width(if_break.break_contents).max(get_document_width(if_break.flat_content))
+        }
+        Document::IndentIfBreak(indent_if_break) => indent_if_break.contents.iter().map(get_document_width).sum(),
+        _ => 0,
+    }
+}
+
+/// Determines whether an expression can be "hugged" within brackets without line breaks.
+///
+/// # Overview
+///
+/// A "huggable" expression can be formatted compactly within parentheses `()` or square brackets `[]`
+/// without requiring additional line breaks or indentation. This means the expression can be
+/// rendered on the same line as the opening and closing brackets.
+///
+/// # Hugging Rules
+///
+/// 1. Nested expressions are recursively checked
+/// 2. Expressions with leading or trailing comments cannot be hugged
+/// 3. Specific expression types are considered huggable
+///
+/// # Supported Huggable Expressions
+///
+/// - Arrays
+/// - Legacy Arrays
+/// - Lists
+/// - Closures
+/// - Closure Creations
+/// - Function Calls
+/// - Anonymous Classes
+/// - Match Expressions
+///
+/// # Parameters
+///
+/// - `f`: The formatter context
+/// - `expression`: The expression to check for hugging potential
+///
+/// # Returns
+///
+/// `true` if the expression can be formatted compactly, `false` otherwise
+///
+/// # Performance
+///
+/// O(1) for most checks, with potential O(n) recursion for nested expressions
+pub(super) fn should_hug_expression<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    expression: &'arena Expression<'arena>,
+    arrow_function_recursion: bool,
+) -> bool
+where
+    A: Arena,
+{
+    if let Expression::Parenthesized(inner) = expression {
+        return should_hug_expression(f, inner.expression, arrow_function_recursion);
+    }
+
+    if let Expression::UnaryPrefix(operation) = expression {
+        return should_hug_expression(f, operation.operand, arrow_function_recursion);
+    }
+
+    // if the expression has leading or trailing comments, we can't hug it
+    if f.has_comment(expression.span(), CommentFlags::LEADING | CommentFlags::TRAILING) {
+        return false;
+    }
+
+    if is_breaking_expression(f, expression, arrow_function_recursion) {
+        return true;
+    }
+
+    if let Expression::Access(access) = expression {
+        // A class constant cannot break, so hugging it would keep the argument list from ever breaking.
+        if let Access::ClassConstant(_) = access {
+            return false;
+        }
+
+        return collect_member_access_chain(f.arena, expression).is_none_or(|chain| !chain.is_eligible_for_chaining(f));
+    }
+
+    if let Expression::Call(call) = expression {
+        if collect_member_access_chain(f.arena, expression).is_some_and(|chain| chain.is_eligible_for_chaining(f)) {
+            return false;
+        }
+
+        let argument_list = call.get_argument_list();
+
+        if argument_list.arguments.is_empty() {
+            return false;
+        }
+
+        if argument_list.arguments.len() >= 2 {
+            return true;
+        }
+
+        // A call with a single zero-arg call argument (e.g. `foo(bar())`) has no
+        // internal line breaks, so hugging it would prevent the enclosing argument
+        // list from ever breaking regardless of print width.
+        let arg_value = argument_list.arguments.as_slice()[0].value();
+        return !matches!(
+            arg_value,
+            Expression::Call(inner_call) if inner_call.get_argument_list().arguments.is_empty()
+        );
+    }
+
+    if let Expression::ArrowFunction(arrow_function) = expression {
+        return !arrow_function_recursion && should_hug_expression(f, arrow_function.expression, true);
+    }
+
+    if let Expression::Binary(binary) = expression {
+        // Don't hug concatenation chains (3+ operands) as they can be long
+        // and should allow the argument list to properly expand with indentation.
+        if binary.operator.is_concatenation()
+            && (matches!(binary.lhs, Expression::Binary(b) if b.operator.is_concatenation())
+                || matches!(binary.rhs, Expression::Binary(b) if b.operator.is_concatenation()))
+        {
+            return false;
+        }
+
+        let is_left_hand_side_simple = is_simple_expression(binary.lhs);
+        let is_right_hand_side_simple = is_simple_expression(binary.rhs);
+
+        // Hug binary expressions if they are simple and not too complex
+        if is_left_hand_side_simple && is_right_hand_side_simple {
+            return true;
+        }
+
+        if binary.operator.is_concatenation() {
+            if matches!(binary.lhs, Expression::Call(_)) || matches!(binary.rhs, Expression::Call(_)) {
+                return false;
+            }
+
+            return (is_left_hand_side_simple && should_hug_expression(f, binary.rhs, arrow_function_recursion))
+                || (is_right_hand_side_simple && should_hug_expression(f, binary.lhs, arrow_function_recursion));
+        }
+
+        return false;
+    }
+
+    let Expression::Instantiation(instantiation) = expression else {
+        return false;
+    };
+
+    // Hug instantiations if it is a simple class instantiation
+    let Expression::Identifier(_) = instantiation.class else {
+        return false;
+    };
+
+    // And either:
+    match &instantiation.argument_list {
+        // a. The instantiation is a simple class instantiation without arguments
+        None => true,
+        Some(argument_list) => {
+            let arguments_len = argument_list.arguments.len();
+            if 0 == arguments_len {
+                false
+            } else if arguments_len == 1 {
+                // b. The instantiation has a single non-named argument that is huggable or an instantiation
+                //   (e.g. `new Foo(new Bar())`)
+                match &argument_list.arguments.as_slice()[0] {
+                    Argument::Named(_) => false,
+                    Argument::Positional(positional) => {
+                        matches!(positional.value, Expression::Instantiation(_))
+                            || should_hug_expression(f, positional.value, arrow_function_recursion)
+                    }
+                }
+            } else {
+                // c. The instantiation has multiple arguments and all are named.
+                argument_list.arguments.iter().all(|arg| matches!(arg, Argument::Named(_))) ||
+                // d. The instantiation has less than 4 non-named arguments,
+                // all of which are simple expressions
+                (arguments_len < 4 && argument_list.arguments.iter().all(|arg| {
+                    matches!(arg, Argument::Positional(positional) if is_simple_expression(positional.value))
+                }))
+            }
+        }
+    }
+}
+
+pub fn is_breaking_expression<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    node: &'arena Expression<'arena>,
+    arrow_function_recursion: bool,
+) -> bool
+where
+    A: Arena,
+{
+    if let Expression::Parenthesized(inner) = node {
+        return is_breaking_expression(f, inner.expression, arrow_function_recursion);
+    }
+
+    if let Expression::UnaryPrefix(operation) = node {
+        return is_breaking_expression(f, operation.operand, arrow_function_recursion);
+    }
+
+    if let Expression::ArrowFunction(arrow_function) = node {
+        return !arrow_function_recursion && is_breaking_expression(f, arrow_function.expression, true);
+    }
+
+    if let Expression::Instantiation(Instantiation { argument_list: Some(args), .. }) = node
+        && should_break_all_arguments(f, promote_argument_list_to_partial(f.arena, args), false)
+    {
+        return true;
+    }
+
+    if let Expression::Call(call) = node
+        && should_break_all_arguments(f, promote_argument_list_to_partial(f.arena, call.get_argument_list()), false)
+    {
+        return true;
+    }
+
+    matches!(
+        node,
+        Expression::Array(_)
+            | Expression::LegacyArray(_)
+            | Expression::List(_)
+            | Expression::Closure(_)
+            | Expression::AnonymousClass(_)
+            | Expression::Match(_)
+    )
+}
+
+fn contains_breaking_concatenation(node: &Expression<'_>) -> bool {
+    match node {
+        Expression::Binary(binary) if binary.operator.is_concatenation() => {
+            matches!(binary.lhs, Expression::Call(_)) || matches!(binary.rhs, Expression::Call(_))
+        }
+        Expression::Parenthesized(inner) => contains_breaking_concatenation(inner.expression),
+        _ => false,
+    }
+}
+
+pub fn is_expandable_expression<'arena>(node: &'arena Expression<'arena>, include_calls: bool) -> bool {
+    if let Expression::Parenthesized(inner) = node {
+        return is_expandable_expression(inner.expression, include_calls);
+    }
+
+    if let Expression::Throw(throw) = node {
+        return is_expandable_expression(throw.exception, include_calls);
+    }
+
+    if let Expression::Yield(r#yield) = node {
+        return match r#yield {
+            Yield::Value(yield_value) => {
+                if let Some(value) = yield_value.value {
+                    is_expandable_expression(value, include_calls)
+                } else {
+                    false
+                }
+            }
+            Yield::Pair(yield_pair) => {
+                is_expandable_expression(yield_pair.key, include_calls)
+                    || is_expandable_expression(yield_pair.value, include_calls)
+            }
+            Yield::From(yield_from) => is_expandable_expression(yield_from.iterator, include_calls),
+        };
+    }
+
+    if let Expression::UnaryPrefix(operation) = node {
+        return is_expandable_expression(operation.operand, include_calls);
+    }
+
+    let argument_list = match node {
+        Expression::Call(call) => Some(call.get_argument_list()),
+        Expression::Instantiation(instantiation) => instantiation.argument_list.as_ref(),
+        _ => None,
+    };
+
+    if let Some(argument_list) = argument_list
+        && argument_list.arguments.iter().any(|arg| is_expandable_expression(arg.value(), include_calls))
+    {
+        return true;
+    }
+
+    if let Expression::Call(_) | Expression::Instantiation(_) = node {
+        return include_calls;
+    }
+
+    matches!(
+        node,
+        Expression::Array(_)
+            | Expression::LegacyArray(_)
+            | Expression::List(_)
+            | Expression::Closure(_)
+            | Expression::PartialApplication(_)
+            | Expression::AnonymousClass(_)
+            | Expression::Match(_)
+    )
+}
+
+pub fn is_simple_expression<'arena>(node: &'arena Expression<'arena>) -> bool {
+    if let Expression::Parenthesized(inner) = node {
+        return is_simple_expression(inner.expression);
+    }
+
+    if let Expression::UnaryPrefix(operation) = node {
+        return is_simple_expression(operation.operand);
+    }
+
+    if let Expression::Binary(operation) = node {
+        return is_simple_expression(operation.lhs) && is_simple_expression(operation.rhs);
+    }
+
+    matches!(
+        node,
+        Expression::Static(_)
+            | Expression::Parent(_)
+            | Expression::Self_(_)
+            | Expression::MagicConstant(_)
+            | Expression::Literal(_)
+            | Expression::Identifier(_)
+            | Expression::ConstantAccess(_)
+            | Expression::Variable(_)
+            | Expression::Access(Access::ClassConstant(_))
+    )
+}
+
+pub fn is_simple_single_line_expression<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    node: &'arena Expression<'arena>,
+) -> bool
+where
+    A: Arena,
+{
+    if let Expression::Parenthesized(inner) = node {
+        return is_simple_single_line_expression(f, inner.expression);
+    }
+
+    if let Expression::UnaryPrefix(operation) = node {
+        return is_simple_single_line_expression(f, operation.operand);
+    }
+
+    if let Expression::Binary(operation) = node {
+        return is_simple_single_line_expression(f, operation.lhs)
+            && is_simple_single_line_expression(f, operation.rhs);
+    }
+
+    if let Expression::Literal(literal) = node {
+        return match literal {
+            Literal::String(literal_string) => {
+                if let Some(v) = &literal_string.value
+                    && string_width(v) >= f.settings.print_width
+                {
+                    return false;
+                }
+
+                f.file.line_number(literal_string.span.start.offset)
+                    == f.file.line_number(literal_string.span.end.offset)
+            }
+            _ => true,
+        };
+    }
+
+    if let Expression::ArrayAccess(ArrayAccess { array, index, .. }) = node {
+        return is_simple_single_line_expression(f, array) && is_simple_single_line_expression(f, index);
+    }
+
+    if let Expression::Call(call) = node {
+        if !call.get_argument_list().arguments.is_empty() {
+            return false;
+        }
+
+        return match call {
+            Call::Function(function_call) => is_simple_single_line_expression(f, function_call.function),
+            Call::Method(method_call) => {
+                is_simple_single_line_expression(f, method_call.object) && method_call.method.is_identifier()
+            }
+            Call::NullSafeMethod(method_call) => {
+                is_simple_single_line_expression(f, method_call.object) && method_call.method.is_identifier()
+            }
+            Call::StaticMethod(method_call) => {
+                is_simple_single_line_expression(f, method_call.class) && method_call.method.is_identifier()
+            }
+        };
+    }
+
+    matches!(
+        node,
+        Expression::Static(_)
+            | Expression::Parent(_)
+            | Expression::Self_(_)
+            | Expression::MagicConstant(_)
+            | Expression::Identifier(_)
+            | Expression::ConstantAccess(_)
+            | Expression::Variable(_)
+            | Expression::Access(Access::ClassConstant(_))
+    )
+}
+
+#[inline]
+pub(super) const fn is_string_word_type(node: &Expression) -> bool {
+    matches!(
+        node,
+        Expression::Static(_)
+            | Expression::Parent(_)
+            | Expression::Self_(_)
+            | Expression::MagicConstant(_)
+            | Expression::Identifier(Identifier::Local(_))
+            | Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(_) })
+            | Expression::Variable(Variable::Direct(_))
+    )
+}
+
+pub(super) fn is_simple_call_argument<'arena>(node: &'arena Expression<'arena>, depth: usize) -> bool {
+    let is_child_simple = |node: &'arena Expression<'arena>| {
+        if depth <= 1 {
+            return false;
+        }
+
+        is_simple_call_argument(node, depth - 1)
+    };
+
+    let is_simple_element = |node: &'arena ArrayElement<'arena>| match node {
+        ArrayElement::KeyValue(element) => is_child_simple(element.key) && is_child_simple(element.value),
+        ArrayElement::Value(element) => is_child_simple(element.value),
+        ArrayElement::Variadic(element) => is_child_simple(element.value),
+        ArrayElement::Missing(_) => true,
+    };
+
+    if node.is_literal() || is_string_word_type(node) {
+        return true;
+    }
+
+    match node {
+        Expression::Parenthesized(parenthesized) => is_simple_call_argument(parenthesized.expression, depth),
+        Expression::UnaryPrefix(operation) => {
+            if let UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) = operation.operator {
+                return false;
+            }
+
+            if operation.operator.is_cast() {
+                return false;
+            }
+
+            is_simple_call_argument(operation.operand, depth)
+        }
+        Expression::Array(array) => array.elements.iter().all(is_simple_element),
+        Expression::LegacyArray(array) => array.elements.iter().all(is_simple_element),
+        Expression::CompositeString(composite_string) => is_simple_composite_string_argument(composite_string, depth),
+        Expression::Call(call) => {
+            let callee = match call {
+                Call::Function(function_call) => function_call.function,
+                Call::Method(method_call) => method_call.object,
+                Call::NullSafeMethod(null_safe_method_call) => null_safe_method_call.object,
+                Call::StaticMethod(static_method_call) => static_method_call.class,
+            };
+
+            if !is_simple_call_argument(callee, depth) {
+                return false;
+            }
+
+            let argument_list = call.get_argument_list();
+            argument_list.arguments.len() <= depth
+                && argument_list.arguments.iter().map(Argument::value).all(is_child_simple)
+        }
+        Expression::Access(access) => {
+            let object_or_class = match access {
+                Access::Property(property_access) => &property_access.object,
+                Access::NullSafeProperty(null_safe_property_access) => &null_safe_property_access.object,
+                Access::StaticProperty(static_property_access) => &static_property_access.class,
+                Access::ClassConstant(class_constant_access) => &class_constant_access.class,
+            };
+
+            is_simple_call_argument(object_or_class, depth)
+        }
+        Expression::ArrayAccess(array_access) => {
+            is_simple_call_argument(array_access.array, depth) && is_simple_call_argument(array_access.index, depth)
+        }
+        Expression::Instantiation(instantiation) if is_simple_call_argument(instantiation.class, depth) => {
+            match &instantiation.argument_list {
+                Some(argument_list) => {
+                    argument_list.arguments.len() <= depth
+                        && argument_list.arguments.iter().map(Argument::value).all(is_child_simple)
+                }
+                None => true,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn is_simple_composite_string_argument(composite_string: &CompositeString<'_>, depth: usize) -> bool {
+    if matches!(composite_string, CompositeString::Document(_)) {
+        return false;
+    }
+
+    composite_string.parts().iter().all(|part| match part {
+        StringPart::Literal(literal) => !literal.raw.contains(&b'\n') && !literal.raw.contains(&b'\r'),
+        StringPart::Expression(expression) => is_simple_call_argument(expression, depth),
+        StringPart::BracedExpression(braced) => is_simple_call_argument(braced.expression, depth),
+    })
+}
+
+pub(super) fn print_colon_delimited_body<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    colon: &Span,
+    statements: &'arena Sequence<'arena, Statement<'arena>>,
+    end_keyword: &'arena Keyword<'arena>,
+    terminator: &'arena Terminator<'arena>,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let mut parts = vec_in![f.arena;Document::String(b":")];
+
+    let mut printed_statements = print_statement_sequence(f, statements);
+    if !printed_statements.is_empty() {
+        if let Some(Statement::ClosingTag(_)) = statements.first() {
+            printed_statements.insert(0, Document::String(b" "));
+            parts.push(Document::Array(printed_statements));
+        } else {
+            printed_statements.insert(0, Document::Line(Line::hard()));
+            parts.push(Document::Indent(printed_statements));
+        }
+    }
+
+    if let Some(comments) = f.print_dangling_comments(colon.join(terminator.span()), true) {
+        parts.push(comments);
+    } else if !matches!(statements.last(), Some(Statement::OpeningTag(_))) {
+        parts.push(Document::Line(Line::hard()));
+    } else {
+        parts.push(Document::String(b" "));
+    }
+
+    parts.push(end_keyword.format(f));
+    parts.push(terminator.format(f));
+
+    Document::Group(Group::new(parts).with_break_mode(BreakMode::Force))
+}
+
+pub(super) fn print_modifiers<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    modifiers: &'arena Sequence<'arena, Modifier<'arena>>,
+) -> Vec<'arena, Document<'arena, A>, A>
+where
+    A: Arena,
+{
+    let mut printed_modifiers = vec_in![f.arena;];
+
+    if let Some(modifier) = modifiers.get_final() {
+        printed_modifiers.push(modifier.format(f));
+    }
+
+    if let Some(modifier) = modifiers.get_abstract() {
+        printed_modifiers.push(modifier.format(f));
+    }
+
+    if let Some(modifier) = modifiers.get_first_read_visibility() {
+        printed_modifiers.push(modifier.format(f));
+    }
+
+    if let Some(modifier) = modifiers.get_first_write_visibility() {
+        printed_modifiers.push(modifier.format(f));
+    }
+
+    if let Some(modifier) = modifiers.get_static() {
+        printed_modifiers.push(modifier.format(f));
+    }
+
+    if let Some(modifier) = modifiers.get_readonly() {
+        printed_modifiers.push(modifier.format(f));
+    }
+
+    Document::join(f.arena, printed_modifiers, Separator::Space)
+}
+
+pub(super) fn print_attribute_list_sequence<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    attribute_lists: &'arena Sequence<'arena, AttributeList<'arena>>,
+) -> Option<Document<'arena, A>>
+where
+    A: Arena,
+{
+    if attribute_lists.is_empty() {
+        return None;
+    }
+
+    if f.settings.separate_attributes {
+        let mut flat: std::vec::Vec<&'arena Attribute<'arena>> =
+            attribute_lists.iter().flat_map(|list| list.attributes.iter()).collect();
+
+        if !matches!(f.settings.attributes_order, SortOrder::Preserve) {
+            sort_attribute_refs(&mut flat, f.settings.attributes_order);
+        }
+
+        let mut contents = vec_in![f.arena;];
+        let last_index = flat.len().saturating_sub(1);
+        for (index, attribute) in flat.into_iter().enumerate() {
+            contents.push(Document::Group(Group::new(vec_in![f.arena;
+                Document::String(b"#["),
+                attribute.format(f),
+                Document::String(b"]"),
+            ])));
+
+            if index != last_index {
+                contents.push(Document::Line(Line::hard()));
+            }
+        }
+
+        return Some(Document::Group(Group::new(contents)));
+    }
+
+    let mut lists = vec_in![f.arena;];
+    if matches!(f.settings.attributes_order, SortOrder::Preserve) {
+        lists.extend(attribute_lists.iter().map(|attribute_list| attribute_list.format(f)));
+    } else {
+        let mut sorted: std::vec::Vec<&'arena AttributeList<'arena>> = attribute_lists.iter().collect();
+        sort_attribute_list_refs(&mut sorted, f.settings.attributes_order);
+        lists.extend(sorted.into_iter().map(|attribute_list| attribute_list.format(f)));
+    }
+
+    Some(Document::Group(Group::new(Document::join(f.arena, lists, Separator::HardLine))))
+}
+
+pub(super) fn print_clause<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    node: &'arena Statement<'arena>,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let clause = node.format(f);
+
+    adjust_clause(f, node, clause)
+}
+
+pub(super) fn adjust_clause<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    node: &'arena Statement<'arena>,
+    clause: Document<'arena, A>,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let mut force_space = false;
+    let mut is_block = false;
+
+    let has_trailing_segment = match f.current_node() {
+        Node::IfStatementBody(b) => b.else_clause.is_some() || !b.else_if_clauses.is_empty(),
+        Node::IfStatementBodyElseClause(_) => {
+            if let Statement::If(_) = node {
+                force_space = true;
+            }
+
+            false
+        }
+        Node::IfStatementBodyElseIfClause(c) => {
+            if let Node::IfStatementBody(b) = f.parent_node() {
+                b.else_clause.is_some()
+                    || b.else_if_clauses.iter().any(|clause| clause.span().start.offset >= c.span().end.offset)
+            } else {
+                false
+            }
+        }
+        Node::DoWhile(_) => true,
+        _ => false,
+    };
+
+    let clause = match node {
+        Statement::Noop(_) => clause,
+        Statement::Block(block) => {
+            is_block = true;
+
+            let is_block_empty = block_is_empty(f, &block.left_brace, &block.right_brace);
+            match f.settings.control_brace_style {
+                BraceStyle::SameLine => Document::Array(vec_in![f.arena;Document::space(), clause]),
+                BraceStyle::NextLine => {
+                    if f.settings.inline_empty_control_braces && is_block_empty {
+                        Document::Array(vec_in![f.arena; Document::space(), clause])
+                    } else {
+                        Document::Array(vec_in![f.arena; Document::Line(Line::default()), clause])
+                    }
+                }
+                BraceStyle::AlwaysNextLine => {
+                    if f.settings.inline_empty_control_braces && is_block_empty {
+                        Document::Array(vec_in![f.arena; Document::space(), clause])
+                    } else {
+                        Document::Array(vec_in![f.arena; Document::Line(Line::hard()), clause])
+                    }
+                }
+            }
+        }
+        _ => {
+            if force_space {
+                Document::Array(vec_in![f.arena; Document::space(), clause])
+            } else {
+                Document::Indent(vec_in![f.arena; Document::BreakParent, Document::Line(Line::hard()), clause])
+            }
+        }
+    };
+
+    if has_trailing_segment {
+        let is_do_while = matches!(f.current_node(), Node::DoWhile(_));
+
+        if !is_block
+            || f.is_followed_by_comment_on_next_line(node.span())
+            || f.has_same_line_trailing_comment(node.span())
+            || (f.settings.following_clause_on_newline && !is_do_while)
+        {
+            Document::Array(vec_in![f.arena; clause, Document::Line(Line::hard())])
+        } else {
+            Document::Array(vec_in![f.arena; clause, Document::space()])
+        }
+    } else {
+        clause
+    }
+}
+
+pub(super) fn print_condition<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    left_parenthesis: Span,
+    condition: &'arena Expression<'arena>,
+    right_parenthesis: Span,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let was_in_condition = f.in_condition;
+    let was_must_break_condition = f.must_break_condition;
+    f.in_condition = true;
+
+    let must_break = f.settings.preserve_breaking_condition_expression
+        && has_new_line_in_range(f.source_text, left_parenthesis.end.offset, condition.span().start.offset);
+
+    f.must_break_condition = must_break;
+
+    let has_breaking_concat = match condition {
+        Expression::Call(call) => {
+            call.get_argument_list().arguments.iter().any(|arg| contains_breaking_concatenation(arg.value()))
+        }
+        Expression::Instantiation(inst) => inst
+            .argument_list
+            .as_ref()
+            .is_some_and(|args| args.arguments.iter().any(|arg| contains_breaking_concatenation(arg.value()))),
+        _ => false,
+    };
+
+    let condition = if is_expandable_expression(condition, true)
+        && !has_breaking_concat
+        && !f.has_comment(condition.span(), CommentFlags::LEADING | CommentFlags::TRAILING)
+        && !must_break
+    {
+        Document::Group(Group::new(vec_in![f.arena;
+            Document::space(),
+            format_token(f, left_parenthesis, b"("),
+            condition.format(f),
+            format_token(f, right_parenthesis, b")"),
+        ]))
+    } else {
+        let group_id = f.next_id();
+
+        Document::Group(
+            Group::new(vec_in![f.arena;
+                Document::space(),
+                format_token(f, left_parenthesis, b"("),
+                Document::IndentIfBreak(IndentIfBreak::new(group_id, vec_in![f.arena;
+                    Document::Line(if must_break { Line::hard() } else { Line::soft() }),
+                    condition.format(f),
+                ])),
+                Document::Line(if must_break { Line::hard() } else { Line::soft() }),
+                format_token(f, right_parenthesis, b")"),
+            ])
+            .with_id(group_id)
+            .with_break_mode(if must_break { BreakMode::Force } else { BreakMode::Auto }),
+        )
+    };
+
+    f.in_condition = was_in_condition;
+    f.must_break_condition = was_must_break_condition;
+
+    condition
+}
+
+fn attribute_list_sort_key<'arena>(list: &'arena AttributeList<'arena>) -> &'arena [u8] {
+    list.attributes.iter().next().map(|a| a.name.value()).unwrap_or(b"")
+}
+
+pub(super) fn sort_attribute_list_refs<'arena>(lists: &mut [&'arena AttributeList<'arena>], order: SortOrder) {
+    sort_by_sort_order(lists, order, |list| attribute_list_sort_key(list));
+}
+
+pub(super) fn sort_attribute_refs<'arena>(attributes: &mut [&'arena Attribute<'arena>], order: SortOrder) {
+    sort_by_sort_order(attributes, order, |attribute| attribute.name.value());
+}
+
+fn sort_by_sort_order<T, F>(items: &mut [T], order: SortOrder, key: F)
+where
+    F: Fn(&T) -> &[u8],
+{
+    match order {
+        SortOrder::Preserve => {}
+        SortOrder::AlphanumericAscending => {
+            items.sort_by(|a, b| compare_case_insensitive_bytes(key(a), key(b)));
+        }
+        SortOrder::AlphanumericDescending => {
+            items.sort_by(|a, b| compare_case_insensitive_bytes(key(b), key(a)));
+        }
+        SortOrder::LengthAscending => {
+            items.sort_by(|a, b| {
+                let a_key = key(a);
+                let b_key = key(b);
+                a_key.len().cmp(&b_key.len()).then_with(|| compare_case_insensitive_bytes(a_key, b_key))
+            });
+        }
+        SortOrder::LengthDescending => {
+            items.sort_by(|a, b| {
+                let a_key = key(a);
+                let b_key = key(b);
+                b_key.len().cmp(&a_key.len()).then_with(|| compare_case_insensitive_bytes(a_key, b_key))
+            });
+        }
+    }
+}
+
+pub(super) fn compare_case_insensitive_bytes(a: &[u8], b: &[u8]) -> Ordering {
+    let mut a_iter = a.iter().map(u8::to_ascii_lowercase);
+    let mut b_iter = b.iter().map(u8::to_ascii_lowercase);
+
+    loop {
+        match (a_iter.next(), b_iter.next()) {
+            (Some(ac), Some(bc)) => {
+                let ord = ac.cmp(&bc);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => return Ordering::Equal,
+        }
+    }
+}

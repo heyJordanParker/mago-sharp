@@ -1,0 +1,298 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use mago_word::Word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::get_never;
+use crate::ttype::union::TUnion;
+
+/// Metadata for a PHP array analyzed as a list (vector-like).
+/// Corresponds to `list<TValue>` or `array{T0, T1, ...}` list-shape.
+#[allow(clippy::derived_hash_with_manual_eq)]
+#[derive(Debug, Clone, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TList {
+    /// The general type of elements in the list (`TValue` in `list<TValue>`).
+    pub element_type: Arc<TUnion>,
+    /// Specific types known for certain integer indices. The bool indicates if the element is optional.
+    pub known_elements: Option<BTreeMap<usize, (bool, TUnion)>>,
+    /// The known exact number of elements, if determined (e.g., from `count()` or literal definition).
+    pub known_count: Option<usize>,
+    /// Flag indicating if the list is known to contain at least one element.
+    pub non_empty: bool,
+}
+
+impl PartialEq for TList {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        if std::ptr::eq(self, other) {
+            return true;
+        }
+
+        if self.non_empty != other.non_empty {
+            return false;
+        }
+
+        if self.known_count != other.known_count {
+            return false;
+        }
+
+        if !(Arc::ptr_eq(&self.element_type, &other.element_type) || *self.element_type == *other.element_type) {
+            return false;
+        }
+
+        self.known_elements == other.known_elements
+    }
+}
+
+impl TList {
+    /// Creates new metadata for a list type with the specified general element type.
+    /// Initializes known elements/count as None, and `non_empty` as false.
+    ///
+    /// # Arguments
+    ///
+    /// * `element_type`: The general type (`TUnion`) of elements in the list, Arced.
+    #[inline]
+    #[must_use]
+    pub fn new(element_type: Arc<TUnion>) -> Self {
+        Self { element_type, known_elements: None, known_count: None, non_empty: false }
+    }
+
+    /// Creates new metadata for a list type with specified known elements.
+    ///
+    /// If all known elements are non-optional, sets `known_count` accordingly.
+    /// Sets `non_empty` to true if any known element is non-optional.
+    ///
+    /// # Arguments
+    ///
+    /// * `known_elements`: A `BTreeMap` mapping indices to (`is_optional`, `TUnion`) tuples.
+    #[must_use]
+    pub fn from_known_elements(known_elements: BTreeMap<usize, (bool, TUnion)>) -> Self {
+        Self {
+            element_type: Arc::new(get_never()),
+            known_count: if known_elements.values().all(|(optional, _)| !*optional) {
+                Some(known_elements.len())
+            } else {
+                None
+            },
+            non_empty: known_elements.values().any(|(optional, _)| !*optional),
+            known_elements: Some(known_elements),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn new_non_empty(element_type: Arc<TUnion>) -> Self {
+        Self { element_type, known_elements: None, known_count: None, non_empty: true }
+    }
+
+    /// Returns a reference to the general element type (`TUnion`).
+    #[inline]
+    #[must_use]
+    pub fn get_element_type(&self) -> &TUnion {
+        &self.element_type
+    }
+
+    /// Returns a reference to the map of known element types by index, if any.
+    #[inline]
+    #[must_use]
+    pub fn get_known_elements(&self) -> Option<&BTreeMap<usize, (bool, TUnion)>> {
+        self.known_elements.as_ref()
+    }
+
+    /// Create a non-empty clone of the list type.
+    #[inline]
+    #[must_use]
+    pub fn clone_non_empty(&self) -> Self {
+        Self {
+            element_type: Arc::clone(&self.element_type),
+            known_elements: self.known_elements.clone(),
+            known_count: self.known_count,
+            non_empty: true,
+        }
+    }
+
+    /// Checks if the list is known to be non-empty.
+    #[inline]
+    #[must_use]
+    pub const fn is_non_empty(&self) -> bool {
+        self.non_empty
+    }
+
+    /// Checks if the list contains any known optional elements.
+    #[inline]
+    #[must_use]
+    pub fn has_known_optional_elements(&self) -> bool {
+        self.known_elements.as_ref().is_some_and(|elements| elements.values().any(|(optional, _)| *optional))
+    }
+}
+
+impl TType for TList {
+    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        let mut children = vec![];
+        if let Some(known_items) = self.get_known_elements() {
+            for (_, item_type) in known_items.values() {
+                children.push(TypeRef::Union(item_type));
+            }
+        }
+
+        children.push(TypeRef::Union(self.get_element_type()));
+        children
+    }
+
+    fn needs_population(&self) -> bool {
+        if let Some(elements) = &self.known_elements
+            && elements.iter().any(|element| element.1.1.needs_population())
+        {
+            return true;
+        }
+
+        self.element_type.needs_population()
+    }
+
+    fn is_expandable(&self) -> bool {
+        if let Some(elements) = &self.known_elements
+            && elements.iter().any(|element| element.1.1.is_expandable())
+        {
+            return true;
+        }
+
+        self.element_type.is_expandable()
+    }
+
+    fn is_complex(&self) -> bool {
+        if let Some(elements) = &self.known_elements
+            && !elements.is_empty()
+        {
+            return true;
+        }
+
+        self.element_type.is_complex()
+    }
+
+    fn get_id(&self) -> Word {
+        if let Some(elements) = &self.known_elements {
+            // Format as list{...} shape
+            let mut buf: Vec<u8> = Vec::new();
+            buf.extend_from_slice(b"list{");
+            let has_optional = self.has_known_optional_elements();
+            let mut first = true;
+            let mut include_index = false;
+            for (i, (optional, element_type)) in elements {
+                if first {
+                    first = false;
+                    include_index = *i != 0;
+                } else {
+                    buf.extend_from_slice(b", ");
+                }
+
+                if has_optional || include_index {
+                    buf.extend_from_slice(i.to_string().as_bytes());
+                    if *optional {
+                        buf.extend_from_slice(b"?");
+                    }
+
+                    buf.extend_from_slice(b": ");
+                }
+
+                buf.extend_from_slice(element_type.get_id().as_bytes());
+            }
+
+            if !self.element_type.is_never() {
+                if !first {
+                    buf.extend_from_slice(b", ");
+                }
+
+                buf.extend_from_slice(b"...<");
+                buf.extend_from_slice(self.element_type.get_id().as_bytes());
+                buf.extend_from_slice(b">");
+            }
+
+            buf.extend_from_slice(b"}");
+
+            word(&buf)
+        } else {
+            concat_word!(
+                if self.is_non_empty() { b"non-empty-list".as_slice() } else { b"list".as_slice() },
+                b"<",
+                self.element_type.get_id(),
+                b">"
+            )
+        }
+    }
+
+    fn get_pretty_id_with_indent(&self, indent: usize) -> Word {
+        if let Some(elements) = &self.known_elements {
+            if elements.is_empty() && self.element_type.is_never() {
+                return word(b"list{}");
+            }
+
+            let mut buf: Vec<u8> = Vec::new();
+            buf.extend_from_slice(b"list{\n");
+            let element_indent = indent + 2;
+            let has_optional = self.has_known_optional_elements();
+            let mut include_index = false;
+
+            for (i, (optional, element_type)) in elements {
+                if *i == 0 {
+                    include_index = elements.len() > 1 || has_optional;
+                }
+
+                buf.resize(buf.len() + element_indent, b' ');
+                if has_optional || include_index {
+                    buf.extend_from_slice(i.to_string().as_bytes());
+                    if *optional {
+                        buf.extend_from_slice(b"?");
+                    }
+                    buf.extend_from_slice(b": ");
+                }
+                buf.extend_from_slice(element_type.get_pretty_id_with_indent(element_indent).as_bytes());
+                buf.extend_from_slice(b",\n");
+            }
+
+            if !self.element_type.is_never() {
+                buf.resize(buf.len() + element_indent, b' ');
+                buf.extend_from_slice(b"...");
+                if self.element_type.is_complex() {
+                    buf.extend_from_slice(b"<\n");
+                    buf.resize(buf.len() + element_indent + 2, b' ');
+                    buf.extend_from_slice(self.element_type.get_pretty_id_with_indent(element_indent + 2).as_bytes());
+                    buf.extend_from_slice(b",\n");
+                    buf.resize(buf.len() + element_indent, b' ');
+                    buf.extend_from_slice(b">");
+                } else {
+                    buf.extend_from_slice(b"<");
+                    buf.extend_from_slice(self.element_type.get_pretty_id_with_indent(element_indent).as_bytes());
+                    buf.extend_from_slice(b">");
+                }
+                buf.extend_from_slice(b",\n");
+            }
+
+            buf.resize(buf.len() + indent, b' ');
+            buf.extend_from_slice(b"}");
+
+            word(&buf)
+        } else if self.element_type.is_complex() {
+            let mut buf: Vec<u8> = Vec::new();
+            buf.extend_from_slice(if self.is_non_empty() { b"non-empty-list" } else { b"list" });
+            buf.extend_from_slice(b"<\n");
+            buf.resize(buf.len() + indent + 2, b' ');
+            buf.extend_from_slice(self.element_type.get_pretty_id_with_indent(indent + 2).as_bytes());
+            buf.extend_from_slice(b",\n");
+            buf.resize(buf.len() + indent, b' ');
+            buf.extend_from_slice(b">");
+            word(&buf)
+        } else {
+            concat_word!(
+                if self.is_non_empty() { b"non-empty-list".as_slice() } else { b"list".as_slice() },
+                b"<",
+                self.element_type.get_pretty_id_with_indent(indent),
+                b">"
+            )
+        }
+    }
+}

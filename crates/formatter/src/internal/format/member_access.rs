@@ -1,0 +1,1056 @@
+use mago_allocator::Arena;
+use mago_allocator::vec::Vec;
+use mago_allocator::vec_in;
+use mago_database::file::HasFileId;
+use mago_span::HasSpan;
+use mago_span::Position;
+use mago_span::Span;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::Call;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Instantiation;
+use mago_syntax::cst::MethodCall;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::NullSafeMethodCall;
+use mago_syntax::cst::NullSafePropertyAccess;
+use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::StaticMethodCall;
+use mago_syntax::cst::Variable;
+
+use crate::document::Document;
+use crate::document::Group;
+use crate::document::IndentIfBreak;
+use crate::document::Line;
+use crate::internal::FormatterState;
+use crate::internal::format::Format;
+use crate::internal::format::call_arguments::print_argument_list;
+use crate::internal::format::call_arguments::promote_argument_list_to_partial;
+use crate::internal::format::call_arguments::should_break_all_arguments;
+use crate::internal::format::misc;
+use crate::internal::format::misc::is_breaking_expression;
+use crate::internal::format::misc::is_simple_call_argument;
+use crate::internal::format::misc::is_simple_expression;
+use crate::internal::format::misc::is_string_word_type;
+use crate::internal::utils::get_expression_width;
+use crate::internal::utils::string_width;
+use crate::internal::utils::unwrap_parenthesized;
+
+#[derive(Debug)]
+pub(super) struct MemberAccessChain<'arena, A>
+where
+    A: Arena,
+{
+    pub base: &'arena Expression<'arena>,
+    pub accesses: Vec<'arena, MemberAccess<'arena>, A>,
+}
+
+#[derive(Debug)]
+pub(super) enum MemberAccess<'arena> {
+    PropertyAccess(&'arena PropertyAccess<'arena>),
+    NullSafePropertyAccess(&'arena NullSafePropertyAccess<'arena>),
+    StaticMethodCall(&'arena StaticMethodCall<'arena>),
+    MethodCall(&'arena MethodCall<'arena>),
+    NullSafeMethodCall(&'arena NullSafeMethodCall<'arena>),
+}
+
+impl<'arena> MemberAccess<'arena> {
+    #[inline]
+    const fn is_property_access(&self) -> bool {
+        matches!(self, MemberAccess::PropertyAccess(_) | MemberAccess::NullSafePropertyAccess(_))
+    }
+
+    #[inline]
+    const fn get_operator_as_bytes(&self) -> &'static [u8] {
+        match self {
+            MemberAccess::PropertyAccess(_) | MemberAccess::MethodCall(_) => b"->",
+            MemberAccess::NullSafePropertyAccess(_) | MemberAccess::NullSafeMethodCall(_) => b"?->",
+            MemberAccess::StaticMethodCall(_) => b"::",
+        }
+    }
+
+    #[inline]
+    const fn get_operator_span(&self) -> Span {
+        match self {
+            MemberAccess::PropertyAccess(c) => c.arrow,
+            MemberAccess::NullSafePropertyAccess(c) => c.question_mark_arrow,
+            MemberAccess::MethodCall(c) => c.arrow,
+            MemberAccess::NullSafeMethodCall(c) => c.question_mark_arrow,
+            MemberAccess::StaticMethodCall(c) => c.double_colon,
+        }
+    }
+
+    #[inline]
+    const fn get_selector(&self) -> &'arena ClassLikeMemberSelector<'arena> {
+        match self {
+            MemberAccess::PropertyAccess(c) => &c.property,
+            MemberAccess::NullSafePropertyAccess(c) => &c.property,
+            MemberAccess::MethodCall(c) => &c.method,
+            MemberAccess::NullSafeMethodCall(c) => &c.method,
+            MemberAccess::StaticMethodCall(c) => &c.method,
+        }
+    }
+
+    #[inline]
+    fn get_arguments_list(&self) -> Option<&'arena ArgumentList<'arena>> {
+        match self {
+            MemberAccess::MethodCall(call) => Some(&call.argument_list),
+            MemberAccess::NullSafeMethodCall(call) => Some(&call.argument_list),
+            MemberAccess::StaticMethodCall(call) => Some(&call.argument_list),
+            _ => None,
+        }
+    }
+
+    fn get_flat_width(&self, with_binary_arguments: bool) -> Option<usize> {
+        let selector_width = get_selector_width(self.get_selector())?;
+        let arguments_width = match self.get_arguments_list() {
+            Some(argument_list) => get_argument_list_width(argument_list, with_binary_arguments)?,
+            None => 0,
+        };
+
+        Some(string_width(self.get_operator_as_bytes()) + selector_width + arguments_width)
+    }
+}
+
+impl<'arena, A> MemberAccessChain<'arena, A>
+where
+    A: Arena,
+{
+    #[inline]
+    fn get_eligibility_score(&self, f: &FormatterState<'_, 'arena, A>) -> usize {
+        let mut score: i32 = 0;
+        let mut account_for_simple_calls = true;
+        let mut always_account_for_simple_calls = false;
+
+        match self.base {
+            Expression::Instantiation(instantiation) => {
+                // A `new X(...)` receiver normally pushes the chain toward breaking.
+                // However, when the chain is short (<= 2 links) and every link is a
+                // simple call (no breaking arguments of its own), a receiver whose
+                // *own* argument list will print across multiple lines should
+                // not also drag the trailing short chain onto separate lines.
+                // See: https://github.com/carthage-software/mago/issues/1711
+                let receiver_args_multiline = instantiation
+                    .argument_list
+                    .as_ref()
+                    .is_some_and(|argument_list| receiver_argument_list_will_break(f, instantiation, argument_list));
+
+                let short_simple_chain = self.accesses.len() <= 2
+                    && self.accesses.iter().all(|access| match access.get_arguments_list() {
+                        Some(argument_list) => !argument_list
+                            .arguments
+                            .iter()
+                            .any(|argument| is_breaking_expression(f, argument.value(), false)),
+                        None => true,
+                    });
+
+                if !(receiver_args_multiline && short_simple_chain) {
+                    score += 2; // Instantiation adds extra score
+                }
+            }
+            Expression::Call(Call::Function(FunctionCall { argument_list, .. }))
+                if argument_list.arguments.len() == 1 =>
+            {
+                let (is_breaking_argument, is_string_word_type) = match argument_list.arguments.first() {
+                    Some(argument) => {
+                        (is_breaking_expression(f, argument.value(), true), is_string_word_type(argument.value()))
+                    }
+                    None => (false, false),
+                };
+
+                if is_string_word_type {
+                    always_account_for_simple_calls = true;
+                } else if is_breaking_argument {
+                    score -= 1;
+                }
+            }
+            _ => {
+                // For other base expressions, we don't add extra score
+            }
+        }
+
+        if self.accesses.len() <= 2 && always_account_for_simple_calls {
+            score -= 1;
+        }
+
+        for member_access in &self.accesses {
+            let (method_selector, argument_list) = match member_access {
+                MemberAccess::PropertyAccess(_) | MemberAccess::NullSafePropertyAccess(_) => {
+                    score += 1;
+
+                    continue;
+                }
+                MemberAccess::MethodCall(MethodCall { method, argument_list, .. })
+                | MemberAccess::NullSafeMethodCall(NullSafeMethodCall { method, argument_list, .. })
+                | MemberAccess::StaticMethodCall(StaticMethodCall { method, argument_list, .. }) => {
+                    (method, argument_list)
+                }
+            };
+
+            // Arbitrarily reduce score for very short method names
+            // see: https://github.com/carthage-software/mago/issues/334
+            if let ClassLikeMemberSelector::Identifier(method_name) = method_selector {
+                if method_name.value.len() <= 2 {
+                    score -= 2;
+                } else if method_name.value.len() == 3 {
+                    score -= 1;
+                }
+            }
+
+            if (!account_for_simple_calls && !always_account_for_simple_calls) || argument_list.arguments.is_empty() {
+                score += 2;
+                account_for_simple_calls = false;
+
+                continue;
+            }
+
+            let breaking_arguments = if argument_list.arguments.len() == 1 {
+                argument_list.arguments.first().map(Argument::value).is_some_and(|e| is_breaking_expression(f, e, true))
+            } else {
+                argument_list.arguments.iter().all(|arg| !arg.is_positional())
+                    && argument_list.arguments.iter().any(|arg| is_breaking_expression(f, arg.value(), false))
+            };
+
+            if breaking_arguments {
+                score += 1;
+            } else {
+                score += 2;
+                account_for_simple_calls = false;
+            }
+        }
+
+        if self.accesses.len() >= 6 {
+            score += 3;
+        }
+
+        if f.in_condition {
+            // In conditions, we lower the score to avoid breaking chains too eagerly
+            score -= 3;
+        }
+
+        score.max(0) as usize
+    }
+
+    #[inline]
+    pub fn is_eligible_for_chaining(&self, f: &FormatterState<'_, 'arena, A>) -> bool {
+        if self.has_comments_in_chain(f) {
+            return true;
+        }
+
+        if f.settings.preserve_breaking_member_access_chain && self.is_already_broken(f) {
+            return true;
+        }
+
+        let score = self.get_eligibility_score(f);
+        let threshold = 'threshold: {
+            match self.base {
+                Expression::Call(Call::Function(function_call)) => {
+                    if function_call.argument_list.arguments.len() == 1
+                        && let Some(first_argument) = function_call.argument_list.arguments.first()
+                        && matches!(self.accesses.last(), Some(MemberAccess::MethodCall(MethodCall { argument_list, .. }) | MemberAccess::NullSafeMethodCall(NullSafeMethodCall { argument_list, .. })) if !argument_list.arguments.is_empty())
+                    {
+                        if !matches!(function_call.function, Expression::Identifier(Identifier::Local(_)))
+                            || !first_argument.is_positional()
+                            || !is_simple_expression(first_argument.value())
+                        {
+                            2
+                        } else {
+                            3
+                        }
+                    } else {
+                        4
+                    }
+                }
+                Expression::Variable(Variable::Direct(_))
+                | Expression::Identifier(_)
+                | Expression::ConstantAccess(_)
+                | Expression::Instantiation(_) => {
+                    // Check if the last access is a method call with arguments
+                    let Some(
+                        MemberAccess::MethodCall(MethodCall { argument_list, .. })
+                        | MemberAccess::NullSafeMethodCall(NullSafeMethodCall { argument_list, .. }),
+                    ) = self.accesses.last()
+                    else {
+                        break 'threshold 6;
+                    };
+
+                    // Check argument list length
+                    if argument_list.arguments.len() > 1 {
+                        break 'threshold 6;
+                    }
+
+                    match &self.base {
+                        Expression::Variable(Variable::Direct(v)) => {
+                            if string_width(v.name) > 5 {
+                                4
+                            } else {
+                                5
+                            }
+                        }
+                        Expression::Identifier(_) | Expression::ConstantAccess(_) => 6,
+                        Expression::Instantiation(_) => 6,
+                        #[allow(clippy::unreachable)]
+                        _ => unreachable!(), // We already matched these variants
+                    }
+                }
+                _ => 4,
+            }
+        };
+
+        score >= threshold
+    }
+
+    #[inline]
+    fn is_first_link_static_method_call(&self) -> bool {
+        matches!(self.accesses.first(), Some(MemberAccess::StaticMethodCall(_)))
+    }
+
+    #[inline]
+    fn is_first_link_already_broken(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        let Some(first_access) = self.accesses.first() else {
+            return false;
+        };
+
+        misc::has_new_line_in_range(
+            f.source_text,
+            self.base.span().end.offset,
+            first_access.get_operator_span().start.offset,
+        )
+    }
+
+    #[inline]
+    fn is_first_link_object_method_call(&self) -> bool {
+        matches!(self.accesses.first(), Some(MemberAccess::MethodCall(_) | MemberAccess::NullSafeMethodCall(_)))
+    }
+
+    fn exceeds_print_width(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        let Some(width) = self.get_flat_width(false) else {
+            return false;
+        };
+
+        width > f.settings.print_width
+    }
+
+    fn exceeds_print_width_from_line_start(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        let Some(width) = self.get_flat_width(true) else {
+            return false;
+        };
+
+        let base_start = self.base.span().start.offset;
+        let line = f.file.line_number(base_start);
+        let Some(line_start) = f.file.get_line_start_offset(line) else {
+            return false;
+        };
+
+        let prefix_width = string_width(&f.source_text[line_start as usize..base_start as usize]);
+
+        prefix_width + width > f.settings.print_width
+    }
+
+    #[inline]
+    fn has_break_after_first_access(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        for (i, access) in self.accesses.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+
+            let prev_access = &self.accesses[i - 1];
+            let prev_selector = prev_access.get_selector();
+            let prev_selector_end = match prev_access.get_arguments_list() {
+                Some(args) => args.span().end,
+                None => prev_selector.span().end,
+            };
+
+            if misc::has_new_line_in_range(
+                f.source_text,
+                prev_selector_end.offset,
+                access.get_operator_span().start_offset(),
+            ) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn has_line_break_before_statement_terminator(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        let Some(last_access) = self.accesses.last() else {
+            return false;
+        };
+
+        let chain_end = match last_access.get_arguments_list() {
+            Some(argument_list) => argument_list.span().end.offset,
+            None => last_access.get_selector().span().end.offset,
+        };
+
+        let terminator_start = match f.parent_node() {
+            Node::ExpressionStatement(statement) => statement.terminator.span().start.offset,
+            Node::Return(r#return) => r#return.terminator.span().start.offset,
+            Node::Assignment(_) => match (f.grandparent_node(), f.great_grandparent_node()) {
+                (Some(Node::Expression(_)), Some(Node::ExpressionStatement(statement))) => {
+                    statement.terminator.span().start.offset
+                }
+                (Some(Node::Expression(_)), Some(Node::Return(r#return))) => r#return.terminator.span().start.offset,
+                _ => return false,
+            },
+            _ => return false,
+        };
+
+        misc::has_new_line_in_range(f.source_text, chain_end, terminator_start)
+    }
+
+    fn get_flat_width(&self, with_binary_arguments: bool) -> Option<usize> {
+        let mut width = get_flat_expression_width(self.base, with_binary_arguments)?;
+        for access in &self.accesses {
+            width += access.get_flat_width(with_binary_arguments)?;
+        }
+
+        Some(width)
+    }
+
+    #[inline]
+    fn is_already_broken(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        let mut accesses_len = self.accesses.len();
+        if should_inline_first_access(f, self) {
+            accesses_len -= 1; // First access is inline, so we don't count it for broken links
+        }
+
+        let broken_links = self
+            .link_gaps()
+            .filter(|(start, end)| misc::has_new_line_in_range(f.source_text, start.offset, end.offset))
+            .count();
+
+        if broken_links == 0 {
+            return false;
+        }
+
+        if broken_links >= accesses_len || broken_links >= 2 {
+            return true;
+        }
+
+        if accesses_len <= 3 {
+            // we must have at least 2 breaks for chains of length 3 or less
+            return false;
+        }
+
+        true
+    }
+
+    fn link_gaps(&self) -> impl Iterator<Item = (Position, Position)> + '_ {
+        let first = self.accesses.first().map(|access| (self.base.span().end, access.get_operator_span().start));
+
+        first.into_iter().chain(self.accesses.windows(2).filter_map(|pair| {
+            let [previous, current] = pair else {
+                return None;
+            };
+
+            let end = match previous.get_arguments_list() {
+                Some(arguments) => arguments.span().end,
+                None => previous.get_selector().span().end,
+            };
+
+            Some((end, current.get_operator_span().start))
+        }))
+    }
+
+    #[inline]
+    fn has_comments_in_chain(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        if self.link_gaps().any(|(start, end)| f.has_inner_comment(Span::new(f.file_id(), start, end))) {
+            return true;
+        }
+
+        self.accesses.iter().skip(1).any(|access| {
+            f.has_inner_comment(Span::new(
+                access.get_operator_span().file_id,
+                access.get_operator_span().end_position(),
+                access.get_selector().span().start_position(),
+            ))
+        })
+    }
+
+    /// Checks if any method call in the chain has arguments that will force the chain to break.
+    #[inline]
+    fn has_breaking_arguments(&self) -> bool {
+        let call_count = self.accesses.iter().filter(|a| a.get_arguments_list().is_some()).count();
+        if call_count <= 2 {
+            return false;
+        }
+
+        self.accesses.iter().any(|access| {
+            let Some(argument_list) = access.get_arguments_list() else {
+                return false;
+            };
+
+            argument_list.arguments.iter().any(|arg| !is_simple_call_argument(arg.value(), 2))
+        })
+    }
+
+    #[inline]
+    fn must_break(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        if f.settings.preserve_breaking_member_access_chain && self.has_line_break_before_statement_terminator(f) {
+            return true;
+        }
+
+        if self.has_comments_in_chain(f) && self.is_already_broken(f) {
+            return true;
+        }
+
+        if self.is_first_link_static_method_call() && self.accesses.len() > 5 {
+            return true;
+        }
+
+        if let Expression::Variable(Variable::Direct(variable)) = self.base
+            && variable.name.eq_ignore_ascii_case(b"$builder")
+            && self.accesses.len() >= 3
+            && self.accesses.iter().all(|access| {
+                let (MemberAccess::MethodCall(MethodCall { method: ClassLikeMemberSelector::Identifier(id), .. })
+                | MemberAccess::NullSafeMethodCall(NullSafeMethodCall {
+                    method: ClassLikeMemberSelector::Identifier(id),
+                    ..
+                })) = access
+                else {
+                    return false;
+                };
+
+                id.value.starts_with(b"add") || id.value.starts_with(b"with")
+            })
+        {
+            return true;
+        }
+
+        let must_break = match self.base {
+            Expression::Instantiation(_) => {
+                self.accesses.iter().all(|access| {
+                    matches!(access, MemberAccess::MethodCall(_) | MemberAccess::NullSafeMethodCall(_))
+                }) && self.accesses.iter().any(|access| {
+                    matches!(access, MemberAccess::MethodCall(MethodCall { argument_list, .. }) | MemberAccess::NullSafeMethodCall(NullSafeMethodCall { argument_list, .. }) if !argument_list.arguments.is_empty())
+                })
+            }
+            Expression::Variable(Variable::Direct(variable)) => {
+                variable.name == b"$this" && self.accesses.len() > 5
+            }
+            _ => false,
+        };
+
+        if must_break || !f.settings.preserve_breaking_member_access_chain {
+            return must_break;
+        }
+
+        self.is_already_broken(f)
+    }
+
+    #[inline]
+    fn find_fluent_access_chain_start(&self) -> Option<usize> {
+        // If empty, return None
+        if self.accesses.is_empty() {
+            return None;
+        }
+
+        let mut i = 0;
+        let mut pattern_start_index = None;
+        let mut first_pattern_method_count = 0usize;
+        let mut patterns_count = 0;
+
+        // Iterate through all accesses
+        while i < self.accesses.len() {
+            // Count consecutive property accesses
+            let property_start = i;
+            let mut property_count = 0;
+
+            while i < self.accesses.len()
+                && matches!(self.accesses[i], MemberAccess::PropertyAccess(_) | MemberAccess::NullSafePropertyAccess(_))
+            {
+                property_count += 1;
+                i += 1;
+            }
+
+            // Skip if no properties found
+            if property_count == 0 {
+                i += 1;
+                continue;
+            }
+
+            // Count consecutive method calls
+            let mut method_count = 0;
+
+            while i < self.accesses.len()
+                && matches!(self.accesses[i], MemberAccess::MethodCall(_) | MemberAccess::NullSafeMethodCall(_))
+            {
+                method_count += 1;
+                i += 1;
+            }
+
+            // If we found at least one property access followed by at least one method call,
+            // consider it a valid pattern and record the start position
+            if property_count > 0 && method_count > 0 {
+                if pattern_start_index.is_none() {
+                    pattern_start_index = Some(property_start);
+                    first_pattern_method_count = method_count;
+                }
+
+                patterns_count += 1;
+            }
+        }
+
+        match pattern_start_index {
+            Some(0) if patterns_count > 1 => Some(0),
+            Some(start) if start > 0 && patterns_count > 1 => Some(start),
+            Some(start) if start > 0 && patterns_count == 1 && first_pattern_method_count <= 1 => Some(start),
+            _ => None,
+        }
+    }
+}
+
+fn get_argument_width(argument: &Argument<'_>, with_binary_arguments: bool) -> Option<usize> {
+    match argument {
+        Argument::Positional(argument) => {
+            let unpack_width = usize::from(argument.ellipsis.is_some()) * 3;
+
+            get_flat_expression_width(argument.value, with_binary_arguments).map(|width| width + unpack_width)
+        }
+        Argument::Named(argument) => get_flat_expression_width(argument.value, with_binary_arguments)
+            .map(|width| width + string_width(argument.name.value) + 2),
+    }
+}
+
+fn receiver_argument_list_will_break<A>(
+    f: &FormatterState<'_, '_, A>,
+    instantiation: &Instantiation<'_>,
+    argument_list: &ArgumentList<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    // An empty argument list (`new static()`) never breaks, so the receiver
+    // cannot be multi-line. Short-circuit before the width fallback below,
+    // which would otherwise force a "will break" verdict for a receiver that
+    // fits comfortably on one line.
+    if argument_list.arguments.is_empty() {
+        return false;
+    }
+
+    let argument_list = promote_argument_list_to_partial(f.arena, argument_list);
+    if should_break_all_arguments(f, argument_list, false) {
+        return true;
+    }
+
+    // Use `is_some_and` (not `is_none_or`) so that an un-computable flat width
+    // does not force a "will break" verdict. When the receiver is already
+    // printed across multiple lines (e.g. on a second format pass) the flat
+    // width is `None`; treating that as "will break" makes the surrounding
+    // attach/break decision depend on the current formatting state and breaks
+    // idempotency. Only a *known* width that exceeds the print width means the
+    // receiver argument list will break.
+    get_instantiation_width(instantiation).is_some_and(|width| width > f.settings.print_width)
+}
+
+fn get_instantiation_width(instantiation: &Instantiation<'_>) -> Option<usize> {
+    let class_width = get_flat_expression_width(instantiation.class, false)?;
+    let argument_list_width = match &instantiation.argument_list {
+        Some(argument_list) => get_argument_list_width(argument_list, false)?,
+        None => 0,
+    };
+
+    Some(string_width(b"new ") + class_width + argument_list_width)
+}
+
+fn get_argument_list_width(argument_list: &ArgumentList<'_>, with_binary_arguments: bool) -> Option<usize> {
+    let mut width = 2;
+    for (i, argument) in argument_list.arguments.iter().enumerate() {
+        if i > 0 {
+            width += 2;
+        }
+
+        width += get_argument_width(argument, with_binary_arguments)?;
+    }
+
+    Some(width)
+}
+
+fn get_variable_width(variable: &Variable<'_>) -> Option<usize> {
+    match variable {
+        Variable::Direct(variable) => Some(string_width(variable.name)),
+        Variable::Indirect(variable) => get_expression_width(variable.expression).map(|width| width + 3),
+        Variable::Nested(variable) => get_variable_width(variable.variable).map(|width| width + 1),
+    }
+}
+
+fn get_selector_width(selector: &ClassLikeMemberSelector<'_>) -> Option<usize> {
+    match selector {
+        ClassLikeMemberSelector::Identifier(identifier) => Some(string_width(identifier.value)),
+        ClassLikeMemberSelector::Variable(variable) => get_variable_width(variable),
+        ClassLikeMemberSelector::Expression(selector) => {
+            get_flat_expression_width(selector.expression, false).map(|width| width + 2)
+        }
+        ClassLikeMemberSelector::Missing(_) => None,
+    }
+}
+
+fn get_flat_expression_width(expression: &Expression<'_>, with_binary_arguments: bool) -> Option<usize> {
+    if let Some(width) = get_expression_width(expression) {
+        return Some(width);
+    }
+
+    let recurse = |expression| get_flat_expression_width(expression, with_binary_arguments);
+    let argument_list_width = |argument_list| get_argument_list_width(argument_list, with_binary_arguments);
+
+    match expression {
+        Expression::Parenthesized(parenthesized) => recurse(parenthesized.expression).map(|width| width + 2),
+        Expression::Access(Access::Property(access)) => recurse(access.object)
+            .zip(get_selector_width(&access.property))
+            .map(|(object, property)| object + string_width(b"->") + property),
+        Expression::Access(Access::NullSafeProperty(access)) => recurse(access.object)
+            .zip(get_selector_width(&access.property))
+            .map(|(object, property)| object + string_width(b"?->") + property),
+        Expression::Call(Call::Function(call)) if with_binary_arguments => recurse(call.function)
+            .zip(argument_list_width(&call.argument_list))
+            .map(|(function, arguments)| function + arguments),
+        Expression::Call(Call::Method(call)) => recurse(call.object)
+            .zip(get_selector_width(&call.method))
+            .zip(argument_list_width(&call.argument_list))
+            .map(|((object, method), arguments)| object + string_width(b"->") + method + arguments),
+        Expression::Call(Call::NullSafeMethod(call)) => recurse(call.object)
+            .zip(get_selector_width(&call.method))
+            .zip(argument_list_width(&call.argument_list))
+            .map(|((object, method), arguments)| object + string_width(b"?->") + method + arguments),
+        Expression::Call(Call::StaticMethod(call)) => recurse(call.class)
+            .zip(get_selector_width(&call.method))
+            .zip(argument_list_width(&call.argument_list))
+            .map(|((class, method), arguments)| class + string_width(b"::") + method + arguments),
+        Expression::Binary(binary) if with_binary_arguments => recurse(binary.lhs)
+            .zip(recurse(binary.rhs))
+            .map(|(lhs, rhs)| lhs + string_width(binary.operator.as_bytes()) + rhs + 2),
+        _ => None,
+    }
+}
+
+pub(super) fn collect_member_access_chain<'arena, A>(
+    arena: &'arena A,
+    expr: &'arena Expression<'arena>,
+) -> Option<MemberAccessChain<'arena, A>>
+where
+    A: Arena,
+{
+    let expr = unwrap_parenthesized(expr);
+
+    let mut member_access: Vec<'arena, MemberAccess<'arena>, A> = Vec::new_in(arena);
+    let mut current_expr = expr;
+
+    loop {
+        match current_expr {
+            Expression::Call(Call::StaticMethod(static_method_call)) if !member_access.is_empty() => {
+                member_access.push(MemberAccess::StaticMethodCall(static_method_call));
+
+                current_expr = unwrap_parenthesized(static_method_call.class);
+
+                break;
+            }
+            Expression::Access(Access::Property(property_access)) => {
+                member_access.push(MemberAccess::PropertyAccess(property_access));
+
+                current_expr = unwrap_parenthesized(property_access.object);
+            }
+            Expression::Access(Access::NullSafeProperty(null_safe_property_access)) => {
+                member_access.push(MemberAccess::NullSafePropertyAccess(null_safe_property_access));
+
+                current_expr = unwrap_parenthesized(null_safe_property_access.object);
+            }
+            Expression::Call(Call::Method(method_call)) => {
+                member_access.push(MemberAccess::MethodCall(method_call));
+
+                current_expr = unwrap_parenthesized(method_call.object);
+            }
+            Expression::Call(Call::NullSafeMethod(null_safe_method_call)) => {
+                member_access.push(MemberAccess::NullSafeMethodCall(null_safe_method_call));
+
+                current_expr = unwrap_parenthesized(null_safe_method_call.object);
+            }
+            _ => {
+                break;
+            }
+        }
+    }
+
+    if member_access.is_empty() {
+        None
+    } else {
+        member_access.reverse();
+
+        Some(MemberAccessChain { base: unwrap_parenthesized(current_expr), accesses: member_access })
+    }
+}
+
+pub(super) fn print_member_access_chain<'arena, A>(
+    member_access_chain: &MemberAccessChain<'arena, A>,
+    f: &mut FormatterState<'_, 'arena, A>,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    enum ChainBaseFrame {
+        None,
+        BaseHandlesParens,
+        ChainHandlesParens,
+    }
+
+    let chain_base_frame = if let Some(first) = member_access_chain.accesses.first() {
+        match first {
+            MemberAccess::PropertyAccess(pa) => {
+                f.enter_node(Node::PropertyAccess(pa));
+                ChainBaseFrame::BaseHandlesParens
+            }
+            MemberAccess::NullSafePropertyAccess(pa) => {
+                f.enter_node(Node::NullSafePropertyAccess(pa));
+                ChainBaseFrame::BaseHandlesParens
+            }
+            MemberAccess::MethodCall(mc) => {
+                f.enter_node(Node::MethodCall(mc));
+                ChainBaseFrame::ChainHandlesParens
+            }
+            MemberAccess::NullSafeMethodCall(mc) => {
+                f.enter_node(Node::NullSafeMethodCall(mc));
+                ChainBaseFrame::ChainHandlesParens
+            }
+            MemberAccess::StaticMethodCall(mc) => {
+                f.enter_node(Node::StaticMethodCall(mc));
+                ChainBaseFrame::ChainHandlesParens
+            }
+        }
+    } else {
+        ChainBaseFrame::None
+    };
+
+    let base_document = member_access_chain.base.format(f);
+
+    if !matches!(chain_base_frame, ChainBaseFrame::None) {
+        f.leave_node();
+    }
+
+    let chain_owns_parens = match chain_base_frame {
+        ChainBaseFrame::BaseHandlesParens => false,
+        ChainBaseFrame::None | ChainBaseFrame::ChainHandlesParens => base_needs_parens(f, member_access_chain.base),
+    };
+
+    let mut parts = if chain_owns_parens {
+        vec_in![f.arena; Document::String(b"("), base_document, Document::String(b")")]
+    } else {
+        vec_in![f.arena; base_document]
+    };
+
+    let mut accesses_iter = member_access_chain.accesses.iter().enumerate().peekable();
+    let fluent_access_chain_start = member_access_chain.find_fluent_access_chain_start();
+    let must_break = member_access_chain.must_break(f);
+    let group_id = f.next_id();
+
+    let mut last_element_end = member_access_chain.base.span().end;
+
+    for _ in 0..inline_prefix_len(f, member_access_chain) {
+        let Some((_, chain_link)) = accesses_iter.next() else {
+            break;
+        };
+
+        parts.push(format_access_operator(f, chain_link.get_operator_span(), chain_link.get_operator_as_bytes()));
+
+        let selector = chain_link.get_selector();
+        parts.push(selector.format(f));
+        last_element_end = selector.span().end;
+        if let Some(argument_list) = chain_link.get_arguments_list() {
+            let mut formatted_argument_list = vec_in![f.arena; print_argument_list(f, argument_list, true)];
+            if let Some(comments) = f.print_trailing_comments(argument_list.span()) {
+                formatted_argument_list.push(comments);
+            }
+
+            parts.push(Document::Group(Group::new(formatted_argument_list)));
+            last_element_end = argument_list.span().end;
+        }
+    }
+
+    let mut should_reset = false;
+    // Now handle the remaining method calls
+    while let Some((i, chain_link)) = accesses_iter.next() {
+        let is_in_fluent_chain = fluent_access_chain_start.is_some_and(|start| i >= start);
+
+        let must_have_new_line = if !is_in_fluent_chain || should_reset || i == 0 {
+            should_reset = false;
+            true
+        } else {
+            f.has_inner_comment(Span::new(f.file_id(), last_element_end, chain_link.get_operator_span().start))
+        };
+
+        let mut contents = if must_have_new_line {
+            if must_break {
+                vec_in![f.arena; Document::Line(Line::hard())]
+            } else {
+                vec_in![f.arena; Document::Line(Line::soft())]
+            }
+        } else {
+            vec_in![f.arena;] // No newline if in fluent chain and last was property
+        };
+
+        contents.push(format_access_operator(f, chain_link.get_operator_span(), chain_link.get_operator_as_bytes()));
+        let selector = chain_link.get_selector();
+        last_element_end = selector.span().end;
+        contents.push(selector.format(f));
+        if let Some(argument_list) = chain_link.get_arguments_list() {
+            let mut formatted_argument_list = vec_in![f.arena; print_argument_list(f, argument_list, true)];
+            if let Some(comments) = f.print_trailing_comments(argument_list.span()) {
+                formatted_argument_list.push(comments);
+            }
+
+            contents.push(Document::Group(Group::new(formatted_argument_list)));
+            last_element_end = argument_list.span().end;
+        }
+
+        if must_break {
+            parts.push(Document::Indent(contents));
+        } else {
+            parts.push(Document::IndentIfBreak(IndentIfBreak::new(group_id, contents)));
+        }
+
+        let is_next_property = accesses_iter.peek().is_some_and(|(_, next)| next.is_property_access());
+        if !chain_link.is_property_access() && is_next_property {
+            should_reset = true;
+        }
+    }
+
+    let should_break = must_break || member_access_chain.has_breaking_arguments();
+    if should_break && !matches!(f.parent_node(), Node::Binary(_)) {
+        parts.push(Document::BreakParent);
+    }
+
+    if matches!(f.parent_node(), Node::ExpressionStatement(_) | Node::Assignment(_) | Node::Return(_)) {
+        f.set_member_access_chain_group_id(group_id);
+    }
+
+    // Wrap everything in a group to manage line breaking
+    Document::Group(Group::new(parts).with_id(group_id))
+}
+
+fn inline_prefix_len<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    member_access_chain: &MemberAccessChain<'arena, A>,
+) -> usize
+where
+    A: Arena,
+{
+    if !should_inline_first_access(f, member_access_chain) {
+        return 0;
+    }
+
+    if !f.settings.method_chain_breaking_style.is_next_line()
+        && member_access_chain.accesses.first().is_some_and(MemberAccess::is_property_access)
+        && !preserve_breaks_first_method(f, member_access_chain)
+    {
+        for (index, access) in member_access_chain.accesses.iter().enumerate() {
+            if !access.is_property_access() {
+                return index + 1;
+            }
+        }
+    }
+
+    1
+}
+
+fn preserve_breaks_first_method<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    member_access_chain: &MemberAccessChain<'arena, A>,
+) -> bool
+where
+    A: Arena,
+{
+    f.settings.preserve_breaking_member_access_chain
+        && !f.settings.preserve_breaking_member_access_chain_first_method_on_same_line
+        && (member_access_chain.is_first_link_already_broken(f)
+            || member_access_chain.has_break_after_first_access(f)
+            || member_access_chain.exceeds_print_width(f))
+}
+
+fn should_inline_first_access<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    member_access_chain: &MemberAccessChain<'arena, A>,
+) -> bool
+where
+    A: Arena,
+{
+    if let Some(first_access) = member_access_chain.accesses.first() {
+        let base_end = member_access_chain.base.span().end;
+        let first_op_start = first_access.get_operator_span().start;
+
+        if f.has_inner_comment(Span::new(f.file_id(), base_end, first_op_start)) {
+            return false;
+        }
+    }
+
+    let preserve_same_line_first_method = f.settings.preserve_breaking_member_access_chain
+        && f.settings.preserve_breaking_member_access_chain_first_method_on_same_line
+        && member_access_chain.is_first_link_object_method_call()
+        && (member_access_chain.is_first_link_already_broken(f)
+            || member_access_chain.has_break_after_first_access(f)
+            || member_access_chain.exceeds_print_width_from_line_start(f));
+
+    if preserve_same_line_first_method {
+        return true;
+    }
+
+    if f.settings.preserve_breaking_member_access_chain
+        && member_access_chain.is_first_link_object_method_call()
+        && (member_access_chain.is_first_link_already_broken(f)
+            || member_access_chain.has_break_after_first_access(f)
+            || member_access_chain.exceeds_print_width(f))
+    {
+        return false;
+    }
+
+    if f.settings.first_method_chain_on_new_line && member_access_chain.is_first_link_object_method_call() {
+        return false;
+    }
+
+    if member_access_chain.find_fluent_access_chain_start().is_some_and(|start| start == 0) {
+        return false;
+    }
+
+    if !f.settings.method_chain_breaking_style.is_next_line() {
+        return true;
+    }
+
+    if member_access_chain.is_first_link_static_method_call() {
+        return true;
+    }
+
+    if let Expression::Variable(Variable::Direct(variable)) = member_access_chain.base
+        && variable.name == b"$this"
+    {
+        return true;
+    }
+
+    false
+}
+
+fn base_needs_parens<'arena, A>(f: &FormatterState<'_, 'arena, A>, base: &'arena Expression<'arena>) -> bool
+where
+    A: Arena,
+{
+    if let Expression::Parenthesized(parenthesized) = base {
+        return base_needs_parens(f, parenthesized.expression);
+    }
+
+    f.callee_expression_need_parenthesis(base, false)
+}
+
+pub(super) fn format_access_operator<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    span: Span,
+    operator: &'arena [u8],
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let leading = f.print_leading_comments(span);
+    let doc = Document::String(operator);
+
+    f.print_comments(leading, doc, None)
+}

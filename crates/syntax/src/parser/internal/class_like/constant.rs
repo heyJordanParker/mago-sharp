@@ -1,0 +1,64 @@
+use crate::T;
+use crate::cst::cst::AttributeList;
+use crate::cst::cst::ClassLikeConstant;
+use crate::cst::cst::ClassLikeConstantItem;
+use crate::cst::cst::Modifier;
+use crate::cst::sequence::Sequence;
+use crate::cst::sequence::TokenSeparatedSequence;
+use crate::error::ParseError;
+use crate::parser::Parser;
+use mago_allocator::prelude::*;
+
+impl<'arena, A> Parser<'_, 'arena, A>
+where
+    A: Arena,
+{
+    pub(crate) fn parse_class_like_constant_with_attributes_and_modifiers(
+        &mut self,
+        attributes: Sequence<'arena, AttributeList<'arena>>,
+        modifiers: Sequence<'arena, Modifier<'arena>>,
+    ) -> Result<ClassLikeConstant<'arena>, ParseError> {
+        Ok(ClassLikeConstant {
+            attribute_lists: attributes,
+            modifiers,
+            r#const: self.expect_keyword(T!["const"])?,
+            hint: match self.stream.peek_kind(1)? {
+                Some(
+                    crate::token::TokenKind::Equal
+                    | crate::token::TokenKind::Semicolon
+                    | crate::token::TokenKind::CloseTag,
+                ) => None,
+                _ => Some(self.parse_type_hint()?),
+            },
+            items: {
+                let mut items = self.new_vec();
+                let mut commas = self.new_vec();
+                loop {
+                    if matches!(self.stream.peek_kind(0)?, Some(T![";" | "?>"])) {
+                        break;
+                    }
+
+                    items.push(self.parse_class_like_constant_item()?);
+
+                    match self.stream.peek_kind(0)? {
+                        Some(T![","]) => commas.push(self.stream.consume()?),
+                        _ => {
+                            break;
+                        }
+                    }
+                }
+
+                TokenSeparatedSequence::new(items, commas)
+            },
+            terminator: self.parse_terminator()?,
+        })
+    }
+
+    fn parse_class_like_constant_item(&mut self) -> Result<ClassLikeConstantItem<'arena>, ParseError> {
+        Ok(ClassLikeConstantItem {
+            name: self.parse_local_identifier()?,
+            equals: self.stream.eat_span(T!["="])?,
+            value: self.parse_expression()?,
+        })
+    }
+}

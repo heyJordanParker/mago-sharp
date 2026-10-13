@@ -1,0 +1,59 @@
+use std::cmp::Ordering;
+use std::io::IsTerminal;
+use std::io::Write;
+
+use foldhash::HashMap;
+
+use mago_database::ReadDatabase;
+
+use crate::IssueCollection;
+use crate::Level;
+use crate::error::ReportingError;
+use crate::formatter::Formatter;
+use crate::formatter::FormatterConfig;
+
+/// Formatter that outputs issue counts by severity level.
+pub(crate) struct CountFormatter;
+
+impl Formatter for CountFormatter {
+    fn format(
+        &self,
+        writer: &mut dyn Write,
+        issues: &IssueCollection,
+        _database: &ReadDatabase,
+        config: &FormatterConfig,
+    ) -> Result<(), ReportingError> {
+        let mut counts: HashMap<Level, usize> = HashMap::default();
+        for issue in crate::formatter::utils::filter_issues(issues, config, false) {
+            *counts.entry(issue.level).or_insert(0) += 1;
+        }
+
+        let mut counts_vec: Vec<_> = counts.into_iter().collect();
+        counts_vec.sort_by(|(level_a, count_a), (level_b, count_b)| match count_b.cmp(count_a) {
+            Ordering::Equal => level_a.cmp(level_b),
+            other => other,
+        });
+
+        let use_colors = config.color_choice.should_use_colors(std::io::stdout().is_terminal());
+
+        for (level, count) in counts_vec {
+            if use_colors {
+                let ansi_code = level_ansi_code(level);
+                writeln!(writer, "\x1b[{ansi_code}m\x1b[1m{level}:\x1b[0m {count}")?;
+            } else {
+                writeln!(writer, "{level}: {count}")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn level_ansi_code(level: Level) -> &'static str {
+    match level {
+        Level::Error => "31",   // Red
+        Level::Warning => "33", // Yellow
+        Level::Note => "34",    // Blue
+        Level::Help => "32",    // Green
+    }
+}

@@ -1,0 +1,228 @@
+use mago_word::Word;
+
+use crate::metadata::CodebaseMetadata;
+use crate::metadata::class_like::ClassLikeMetadata;
+use crate::metadata::flags::MetadataFlags;
+use crate::populator::methods::inherit_methods_from_parent;
+use crate::populator::properties::inherit_properties_from_parent;
+use crate::populator::templates::extend_template_parameters;
+use crate::reference::SymbolReferences;
+
+fn canonicalize_template_relationship(metadata: &mut ClassLikeMetadata, source: Word, actual: Word) {
+    if source == actual {
+        return;
+    }
+
+    if let Some(offsets) = metadata.template_extended_offsets.remove(&source) {
+        metadata.template_extended_offsets.entry(actual).or_insert(offsets);
+    }
+
+    if let Some(count) = metadata.template_type_extends_count.remove(&source) {
+        metadata.template_type_extends_count.entry(actual).or_insert(count);
+    }
+
+    if let Some(count) = metadata.template_type_implements_count.remove(&source) {
+        metadata.template_type_implements_count.entry(actual).or_insert(count);
+    }
+
+    if let Some(count) = metadata.template_type_uses_count.remove(&source) {
+        metadata.template_type_uses_count.entry(actual).or_insert(count);
+    }
+}
+
+/// Merges interface data inherited from a parent interface into the current metadata.
+/// Assumes the parent is already populated.
+pub fn merge_interface_metadata_from_parent_interface(
+    metadata: &mut ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    parent_interface: Word,
+    symbol_references: &mut SymbolReferences,
+) {
+    merge_interface_metadata(metadata, codebase, parent_interface, symbol_references, true);
+}
+
+pub fn merge_metadata_from_required_interface(
+    metadata: &mut ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    required_interface: Word,
+    symbol_references: &mut SymbolReferences,
+) {
+    merge_interface_metadata(metadata, codebase, required_interface, symbol_references, false);
+}
+
+fn merge_interface_metadata(
+    metadata: &mut ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    interface: Word,
+    symbol_references: &mut SymbolReferences,
+    inherit_constants: bool,
+) {
+    symbol_references.add_symbol_reference_to_symbol(metadata.name, interface, true);
+
+    let Some(parent_interface_metadata) = codebase.get_class_like_by_word(interface) else {
+        metadata.invalid_dependencies.insert(interface);
+        return;
+    };
+
+    canonicalize_template_relationship(metadata, interface, parent_interface_metadata.name);
+    if inherit_constants {
+        metadata.direct_parent_interfaces.remove(&interface);
+        metadata.all_parent_interfaces.remove(&interface);
+        metadata.direct_parent_interfaces.insert(parent_interface_metadata.name);
+        metadata.all_parent_interfaces.insert(parent_interface_metadata.name);
+    } else {
+        metadata.require_implements.remove(&interface);
+        metadata.require_implements.insert(parent_interface_metadata.name);
+    }
+
+    if inherit_constants {
+        for (interface_constant_name, interface_constant_metadata) in &parent_interface_metadata.constants {
+            if !metadata.constants.contains_key(interface_constant_name) {
+                metadata.constants.insert(*interface_constant_name, interface_constant_metadata.clone());
+            }
+        }
+    }
+
+    metadata.all_parent_interfaces.extend(parent_interface_metadata.all_parent_interfaces.iter().copied());
+    metadata.invalid_dependencies.extend(parent_interface_metadata.invalid_dependencies.iter().copied());
+
+    if let Some(inheritors) = &parent_interface_metadata.permitted_inheritors {
+        metadata.permitted_inheritors.get_or_insert_default().extend(inheritors.iter().copied());
+    }
+
+    extend_template_parameters(metadata, parent_interface_metadata);
+    inherit_methods_from_parent(metadata, parent_interface_metadata, codebase);
+    inherit_properties_from_parent(metadata, parent_interface_metadata);
+}
+
+/// Merges class-like data inherited from a parent class or trait.
+/// Assumes the parent is already populated.
+pub fn merge_metadata_from_parent_class_like(
+    metadata: &mut ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    parent_class: Word,
+    symbol_references: &mut SymbolReferences,
+) {
+    symbol_references.add_symbol_reference_to_symbol(metadata.name, parent_class, true);
+
+    let Some(parent_metadata) = codebase.get_class_like_by_word(parent_class) else {
+        metadata.invalid_dependencies.insert(parent_class);
+        return;
+    };
+
+    canonicalize_template_relationship(metadata, parent_class, parent_metadata.name);
+    metadata.direct_parent_class = Some(parent_metadata.name);
+    metadata.all_parent_classes.remove(&parent_class);
+    metadata.all_parent_classes.insert(parent_metadata.name);
+
+    metadata.all_parent_classes.extend(parent_metadata.all_parent_classes.iter().copied());
+    metadata.all_parent_interfaces.extend(parent_metadata.all_parent_interfaces.iter().copied());
+    metadata.used_traits.extend(parent_metadata.used_traits.iter().copied());
+    metadata.invalid_dependencies.extend(parent_metadata.invalid_dependencies.iter().copied());
+    metadata.mixins.extend(parent_metadata.mixins.iter().cloned());
+
+    if let Some(inheritors) = &parent_metadata.permitted_inheritors {
+        metadata.permitted_inheritors.get_or_insert_default().extend(inheritors.iter().copied());
+    }
+
+    extend_template_parameters(metadata, parent_metadata);
+
+    inherit_methods_from_parent(metadata, parent_metadata, codebase);
+    inherit_properties_from_parent(metadata, parent_metadata);
+
+    for (parent_constant_name, parent_constant_metadata) in &parent_metadata.constants {
+        if !metadata.constants.contains_key(parent_constant_name) {
+            metadata.constants.insert(*parent_constant_name, parent_constant_metadata.clone());
+        }
+    }
+
+    if parent_metadata.flags.has_consistent_templates() {
+        metadata.flags |= MetadataFlags::CONSISTENT_TEMPLATES;
+    }
+
+    // `new Self(…)` can create any descendant of a PHP# class whose constructor is `required`, spec section 25, so
+    // each descendant's constructor is compared with its parent's. PHP's `@consistent-constructor` stays on its class.
+    if parent_metadata.flags.has_consistent_constructor() && parent_metadata.flags.is_sharp() {
+        metadata.flags |= MetadataFlags::CONSISTENT_CONSTRUCTOR;
+    }
+}
+
+/// Merges class-like data inherited from a required class.
+/// Assumes the parent is already populated.
+pub fn merge_metadata_from_required_class_like(
+    metadata: &mut ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    parent_class: Word,
+    symbol_references: &mut SymbolReferences,
+) {
+    symbol_references.add_symbol_reference_to_symbol(metadata.name, parent_class, true);
+
+    let Some(parent_metadata) = codebase.get_class_like_by_word(parent_class) else {
+        metadata.invalid_dependencies.insert(parent_class);
+        return;
+    };
+
+    canonicalize_template_relationship(metadata, parent_class, parent_metadata.name);
+    metadata.require_extends.remove(&parent_class);
+    metadata.require_extends.insert(parent_metadata.name);
+
+    metadata.require_extends.extend(parent_metadata.all_parent_classes.iter().copied());
+    metadata.require_implements.extend(parent_metadata.all_parent_interfaces.iter().copied());
+}
+
+/// Merges class-like data inherited from a used trait.
+/// Assumes the trait is already populated.
+pub fn merge_metadata_from_trait(
+    metadata: &mut ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+    trait_name: Word,
+    symbol_references: &mut SymbolReferences,
+) {
+    symbol_references.add_symbol_reference_to_symbol(metadata.name, trait_name, true);
+
+    let Some(trait_metadata) = codebase.get_class_like_by_word(trait_name) else {
+        metadata.invalid_dependencies.insert(trait_name);
+        return;
+    };
+
+    canonicalize_template_relationship(metadata, trait_name, trait_metadata.name);
+    metadata.used_traits.remove(&trait_name);
+    metadata.used_traits.insert(trait_metadata.name);
+
+    for (trait_constant_name, trait_constant_metadata) in &trait_metadata.constants {
+        metadata.trait_constant_ids.insert(*trait_constant_name, trait_metadata.name);
+
+        if !metadata.constants.contains_key(trait_constant_name) {
+            metadata.constants.insert(*trait_constant_name, trait_constant_metadata.clone());
+        }
+    }
+
+    metadata.all_parent_interfaces.extend(trait_metadata.direct_parent_interfaces.iter().copied());
+    metadata.invalid_dependencies.extend(trait_metadata.invalid_dependencies.iter().copied());
+    metadata.mixins.extend(trait_metadata.mixins.iter().cloned());
+    metadata.add_used_traits(trait_metadata.used_traits.iter().copied());
+
+    extend_template_parameters(metadata, trait_metadata);
+    remove_trait_requirement_template_parameters(metadata, trait_metadata, codebase);
+
+    inherit_methods_from_parent(metadata, trait_metadata, codebase);
+    inherit_properties_from_parent(metadata, trait_metadata);
+}
+
+fn remove_trait_requirement_template_parameters(
+    metadata: &mut ClassLikeMetadata,
+    trait_metadata: &ClassLikeMetadata,
+    codebase: &CodebaseMetadata,
+) {
+    for required_interface in &trait_metadata.require_implements {
+        metadata.template_extended_parameters.remove(required_interface);
+        metadata.template_extended_parameter_paths.remove(required_interface);
+
+        if let Some(required_metadata) = codebase.get_class_like_by_word(*required_interface) {
+            for parent_interface in &required_metadata.all_parent_interfaces {
+                metadata.template_extended_parameters.remove(parent_interface);
+                metadata.template_extended_parameter_paths.remove(parent_interface);
+            }
+        }
+    }
+}

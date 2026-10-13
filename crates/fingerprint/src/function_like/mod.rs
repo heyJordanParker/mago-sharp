@@ -1,0 +1,202 @@
+use std::hash::Hash;
+
+use mago_names::ResolvedNames;
+use mago_span::HasSpan;
+use mago_syntax::comments::docblock::PrecedingDocblocks;
+use mago_syntax::cst::ArrowFunction;
+use mago_syntax::cst::Closure;
+use mago_syntax::cst::ClosureUseClause;
+use mago_syntax::cst::ClosureUseClauseVariable;
+use mago_syntax::cst::Function;
+use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::FunctionLikeParameterDefaultValue;
+use mago_syntax::cst::FunctionLikeParameterList;
+use mago_syntax::cst::FunctionLikeReturnTypeHint;
+
+use crate::FingerprintOptions;
+use crate::Fingerprintable;
+
+impl Fingerprintable for Closure<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "closure".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        self.r#static.is_some().hash(hasher);
+        self.ampersand.is_some().hash(hasher);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.use_clause.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.body.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for ClosureUseClause<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "use_clause".hash(hasher);
+
+        for variable in &self.variables {
+            variable.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for ClosureUseClauseVariable<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "use_var".hash(hasher);
+        self.ampersand.is_some().hash(hasher);
+        self.variable.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for Function<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        if let Some(trivia) = options.trivia_context {
+            for t in PrecedingDocblocks::new(trivia, self.span().start.offset)
+                .important_only(options.important_comment_patterns)
+            {
+                t.value.hash(hasher);
+            }
+        }
+        "function".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        self.ampersand.is_some().hash(hasher);
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+
+        if !options.signature_only {
+            self.body.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for ArrowFunction<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "arrow_fn".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        self.r#static.is_some().hash(hasher);
+        self.ampersand.is_some().hash(hasher);
+        self.parameter_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.return_type_hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for FunctionLikeParameterList<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "params".hash(hasher);
+
+        for parameter in &self.parameters {
+            parameter.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for FunctionLikeParameter<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "param".hash(hasher);
+        for attribute_list in &self.attribute_lists {
+            attribute_list.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        for modifier in &self.modifiers {
+            modifier.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+        self.hint.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.ampersand.is_some().hash(hasher);
+        self.ellipsis.is_some().hash(hasher);
+        self.variable.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.default_value.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.hooks.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for FunctionLikeParameterDefaultValue<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "default_value".hash(hasher);
+        self.value.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}
+
+impl Fingerprintable for FunctionLikeReturnTypeHint<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "return_type".hash(hasher);
+        self.hint.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}

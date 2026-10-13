@@ -1,0 +1,940 @@
+use mago_allocator::Arena;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use foldhash::HashSet;
+
+use mago_algebra::assertion_set::AssertionSet;
+use mago_algebra::clause::Clause;
+use mago_codex::assertion::Assertion;
+use mago_codex::context::ScopeContext;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::union::TUnion;
+use mago_span::Span;
+use mago_word::Word;
+use mago_word::WordMap;
+use mago_word::WordSet;
+use mago_word::word;
+
+use crate::common::global::get_super_globals;
+use crate::context::Context;
+use crate::context::block_flags::BlockContextFlags;
+use crate::context::scope::control_action::ControlActionSet;
+use crate::context::scope::finally_scope::FinallyScope;
+use crate::context::scope::var_has_root;
+use crate::reconciler::assertion_reconciler;
+use crate::reconciler::negated_assertion_reconciler;
+use mago_bytes::BytesDisplay;
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum BreakContext {
+    Switch(Span),
+    Loop(Span),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceConstraintSource {
+    Global,
+    Static,
+    Parameter,
+    Argument,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReferenceConstraint {
+    pub constraint_span: Span,
+    pub source: ReferenceConstraintSource,
+    pub constraint_type: Option<Rc<TUnion>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockContext<'ctx> {
+    pub scope: ScopeContext<'ctx>,
+    pub locals: WordMap<Rc<TUnion>>,
+    pub static_locals: WordSet,
+    pub variables_possibly_in_scope: WordSet,
+    pub conditionally_referenced_variable_ids: WordSet,
+    pub assigned_variable_ids: WordMap<u32>,
+    pub possibly_assigned_variable_ids: WordSet,
+    pub derived_local_sources: WordMap<Word>,
+    pub possibly_undefined_variable_ids: WordSet,
+
+    /// Maps variable names to the number of times they have been referenced in the current scope.
+    ///
+    /// This might not contain all variables in `locals`, as it is only updated when a variable is referenced.
+    pub referenced_counts: WordMap<u32>,
+
+    /// Maps variable names to the local variable that they reference.
+    ///
+    /// All keys and values in this map are guaranteed to be set in `locals`.
+    pub references_in_scope: WordMap<Word>,
+
+    /// Set of references to variables in another scope. These references will be marked as used if they are assigned to.
+    pub references_to_external_scope: WordSet,
+
+    /// A set of references that might still be in scope from a scope likely to cause confusion. This applies
+    /// to references set inside a loop or if statement, since it's easy to forget about PHP's weird scope
+    /// rules, and assigning to a reference will change the referenced variable rather than shadowing it.
+    pub references_possibly_from_confusing_scope: WordSet,
+
+    /// A map of variable names to their reference constraints,
+    /// where the key is the variable name and the value is the reference constraint.
+    pub by_reference_constraints: WordMap<ReferenceConstraint>,
+
+    /// The written type of each PHP# local declared with one, as in `Money? total = null;`, and the span of that
+    /// type. Every value assigned to the local must have this type.
+    pub local_types: WordMap<(Rc<TUnion>, Span)>,
+
+    /// Bitflags for various context states (inside_conditional, inside_isset, etc.)
+    pub flags: BlockContextFlags,
+
+    pub clauses: Vec<Rc<Clause>>,
+    pub reconciled_expression_clauses: Vec<Rc<Clause>>,
+    pub known_functions: WordSet,
+    pub known_constants: WordSet,
+    pub break_types: Vec<BreakContext>,
+    pub finally_scope: Option<Rc<RefCell<FinallyScope>>>,
+    pub parent_conflicting_clause_variables: WordSet,
+    pub loop_bounds: (u32, u32),
+    pub if_body_context: Option<Rc<RefCell<Self>>>,
+    pub control_actions: ControlActionSet,
+    pub possibly_thrown_exceptions: WordMap<HashSet<Span>>,
+
+    /// Properties that are DEFINITELY initialized in ALL code paths.
+    /// Uses intersection semantics - a property must be initialized in ALL branches.
+    pub definitely_initialized_properties: WordSet,
+
+    /// Properties that are POSSIBLY initialized (in at least one path).
+    /// Uses union semantics - a property initialized in ANY branch is included.
+    pub possibly_initialized_properties: WordSet,
+
+    /// Property expression IDs proven uninitialized by the active control-flow path.
+    ///
+    /// This is populated by negated `isset()` assertions and consumed by readonly
+    /// initialization checks. The declared property type is still consulted so that
+    /// nullable properties are not treated as definitely uninitialized.
+    pub definitely_uninitialized_property_ids: WordSet,
+
+    /// Methods called on $this that are DEFINITELY called in ALL code paths.
+    /// Uses intersection semantics for tracking transitive initialization.
+    pub definitely_called_methods: HashSet<Word>,
+
+    /// Methods called on $this in at least one path.
+    /// Uses union semantics.
+    pub called_methods: HashSet<Word>,
+
+    /// If this method calls `parent::`<method>() where <method> is a class initializer,
+    /// this holds the initializer method name.
+    pub calls_parent_initializer: Option<Word>,
+
+    /// Active method call assertions from guard methods.
+    /// When inside a conditional like `if ($obj->isValid())`, this tracks assertions
+    /// about method return types that should be applied.
+    ///
+    /// Key: method call expression id (e.g., "$statements->first()")
+    /// Value: assertion set to apply to the method's return type
+    pub active_method_call_assertions: WordMap<AssertionSet>,
+
+    /// Assertions inferred for repeated zero-argument method calls in the active branch.
+    pub stable_method_call_assertions: WordMap<AssertionSet>,
+
+    /// Zero-argument method calls known to be stable since the last potentially
+    /// mutating invocation.
+    pub stable_method_calls: WordSet,
+
+    class_type_relations: WordMap<WordSet>,
+}
+
+impl BreakContext {
+    #[inline]
+    pub const fn is_switch(&self) -> bool {
+        matches!(self, BreakContext::Switch(_))
+    }
+
+    #[inline]
+    pub const fn span(&self) -> Span {
+        match self {
+            BreakContext::Switch(span) | BreakContext::Loop(span) => *span,
+        }
+    }
+}
+
+impl ReferenceConstraint {
+    pub fn new(constraint_span: Span, source: ReferenceConstraintSource, constraint_type: Option<Rc<TUnion>>) -> Self {
+        let constraint_type = constraint_type.map(|mut constraint_type| {
+            Rc::make_mut(&mut constraint_type).widen_literals();
+
+            constraint_type
+        });
+
+        Self { constraint_span, source, constraint_type }
+    }
+}
+
+/// Locate the first accessor separator (`->` or `[`) in `var_name`. Returns
+/// the byte offset of the separator, or `None` if the name is a plain `$ident`.
+///
+/// A single linear scan with very favorable branch prediction.
+#[inline]
+fn find_accessor_separator(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    let len = bytes.len();
+    while i < len {
+        let b = bytes[i];
+        if b == b'[' {
+            return Some(i);
+        }
+
+        if b == b'-' && i + 1 < len && bytes[i + 1] == b'>' {
+            return Some(i);
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+impl<'ctx> BlockContext<'ctx> {
+    pub fn new(scope: ScopeContext<'ctx>, register_super_globals: bool) -> Self {
+        let mut block_context = Self {
+            scope,
+            locals: WordMap::default(),
+            static_locals: WordSet::default(),
+            variables_possibly_in_scope: WordSet::default(),
+            conditionally_referenced_variable_ids: WordSet::default(),
+            assigned_variable_ids: WordMap::default(),
+            possibly_assigned_variable_ids: WordSet::default(),
+            derived_local_sources: WordMap::default(),
+            possibly_undefined_variable_ids: WordSet::default(),
+            referenced_counts: WordMap::default(),
+            references_in_scope: WordMap::default(),
+            references_to_external_scope: WordSet::default(),
+            references_possibly_from_confusing_scope: WordSet::default(),
+            by_reference_constraints: WordMap::default(),
+            local_types: WordMap::default(),
+            flags: BlockContextFlags::new(),
+            clauses: Vec::new(),
+            reconciled_expression_clauses: Vec::new(),
+            known_functions: WordSet::default(),
+            known_constants: WordSet::default(),
+            break_types: Vec::new(),
+            finally_scope: None,
+            parent_conflicting_clause_variables: WordSet::default(),
+            loop_bounds: (0, 0),
+            if_body_context: None,
+            control_actions: ControlActionSet::new(),
+            possibly_thrown_exceptions: WordMap::default(),
+            definitely_initialized_properties: WordSet::default(),
+            possibly_initialized_properties: WordSet::default(),
+            definitely_uninitialized_property_ids: WordSet::default(),
+            definitely_called_methods: HashSet::default(),
+            called_methods: HashSet::default(),
+            calls_parent_initializer: None,
+            active_method_call_assertions: WordMap::default(),
+            stable_method_call_assertions: WordMap::default(),
+            stable_method_calls: WordSet::default(),
+            class_type_relations: WordMap::default(),
+        };
+
+        if register_super_globals {
+            for (var_name, var_type) in get_super_globals() {
+                block_context.locals.insert(word(var_name), var_type);
+            }
+        }
+
+        block_context
+    }
+
+    pub fn is_global_scope(&self) -> bool {
+        self.scope.is_global()
+    }
+
+    /// Runs `analyze` on a constant expression: a constant's value, a default or an attribute's arguments.
+    pub fn in_constant_expression<R>(&mut self, analyze: impl FnOnce(&mut Self) -> R) -> R {
+        let was_inside_constant_expression = self.flags.inside_constant_expression();
+        self.flags.set_inside_constant_expression(true);
+        let result = analyze(self);
+        self.flags.set_inside_constant_expression(was_inside_constant_expression);
+
+        result
+    }
+
+    pub fn update_references_possibly_from_confusing_scope(&mut self, confusing_scope_context: &BlockContext<'ctx>) {
+        let references = confusing_scope_context
+            .references_in_scope
+            .keys()
+            .chain(confusing_scope_context.references_to_external_scope.iter());
+
+        for reference_id in references {
+            if !self.references_in_scope.contains_key(reference_id)
+                && !self.references_to_external_scope.contains(reference_id)
+            {
+                self.references_possibly_from_confusing_scope.insert(*reference_id);
+            }
+        }
+
+        self.references_possibly_from_confusing_scope
+            .extend(confusing_scope_context.references_possibly_from_confusing_scope.iter().copied());
+    }
+
+    pub fn get_redefined_locals(
+        &self,
+        new_locals: &WordMap<Rc<TUnion>>,
+        include_new_vars: bool,
+        removed_vars: &mut WordSet,
+    ) -> WordMap<Rc<TUnion>> {
+        let mut redefined_vars = WordMap::default();
+
+        for (var_id, this_type) in &self.locals {
+            if let Some(new_type) = new_locals.get(var_id) {
+                if new_type != this_type {
+                    redefined_vars.insert(*var_id, Rc::clone(this_type));
+                }
+            } else if include_new_vars {
+                redefined_vars.insert(*var_id, Rc::clone(this_type));
+            }
+        }
+
+        for var_id in new_locals.keys() {
+            if !self.locals.contains_key(var_id) {
+                removed_vars.insert(*var_id);
+            }
+        }
+
+        redefined_vars
+    }
+
+    pub fn get_new_or_updated_locals(original_context: &Self, new_context: &Self) -> WordSet {
+        let mut redefined_var_ids = WordSet::default();
+
+        for (var_id, new_type) in &new_context.locals {
+            if let Some(original_type) = original_context.locals.get(var_id) {
+                if original_context.assigned_variable_ids.get(var_id).unwrap_or(&0)
+                    != new_context.assigned_variable_ids.get(var_id).unwrap_or(&0)
+                    || original_type != new_type
+                {
+                    redefined_var_ids.insert(*var_id);
+                }
+            } else {
+                redefined_var_ids.insert(*var_id);
+            }
+        }
+
+        redefined_var_ids
+    }
+
+    pub fn remove_reconciled_clause_refs(
+        clauses: &Vec<Rc<Clause>>,
+        changed_var_ids: &WordSet,
+    ) -> (Vec<Rc<Clause>>, Vec<Rc<Clause>>) {
+        let mut included_clauses = Vec::new();
+        let mut rejected_clauses = Vec::new();
+
+        'outer: for c in clauses {
+            if c.wedge {
+                included_clauses.push(Rc::clone(c));
+                continue;
+            }
+
+            for (key, assertions) in &c.possibilities {
+                for changed_var_id in changed_var_ids {
+                    if changed_var_id == key
+                        || var_has_root(*key, *changed_var_id)
+                        || assertions.values().any(|assertion| {
+                            assertion
+                                .referenced_variable()
+                                .is_some_and(|variable| var_has_root(variable, *changed_var_id))
+                        })
+                    {
+                        rejected_clauses.push(Rc::clone(c));
+                        continue 'outer;
+                    }
+                }
+            }
+
+            included_clauses.push(Rc::clone(c));
+        }
+
+        (included_clauses, rejected_clauses)
+    }
+
+    pub fn remove_reconciled_clauses(clauses: &Vec<Clause>, changed_var_ids: &WordSet) -> (Vec<Clause>, Vec<Clause>) {
+        let mut included_clauses = Vec::new();
+        let mut rejected_clauses = Vec::new();
+
+        'outer: for c in clauses {
+            if c.wedge {
+                included_clauses.push(c.clone());
+                continue;
+            }
+
+            for (key, assertions) in &c.possibilities {
+                if changed_var_ids.contains(key)
+                    || assertions.values().any(|assertion| {
+                        assertion.referenced_variable().is_some_and(|variable| changed_var_ids.contains(&variable))
+                    })
+                {
+                    rejected_clauses.push(c.clone());
+                    continue 'outer;
+                }
+            }
+
+            included_clauses.push(c.clone());
+        }
+
+        (included_clauses, rejected_clauses)
+    }
+
+    pub(crate) fn filter_clauses<'arena, A>(
+        context: &mut Context<'ctx, 'arena, A>,
+        remove_var_id: Word,
+        clauses: Vec<Rc<Clause>>,
+        new_type: Option<&TUnion>,
+    ) -> Vec<Rc<Clause>>
+    where
+        A: Arena,
+    {
+        let mut clauses_to_keep = Vec::new();
+        let mut other_clauses = Vec::new();
+
+        'outer: for clause in clauses {
+            for (var_id, assertions) in &clause.possibilities {
+                if var_has_root(*var_id, remove_var_id)
+                    || assertions.values().any(|assertion| {
+                        assertion.referenced_variable().is_some_and(|variable| var_has_root(variable, remove_var_id))
+                    })
+                {
+                    continue 'outer;
+                }
+            }
+
+            let keep_clause = should_keep_clause(&clause, remove_var_id, new_type);
+
+            if keep_clause {
+                clauses_to_keep.push(Rc::clone(&clause));
+            } else {
+                other_clauses.push(clause);
+            }
+        }
+
+        if let Some(new_type) = new_type
+            && !new_type.is_mixed()
+        {
+            for clause in other_clauses {
+                let mut type_changed = false;
+                let Some(possibilities) = clause.possibilities.get(&remove_var_id) else {
+                    clauses_to_keep.push(Rc::clone(&clause));
+
+                    continue;
+                };
+
+                for (_, assertion) in possibilities {
+                    if assertion.is_negation() {
+                        type_changed = true;
+                        break;
+                    }
+
+                    let result_type = assertion_reconciler::reconcile(
+                        context,
+                        assertion,
+                        Some(&new_type.clone()),
+                        None,
+                        false,
+                        None,
+                        false,
+                        false,
+                    );
+
+                    if result_type != *new_type {
+                        type_changed = true;
+                        break;
+                    }
+                }
+
+                if !type_changed {
+                    clauses_to_keep.push(Rc::clone(&clause));
+                }
+            }
+        }
+
+        clauses_to_keep
+    }
+
+    pub(crate) fn remove_variable_from_conflicting_clauses<'arena, A>(
+        &mut self,
+        context: &mut Context<'ctx, 'arena, A>,
+        remove_var_id: Word,
+        new_type: Option<&TUnion>,
+    ) where
+        A: Arena,
+    {
+        self.clauses = BlockContext::filter_clauses(context, remove_var_id, self.clauses.clone(), new_type);
+
+        self.class_type_relations.retain(|source, targets| {
+            if var_has_root(*source, remove_var_id) {
+                return false;
+            }
+
+            targets.retain(|target| !var_has_root(*target, remove_var_id));
+            !targets.is_empty()
+        });
+
+        self.parent_conflicting_clause_variables.insert(remove_var_id);
+    }
+
+    pub(crate) fn add_class_type_relation(&mut self, source: Word, target: Word) {
+        if source != target {
+            self.class_type_relations.entry(source).or_default().insert(target);
+        }
+    }
+
+    pub(crate) fn get_class_type_relation_sources(&self, target: Word) -> WordSet {
+        self.class_type_relations
+            .iter()
+            .filter_map(|(source, targets)| targets.contains(&target).then_some(*source))
+            .collect()
+    }
+
+    pub(crate) fn retain_valid_class_type_relations(&mut self) {
+        self.class_type_relations.retain(|source, targets| {
+            if !self.locals.contains_key(source) {
+                return false;
+            }
+
+            targets.retain(|target| self.locals.contains_key(target));
+            !targets.is_empty()
+        });
+    }
+
+    pub(crate) fn remove_descendants<'arena, A>(
+        &mut self,
+        context: &mut Context<'ctx, 'arena, A>,
+        remove_var_id: Word,
+        existing_type: &TUnion,
+        new_type: Option<&TUnion>,
+    ) where
+        A: Arena,
+    {
+        self.remove_variable_from_conflicting_clauses(
+            context,
+            remove_var_id,
+            if existing_type.is_mixed() {
+                None
+            } else if let Some(new_type) = new_type {
+                Some(new_type)
+            } else {
+                None
+            },
+        );
+
+        let keys = self.locals.keys().copied().collect::<Vec<_>>();
+
+        for var_id in keys {
+            if var_has_root(var_id, remove_var_id) {
+                self.locals.remove(&var_id);
+            }
+        }
+    }
+
+    /// Registers a variable that is referenced conditionally, like in a property
+    /// or array access (`$foo->bar`, `$foo[0]`).
+    pub fn add_conditionally_referenced_variable(&mut self, var_name: &[u8]) {
+        match find_accessor_separator(var_name) {
+            None if var_name == b"$this" => {
+                // Nothing
+            }
+            _ => {
+                self.conditionally_referenced_variable_ids.insert(word(var_name));
+            }
+        }
+    }
+
+    /// Checks if a variable exists in the local scope, while also registering it
+    /// as a conditionally referenced variable if it's part of an access chain.
+    #[must_use]
+    pub fn has_variable(&mut self, var_name: &[u8]) -> bool {
+        self.add_conditionally_referenced_variable(var_name);
+        self.locals.contains_key(&word(var_name))
+    }
+
+    /// Variant of [`add_conditionally_referenced_variable`] that accepts an
+    /// already-interned [`Word`] together with the original string. Saves one
+    /// `word()` lookup on the hot path that already has the atom available.
+    pub fn add_conditionally_referenced_variable_atom(&mut self, var_name: &[u8], var_atom: Word) {
+        match find_accessor_separator(var_name) {
+            None if var_name == b"$this" => {
+                // Nothing
+            }
+            _ => {
+                self.conditionally_referenced_variable_ids.insert(var_atom);
+            }
+        }
+    }
+
+    pub(crate) fn remove_variable<'arena, A>(
+        &mut self,
+        var_name: &[u8],
+        remove_descendants: bool,
+        context: &mut Context<'ctx, 'arena, A>,
+    ) where
+        A: Arena,
+    {
+        let var_atom = word(var_name);
+        if let Some(existing_type) = self.locals.remove(&var_atom)
+            && remove_descendants
+        {
+            self.remove_descendants(context, var_atom, &existing_type, None);
+        }
+
+        self.assigned_variable_ids.remove(&var_atom);
+        self.possibly_assigned_variable_ids.remove(&var_atom);
+        self.conditionally_referenced_variable_ids.remove(&var_atom);
+        self.derived_local_sources.remove(&var_atom);
+        self.possibly_undefined_variable_ids.remove(&var_atom);
+    }
+
+    pub fn remove_possible_reference(&mut self, remove_var_id: &[u8]) {
+        let remove_var_atom = word(remove_var_id);
+        if let Some(reference_count) = self.referenced_counts.get(&remove_var_atom)
+            && *reference_count > 0
+        {
+            // If a referenced variable goes out of scope, we need to update the references.
+            // All of the references to this variable are still references to the same value,
+            // so we pick one as the new root and point the rest at it. The candidates are
+            // sorted so the choice is deterministic regardless of map iteration order.
+            let mut references = vec![];
+            for (reference, referenced) in &self.references_in_scope {
+                if *referenced == remove_var_atom {
+                    references.push(*reference);
+                }
+            }
+
+            references.sort_unstable();
+            for reference in &references {
+                self.references_in_scope.remove(reference);
+            }
+
+            debug_assert!(
+                !references.is_empty(),
+                "No references found for variable {}, even though it has a reference count of {reference_count}",
+                BytesDisplay(remove_var_id)
+            );
+
+            if !references.is_empty() {
+                self.referenced_counts.remove(&remove_var_atom);
+
+                let first_reference = references.remove(0);
+                if !references.is_empty() {
+                    let reassigned_references = references.len() as u32;
+                    if let Some(existing_count) = self.referenced_counts.get_mut(&first_reference) {
+                        *existing_count += reassigned_references;
+                    } else {
+                        self.referenced_counts.insert(first_reference, reassigned_references);
+                    }
+
+                    for reference in references {
+                        self.references_in_scope.insert(reference, first_reference);
+                    }
+                }
+            }
+        }
+
+        if self.references_in_scope.contains_key(&remove_var_atom) {
+            self.decrement_reference_count(remove_var_id);
+        }
+
+        self.locals.remove(&remove_var_atom);
+        self.variables_possibly_in_scope.remove(&remove_var_atom);
+        self.assigned_variable_ids.remove(&remove_var_atom);
+        self.possibly_assigned_variable_ids.remove(&remove_var_atom);
+        self.conditionally_referenced_variable_ids.remove(&remove_var_atom);
+        self.derived_local_sources.remove(&remove_var_atom);
+        self.possibly_undefined_variable_ids.remove(&remove_var_atom);
+    }
+
+    pub fn update<A>(
+        &mut self,
+        context: &mut Context<'ctx, '_, A>,
+        start_block_context: &Self,
+        end_block_context: &mut Self,
+        has_leaving_statements: bool,
+        vars_to_update: &WordSet,
+        updated_vars: &mut WordSet,
+    ) where
+        A: Arena,
+    {
+        if vars_to_update.is_empty() {
+            return;
+        }
+
+        for (variable_id, old_type) in &start_block_context.locals {
+            if !vars_to_update.contains(variable_id) {
+                continue;
+            }
+
+            let new_type = if !has_leaving_statements && end_block_context.has_variable(variable_id.as_bytes()) {
+                end_block_context.locals.get(variable_id).cloned()
+            } else {
+                None
+            };
+
+            let Some(existing_type) = self.locals.get(variable_id).map(std::convert::AsRef::as_ref).cloned() else {
+                if let Some(new_type) = new_type {
+                    self.locals.insert(*variable_id, new_type);
+                    updated_vars.insert(*variable_id);
+                }
+
+                continue;
+            };
+
+            let old_type = old_type.as_ref().clone();
+
+            let should_substitute = match &new_type {
+                Some(new_type) => !old_type.eq(new_type),
+                None => existing_type.types.len() > 1,
+            };
+
+            let resulting_type = if should_substitute {
+                updated_vars.insert(*variable_id);
+
+                substitute_types(context, existing_type, old_type, new_type.as_deref())
+            } else {
+                existing_type
+            };
+
+            self.locals.insert(*variable_id, Rc::new(resulting_type));
+        }
+    }
+
+    /// Decrement the reference count of the variable that $`ref_id` is referring to. This needs to
+    /// be done before $`ref_id` is changed to no longer reference its currently referenced variable,
+    /// for example by unsetting, reassigning to another reference, or being shadowed by a global.
+    pub fn decrement_reference_count(&mut self, ref_id: &[u8]) -> bool {
+        let ref_atom = word(ref_id);
+        let Some(ref_target) = self.references_in_scope.get(&ref_atom) else {
+            return false;
+        };
+
+        let Some(reference_count) = self.referenced_counts.get_mut(ref_target) else {
+            return false;
+        };
+
+        if *reference_count < 1 {
+            return false;
+        }
+
+        *reference_count -= 1;
+
+        true
+    }
+}
+
+impl std::fmt::Display for ReferenceConstraintSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReferenceConstraintSource::Global => write!(f, "global"),
+            ReferenceConstraintSource::Static => write!(f, "static"),
+            ReferenceConstraintSource::Parameter => write!(f, "parameter"),
+            ReferenceConstraintSource::Argument => write!(f, "argument"),
+        }
+    }
+}
+
+fn substitute_types<A>(
+    context: &mut Context<'_, '_, A>,
+    existing_type: TUnion,
+    old_type: TUnion,
+    new_type: Option<&TUnion>,
+) -> TUnion
+where
+    A: Arena,
+{
+    if existing_type.is_mixed() || existing_type.is_never() {
+        return existing_type;
+    }
+
+    if existing_type.eq(&old_type) {
+        let Some(new_type) = new_type else {
+            return existing_type;
+        };
+
+        return add_optional_union_type(get_mixed(), Some(new_type), context.codebase);
+    }
+
+    let updated_type = subtract_union_types(context, existing_type, old_type);
+
+    add_optional_union_type(updated_type, new_type, context.codebase)
+}
+
+/// Subtracts the types in `type_to_remove` from `existing_type`.
+///
+/// This function iterates through each atomic type in `existing_type`. For each of these,
+/// it iteratively applies the logic of "is not `atomic_from_remove_set`" for every
+/// atomic type in `type_to_remove`. This effectively refines each part of `existing_type`
+/// to exclude any possibilities covered by `type_to_remove`.
+///
+/// This is primarily useful for determining remaining possible types for a match subject
+/// after some conditional arms have been considered.
+///
+/// # Arguments
+///
+/// * `context` - The reconciliation context, and providing access to codebase.
+/// * `existing_type` - The initial `TUnion` type (the minuend).
+/// * `type_to_remove` - The `TUnion` type whose components should be subtracted from `existing_type`.
+///
+/// # Returns
+///
+/// A new `TUnion` representing `existing_type - type_to_remove`.
+pub fn subtract_union_types<A>(
+    context: &mut Context<'_, '_, A>,
+    existing_type: TUnion,
+    type_to_remove: TUnion,
+) -> TUnion
+where
+    A: Arena,
+{
+    if existing_type == type_to_remove {
+        return get_never();
+    }
+
+    if !(existing_type.has_literal_value() && type_to_remove.has_literal_value())
+        && union_comparator::is_contained_by(
+            context.codebase,
+            &existing_type,
+            &type_to_remove,
+            false,
+            false,
+            true,
+            &mut ComparisonResult::new(),
+        )
+    {
+        return existing_type;
+    }
+
+    let mut result = existing_type;
+    for atomic in type_to_remove.types.into_owned() {
+        let assertion = Assertion::IsNotType(atomic);
+        let key = result.get_id();
+
+        result = negated_assertion_reconciler::reconcile(context, &assertion, &result, None, key, None, true);
+        if result.is_never() {
+            break;
+        }
+    }
+
+    result
+}
+
+fn should_keep_clause(clause: &Rc<Clause>, remove_var_id: Word, new_type: Option<&TUnion>) -> bool {
+    if let Some(possibilities) = clause.possibilities.get(&remove_var_id) {
+        if possibilities.len() == 1
+            && let Some((_, Assertion::IsType(assertion_type))) = possibilities.first()
+            && let Some(new_type) = new_type
+            && new_type.is_single()
+        {
+            return new_type.get_single() == assertion_type;
+        }
+
+        false
+    } else {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use mago_codex::context::ScopeContext;
+    use mago_codex::reference::ReferenceOrigin;
+    use mago_codex::ttype::get_mixed;
+    use mago_word::word;
+
+    use super::BlockContext;
+
+    fn block_context_with_locals(vars: &[&str]) -> BlockContext<'static> {
+        let mut block_context = BlockContext::new(ScopeContext::new(ReferenceOrigin::File(word("test.php"))), false);
+        for variable in vars {
+            let variable_atom = word(variable);
+            block_context.locals.insert(variable_atom, Rc::new(get_mixed()));
+            block_context.variables_possibly_in_scope.insert(variable_atom);
+        }
+
+        block_context
+    }
+
+    #[test]
+    fn remove_possible_reference_preserves_promoted_reference_counts() {
+        let mut block_context = block_context_with_locals(&["$a", "$b", "$c"]);
+
+        // Model: $b =& $a; $c =& $b.
+        block_context.references_in_scope.insert(word("$b"), word("$a"));
+        block_context.references_in_scope.insert(word("$c"), word("$b"));
+        block_context.referenced_counts.insert(word("$a"), 1);
+        block_context.referenced_counts.insert(word("$b"), 1);
+
+        block_context.remove_possible_reference(b"$a");
+
+        // $b is promoted to root, but still has $c pointing to it.
+        assert_eq!(block_context.references_in_scope.get(&word("$c")).copied(), Some(word("$b")));
+        assert_eq!(block_context.referenced_counts.get(&word("$b")).copied(), Some(1));
+
+        // Removing $b should re-root $c and clear dangling reference links.
+        block_context.remove_possible_reference(b"$b");
+        assert!(!block_context.references_in_scope.contains_key(&word("$c")));
+    }
+
+    #[test]
+    fn remove_possible_reference_adds_to_existing_promoted_count() {
+        let mut block_context = block_context_with_locals(&["$a", "$b", "$c", "$d"]);
+
+        // Model before removal:
+        // $b =& $a, $c =& $a, and $d =& $b.
+        block_context.references_in_scope.insert(word("$b"), word("$a"));
+        block_context.references_in_scope.insert(word("$c"), word("$a"));
+        block_context.references_in_scope.insert(word("$d"), word("$b"));
+        block_context.referenced_counts.insert(word("$a"), 2);
+        block_context.referenced_counts.insert(word("$b"), 1);
+
+        block_context.remove_possible_reference(b"$a");
+
+        // $b is promoted and keeps its prior 1, plus 1 reassigned reference from $c.
+        assert_eq!(block_context.referenced_counts.get(&word("$b")).copied(), Some(2));
+        assert_eq!(block_context.references_in_scope.get(&word("$c")).copied(), Some(word("$b")));
+        assert_eq!(block_context.references_in_scope.get(&word("$d")).copied(), Some(word("$b")));
+    }
+
+    #[test]
+    fn remove_possible_reference_sets_promoted_count_when_missing() {
+        let mut block_context = block_context_with_locals(&["$a", "$b", "$c"]);
+
+        // Model before removal:
+        // $b =& $a, $c =& $a with no prior count entry for $b.
+        block_context.references_in_scope.insert(word("$b"), word("$a"));
+        block_context.references_in_scope.insert(word("$c"), word("$a"));
+        block_context.referenced_counts.insert(word("$a"), 2);
+
+        block_context.remove_possible_reference(b"$a");
+
+        // $b becomes primary and should have count 1 (the reassigned $c).
+        assert_eq!(block_context.referenced_counts.get(&word("$b")).copied(), Some(1));
+        assert_eq!(block_context.references_in_scope.get(&word("$c")).copied(), Some(word("$b")));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "No references found for variable")]
+    fn remove_possible_reference_panics_on_stale_counts_in_debug() {
+        let mut block_context = block_context_with_locals(&["$stale"]);
+        block_context.referenced_counts.insert(word("$stale"), 1);
+
+        // No references_in_scope entry for $stale -> intentional debug panic.
+        block_context.remove_possible_reference(b"$stale");
+    }
+}

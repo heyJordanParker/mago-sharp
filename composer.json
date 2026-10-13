@@ -1,0 +1,42 @@
+{
+  "name": "heyjordanparker/mago-sharp",
+  "description": "PHP#'s checker and toolchain: checks PHP and PHP# code, compiles PHP#, and lints and formats PHP.",
+  "type": "library",
+  "license": "MIT OR Apache-2.0",
+  "authors": [
+    {
+      "name": "Seifeddine Gmati",
+      "email": "azjezz@carthage.software"
+    }
+  ],
+  "keywords": [
+    "dev"
+  ],
+  "bin": [
+    "composer/bin/mago"
+  ],
+  "autoload": {
+    "psr-4": {
+      "Mago\\": "composer/src/"
+    },
+    "files": [
+      "composer/src/functions.php",
+      "composer/src/internal.php"
+    ]
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Mago\\Tests\\": "composer/tests/"
+    }
+  },
+  "suggest": {
+    "ext-curl": "To show binary download progress"
+  },
+  "require": {
+    "php": "~8.1 || ~8.2 || ~8.3 || ~8.4 || ~8.5 || ~8.6",
+    "revolt/event-loop": "^1.0.9"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.5"
+  }
+}

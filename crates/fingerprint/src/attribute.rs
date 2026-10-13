@@ -1,0 +1,38 @@
+use crate::FingerprintOptions;
+use crate::Fingerprintable;
+use mago_names::ResolvedNames;
+use mago_syntax::cst::Attribute;
+use mago_syntax::cst::AttributeList;
+use std::hash::Hash;
+
+impl Fingerprintable for AttributeList<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        for attribute in &self.attributes {
+            attribute.fingerprint_with_hasher(hasher, resolved_names, options);
+        }
+    }
+}
+
+impl Fingerprintable for Attribute<'_> {
+    #[inline]
+    fn fingerprint_with_hasher<H>(
+        &self,
+        hasher: &mut H,
+        resolved_names: &ResolvedNames,
+        options: &FingerprintOptions<'_>,
+    ) where
+        H: std::hash::Hasher,
+    {
+        "attr".hash(hasher);
+        self.name.fingerprint_with_hasher(hasher, resolved_names, options);
+        self.argument_list.fingerprint_with_hasher(hasher, resolved_names, options);
+    }
+}

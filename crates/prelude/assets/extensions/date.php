@@ -1,0 +1,806 @@
+<?php
+
+/**
+ * @var non-empty-string
+ */
+const DATE_ATOM = "Y-m-d\\TH:i:sP";
+
+/**
+ * @var non-empty-string
+ */
+const DATE_COOKIE = 'l, d-M-Y H:i:s T';
+
+/**
+ * @var non-empty-string
+ */
+const DATE_ISO8601 = "Y-m-d\\TH:i:sO";
+
+/**
+ * @var non-empty-string
+ */
+const DATE_ISO8601_EXPANDED = "X-m-d\\TH:i:sP";
+
+/**
+ * @var non-empty-string
+ */
+const DATE_RFC822 = 'D, d M y H:i:s O';
+
+/**
+ * @var non-empty-string
+ */
+const DATE_RFC850 = 'l, d-M-y H:i:s T';
+
+/**
+ * @var non-empty-string
+ */
+const DATE_RFC1036 = 'D, d M y H:i:s O';
+
+/**
+ * @var non-empty-string
+ */
+const DATE_RFC1123 = 'D, d M Y H:i:s O';
+
+/**
+ * @var non-empty-string
+ */
+#[Deprecated(since: '8.5', message: 'as this format ignores the associated timezone and always uses GMT')]
+const DATE_RFC7231 = "D, d M Y H:i:s \\G\\M\\T";
+
+/**
+ * @var non-empty-string
+ */
+const DATE_RFC2822 = 'D, d M Y H:i:s O';
+
+/**
+ * @var non-empty-string
+ */
+const DATE_RFC3339 = "Y-m-d\\TH:i:sP";
+
+/**
+ * @var non-empty-string
+ */
+const DATE_RFC3339_EXTENDED = "Y-m-d\\TH:i:s.vP";
+
+/** @var non-empty-string */
+const DATE_RSS = DATE_RFC1123;
+
+/** @var non-empty-string */
+const DATE_W3C = DATE_RFC3339;
+
+/**
+ * @var int
+ * @deprecated
+ */
+const SUNFUNCS_RET_TIMESTAMP = 0;
+
+/**
+ * @var int
+ * @deprecated
+ */
+const SUNFUNCS_RET_STRING = 1;
+
+/**
+ * @var int
+ * @deprecated
+ */
+const SUNFUNCS_RET_DOUBLE = 2;
+
+function strtotime(string $datetime, ?int $baseTimestamp = null): int|false {}
+
+function date(string $format, ?int $timestamp = null): string {}
+
+function idate(string $format, ?int $timestamp = null): int|false {}
+
+function gmdate(string $format, ?int $timestamp = null): string {}
+
+function mktime(
+    int $hour,
+    ?int $minute = null,
+    ?int $second = null,
+    ?int $month = null,
+    ?int $day = null,
+    ?int $year = null,
+): int|false {}
+
+function gmmktime(
+    int $hour,
+    ?int $minute = null,
+    ?int $second = null,
+    ?int $month = null,
+    ?int $day = null,
+    ?int $year = null,
+): int|false {}
+
+function checkdate(int $month, int $day, int $year): bool {}
+
+/**
+ * @deprecated
+ */
+function strftime(string $format, ?int $timestamp = null): string|false {}
+
+/**
+ * @deprecated
+ */
+function gmstrftime(string $format, ?int $timestamp = null): string|false {}
+
+function time(): int {}
+
+/**
+ * @return array<int|string, int>
+ */
+function localtime(?int $timestamp = null, bool $associative = false): array {}
+
+/**
+ * @return array{
+ *   seconds: int,
+ *   minutes: int,
+ *   hours: int,
+ *   mday: int,
+ *   wday: int,
+ *   mon: int,
+ *   year: int,
+ *   yday: int,
+ *   weekday: int,
+ *   month: string,
+ *   0: int
+ * }
+ */
+function getdate(?int $timestamp): array {}
+
+function date_create(string $datetime = 'now', ?DateTimeZone $timezone = null): DateTime|false {}
+
+function date_create_immutable(string $datetime = 'now', ?DateTimeZone $timezone = null): DateTimeImmutable|false {}
+
+function date_create_from_format(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTime|false {}
+
+function date_create_immutable_from_format(
+    string $format,
+    string $datetime,
+    ?DateTimeZone $timezone = null,
+): DateTimeImmutable|false {}
+
+/**
+ * @return array<string, mixed>
+ */
+function date_parse(string $datetime): array {}
+
+/**
+ * @return array<string, mixed>
+ */
+function date_parse_from_format(string $format, string $datetime): array {}
+
+/**
+ * @return array<string, int|array>|false
+ */
+function date_get_last_errors(): array|false {}
+
+function date_format(DateTimeInterface $object, string $format): string {}
+
+function date_modify(DateTime $object, string $modifier): DateTime|false {}
+
+function date_add(DateTime $object, DateInterval $interval): DateTime {}
+
+function date_sub(DateTime $object, DateInterval $interval): DateTime {}
+
+function date_timezone_get(DateTimeInterface $object): DateTimeZone|false {}
+
+function date_timezone_set(DateTime $object, DateTimeZone $timezone): DateTime {}
+
+function date_offset_get(DateTimeInterface $object): int {}
+
+function date_diff(
+    DateTimeInterface $baseObject,
+    DateTimeInterface $targetObject,
+    bool $absolute = false,
+): DateInterval {}
+
+function date_time_set(DateTime $object, int $hour, int $minute, int $second = 0, int $microsecond = 0): DateTime {}
+
+function date_date_set(DateTime $object, int $year, int $month, int $day): DateTime {}
+
+function date_isodate_set(DateTime $object, int $year, int $week, int $dayOfWeek = 1): DateTime {}
+
+function date_timestamp_set(DateTime $object, int $timestamp): DateTime {}
+
+function date_timestamp_get(DateTimeInterface $object): int {}
+
+function timezone_open(string $timezone): DateTimeZone|false {}
+
+/** @return non-empty-string */
+function timezone_name_get(DateTimeZone $object): string {}
+
+/**
+ * @param non-empty-string $abbr
+ * @return non-empty-string|false
+ */
+function timezone_name_from_abbr(string $abbr, int $utcOffset = -1, int $isDST = -1): string|false {}
+
+function timezone_offset_get(DateTimeZone $object, DateTimeInterface $datetime): int {}
+
+/**
+ * @return array<int, array>|false
+ */
+function timezone_transitions_get(
+    DateTimeZone $object,
+    int $timestampBegin = PHP_INT_MIN,
+    int $timestampEnd = 2147483647,
+): array|false {}
+
+/**
+ * @return array<string, float|string>|false
+ */
+function timezone_location_get(DateTimeZone $object): array|false {}
+
+/**
+ * @return array<int, string>
+ */
+function timezone_identifiers_list(int $timezoneGroup = DateTimeZone::ALL, ?string $countryCode = null): array {}
+
+/**
+ * @return array<string, array>
+ */
+function timezone_abbreviations_list(): array {}
+
+function timezone_version_get(): string {}
+
+function date_interval_create_from_date_string(string $datetime): DateInterval|false {}
+
+function date_interval_format(DateInterval $object, string $format): string {}
+
+function date_default_timezone_set(string $timezoneId): bool {}
+
+function date_default_timezone_get(): string {}
+
+/**
+ * @deprecated
+ */
+function date_sunrise(
+    int $timestamp,
+    int $returnFormat = SUNFUNCS_RET_STRING,
+    ?float $latitude = null,
+    ?float $longitude = null,
+    ?float $zenith = null,
+    ?float $utcOffset = null,
+): string|int|float|false {}
+
+/**
+ * @deprecated
+ */
+function date_sunset(
+    int $timestamp,
+    int $returnFormat = SUNFUNCS_RET_STRING,
+    ?float $latitude = null,
+    ?float $longitude = null,
+    ?float $zenith = null,
+    ?float $utcOffset = null,
+): string|int|float|false {}
+
+/**
+ * @return array{
+ *   sunrise: int|bool,
+ *   sunset: int|bool,
+ *   transit: int|bool,
+ *   civil_twilight_begin: int|bool,
+ *   civil_twilight_end: int|bool,
+ *   nautical_twilight_begin: int|bool,
+ *   nautical_twilight_end: int|bool,
+ *   astronomical_twilight_begin: int|bool,
+ *   astronomical_twilight_end: int|bool,
+ * }
+ */
+function date_sun_info(int $timestamp, float $latitude, float $longitude): array {}
+
+interface DateTimeInterface
+{
+    /** @var non-empty-string */
+    public const string ATOM = DATE_ATOM;
+
+    /** @var non-empty-string */
+    public const string COOKIE = DATE_COOKIE;
+
+    /** @var non-empty-string */
+    public const string ISO8601 = DATE_ISO8601;
+
+    /** @var non-empty-string */
+    public const string ISO8601_EXPANDED = DATE_ISO8601_EXPANDED;
+
+    /** @var non-empty-string */
+    public const string RFC822 = DATE_RFC822;
+
+    /** @var non-empty-string */
+    public const string RFC850 = DATE_RFC850;
+
+    /** @var non-empty-string */
+    public const string RFC1036 = DATE_RFC1036;
+
+    /** @var non-empty-string */
+    public const string RFC1123 = DATE_RFC1123;
+
+    /** @var non-empty-string */
+    #[Deprecated(since: '8.5', message: 'as this format ignores the associated timezone and always uses GMT')]
+    public const string RFC7231 = DATE_RFC7231;
+
+    /** @var non-empty-string */
+    public const string RFC2822 = DATE_RFC2822;
+
+    /** @var non-empty-string */
+    public const string RFC3339 = DATE_RFC3339;
+
+    /** @var non-empty-string */
+    public const string RFC3339_EXTENDED = DATE_RFC3339_EXTENDED;
+
+    /** @var non-empty-string */
+    public const string RSS = DATE_RSS;
+
+    /** @var non-empty-string */
+    public const string W3C = DATE_W3C;
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @param string $format
+     *
+     * @return ($format is non-empty-string ? non-empty-string : string)
+     */
+    public function format(string $format): string;
+
+    public function getTimezone(): DateTimeZone;
+
+    public function getOffset(): int;
+
+    public function getTimestamp(): int;
+
+    public function getMicrosecond(): int;
+
+    public function diff(DateTimeInterface $targetObject, bool $absolute = false): DateInterval;
+
+    public function __wakeup(): void;
+
+    public function __serialize(): array;
+
+    public function __unserialize(array $data): void;
+}
+
+class DateTime implements DateTimeInterface
+{
+    public function __construct(string $datetime = 'now', ?DateTimeZone $timezone = null) {}
+
+    public function __serialize(): array {}
+
+    public function __unserialize(array $data): void {}
+
+    public function __wakeup(): void {}
+
+    public static function __set_state(array $array): DateTime {}
+
+    public static function createFromImmutable(DateTimeImmutable $object): static {}
+
+    /** @return static */
+    #[Mago\AvailableSince(80000)]
+    public static function createFromInterface(DateTimeInterface $object): DateTime {} // TODO return type should be static
+
+    public static function createFromFormat(
+        string $format,
+        string $datetime,
+        ?DateTimeZone $timezone = null,
+    ): DateTime|false {}
+
+    #[Mago\AvailableSince(80400)]
+    public static function createFromTimestamp(int|float $timestamp): static {}
+
+    /**
+     * @return array{
+     *     warning_count: non-negative-int,
+     *     warnings: array<non-negative-int, non-empty-string>,
+     *     error_count: non-negative-int,
+     *     errors: array<non-negative-int, non-empty-string>,
+     * }|false
+     */
+    public static function getLastErrors(): array|false {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @param string $format
+     *
+     * @return ($format is non-empty-string ? non-empty-string : string)
+     */
+    public function format(string $format): string {}
+
+    public function modify(string $modifier): DateTime {}
+
+    public function add(DateInterval $interval): DateTime {}
+
+    public function sub(DateInterval $interval): DateTime {}
+
+    public function getTimezone(): DateTimeZone {}
+
+    public function setTimezone(DateTimeZone $timezone): DateTime {}
+
+    public function getOffset(): int {}
+
+    #[Mago\AvailableSince(80400)]
+    public function getMicrosecond(): int {}
+
+    public function setTime(int $hour, int $minute, int $second = 0, int $microsecond = 0): DateTime {}
+
+    public function setDate(int $year, int $month, int $day): DateTime {}
+
+    public function setISODate(int $year, int $week, int $dayOfWeek = 1): DateTime {}
+
+    public function setTimestamp(int $timestamp): DateTime {}
+
+    #[Mago\AvailableSince(80400)]
+    public function setMicrosecond(int $microsecond): static {}
+
+    public function getTimestamp(): int {}
+
+    public function diff(DateTimeInterface $targetObject, bool $absolute = false): DateInterval {}
+}
+
+class DateTimeImmutable implements DateTimeInterface
+{
+    public function __construct(string $datetime = 'now', ?DateTimeZone $timezone = null) {}
+
+    public function __serialize(): array {}
+
+    public function __unserialize(array $data): void {}
+
+    public function __wakeup(): void {}
+
+    public static function __set_state(array $array): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static|false
+     */
+    public static function createFromFormat(
+        string $format,
+        string $datetime,
+        ?DateTimeZone $timezone = null,
+    ): DateTimeImmutable|false {}
+
+    #[Mago\AvailableSince(80400)]
+    public static function createFromTimestamp(int|float $timestamp): static {}
+
+    /**
+     * @return array{
+     *     warning_count: non-negative-int,
+     *     warnings: array<non-negative-int, non-empty-string>,
+     *     error_count: non-negative-int,
+     *     errors: array<non-negative-int, non-empty-string>,
+     * }|false
+     */
+    public static function getLastErrors(): array|false {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @param string $format
+     *
+     * @return ($format is non-empty-string ? non-empty-string : string)
+     */
+    public function format(string $format): string {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @psalm-ignore-falsable-return
+     */
+    public function getTimezone(): DateTimeZone {}
+
+    /**
+     * @psalm-mutation-free
+     */
+    public function getOffset(): int {}
+
+    /**
+     * @psalm-mutation-free
+     */
+    public function getTimestamp(): int {}
+
+    #[Mago\AvailableSince(80400)]
+    public function getMicrosecond(): int {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @param bool $absolute
+     *
+     * @return DateInterval
+     */
+    public function diff(DateTimeInterface $targetObject, bool $absolute = false): DateInterval {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[NoDiscard(message: 'as DateTimeImmutable::modify() does not modify the object itself')]
+    public function modify(string $modifier): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[NoDiscard(message: 'as DateTimeImmutable::add() does not modify the object itself')]
+    public function add(DateInterval $interval): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[NoDiscard(message: 'as DateTimeImmutable::sub() does not modify the object itself')]
+    public function sub(DateInterval $interval): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[NoDiscard(message: 'as DateTimeImmutable::setTimezone() does not modify the object itself')]
+    public function setTimezone(DateTimeZone $timezone): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[NoDiscard(message: 'as DateTimeImmutable::setTime() does not modify the object itself')]
+    public function setTime(int $hour, int $minute, int $second = 0, int $microsecond = 0): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[NoDiscard(message: 'as DateTimeImmutable::setDate() does not modify the object itself')]
+    public function setDate(int $year, int $month, int $day): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[NoDiscard(message: 'as DateTimeImmutable::setISODate() does not modify the object itself')]
+    public function setISODate(int $year, int $week, int $dayOfWeek = 1): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[NoDiscard(message: 'as DateTimeImmutable::setTimestamp() does not modify the object itself')]
+    public function setTimestamp(int $timestamp): DateTimeImmutable {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[Mago\AvailableSince(80400)]
+    #[NoDiscard(message: 'as DateTimeImmutable::setMicrosecond() does not modify the object itself')]
+    public function setMicrosecond(int $microsecond): static {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    public static function createFromMutable(DateTime $object): static {}
+
+    /**
+     * @psalm-mutation-free
+     *
+     * @return static
+     */
+    #[Mago\AvailableSince(80000)]
+    public static function createFromInterface(DateTimeInterface $object): DateTimeImmutable {}
+}
+
+class DateTimeZone
+{
+    public const int AFRICA = 1;
+    public const int AMERICA = 2;
+    public const int ANTARCTICA = 4;
+    public const int ARCTIC = 8;
+    public const int ASIA = 16;
+    public const int ATLANTIC = 32;
+    public const int AUSTRALIA = 64;
+    public const int EUROPE = 128;
+    public const int INDIAN = 256;
+    public const int PACIFIC = 512;
+    public const int UTC = 1024;
+    public const int ALL = 2047;
+    public const int ALL_WITH_BC = 4095;
+    public const int PER_COUNTRY = 4096;
+
+    /**
+     * @psalm-external-mutation-free
+     *
+     * @throws DateInvalidTimeZoneException
+     */
+    public function __construct(string $timezone) {}
+
+    /** @return non-empty-string */
+    public function getName(): string {}
+
+    /**
+     * @psalm-mutation-free
+     */
+    public function getOffset(DateTimeInterface $datetime): int {}
+
+    /**
+     * @return list<array{
+     *     ts: int,
+     *     time: non-empty-string,
+     *     offset: int,
+     *     isdst: bool,
+     *     abbr: string,
+     * }>|false
+     */
+    public function getTransitions(int $timestampBegin = PHP_INT_MIN, int $timestampEnd = 2147483647): array|false {}
+
+    /**
+     * @return array{
+     *     country_code: non-empty-string,
+     *     latitude: float,
+     *     longitude: float,
+     *     comments: string,
+     * }|false
+     */
+    public function getLocation(): array|false {}
+
+    /**
+     * @return array<string, list<array{
+     *     dst: bool,
+     *     offset: int,
+     *     timezone_id: non-empty-string,
+     * }>>
+     */
+    public static function listAbbreviations(): array {}
+
+    /**
+     * @param non-empty-string|null $countryCode
+     *
+     * @return list<non-empty-string>
+     */
+    public static function listIdentifiers(
+        int $timezoneGroup = DateTimeZone::ALL,
+        ?string $countryCode = null,
+    ): array {}
+
+    public function __serialize(): array {}
+
+    public function __unserialize(array $data): void {}
+
+    public function __wakeup(): void {}
+
+    public static function __set_state(array $array): DateTimeZone {}
+}
+
+class DateInterval
+{
+    public readonly int $y;
+    public readonly int $m;
+    public readonly int $d;
+    public readonly int $h;
+    public readonly int $i;
+    public readonly int $s;
+    public readonly float $f;
+    /** @var int<0, 1> */
+    public readonly int $invert;
+    public readonly int|false $days;
+    public readonly bool $from_string;
+    public readonly string $date_string;
+
+    public function __construct(string $duration) {}
+
+    public static function createFromDateString(string $datetime): DateInterval {}
+
+    public function format(string $format): string {}
+
+    public function __serialize(): array;
+
+    public function __unserialize(array $data): void;
+
+    public function __wakeup(): void {}
+
+    public static function __set_state(array $array): DateInterval {}
+}
+
+/**
+ * @implements IteratorAggregate<int, DateTimeInterface>
+ */
+class DatePeriod implements IteratorAggregate
+{
+    public const int EXCLUDE_START_DATE = UNKNOWN;
+    public const int INCLUDE_END_DATE = UNKNOWN;
+
+    /**
+     * @readonly
+     */
+    public ?DateTimeInterface $start;
+
+    /**
+     * @readonly
+     */
+    public ?DateTimeInterface $current;
+
+    /**
+     * @readonly
+     */
+    public ?DateTimeInterface $end;
+
+    /**
+     * @readonly
+     */
+    public ?DateInterval $interval;
+
+    /**
+     * @readonly
+     */
+    public int $recurrences;
+
+    /**
+     * @readonly
+     */
+    public bool $include_start_date;
+
+    /**
+     * @readonly
+     */
+    public bool $include_end_date;
+
+    public static function createFromISO8601String(string $specification, int $options = 0): static {}
+
+    /**
+     * @param DateTimeInterface|string $start
+     * @param DateInterval|int $interval
+     * @param DateTimeInterface|int $end
+     * @param int $options
+     */
+    public function __construct($start, $interval = UNKNOWN, $end = UNKNOWN, $options = UNKNOWN) {}
+
+    public function getStartDate(): DateTimeInterface {}
+
+    public function getEndDate(): ?DateTimeInterface {}
+
+    public function getDateInterval(): DateInterval {}
+
+    public function getRecurrences(): ?int {}
+
+    public function __serialize(): array;
+
+    public function __unserialize(array $data): void;
+
+    public function __wakeup(): void {}
+
+    public static function __set_state(array $array): DatePeriod {}
+
+    public function getIterator(): Iterator {}
+}
+
+#[Mago\AvailableSince(80300)]
+class DateError extends Error {}
+
+class DateObjectError extends DateError {}
+
+class DateRangeError extends DateError {}
+
+class DateException extends Exception {}
+
+class DateInvalidTimeZoneException extends DateException {}
+
+#[Mago\AvailableSince(80300)]
+class DateInvalidOperationException extends DateException {}
+
+#[Mago\AvailableSince(80300)]
+class DateMalformedStringException extends DateException {}
+
+class DateMalformedIntervalStringException extends DateException {}
+
+class DateMalformedPeriodStringException extends DateException {}

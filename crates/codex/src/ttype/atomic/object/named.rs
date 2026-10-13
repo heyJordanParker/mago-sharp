@@ -1,0 +1,281 @@
+use mago_word::Word;
+use mago_word::concat_word;
+use mago_word::word;
+
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::append_intersection_ids;
+use crate::ttype::template::variance::Variance;
+use crate::ttype::union::TUnion;
+
+/// Represents an instance of a specific named class, interface, or trait.
+///
+/// This structure holds the name, any concrete type parameters for generics,
+/// flags (`$this`, internal state), and potential intersection types (`&OtherType`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TNamedObject {
+    /// The fully qualified class name (FQCN) of the primary type (e.g., `A` in `A&B<T>&S`).
+    pub name: Word,
+    /// Concrete types provided for generic type parameters, if any.
+    pub type_parameters: Option<Vec<TUnion>>,
+    pub variances: Option<Vec<Variance>>,
+    /// `true` if this represents the `static` type (same class, possibly different instance).
+    /// Set for `new static()`, `: static` return type, and `$this`.
+    pub is_static: bool,
+    /// `true` if this specifically represents the `$this` variable (same instance).
+    /// Implies `is_static`. Only `return $this` satisfies a `$this` return type.
+    pub is_this: bool,
+    /// Represents additional types in an intersection type (`&B&S` part of `A&B&S`).
+    /// Contains other *atomic* types (boxed due to potential recursion).
+    pub intersection_types: Option<Vec<TAtomic>>,
+    /// Internal analysis flag: `true` if the type parameters have been remapped.
+    pub remapped_parameters: bool,
+}
+
+impl TNamedObject {
+    /// Creates metadata for a named object type with default flags and no generics/intersections.
+    #[inline]
+    #[must_use]
+    pub fn new(name: Word) -> Self {
+        Self {
+            name,
+            type_parameters: None,
+            variances: None,
+            is_static: false,
+            is_this: false,
+            remapped_parameters: false,
+            intersection_types: None,
+        }
+    }
+
+    /// Creates metadata for a named object type with specified type parameters.
+    #[inline]
+    #[must_use]
+    pub fn new_with_type_parameters(name: Word, type_parameters: Option<Vec<TUnion>>) -> Self {
+        Self::new(name).with_type_parameters(type_parameters)
+    }
+
+    /// Creates metadata representing the `static` type (same class, possibly different instance).
+    #[inline]
+    #[must_use]
+    pub fn new_static(name: Word) -> Self {
+        Self::new(name).with_is_static(true)
+    }
+
+    /// Creates metadata representing the `$this` variable (same instance).
+    #[inline]
+    #[must_use]
+    pub fn new_this(name: Word) -> Self {
+        Self { is_this: true, ..Self::new_static(name) }
+    }
+
+    /// Returns the `Word` for the primary class/interface name.
+    #[inline]
+    #[must_use]
+    pub const fn get_name(&self) -> Word {
+        self.name
+    }
+
+    /// Checks if this object has concrete generic type parameters.
+    #[inline]
+    #[must_use]
+    pub fn has_type_parameters(&self) -> bool {
+        self.type_parameters.as_ref().is_some_and(|v| !v.is_empty())
+    }
+
+    /// Returns a slice of the concrete generic type parameters, if specified.
+    #[inline]
+    #[must_use]
+    pub fn get_type_parameters(&self) -> Option<&[TUnion]> {
+        self.type_parameters.as_deref()
+    }
+
+    /// Returns a mutable slice of the concrete generic type parameters, if specified.
+    #[inline]
+    pub fn get_type_parameters_mut(&mut self) -> Option<&mut [TUnion]> {
+        self.type_parameters.as_deref_mut()
+    }
+
+    /// Checks if this represents the `$this` variable.
+    #[inline]
+    #[must_use]
+    pub const fn is_this(&self) -> bool {
+        self.is_this
+    }
+
+    /// Checks if this is part of an intersection type (has extra types).
+    #[inline]
+    #[must_use]
+    pub fn is_intersection(&self) -> bool {
+        self.intersection_types.as_ref().is_some_and(|v| !v.is_empty())
+    }
+
+    /// Returns a new instance with the type parameters set.
+    #[inline]
+    #[must_use]
+    pub fn with_type_parameters(mut self, type_parameters: Option<Vec<TUnion>>) -> Self {
+        self.type_parameters = type_parameters;
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn with_variances(mut self, variances: Option<Vec<Variance>>) -> Self {
+        self.variances = variances;
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get_variance(&self, offset: usize) -> Option<Variance> {
+        self.variances.as_ref().and_then(|variances| variances.get(offset).copied())
+    }
+
+    /// Returns a new instance with the `is_static` flag set.
+    #[inline]
+    #[must_use]
+    pub fn with_is_static(mut self, is_static: bool) -> Self {
+        self.is_static = is_static;
+        if !is_static {
+            self.is_this = false;
+        }
+        self
+    }
+}
+
+impl TType for TNamedObject {
+    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+        let mut children = vec![];
+
+        if let Some(type_parameters) = &self.type_parameters {
+            for parameter in type_parameters {
+                children.push(TypeRef::Union(parameter));
+            }
+        }
+
+        if let Some(intersection_types) = &self.intersection_types {
+            for atomic in intersection_types {
+                children.push(TypeRef::Atomic(atomic));
+            }
+        }
+
+        children
+    }
+
+    fn can_be_intersected(&self) -> bool {
+        true
+    }
+
+    fn get_intersection_types(&self) -> Option<&[TAtomic]> {
+        self.intersection_types.as_deref()
+    }
+
+    fn get_intersection_types_mut(&mut self) -> Option<&mut Vec<TAtomic>> {
+        self.intersection_types.as_mut()
+    }
+
+    fn has_intersection_types(&self) -> bool {
+        self.intersection_types.as_ref().is_some_and(|v| !v.is_empty())
+    }
+
+    fn add_intersection_type(&mut self, intersection_type: TAtomic) -> bool {
+        if let Some(intersection_types) = self.intersection_types.as_mut() {
+            intersection_types.push(intersection_type);
+        } else {
+            self.intersection_types = Some(vec![intersection_type]);
+        }
+
+        true
+    }
+
+    fn needs_population(&self) -> bool {
+        true
+    }
+
+    fn is_expandable(&self) -> bool {
+        true
+    }
+
+    fn is_complex(&self) -> bool {
+        if let Some(parameters) = &self.type_parameters {
+            return parameters.iter().any(crate::ttype::TType::is_complex);
+        }
+        false
+    }
+
+    fn get_id(&self) -> Word {
+        let mut result = self.name;
+        if let Some(parameters) = self.get_type_parameters() {
+            result = concat_word!(result, b"<");
+            for (i, atomic) in parameters.iter().enumerate() {
+                if i > 0 {
+                    result = concat_word!(result, b", ");
+                }
+
+                result = concat_word!(result, atomic.get_id());
+            }
+
+            result = concat_word!(result, b">");
+        }
+
+        if let Some(intersection_types) = self.get_intersection_types() {
+            result = append_intersection_ids(result, intersection_types, None);
+        }
+
+        if self.is_this {
+            concat_word!(b"$this(", result, b")")
+        } else if self.is_static {
+            concat_word!(result, b"&static")
+        } else {
+            result
+        }
+    }
+
+    fn get_pretty_id_with_indent(&self, indent: usize) -> Word {
+        let mut result = self.name;
+        if let Some(parameters) = self.get_type_parameters() {
+            if parameters.iter().any(crate::ttype::TType::is_complex) {
+                // Use multiline format for complex type parameters
+                let param_indent = indent + 2;
+                let mut buf: Vec<u8> = Vec::new();
+                buf.extend_from_slice(self.name.as_bytes());
+                buf.extend_from_slice(b"<\n");
+                for (i, atomic) in parameters.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b",\n");
+                    }
+                    buf.resize(buf.len() + param_indent, b' ');
+                    buf.extend_from_slice(atomic.get_pretty_id_with_indent(param_indent).as_bytes());
+                }
+                buf.extend_from_slice(b",\n");
+                buf.resize(buf.len() + indent, b' ');
+                buf.extend_from_slice(b">");
+                result = word(&buf);
+            } else {
+                // Use inline format for simple type parameters
+                result = concat_word!(result, b"<");
+                for (i, atomic) in parameters.iter().enumerate() {
+                    if i > 0 {
+                        result = concat_word!(result, b", ");
+                    }
+                    result = concat_word!(result, atomic.get_pretty_id_with_indent(indent));
+                }
+                result = concat_word!(result, b">");
+            }
+        }
+
+        if let Some(intersection_types) = self.get_intersection_types() {
+            result = append_intersection_ids(result, intersection_types, Some(indent));
+        }
+
+        if self.is_this {
+            concat_word!(b"$this(", result, b")")
+        } else if self.is_static {
+            concat_word!(result, b"&static")
+        } else {
+            result
+        }
+    }
+}

@@ -1,0 +1,2368 @@
+use mago_allocator::Arena;
+use mago_allocator::vec::Vec;
+use mago_allocator::vec_in;
+
+use mago_php_version::feature::Feature;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Attribute;
+use mago_syntax::cst::AttributeList;
+use mago_syntax::cst::Block;
+use mago_syntax::cst::Class;
+use mago_syntax::cst::ClassLikeConstant;
+use mago_syntax::cst::ClassLikeConstantItem;
+use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::ClosingTag;
+use mago_syntax::cst::Constant;
+use mago_syntax::cst::ConstantItem;
+use mago_syntax::cst::Declare;
+use mago_syntax::cst::DeclareBody;
+use mago_syntax::cst::DeclareColonDelimitedBody;
+use mago_syntax::cst::DeclareItem;
+use mago_syntax::cst::Echo;
+use mago_syntax::cst::EchoTag;
+use mago_syntax::cst::Enum;
+use mago_syntax::cst::EnumBackingTypeHint;
+use mago_syntax::cst::EnumCase;
+use mago_syntax::cst::EnumCaseBackedItem;
+use mago_syntax::cst::EnumCaseItem;
+use mago_syntax::cst::EnumCaseUnitItem;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::ExpressionStatement;
+use mago_syntax::cst::Extends;
+use mago_syntax::cst::FullOpeningTag;
+use mago_syntax::cst::FullyQualifiedIdentifier;
+use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::FunctionLikeParameterDefaultValue;
+use mago_syntax::cst::FunctionLikeParameterList;
+use mago_syntax::cst::FunctionLikeReturnTypeHint;
+use mago_syntax::cst::Global;
+use mago_syntax::cst::Goto;
+use mago_syntax::cst::HaltCompiler;
+use mago_syntax::cst::Hint;
+use mago_syntax::cst::HookedProperty;
+use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Implements;
+use mago_syntax::cst::Inline;
+use mago_syntax::cst::Interface;
+use mago_syntax::cst::Keyword;
+use mago_syntax::cst::Label;
+use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::MaybeTypedUseItem;
+use mago_syntax::cst::MixedUseItemList;
+use mago_syntax::cst::Modifier;
+use mago_syntax::cst::Namespace;
+use mago_syntax::cst::NamespaceBody;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::OpeningTag;
+use mago_syntax::cst::PlainProperty;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::Property;
+use mago_syntax::cst::PropertyAbstractItem;
+use mago_syntax::cst::PropertyConcreteItem;
+use mago_syntax::cst::PropertyHook;
+use mago_syntax::cst::PropertyHookAbstractBody;
+use mago_syntax::cst::PropertyHookBody;
+use mago_syntax::cst::PropertyHookConcreteBody;
+use mago_syntax::cst::PropertyHookConcreteExpressionBody;
+use mago_syntax::cst::PropertyHookList;
+use mago_syntax::cst::PropertyItem;
+use mago_syntax::cst::QualifiedIdentifier;
+use mago_syntax::cst::Return;
+use mago_syntax::cst::ShortOpeningTag;
+use mago_syntax::cst::Statement;
+use mago_syntax::cst::Static;
+use mago_syntax::cst::StaticAbstractItem;
+use mago_syntax::cst::StaticConcreteItem;
+use mago_syntax::cst::StaticItem;
+use mago_syntax::cst::Terminator;
+use mago_syntax::cst::TokenSeparatedSequence;
+use mago_syntax::cst::Trait;
+use mago_syntax::cst::TraitUse;
+use mago_syntax::cst::TraitUseAbsoluteMethodReference;
+use mago_syntax::cst::TraitUseAbstractSpecification;
+use mago_syntax::cst::TraitUseAdaptation;
+use mago_syntax::cst::TraitUseAliasAdaptation;
+use mago_syntax::cst::TraitUseConcreteSpecification;
+use mago_syntax::cst::TraitUseMethodReference;
+use mago_syntax::cst::TraitUsePrecedenceAdaptation;
+use mago_syntax::cst::TraitUseSpecification;
+use mago_syntax::cst::Try;
+use mago_syntax::cst::TryCatchClause;
+use mago_syntax::cst::TryFinallyClause;
+use mago_syntax::cst::TypedUseItemList;
+use mago_syntax::cst::TypedUseItemSequence;
+use mago_syntax::cst::Unset;
+use mago_syntax::cst::Use;
+use mago_syntax::cst::UseItem;
+use mago_syntax::cst::UseItemAlias;
+use mago_syntax::cst::UseItemSequence;
+use mago_syntax::cst::UseItems;
+use mago_syntax::cst::UseType;
+
+use crate::document::BreakMode;
+use crate::document::Document;
+use crate::document::Group;
+use crate::document::IfBreak;
+use crate::document::IndentIfBreak;
+use crate::document::Line;
+use crate::document::Separator;
+use crate::document::Space;
+use crate::document::Trim;
+use crate::internal::FormatterState;
+use crate::internal::format::assignment::AssignmentLikeNode;
+use crate::internal::format::assignment::print_assignment_with_alignment;
+use crate::internal::format::block::print_block_of_nodes;
+use crate::internal::format::call_node::CallLikeNode;
+use crate::internal::format::call_node::print_call_like_node;
+use crate::internal::format::class_like::print_class_like_body;
+use crate::internal::format::misc::print_attribute_list_sequence;
+use crate::internal::format::misc::print_colon_delimited_body;
+use crate::internal::format::misc::print_modifiers;
+use crate::internal::format::parameters::print_function_like_parameters;
+use crate::internal::format::return_value::format_return_value;
+use crate::internal::format::statement::print_statement_sequence;
+use crate::internal::format::string::print_lowercase_keyword;
+use crate::internal::utils;
+use crate::settings::SortOrder;
+use crate::wrap;
+
+pub mod alignment;
+pub mod array;
+pub mod assignment;
+pub mod binaryish;
+pub mod block;
+pub mod call_arguments;
+pub mod call_node;
+pub mod class_like;
+pub mod control_structure;
+pub mod expression;
+pub mod function_like;
+pub mod member_access;
+pub mod misc;
+pub mod parameters;
+pub mod return_value;
+pub mod statement;
+pub mod string;
+
+fn print_inheritance_clause<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    keyword: Document<'arena, A>,
+    types: &'arena TokenSeparatedSequence<'arena, Identifier<'arena>>,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    Document::Group(Group::new(vec_in![f.arena;
+        keyword,
+        Document::Indent(vec_in![f.arena; Document::Line(Line::default())]),
+        Document::Indent(Document::join(f.arena, types.iter().map(|v| v.format(f)), Separator::CommaLine)),
+    ]))
+}
+
+fn push_comma_separated_items<'arena, A, T>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    contents: &mut Vec<'arena, Document<'arena, A>, A>,
+    items: &'arena [T],
+) where
+    T: Format<'arena, A>,
+    A: Arena,
+{
+    if items.len() == 1 {
+        contents.push(Document::space());
+        contents.push(items[0].format(f));
+    } else if !items.is_empty() {
+        contents.push(Document::Indent(vec_in![f.arena; Document::Line(Line::default())]));
+
+        contents.push(Document::Indent(Document::join(
+            f.arena,
+            items.iter().map(|v| v.format(f)),
+            Separator::CommaLine,
+        )));
+        contents.push(Document::Line(Line::soft()));
+    }
+}
+
+pub trait Format<'arena, A>
+where
+    A: Arena,
+{
+    #[must_use]
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A>;
+}
+
+impl<'arena, T, A> Format<'arena, A> for &'arena T
+where
+    T: Format<'arena, A>,
+    A: Arena,
+{
+    fn format(&self, p: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        (**self).format(p)
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Program<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        f.enter_node(Node::Program(self));
+        let mut parts = vec_in![f.arena];
+        if let Some(doc) = block::print_block_body(f, &self.statements) {
+            match doc {
+                Document::Array(arr) => {
+                    parts.extend(arr);
+                }
+                other => parts.push(other),
+            }
+        }
+
+        f.leave_node();
+
+        if !f.halted_compilation {
+            parts.push(Document::Trim(Trim::Newlines));
+            parts.push(Document::Line(Line::hard()));
+
+            if f.scripting_mode
+                && let Some(last_span) = self.trivia.last_span().or_else(|| self.statements.last_span())
+            {
+                let first_span = self.trivia.first_span().or_else(|| self.statements.first_span()).unwrap_or(last_span);
+
+                if let Some(comments) = f.print_dangling_comments(first_span.join(last_span), false) {
+                    parts.push(Document::Line(Line::hard()));
+                    parts.push(comments);
+                    parts.push(Document::Trim(Trim::Newlines));
+                    parts.push(Document::Line(Line::hard()));
+                }
+            }
+        }
+
+        Document::Array(parts)
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Statement<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        let was_in_script_terminating_statement = f.in_script_terminating_statement;
+
+        f.in_script_terminating_statement = !self.is_closing_tag() && self.terminates_scripting();
+
+        let result = wrap!(f, self, Statement, {
+            match self {
+                Statement::OpeningTag(t) => t.format(f),
+                Statement::ClosingTag(t) => t.format(f),
+                Statement::Inline(i) => i.format(f),
+                Statement::Namespace(n) => n.format(f),
+                Statement::Use(u) => u.format(f),
+                Statement::Class(c) => c.format(f),
+                Statement::Interface(i) => i.format(f),
+                Statement::Trait(t) => t.format(f),
+                Statement::Enum(e) => e.format(f),
+                Statement::Block(b) => b.format(f),
+                Statement::Constant(c) => c.format(f),
+                Statement::Function(u) => u.format(f),
+                Statement::Declare(d) => d.format(f),
+                Statement::Goto(g) => g.format(f),
+                Statement::Label(l) => l.format(f),
+                Statement::Try(t) => t.format(f),
+                Statement::Foreach(o) => o.format(f),
+                Statement::For(o) => o.format(f),
+                Statement::While(w) => w.format(f),
+                Statement::DoWhile(d) => d.format(f),
+                Statement::Continue(c) => c.format(f),
+                Statement::Break(b) => b.format(f),
+                Statement::Switch(s) => s.format(f),
+                Statement::If(i) => i.format(f),
+                Statement::Return(r) => r.format(f),
+                Statement::Expression(e) => e.format(f),
+                Statement::Echo(e) => e.format(f),
+                Statement::EchoTag(e) => e.format(f),
+                Statement::Global(g) => g.format(f),
+                Statement::Static(s) => s.format(f),
+                Statement::HaltCompiler(h) => h.format(f),
+                Statement::Unset(u) => u.format(f),
+                Statement::Noop(_) => Document::String(b";"),
+                #[allow(clippy::unreachable)]
+                _ => unreachable!("A statement variant was not handled in formatter: {self:?}"),
+            }
+        });
+
+        f.in_script_terminating_statement = was_in_script_terminating_statement;
+
+        result
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for OpeningTag<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        f.scripting_mode = true;
+
+        wrap!(f, self, OpeningTag, {
+            match &self {
+                OpeningTag::Full(tag) => tag.format(f),
+                OpeningTag::Short(tag) => tag.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for FullOpeningTag<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, FullOpeningTag, { Document::String(b"<?php") })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for ShortOpeningTag
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, ShortOpeningTag, { Document::String(b"<?") })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for ClosingTag
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        f.scripting_mode = false;
+
+        wrap!(f, self, ClosingTag, {
+            if f.settings.remove_trailing_close_tag
+                && !f.in_script_terminating_statement
+                && f.skip_spaces_and_new_lines(Some(self.span.end.offset), /* backwards */ false).is_none()
+            {
+                f.scripting_mode = true;
+
+                Document::Trim(Trim::Newlines)
+            } else {
+                Document::Array(vec_in![f.arena;
+                    Document::LineSuffixBoundary,
+                    if f.is_at_start_of_line(self.span) { Document::empty() } else { Document::soft_space() },
+                    Document::String(b"?>"),
+                ])
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Inline<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        f.scripting_mode = false;
+
+        wrap!(f, self, Inline, {
+            utils::replace_end_of_line(f, Document::String(self.value), Separator::LiteralLine, f.halted_compilation)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Declare<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Declare, {
+            let mut contents = vec_in![f.arena; self.declare.format(f)];
+
+            contents.push(Document::String(b"("));
+            contents.extend(Document::join(
+                f.arena,
+                self.items.iter().map(|item| item.format(f)),
+                Separator::CommaSpace,
+            ));
+            contents.push(Document::String(b")"));
+            contents.push(self.body.format(f));
+
+            Document::Group(Group::new(contents).with_break_mode(BreakMode::Force))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for DeclareItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, DeclareItem, {
+            Document::Array(vec_in![f.arena;
+                self.name.format(f),
+                if f.settings.space_around_assignment_in_declare { Document::space() } else { Document::empty() },
+                Document::String(b"="),
+                if f.settings.space_around_assignment_in_declare { Document::space() } else { Document::empty() },
+                self.value.format(f),
+            ])
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for DeclareBody<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, DeclareBody, {
+            match self {
+                DeclareBody::Statement(s) => {
+                    let body = s.format(f);
+
+                    misc::adjust_clause(f, s, body)
+                }
+                DeclareBody::ColonDelimited(b) => b.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for DeclareColonDelimitedBody<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, DeclareColonDelimitedBody, {
+            print_colon_delimited_body(f, &self.colon, &self.statements, &self.end_declare, &self.terminator)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Namespace<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Namespace, {
+            let mut parts = vec_in![f.arena; self.namespace.format(f)];
+
+            if let Some(name) = &self.name {
+                parts.push(Document::space());
+                parts.push(name.format(f));
+            }
+
+            match &self.body {
+                NamespaceBody::Implicit(namespace_implicit_body) => {
+                    parts.push(namespace_implicit_body.terminator.format(f));
+                    parts.push(Document::Line(Line::hard()));
+                    parts.push(Document::Line(Line::hard()));
+
+                    parts.extend(print_statement_sequence(f, &namespace_implicit_body.statements));
+                }
+                NamespaceBody::BraceDelimited(block) => {
+                    parts.push(Document::space());
+                    parts.push(block.format(f));
+                }
+            }
+
+            Document::Array(parts)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Identifier<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Identifier, {
+            match self {
+                Identifier::Local(i) => i.format(f),
+                Identifier::Qualified(i) => i.format(f),
+                Identifier::FullyQualified(i) => i.format(f),
+                Identifier::Dotted(i) => Document::String(i.value),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for LocalIdentifier<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, LocalIdentifier, { Document::String(self.value) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for QualifiedIdentifier<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, QualifiedIdentifier, { Document::String(self.value) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for FullyQualifiedIdentifier<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, FullyQualifiedIdentifier, { Document::String(self.value) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Use<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Use, {
+            Document::Group(Group::new(vec_in![f.arena;
+                self.r#use.format(f),
+                Document::space(),
+                match &self.items {
+                    UseItems::Sequence(s) => s.format(f),
+                    UseItems::TypedSequence(s) => s.format(f),
+                    UseItems::TypedList(t) => t.format(f),
+                    UseItems::MixedList(m) => m.format(f),
+                },
+                self.terminator.format(f),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for UseItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, UseItem, {
+            let mut parts = vec_in![f.arena; self.name.format(f)];
+
+            if let Some(alias) = &self.alias {
+                parts.push(Document::space());
+                parts.push(alias.format(f));
+            }
+
+            Document::Group(Group::new(parts))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for UseItemSequence<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, UseItemSequence, {
+            if *f.settings.sort_uses != SortOrder::Preserve {
+                Document::Group(Group::new(vec_in![f.arena;
+                    Document::Indent(Document::join(
+                        f.arena,
+                        statement::sort_use_items(self.items.iter()).into_iter().map(|i| i.format(f)),
+                        Separator::CommaLine,
+                    )),
+                ]))
+            } else {
+                Document::Group(Group::new(vec_in![f.arena;
+                    Document::Indent(Document::join(
+                        f.arena,
+                        self.items.iter().map(|i| i.format(f)),
+                        Separator::CommaLine,
+                    )),
+                ]))
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TypedUseItemList<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TypedUseItemList, {
+            let contents = vec_in![f.arena;
+                self.r#type.format(f),
+                Document::space(),
+                self.namespace.format(f),
+                Document::String(b"\\"),
+                Document::String(b"{"),
+            ];
+
+            let items: Vec<'arena, _, A> = if *f.settings.sort_uses != SortOrder::Preserve {
+                Document::join(
+                    f.arena,
+                    statement::sort_use_items(self.items.iter()).into_iter().map(|i| i.format(f)),
+                    Separator::CommaLine,
+                )
+            } else {
+                Document::join(f.arena, self.items.iter().map(|i| i.format(f)), Separator::CommaLine)
+            };
+
+            print_braced_use_items(f, contents, items, self.left_brace, self.right_brace)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for MixedUseItemList<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, MixedUseItemList, {
+            let contents = vec_in![f.arena; self.namespace.format(f), Document::String(b"\\"), Document::String(b"{")];
+
+            let items = if *f.settings.sort_uses != SortOrder::Preserve {
+                Document::join(
+                    f.arena,
+                    statement::sort_maybe_typed_use_items(self.items.iter()).into_iter().map(|i| i.format(f)),
+                    Separator::CommaLine,
+                )
+            } else {
+                Document::join(f.arena, self.items.iter().map(|i| i.format(f)), Separator::CommaLine)
+            };
+
+            print_braced_use_items(f, contents, items, self.left_brace, self.right_brace)
+        })
+    }
+}
+
+fn print_braced_use_items<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    mut contents: Vec<'arena, Document<'arena, A>, A>,
+    mut items: Vec<'arena, Document<'arena, A>, A>,
+    left_brace: Span,
+    right_brace: Span,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    if !items.is_empty() {
+        items.insert(0, Document::Line(Line::soft()));
+
+        contents.push(Document::Indent(items));
+    }
+
+    if let Some(comments) = f.print_dangling_comments(left_brace.join(right_brace), true) {
+        contents.push(comments);
+    } else {
+        contents.push(Document::Line(Line::soft()));
+    }
+
+    contents.push(Document::String(b"}"));
+
+    Document::Group(Group::new(contents))
+}
+
+impl<'arena, A> Format<'arena, A> for MaybeTypedUseItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, MaybeTypedUseItem, {
+            match &self.r#type {
+                Some(t) => {
+                    Document::Group(Group::new(vec_in![f.arena; t.format(f), Document::space(), self.item.format(f)]))
+                }
+                None => self.item.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TypedUseItemSequence<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TypedUseItemSequence, {
+            Document::Group(Group::new(vec_in![f.arena;
+                self.r#type.format(f),
+                Document::space(),
+                if *f.settings.sort_uses != SortOrder::Preserve {
+                    Document::Indent(Document::join(
+                        f.arena,
+                        statement::sort_use_items(self.items.iter()).into_iter().map(|i| i.format(f)),
+                        Separator::CommaLine,
+                    ))
+                } else {
+                    Document::Indent(Document::join(f.arena, self.items.iter().map(|i| i.format(f)), Separator::CommaLine))
+                },
+                Document::Line(Line::soft())
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for UseItemAlias<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, UseItemAlias, {
+            Document::Group(Group::new(
+                vec_in![f.arena; self.r#as.format(f), Document::space(), self.identifier.format(f)],
+            ))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for UseType<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, UseType, {
+            match self {
+                UseType::Function(keyword) => keyword.format(f),
+                UseType::Const(keyword) => keyword.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUse<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUse, {
+            if f.settings.separate_trait_use
+                && self.trait_names.len() > 1
+                && matches!(self.specification, TraitUseSpecification::Abstract(_))
+            {
+                let mut parts = Vec::with_capacity_in(self.trait_names.len() * 5, f.arena);
+                for (index, trait_name) in self.trait_names.iter().enumerate() {
+                    if index != 0 {
+                        parts.push(Document::Line(Line::hard()));
+                    }
+                    parts.push(self.r#use.format(f));
+                    parts.push(Document::space());
+                    parts.push(trait_name.format(f));
+                    parts.push(Document::String(b";"));
+                }
+
+                return Document::Array(parts);
+            }
+
+            let mut contents = vec_in![f.arena; self.r#use.format(f), Document::space()];
+            contents.extend(Document::join(
+                f.arena,
+                self.trait_names.iter().map(|trait_name| trait_name.format(f)),
+                Separator::CommaSpace,
+            ));
+            contents.push(self.specification.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUseSpecification<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUseSpecification, {
+            match self {
+                TraitUseSpecification::Abstract(s) => s.format(f),
+                TraitUseSpecification::Concrete(s) => Document::Array(vec_in![f.arena; Document::space(), s.format(f)]),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUseAbstractSpecification<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUseAbstractSpecification, { self.0.format(f) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUseConcreteSpecification<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUseConcreteSpecification, {
+            print_block_of_nodes(f, &self.left_brace, &self.adaptations, &self.right_brace, false)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUseAdaptation<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUseAdaptation, {
+            match self {
+                TraitUseAdaptation::Precedence(a) => a.format(f),
+                TraitUseAdaptation::Alias(a) => a.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUseMethodReference<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUseMethodReference, {
+            match self {
+                TraitUseMethodReference::Identifier(m) => m.format(f),
+                TraitUseMethodReference::Absolute(m) => m.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUseAbsoluteMethodReference<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUseAbsoluteMethodReference, {
+            Document::Group(Group::new(vec_in![f.arena;
+                self.trait_name.format(f),
+                Document::String(b"::"),
+                self.method_name.format(f),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUsePrecedenceAdaptation<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUsePrecedenceAdaptation, {
+            let mut contents = vec_in![f.arena; self.method_reference.format(f), Document::space(), self.insteadof.format(f), Document::space()];
+
+            contents.extend(Document::join(
+                f.arena,
+                self.trait_names.iter().map(|trait_name| trait_name.format(f)),
+                Separator::CommaSpace,
+            ));
+            contents.push(self.terminator.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TraitUseAliasAdaptation<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TraitUseAliasAdaptation, {
+            let mut parts = vec_in![f.arena; self.method_reference.format(f), Document::space(), self.r#as.format(f)];
+
+            if let Some(v) = &self.modifier {
+                parts.push(Document::space());
+                parts.push(v.format(f));
+            }
+
+            if let Some(a) = &self.alias {
+                parts.push(Document::space());
+                parts.push(a.format(f));
+            }
+
+            parts.push(self.terminator.format(f));
+
+            Document::Group(Group::new(parts))
+        })
+    }
+}
+
+fn clause_separator<'arena, A>(f: &FormatterState<'_, 'arena, A>, prev_block_span: Span) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    if f.settings.following_clause_on_newline
+        || f.is_followed_by_comment_on_next_line(prev_block_span)
+        || f.has_same_line_trailing_comment(prev_block_span)
+    {
+        Document::Line(Line::hard())
+    } else {
+        Document::space()
+    }
+}
+
+fn print_eq_assignment<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    node: AssignmentLikeNode<'arena>,
+    lhs: Document<'arena, A>,
+    value: &'arena Expression<'arena>,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let alignment = f.alignment_context();
+
+    print_assignment_with_alignment(f, node, lhs, Document::String(b"="), value, alignment)
+}
+
+impl<'arena, A> Format<'arena, A> for ClassLikeConstant<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, ClassLikeConstant, {
+            let mut contents = vec_in![f.arena];
+            if let Some(attributes) = misc::print_attribute_list_sequence(f, &self.attribute_lists) {
+                contents.push(attributes);
+                contents.push(Document::Line(Line::hard()));
+            }
+
+            if !self.modifiers.is_empty() {
+                contents.extend(print_modifiers(f, &self.modifiers));
+                contents.push(Document::space());
+            }
+
+            contents.push(self.r#const.format(f));
+            if let Some(h) = &self.hint {
+                contents.push(Document::space());
+                contents.push(h.format(f));
+            }
+
+            push_comma_separated_items(f, &mut contents, self.items.as_slice());
+
+            contents.push(self.terminator.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for ClassLikeConstantItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, ClassLikeConstantItem, {
+            let lhs = self.name.format(f);
+
+            print_eq_assignment(f, AssignmentLikeNode::ClassLikeConstantItem(self), lhs, self.value)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for EnumCase<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, EnumCase, {
+            let mut parts = vec_in![f.arena];
+            for attribute_list in &self.attribute_lists {
+                parts.push(attribute_list.format(f));
+                parts.push(Document::Line(Line::hard()));
+            }
+
+            parts.push(self.case.format(f));
+            parts.push(Document::space());
+            parts.push(self.item.format(f));
+            parts.push(self.terminator.format(f));
+
+            Document::Group(Group::new(parts))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for EnumCaseItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, EnumCaseItem, {
+            match self {
+                EnumCaseItem::Unit(c) => c.format(f),
+                EnumCaseItem::Backed(c) => c.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for EnumCaseUnitItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, EnumCaseUnitItem, { self.name.format(f) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for EnumCaseBackedItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, EnumCaseBackedItem, {
+            let lhs = self.name.format(f);
+
+            print_eq_assignment(f, AssignmentLikeNode::EnumCaseBackedItem(self), lhs, self.value)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Property<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Property, {
+            match self {
+                Property::Plain(p) => p.format(f),
+                Property::Hooked(p) => p.format(f),
+                Property::Computed(_) => unreachable!("`mago format` skips PHP# files, the only ones with it"),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PlainProperty<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PlainProperty, {
+            let mut contents = vec_in![f.arena];
+            if let Some(attributes) = misc::print_attribute_list_sequence(f, &self.attribute_lists) {
+                contents.push(attributes);
+                contents.push(Document::Line(Line::hard()));
+            }
+
+            contents.extend(print_modifiers(f, &self.modifiers));
+            let mut should_add_space = !self.modifiers.is_empty();
+            if let Some(var) = &self.var {
+                if should_add_space {
+                    contents.push(Document::space());
+                }
+
+                contents.push(var.format(f));
+                should_add_space = true;
+            }
+
+            if let Some(h) = &self.hint {
+                if should_add_space {
+                    contents.push(Document::space());
+                }
+
+                contents.push(h.format(f));
+
+                // Add type padding for alignment if in an alignment context
+                if let Some(alignment) = f.alignment_context()
+                    && alignment.type_padding > 0
+                {
+                    contents.push(Document::String(utils::spaces(f.arena, alignment.type_padding)));
+                }
+
+                should_add_space = true;
+            }
+
+            if self.items.len() == 1 {
+                if should_add_space {
+                    contents.push(Document::space());
+                }
+
+                contents.push(self.items.as_slice()[0].format(f));
+            } else if !self.items.is_empty() {
+                let mut items = Document::join(f.arena, self.items.iter().map(|v| v.format(f)), Separator::CommaLine);
+
+                if should_add_space {
+                    items.insert(0, Document::Line(Line::default()));
+                    contents.push(Document::Indent(items));
+                    contents.push(Document::Line(Line::soft()));
+                } else {
+                    // we don't have any modifiers, so we don't need to indent, or add a line
+                    contents.extend(items);
+                }
+            }
+
+            contents.push(self.terminator.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for HookedProperty<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, HookedProperty, {
+            let mut contents = vec_in![f.arena];
+            if let Some(attributes) = misc::print_attribute_list_sequence(f, &self.attribute_lists) {
+                contents.push(attributes);
+                contents.push(Document::Line(Line::hard()));
+            }
+
+            contents.extend(print_modifiers(f, &self.modifiers));
+            let mut should_add_space = !self.modifiers.is_empty();
+            if let Some(var) = &self.var {
+                if should_add_space {
+                    contents.push(Document::space());
+                }
+
+                contents.push(var.format(f));
+                should_add_space = true;
+            }
+
+            if let Some(h) = &self.hint {
+                if should_add_space {
+                    contents.push(Document::space());
+                }
+
+                contents.push(h.format(f));
+                should_add_space = true;
+            }
+
+            if should_add_space {
+                contents.push(Document::space());
+            }
+
+            contents.push(self.item.format(f));
+            contents.push(Document::space());
+            contents.push(self.hook_list.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyItem, {
+            match self {
+                PropertyItem::Abstract(p) => p.format(f),
+                PropertyItem::Concrete(p) => p.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyAbstractItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyAbstractItem, { self.variable.format(f) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyConcreteItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyConcreteItem, {
+            let lhs = self.variable.format(f);
+
+            print_eq_assignment(f, AssignmentLikeNode::PropertyConcreteItem(self), lhs, self.value)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Keyword<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Keyword, { Document::String(print_lowercase_keyword(f, self.value)) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Terminator<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Terminator, {
+            match self {
+                Terminator::Semicolon(_) | Terminator::TagPair(_, _) => Document::String(b";"),
+                Terminator::ClosingTag(t) => {
+                    Document::Array(vec_in![f.arena; Document::Space(Space::soft()), t.format(f)])
+                }
+                #[allow(clippy::unreachable)]
+                Terminator::Missing(span) => {
+                    unreachable!("Syntax error: a terminator was expected but missing at {:#?}", span)
+                }
+            }
+        })
+    }
+}
+
+/// Returns the document that terminates a statement whose member access chain received
+/// the dangling-semicolon treatment (`method_chain_semicolon_on_next_line`).
+///
+/// A closing-tag terminator must survive the replacement: dropping it would turn any
+/// inline HTML following the statement into PHP code.
+fn member_chain_dangling_semicolon<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    terminator: &'arena Terminator<'arena>,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    match terminator {
+        Terminator::ClosingTag(closing_tag) => Document::Array(vec_in![f.arena;
+            Document::Line(Line::hard()),
+            Document::String(b";"),
+            Document::Line(Line::hard()),
+            closing_tag.format(f),
+        ]),
+        _ => Document::Array(vec_in![f.arena;
+            Document::Line(Line::hard()),
+            Document::String(b";"),
+        ]),
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for ExpressionStatement<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, ExpressionStatement, {
+            let expression = self.expression.format(f);
+            let terminator = self.terminator.format(f);
+            if let Some(chain_group_id) = f.take_member_access_chain_group_id()
+                && f.settings.method_chain_semicolon_on_next_line
+            {
+                let semicolon = member_chain_dangling_semicolon(f, &self.terminator);
+
+                Document::Array(vec_in![f.arena;
+                    expression,
+                    Document::IfBreak(
+                        IfBreak::new(
+                            f.arena,
+                            semicolon,
+                            terminator,
+                        )
+                        .with_id(chain_group_id),
+                    ),
+                ])
+            } else {
+                Document::Array(vec_in![f.arena; expression, terminator])
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Extends<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Extends, {
+            let keyword = self.extends.format(f);
+
+            print_inheritance_clause(f, keyword, &self.types)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Implements<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Implements, {
+            let keyword = self.implements.format(f);
+
+            print_inheritance_clause(f, keyword, &self.types)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for ClassLikeMember<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, ClassLikeMember, {
+            match self {
+                ClassLikeMember::TraitUse(m) => m.format(f),
+                ClassLikeMember::Constant(m) => m.format(f),
+                ClassLikeMember::Property(m) => m.format(f),
+                ClassLikeMember::EnumCase(m) => m.format(f),
+                ClassLikeMember::Method(m) => m.format(f),
+                ClassLikeMember::Operator(_) | ClassLikeMember::Law(_) => {
+                    unreachable!("`mago format` skips PHP# files, the only ones with it")
+                }
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Interface<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Interface, {
+            let mut attributes = vec_in![f.arena];
+            for attribute_list in &self.attribute_lists {
+                attributes.push(attribute_list.format(f));
+                attributes.push(Document::Line(Line::hard()));
+            }
+
+            let signature = vec_in![f.arena;
+                self.interface.format(f),
+                Document::space(),
+                self.name.format(f),
+                if let Some(e) = &self.extends {
+                    Document::Array(vec_in![f.arena; Document::space(), e.format(f)])
+                } else {
+                    Document::empty()
+                },
+            ];
+
+            Document::Group(Group::new(vec_in![f.arena;
+                Document::Group(Group::new(attributes)),
+                Document::Group(Group::new(signature)),
+                print_class_like_body(f, &self.left_brace, &self.members, &self.right_brace, None),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for EnumBackingTypeHint<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, EnumBackingTypeHint, {
+            Document::Group(Group::new(vec_in![f.arena;
+                format_token(f, self.colon, b":"),
+                Document::space(),
+                self.hint.format(f),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Class<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Class, {
+            let attributes = misc::print_attribute_list_sequence(f, &self.attribute_lists);
+            let mut signature = print_modifiers(f, &self.modifiers);
+            if !signature.is_empty() {
+                signature.push(Document::space());
+            }
+
+            signature.push(self.class.format(f));
+            signature.push(Document::space());
+            signature.push(self.name.format(f));
+
+            if let Some(e) = &self.extends {
+                signature.push(Document::space());
+                signature.push(e.format(f));
+            }
+
+            if let Some(i) = &self.implements {
+                signature.push(Document::space());
+                signature.push(i.format(f));
+            }
+
+            let class = Document::Group(Group::new(vec_in![f.arena;
+                Document::Group(Group::new(signature)),
+                print_class_like_body(f, &self.left_brace, &self.members, &self.right_brace, None),
+            ]));
+
+            if let Some(attributes) = attributes {
+                Document::Array(vec_in![f.arena; attributes, Document::Line(Line::hard()), class])
+            } else {
+                class
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Trait<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Trait, {
+            let mut attributes = vec_in![f.arena];
+            for attribute_list in &self.attribute_lists {
+                attributes.push(attribute_list.format(f));
+                attributes.push(Document::Line(Line::hard()));
+            }
+
+            Document::Group(Group::new(vec_in![f.arena;
+                Document::Group(Group::new(attributes)),
+                Document::Group(Group::new(vec_in![f.arena; self.r#trait.format(f), Document::space(), self.name.format(f)])),
+                print_class_like_body(f, &self.left_brace, &self.members, &self.right_brace, None),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Enum<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Enum, {
+            let mut attributes = vec_in![f.arena];
+            for attribute_list in &self.attribute_lists {
+                attributes.push(attribute_list.format(f));
+                attributes.push(Document::Line(Line::hard()));
+            }
+
+            let signature = vec_in![f.arena;
+                self.r#enum.format(f),
+                Document::space(),
+                self.name.format(f),
+                if let Some(backing_type_hint) = &self.backing_type_hint {
+                    backing_type_hint.format(f)
+                } else {
+                    Document::empty()
+                },
+                if let Some(i) = &self.implements {
+                    Document::Array(vec_in![f.arena; Document::space(), i.format(f)])
+                } else {
+                    Document::empty()
+                },
+            ];
+
+            Document::Group(Group::new(vec_in![f.arena;
+                Document::Group(Group::new(attributes)),
+                Document::Group(Group::new(signature)),
+                print_class_like_body(f, &self.left_brace, &self.members, &self.right_brace, None),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Return<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Return, {
+            let mut contents = vec_in![f.arena; self.r#return.format(f)];
+
+            if let Some(value) = &self.value {
+                contents.push(Document::space());
+                contents.push(format_return_value(f, value));
+            }
+
+            let terminator = self.terminator.format(f);
+
+            if let Some(chain_group_id) = f.take_member_access_chain_group_id()
+                && f.settings.method_chain_semicolon_on_next_line
+            {
+                let semicolon = member_chain_dangling_semicolon(f, &self.terminator);
+                contents.push(Document::IfBreak(IfBreak::new(f.arena, semicolon, terminator).with_id(chain_group_id)));
+
+                Document::Group(Group::new(contents).with_id(chain_group_id))
+            } else {
+                contents.push(terminator);
+
+                Document::Group(Group::new(contents))
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Block<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Block, { block::print_block(f, &self.left_brace, &self.statements, &self.right_brace) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Echo<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Echo, {
+            let echo_keyword = self.echo.format(f);
+
+            let values_group_id = f.next_id();
+            let values_group = Document::Group(
+                Group::new(Document::join(f.arena, self.values.iter().map(|v| v.format(f)), Separator::CommaLine))
+                    .with_id(values_group_id),
+            );
+
+            let mut contents = vec_in![f.arena;
+                echo_keyword,
+                Document::IndentIfBreak(IndentIfBreak::new(values_group_id, vec_in![f.arena;
+                    Document::Line(Line::default()),
+                    values_group
+                ])),
+            ];
+
+            // A closing tag terminates the statement *and* leaves PHP mode, so it reads as the end
+            // of the block and gets its own line; a semicolon belongs to the last value.
+            if !matches!(self.terminator, Terminator::Semicolon(_)) {
+                contents.push(Document::Line(Line::soft()));
+            }
+
+            contents.push(self.terminator.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for EchoTag<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, EchoTag, {
+            if self.values.len() == 1
+                && let Some(expression) = self.values.first()
+            {
+                // Single expression: inline as `<?= expr ?>`
+                Document::Group(Group::new(vec_in![f.arena;
+                    Document::String(b"<?="),
+                    Document::space(),
+                    expression.format(f),
+                    self.terminator.format(f),
+                ]))
+            } else {
+                let values_group_id = f.next_id();
+                let values_group = Document::Group(
+                    Group::new(Document::join(f.arena, self.values.iter().map(|v| v.format(f)), Separator::CommaLine))
+                        .with_id(values_group_id),
+                );
+
+                Document::Group(Group::new(vec_in![f.arena;
+                    Document::String(b"<?="),
+                    Document::IndentIfBreak(IndentIfBreak::new(values_group_id, vec_in![f.arena;
+                        Document::Line(Line::default()),
+                        values_group
+                    ])),
+                    Document::Line(Line::soft()),
+                    self.terminator.format(f),
+                ]))
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for ConstantItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, ConstantItem, {
+            let lhs = self.name.format(f);
+
+            print_eq_assignment(f, AssignmentLikeNode::ConstantItem(self), lhs, self.value)
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Constant<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Constant, {
+            let mut contents = vec_in![f.arena];
+
+            if let Some(attributes) = misc::print_attribute_list_sequence(f, &self.attribute_lists) {
+                contents.push(attributes);
+                contents.push(Document::Line(Line::hard()));
+            }
+
+            contents.push(self.r#const.format(f));
+            push_comma_separated_items(f, &mut contents, self.items.as_slice());
+
+            contents.push(self.terminator.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Attribute<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Attribute, { print_call_like_node(f, CallLikeNode::Attribute(self)) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Hint<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Hint, {
+            match self {
+                Hint::Identifier(identifier) => identifier.format(f),
+                Hint::Parenthesized(parenthesized_hint) => Document::Array(vec_in![f.arena;
+                    format_token(f, parenthesized_hint.left_parenthesis, b"("),
+                    parenthesized_hint.hint.format(f),
+                    format_token(f, parenthesized_hint.right_parenthesis, b")"),
+                ]),
+                Hint::Nullable(nullable_hint) => {
+                    // If the nullable type is nested inside another type hint,
+                    // we cannot use `?` syntax.
+                    let force_long_syntax = matches!(f.parent_node(), Node::Hint(_))
+                        || (matches!(
+                            nullable_hint.hint,
+                            Hint::Nullable(_) | Hint::Union(_) | Hint::Intersection(_) | Hint::Parenthesized(_)
+                        ));
+
+                    if !force_long_syntax && f.settings.null_type_hint.is_question() {
+                        Document::Array(vec_in![f.arena; Document::String(b"?"), nullable_hint.hint.format(f)])
+                    } else if f.settings.null_type_hint.is_null_pipe_last() {
+                        Document::Array(vec_in![f.arena;
+                            nullable_hint.hint.format(f),
+                            Document::String(b"|"),
+                            Document::String(b"null"),
+                        ])
+                    } else {
+                        Document::Array(vec_in![f.arena;
+                            Document::String(b"null"),
+                            Document::String(b"|"),
+                            nullable_hint.hint.format(f),
+                        ])
+                    }
+                }
+                Hint::Union(union_hint) => {
+                    let force_long_syntax = matches!(f.parent_node(), Node::Hint(_))
+                        || matches!(
+                            union_hint.left,
+                            Hint::Nullable(_) | Hint::Union(_) | Hint::Intersection(_) | Hint::Parenthesized(_)
+                        )
+                        || matches!(
+                            union_hint.right,
+                            Hint::Nullable(_) | Hint::Union(_) | Hint::Intersection(_) | Hint::Parenthesized(_)
+                        );
+
+                    let use_short_syntax = if !force_long_syntax && f.settings.null_type_hint.is_question() {
+                        matches!(union_hint.left, Hint::Null(_)) || matches!(union_hint.right, Hint::Null(_))
+                    } else {
+                        false
+                    };
+
+                    if use_short_syntax {
+                        let non_null_hint =
+                            if matches!(union_hint.left, Hint::Null(_)) { &union_hint.right } else { &union_hint.left };
+
+                        Document::Array(vec_in![f.arena;
+                            Document::String(b"?"),
+                            non_null_hint.format(f),
+                        ])
+                    } else if (f.settings.null_type_hint.is_null_pipe_last()
+                        || f.settings.null_type_hint.is_question())
+                        // Only reorder at top-level unions; nested unions are handled by the top-level's tree traversal.
+                        && !matches!(f.parent_node(), Node::Hint(Hint::Union(_)))
+                        && union_needs_null_reorder(self)
+                    {
+                        let mut docs = Vec::new_in(f.arena);
+                        format_union_non_null_leaves(f, self, &mut docs);
+                        docs.push(Document::String(b"|"));
+                        docs.push(Document::String(b"null"));
+                        Document::Array(docs)
+                    } else {
+                        Document::Array(vec_in![f.arena;
+                            union_hint.left.format(f),
+                            format_token(f, union_hint.pipe, b"|"),
+                            union_hint.right.format(f),
+                        ])
+                    }
+                }
+                Hint::Intersection(intersection_hint) => Document::Array(vec_in![f.arena;
+                    intersection_hint.left.format(f),
+                    format_token(f, intersection_hint.ampersand, b"&"),
+                    intersection_hint.right.format(f),
+                ]),
+                Hint::Null(_) => Document::String(b"null"),
+                Hint::True(_) => Document::String(b"true"),
+                Hint::False(_) => Document::String(b"false"),
+                Hint::Array(_) => Document::String(b"array"),
+                Hint::Callable(_) => Document::String(b"callable"),
+                Hint::Static(_) => Document::String(b"static"),
+                Hint::Self_(_) => Document::String(b"self"),
+                Hint::Parent(_) => Document::String(b"parent"),
+                Hint::Void(_) => Document::String(b"void"),
+                Hint::Never(_) => Document::String(b"never"),
+                Hint::Float(_) => Document::String(b"float"),
+                Hint::Bool(_) => Document::String(b"bool"),
+                Hint::Integer(_) => Document::String(b"int"),
+                Hint::String(_) => Document::String(b"string"),
+                Hint::Object(_) => Document::String(b"object"),
+                Hint::Mixed(_) => Document::String(b"mixed"),
+                Hint::Iterable(_) => Document::String(b"iterable"),
+                #[allow(clippy::unreachable)]
+                Hint::Generic(_) => unreachable!("the formatter refuses a PHP# file, the only one with type arguments"),
+                Hint::Function(_) => {
+                    unreachable!("the formatter refuses a PHP# file, the only one with function types")
+                }
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Modifier<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Modifier, {
+            match self {
+                Modifier::Static(keyword) => keyword.format(f),
+                Modifier::Final(keyword) => keyword.format(f),
+                Modifier::Abstract(keyword) => keyword.format(f),
+                Modifier::Readonly(keyword) => keyword.format(f),
+                Modifier::Public(keyword) => keyword.format(f),
+                Modifier::Protected(keyword) => keyword.format(f),
+                Modifier::Private(keyword) => keyword.format(f),
+                Modifier::PrivateSet(keyword) => keyword.format(f),
+                Modifier::ProtectedSet(keyword) => keyword.format(f),
+                Modifier::PublicSet(keyword) => keyword.format(f),
+                Modifier::Virtual(keyword) => keyword.format(f),
+                Modifier::Override(keyword) => keyword.format(f),
+                Modifier::Required(keyword) => keyword.format(f),
+                Modifier::Extern(keyword) => keyword.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for AttributeList<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, AttributeList, {
+            let attributes_count = self.attributes.len();
+
+            let sorted_attributes =
+                if attributes_count > 1 && !matches!(f.settings.attributes_order, SortOrder::Preserve) {
+                    let mut sorted: std::vec::Vec<&'arena Attribute<'arena>> = self.attributes.iter().collect();
+                    misc::sort_attribute_refs(&mut sorted, f.settings.attributes_order);
+                    Some(sorted)
+                } else {
+                    None
+                };
+
+            let preserve_break = f.settings.preserve_breaking_attribute_list
+                && attributes_count >= 1
+                && misc::has_new_line_in_range(
+                    f.source_text,
+                    self.hash_left_bracket.end.offset,
+                    self.attributes.as_slice()[0].span().start.offset,
+                );
+            let should_inline = !preserve_break && attributes_count == 1;
+
+            let mut contents = vec_in![f.arena; Document::String(b"#[")];
+            if let Some(trailing_comments) = f.print_trailing_comments(self.hash_left_bracket) {
+                contents.push(trailing_comments);
+            }
+
+            if should_inline {
+                contents.push(self.attributes.as_slice()[0].format(f));
+            } else {
+                contents.push(Document::Indent({
+                    let mut attributes = match &sorted_attributes {
+                        Some(sorted) => Document::join(
+                            f.arena,
+                            sorted.iter().copied().map(|a| Document::Group(Group::new(vec_in![f.arena; a.format(f)]))),
+                            Separator::CommaLine,
+                        ),
+                        None => Document::join(
+                            f.arena,
+                            self.attributes.iter().map(|a| Document::Group(Group::new(vec_in![f.arena; a.format(f)]))),
+                            Separator::CommaLine,
+                        ),
+                    };
+
+                    attributes.insert(0, Document::Line(Line::soft()));
+
+                    attributes
+                }));
+            }
+
+            if !should_inline {
+                if f.settings.trailing_comma {
+                    contents.push(Document::IfBreak(IfBreak::then(f.arena, Document::String(b","))));
+                }
+
+                contents.push(Document::Line(Line::soft()));
+            }
+
+            if let Some(leading_comments) = f.print_leading_comments(self.right_bracket) {
+                contents.push(leading_comments);
+            }
+
+            contents.push(Document::String(b"]"));
+
+            Document::Group(Group::new(contents).with_break_mode(if preserve_break {
+                BreakMode::Preserve
+            } else {
+                BreakMode::Auto
+            }))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyHookAbstractBody
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyHookAbstractBody, { Document::String(b";") })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyHookConcreteBody<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyHookConcreteBody, {
+            Document::Group(Group::new(vec_in![f.arena;
+                Document::space(),
+                match self {
+                    PropertyHookConcreteBody::Block(b) => b.format(f),
+                    PropertyHookConcreteBody::Expression(b) => b.format(f),
+                },
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyHookConcreteExpressionBody<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyHookConcreteExpressionBody, {
+            Document::Group(Group::new(vec_in![f.arena;
+                Document::String(b"=>"),
+                Document::space(),
+                self.expression.format(f),
+                Document::String(b";"),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyHookBody<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyHookBody, {
+            match self {
+                PropertyHookBody::Abstract(b) => b.format(f),
+                PropertyHookBody::Concrete(b) => b.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyHook<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyHook, {
+            let mut contents = vec_in![f.arena];
+            if let Some(attributes) = print_attribute_list_sequence(f, &self.attribute_lists) {
+                contents.push(attributes);
+                contents.push(Document::Line(Line::hard()));
+            }
+
+            contents.extend(print_modifiers(f, &self.modifiers));
+            if !self.modifiers.is_empty() {
+                contents.push(Document::space());
+            }
+
+            if self.ampersand.is_some() {
+                contents.push(Document::String(b"&"));
+            }
+
+            contents.push(self.name.format(f));
+            if let Some(parameters) = &self.parameter_list {
+                if f.settings.space_before_hook_parameter_list_parenthesis {
+                    contents.push(Document::space());
+                }
+
+                contents.push(parameters.format(f));
+            }
+
+            contents.push(self.body.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for PropertyHookList<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, PropertyHookList, {
+            let can_inline = f.settings.inline_abstract_property_hooks
+                && !self.hooks.is_empty()
+                && self.hooks.iter().all(|hook| {
+                    hook.attribute_lists.is_empty()
+                        && hook.modifiers.is_empty()
+                        && matches!(hook.body, PropertyHookBody::Abstract(_))
+                });
+
+            if can_inline {
+                Document::Group(Group::new(vec_in![f.arena;
+                    Document::String(b"{"),
+                    f.print_trailing_comments(self.left_brace).unwrap_or_else(Document::empty),
+                    Document::String(b" "),
+                    Document::Array(Document::join(
+                        f.arena,
+                        self.hooks.iter().map(|hook| hook.format(f)),
+                        Separator::Space,
+                    )),
+                    f.print_dangling_comments(self.span(), true).unwrap_or_else(Document::empty),
+                    Document::String(b" "),
+                    Document::String(b"}"),
+                    f.print_trailing_comments(self.right_brace).unwrap_or_else(Document::empty),
+                ]))
+            } else {
+                Document::Group(Group::new(vec_in![f.arena;
+                    Document::String(b"{"),
+                    f.print_trailing_comments(self.left_brace).unwrap_or_else(Document::empty),
+                    if self.hooks.is_empty() {
+                        Document::empty()
+                    } else {
+                        Document::Indent(vec_in![f.arena;
+                            Document::Line(Line::hard()),
+                            Document::Array(Document::join(
+                                f.arena,
+                                self.hooks.iter().map(|hook| hook.format(f)),
+                                Separator::HardLine,
+                            )),
+                        ])
+                    },
+                    f.print_dangling_comments(self.span(), true).unwrap_or_else(|| {
+                        if self.hooks.is_empty() { Document::empty() } else { Document::Line(Line::hard()) }
+                    }),
+                    Document::String(b"}"),
+                    f.print_trailing_comments(self.right_brace).unwrap_or_else(Document::empty),
+                ]))
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for FunctionLikeParameterDefaultValue<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, FunctionLikeParameterDefaultValue, {
+            Document::Group(Group::new(vec_in![f.arena; Document::String(b"= "), self.value.format(f)]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for FunctionLikeParameter<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, FunctionLikeParameter, {
+            let mut contents = vec_in![f.arena];
+            if let Some(attributes) = print_attribute_list_sequence(f, &self.attribute_lists) {
+                contents.push(attributes);
+                contents.push(
+                    if f.settings.parameter_attribute_on_new_line
+                        && let Some(list_id) = f.parameter_state.list_group_id
+                    {
+                        Document::IfBreak(
+                            IfBreak::new(f.arena, Document::Line(Line::hard()), Document::Line(Line::default()))
+                                .with_id(list_id),
+                        )
+                    } else {
+                        Document::Line(Line::default())
+                    },
+                );
+            }
+
+            contents.extend(print_modifiers(f, &self.modifiers));
+            if !self.modifiers.is_empty() {
+                contents.push(Document::space());
+            }
+
+            if let Some(hint) = &self.hint {
+                contents.push(hint.format(f));
+                contents.push(Document::space());
+            }
+
+            if self.ampersand.is_some() {
+                contents.push(Document::String(b"&"));
+            }
+
+            if self.ellipsis.is_some() {
+                contents.push(Document::String(b"..."));
+            }
+
+            if let (Some(padding), Some(list_id)) =
+                (f.parameter_state.variable_padding, f.parameter_state.list_group_id)
+                && padding > 0
+            {
+                let spaces = Document::String(utils::spaces(f.arena, padding));
+                contents.push(Document::IfBreak(IfBreak::new(f.arena, spaces, Document::empty()).with_id(list_id)));
+            }
+
+            contents.push(self.variable.format(f));
+            if let Some(default_value) = &self.default_value {
+                contents.push(Document::space());
+                contents.push(default_value.format(f));
+            }
+
+            if let Some(hooks) = &self.hooks {
+                contents.push(Document::space());
+                contents.push(hooks.format(f));
+            }
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for FunctionLikeParameterList<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, FunctionLikeParameterList, { print_function_like_parameters(f, self) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for FunctionLikeReturnTypeHint<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, FunctionLikeReturnTypeHint, {
+            match self.colon {
+                Some(colon) => Document::Group(Group::new(vec_in![f.arena;
+                    format_token(f, colon, b":"),
+                    Document::space(),
+                    self.hint.format(f),
+                ])),
+                None => self.hint.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Try<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Try, {
+            let mut parts = vec_in![f.arena; self.r#try.format(f), Document::space(), self.block.format(f)];
+
+            let mut prev_block_span = self.block.span();
+            for clause in &self.catch_clauses {
+                parts.push(clause_separator(f, prev_block_span));
+                parts.push(clause.format(f));
+                prev_block_span = clause.block.span();
+            }
+
+            if let Some(clause) = &self.finally_clause {
+                parts.push(clause_separator(f, prev_block_span));
+                parts.push(clause.format(f));
+            }
+
+            Document::Group(Group::new(parts))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TryCatchClause<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TryCatchClause, {
+            let hint_group_id = f.next_id();
+
+            Document::Group(Group::new(vec_in![f.arena;
+                self.catch.format(f),
+                Document::space(),
+                format_token(f, self.left_parenthesis, b"("),
+                Document::Group(Group::new(vec_in![f.arena;
+                    Document::IndentIfBreak(IndentIfBreak::new(hint_group_id, {
+                        let mut context = vec_in![f.arena; Document::Line(Line::soft())];
+
+                        context.push(self.hint.format(f));
+                        if let Some(variable) = &self.variable {
+                            context.push(Document::space());
+                            context.push(variable.format(f));
+                        }
+
+                        context
+                    })),
+                    Document::Line(Line::soft()),
+                ]).with_id(hint_group_id)),
+                format_token(f, self.right_parenthesis, b")"),
+                Document::space(),
+                self.block.format(f),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for TryFinallyClause<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, TryFinallyClause, {
+            Document::Group(Group::new(
+                vec_in![f.arena; self.finally.format(f), Document::space(), self.block.format(f)],
+            ))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Global<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Global, {
+            let mut contents = vec_in![f.arena; self.global.format(f)];
+
+            push_comma_separated_items(f, &mut contents, self.variables.as_slice());
+
+            contents.push(self.terminator.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for StaticAbstractItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, StaticAbstractItem, { self.variable.format(f) })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for StaticConcreteItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, StaticConcreteItem, {
+            Document::Group(Group::new(vec_in![f.arena;
+                self.variable.format(f),
+                Document::space(),
+                Document::String(b"="),
+                Document::space(),
+                self.value.format(f),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for StaticItem<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, StaticItem, {
+            match self {
+                StaticItem::Abstract(i) => i.format(f),
+                StaticItem::Concrete(i) => i.format(f),
+            }
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Static<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Static, {
+            let mut contents = vec_in![f.arena; self.r#static.format(f)];
+
+            push_comma_separated_items(f, &mut contents, self.items.as_slice());
+
+            contents.push(self.terminator.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Unset<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Unset, {
+            let mut contents = vec_in![f.arena; self.unset.format(f), Document::String(b"(")];
+
+            if !self.values.is_empty() {
+                let mut values = Document::join(f.arena, self.values.iter().map(|v| v.format(f)), Separator::CommaLine);
+
+                // `unset()` accepts a trailing comma since the same version as function calls (7.3)
+                if f.trailing_comma_for(Feature::TrailingCommaInFunctionCalls) {
+                    values.push(Document::IfBreak(IfBreak::then(f.arena, Document::String(b","))));
+                }
+
+                values.insert(0, Document::Line(Line::soft()));
+
+                contents.push(Document::Indent(values));
+                contents.push(Document::Line(Line::soft()));
+            }
+
+            contents.push(Document::String(b")"));
+            contents.push(self.terminator.format(f));
+
+            Document::Group(Group::new(contents))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Goto<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Goto, {
+            Document::Group(Group::new(vec_in![f.arena;
+                self.goto.format(f),
+                Document::space(),
+                self.label.format(f),
+                self.terminator.format(f),
+            ]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for Label<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        wrap!(f, self, Label, {
+            Document::Group(Group::new(vec_in![f.arena; self.name.format(f), Document::String(b":")]))
+        })
+    }
+}
+
+impl<'arena, A> Format<'arena, A> for HaltCompiler<'arena>
+where
+    A: Arena,
+{
+    fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
+        f.scripting_mode = false;
+        f.halted_compilation = true;
+
+        wrap!(f, self, HaltCompiler, {
+            Document::Group(Group::new(vec_in![f.arena;
+                self.halt_compiler.format(f),
+                Document::String(b"("),
+                Document::String(b")"),
+                self.terminator.format(f),
+            ]))
+        })
+    }
+}
+
+/// Returns `true` if the union tree contains `null` that is not already the rightmost leaf.
+fn union_needs_null_reorder(hint: &Hint<'_>) -> bool {
+    fn contains_null(hint: &Hint<'_>) -> bool {
+        match hint {
+            Hint::Null(_) => true,
+            Hint::Union(u) => contains_null(u.left) || contains_null(u.right),
+            _ => false,
+        }
+    }
+
+    match hint {
+        Hint::Union(u) => contains_null(u.left) || union_needs_null_reorder(u.right),
+        _ => false,
+    }
+}
+
+/// Formats all non-null leaves of a union tree directly into `docs`, skipping `null`.
+fn format_union_non_null_leaves<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    hint: &'arena Hint<'arena>,
+    docs: &mut Vec<'arena, Document<'arena, A>, A>,
+) where
+    A: Arena,
+{
+    match hint {
+        Hint::Union(u) => {
+            format_union_non_null_leaves(f, u.left, docs);
+            format_union_non_null_leaves(f, u.right, docs);
+        }
+        Hint::Null(_) => {}
+        leaf => {
+            if !docs.is_empty() {
+                docs.push(Document::String(b"|"));
+            }
+            docs.push(leaf.format(f));
+        }
+    }
+}
+
+fn format_token<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    span: Span,
+    token_value: &'arena [u8],
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let leading = f.print_leading_comments(span);
+    let trailing = f.print_trailing_comments(span);
+
+    f.print_comments(leading, Document::String(token_value), trailing)
+}
+
+fn format_token_with_only_leading_comments<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    span: Span,
+    token_value: &'arena [u8],
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let leading = f.print_leading_comments(span);
+
+    f.print_comments(leading, Document::String(token_value), None)
+}

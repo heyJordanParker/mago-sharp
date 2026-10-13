@@ -1,0 +1,622 @@
+use mago_allocator::Arena;
+use mago_allocator::CollectIn;
+use mago_allocator::vec::Vec as BumpVec;
+use mago_database::file::File;
+use mago_database::file::FileId;
+use mago_database::file::HasFileId;
+use mago_php_version::PHPVersion;
+use mago_php_version::feature::Feature;
+use mago_span::Span;
+use mago_syntax::cst::Node;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::Trivia;
+
+use crate::document::group::GroupIdentifier;
+use crate::document::group::GroupIdentifierBuilder;
+use crate::internal::comment::placement::Comments;
+use crate::internal::comment::placement::place_comments;
+use crate::internal::format::assignment::AssignmentAlignment;
+use crate::settings::FormatSettings;
+
+pub mod comment;
+pub mod format;
+pub mod macros;
+pub mod parens;
+pub mod printer;
+pub mod utils;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ArgumentState {
+    expand_first_argument: bool,
+    expand_last_argument: bool,
+    named_argument_padding: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParameterState {
+    list_group_id: Option<GroupIdentifier>,
+    variable_padding: Option<usize>,
+}
+
+/// A region of source code that should not be formatted.
+#[derive(Debug, Clone, Copy)]
+pub struct IgnoreRegion {
+    /// Start offset (beginning of the @mago-format-ignore-start comment)
+    pub start: u32,
+    /// End offset (end of the @mago-format-ignore-end comment, or EOF)
+    pub end: u32,
+}
+
+/// Markers that indicate the start of an unformatted region.
+const IGNORE_START_MARKERS: [&[u8]; 2] = [b"@mago-format-ignore-start", b"@mago-formatter-ignore-start"];
+
+/// Markers that indicate the end of an unformatted region.
+const IGNORE_END_MARKERS: [&[u8]; 2] = [b"@mago-format-ignore-end", b"@mago-formatter-ignore-end"];
+
+/// Markers that indicate the next statement should be ignored.
+const IGNORE_NEXT_MARKERS: [&[u8]; 2] = [b"@mago-format-ignore-next", b"@mago-formatter-ignore-next"];
+
+/// A marker indicating the next statement should not be formatted.
+#[derive(Debug, Clone, Copy)]
+pub struct IgnoreNextMarker {
+    /// Start offset of the comment containing the marker.
+    pub comment_start: u32,
+    /// End offset of the comment containing the marker.
+    pub comment_end: u32,
+}
+
+/// Scans comments to build a list of ignore regions and ignore-next markers.
+fn build_ignore_markers<'arena, A>(
+    arena: &'arena A,
+    comments: &[Trivia<'arena>],
+    source_len: u32,
+) -> (&'arena [IgnoreRegion], &'arena [IgnoreNextMarker])
+where
+    A: Arena,
+{
+    let mut regions = BumpVec::new_in(arena);
+    let mut next_markers = BumpVec::new_in(arena);
+    let mut current_start: Option<u32> = None;
+
+    for comment in comments {
+        let has_start = IGNORE_START_MARKERS.iter().any(|m| memchr::memmem::find(comment.value, m).is_some());
+        let has_end = IGNORE_END_MARKERS.iter().any(|m| memchr::memmem::find(comment.value, m).is_some());
+        let has_next = IGNORE_NEXT_MARKERS.iter().any(|m| memchr::memmem::find(comment.value, m).is_some());
+
+        if has_start && current_start.is_none() {
+            current_start = Some(comment.span.start.offset);
+        } else if has_end && let Some(start) = current_start.take() {
+            regions.push(IgnoreRegion { start, end: comment.span.end.offset });
+        }
+
+        if has_next {
+            next_markers.push(IgnoreNextMarker {
+                comment_start: comment.span.start.offset,
+                comment_end: comment.span.end.offset,
+            });
+        }
+    }
+
+    // If start without end, extend to EOF
+    if let Some(start) = current_start {
+        regions.push(IgnoreRegion { start, end: source_len });
+    }
+
+    (regions.leak(), next_markers.leak())
+}
+
+#[derive(Debug)]
+pub struct FormatterState<'ctx, 'arena, A>
+where
+    A: Arena,
+{
+    arena: &'arena A,
+    source_text: &'arena [u8],
+    file: &'ctx File,
+    php_version: PHPVersion,
+    settings: FormatSettings,
+    stack: BumpVec<'arena, Node<'arena, 'arena>, A>,
+    all_comments: &'arena [Trivia<'arena>],
+    next_comment_index: usize,
+    placed_comments: Comments,
+    ignore_regions: &'arena [IgnoreRegion],
+    ignore_next_markers: &'arena [IgnoreNextMarker],
+    next_ignore_next_index: usize,
+    scripting_mode: bool,
+    id_builder: GroupIdentifierBuilder,
+    argument_state: ArgumentState,
+    parameter_state: ParameterState,
+    in_script_terminating_statement: bool,
+    in_condition: bool,
+    must_break_condition: bool,
+    is_wrapped_in_parens: bool,
+    is_in_inlined_binary_chain: bool,
+    is_in_aligned_assignment_rhs: bool,
+    halted_compilation: bool,
+    alignment_context: Option<AssignmentAlignment>,
+    member_access_chain_group_id: Option<GroupIdentifier>,
+}
+
+impl<'ctx, 'arena, A> FormatterState<'ctx, 'arena, A>
+where
+    A: Arena,
+{
+    pub fn new(
+        arena: &'arena A,
+        program: &'arena Program<'arena>,
+        file: &'ctx File,
+        php_version: PHPVersion,
+        settings: FormatSettings,
+    ) -> Self {
+        let all_comments = program
+            .trivia
+            .iter()
+            .filter(|t| t.kind.is_comment())
+            .copied()
+            .collect_in::<BumpVec<'arena, _, A>>(arena)
+            .leak();
+
+        let (ignore_regions, ignore_next_markers) =
+            build_ignore_markers(arena, all_comments, program.source_text.len() as u32);
+
+        let placed_comments = place_comments(program.source_text, Node::Program(program), all_comments);
+
+        Self {
+            arena,
+            file,
+            source_text: program.source_text,
+            php_version,
+            settings,
+            stack: BumpVec::new_in(arena),
+            all_comments,
+            next_comment_index: 0,
+            placed_comments,
+            ignore_regions,
+            ignore_next_markers,
+            next_ignore_next_index: 0,
+            scripting_mode: false,
+            id_builder: GroupIdentifierBuilder::new(),
+            argument_state: ArgumentState::default(),
+            parameter_state: ParameterState::default(),
+            in_condition: false,
+            must_break_condition: false,
+            is_wrapped_in_parens: false,
+            is_in_inlined_binary_chain: false,
+            is_in_aligned_assignment_rhs: false,
+            halted_compilation: false,
+            in_script_terminating_statement: false,
+            alignment_context: None,
+            member_access_chain_group_id: None,
+        }
+    }
+
+    /// Get the current alignment context.
+    #[inline]
+    pub fn alignment_context(&self) -> Option<AssignmentAlignment> {
+        self.alignment_context
+    }
+
+    /// Set the alignment context for the current formatting operation.
+    #[inline]
+    pub fn set_alignment_context(&mut self, context: Option<AssignmentAlignment>) {
+        self.alignment_context = context;
+    }
+
+    /// Whether a trailing comma may be printed for a construct whose trailing-comma support
+    /// arrived with `feature`: the `trailing_comma` setting has to be on, and the target PHP
+    /// version has to accept the syntax. Constructs that always allowed a trailing comma
+    /// (array literals, `match` arms, attribute lists) do not go through here.
+    #[inline]
+    pub(crate) fn trailing_comma_for(&self, feature: Feature) -> bool {
+        self.settings.trailing_comma && self.php_version.is_supported(feature)
+    }
+
+    /// Get the current next comment index.
+    #[inline]
+    pub(crate) fn get_next_comment_index(&self) -> usize {
+        self.next_comment_index
+    }
+
+    /// Set the next comment index (used when formatting sorted members).
+    #[inline]
+    pub(crate) fn set_next_comment_index(&mut self, index: usize) {
+        self.next_comment_index = index;
+    }
+
+    /// Get the all_comments slice.
+    #[inline]
+    pub(crate) fn all_comments(&self) -> &'arena [Trivia<'arena>] {
+        self.all_comments
+    }
+
+    /// Take the member access chain group ID, resetting it to None.
+    #[inline]
+    pub(crate) fn take_member_access_chain_group_id(&mut self) -> Option<GroupIdentifier> {
+        self.member_access_chain_group_id.take()
+    }
+
+    /// Set the member access chain group ID.
+    #[inline]
+    pub(crate) fn set_member_access_chain_group_id(&mut self, id: GroupIdentifier) {
+        self.member_access_chain_group_id = Some(id);
+    }
+
+    fn next_id(&mut self) -> GroupIdentifier {
+        self.id_builder.next_id()
+    }
+
+    #[inline]
+    fn enter_node(&mut self, node: Node<'arena, 'arena>) {
+        self.stack.push(node);
+    }
+
+    #[inline]
+    fn leave_node(&mut self) {
+        self.stack.pop();
+    }
+
+    #[inline]
+    fn current_node(&self) -> Node<'arena, 'arena> {
+        self.stack[self.stack.len() - 1]
+    }
+
+    #[inline]
+    fn parent_node(&self) -> Node<'arena, 'arena> {
+        self.stack[self.stack.len() - 2]
+    }
+
+    #[inline]
+    fn grandparent_node(&self) -> Option<Node<'arena, 'arena>> {
+        let len = self.stack.len();
+
+        (len > 2).then(|| self.stack[len - 2 - 1])
+    }
+
+    #[inline]
+    fn great_grandparent_node(&self) -> Option<Node<'arena, 'arena>> {
+        let len = self.stack.len();
+        (len > 3).then(|| self.stack[len - 3 - 1])
+    }
+
+    #[inline]
+    fn nth_parent_kind(&self, n: u32) -> Option<Node<'arena, 'arena>> {
+        let n = n as usize;
+        let len = self.stack.len();
+
+        (len > n).then(|| self.stack[len - n - 1])
+    }
+
+    #[inline]
+    fn is_previous_line_empty(&self, start_index: u32) -> bool {
+        let idx = start_index - 1;
+        let idx = self.skip_spaces(Some(idx), true);
+        let idx = self.skip_newline(idx, true);
+        let idx = self.skip_spaces(idx, true);
+        let idx2 = self.skip_newline(idx, true);
+        idx != idx2
+    }
+
+    /// Checks if a span is at the start of its line, ignoring leading whitespace.
+    ///
+    /// For example, given the code `  $foo = 1;`, a span for `$foo` would
+    /// return `true`, but a span for `= 1` would return `false`.
+    ///
+    /// # Returns
+    ///
+    /// `true` if there are no non-whitespace characters on the line before the span's start.
+    pub(crate) fn is_at_start_of_line(&self, span: Span) -> bool {
+        let line_index = self.file.line_number(span.start.offset);
+        let line_start_offset = self.file.lines[line_index as usize] as usize;
+        let span_start_offset = span.start.offset as usize;
+        let prefix = &self.source_text[line_start_offset..span_start_offset];
+
+        prefix.trim_ascii().is_empty()
+    }
+
+    #[inline]
+    fn is_next_line_empty(&self, span: Span) -> bool {
+        self.is_next_line_empty_after_index(span.end.offset)
+    }
+
+    #[inline]
+    pub(crate) fn is_next_line_empty_after_index(&self, start_index: u32) -> bool {
+        let mut old_idx = None;
+        let mut idx = Some(start_index);
+        while idx != old_idx {
+            old_idx = idx;
+            idx = self.skip_to_line_end(idx);
+            idx = self.skip_spaces(idx, /* backwards */ false);
+        }
+
+        idx = self.skip_inline_comments(idx);
+        idx = self.skip_newline(idx, /* backwards */ false);
+        idx.is_some_and(|idx| self.has_newline(idx, /* backwards */ false))
+    }
+
+    #[inline]
+    fn skip_inline_comments(&self, start_index: Option<u32>) -> Option<u32> {
+        let start_index = start_index?;
+        let start_index_usize = start_index as usize;
+        if start_index_usize + 1 >= self.source_text.len() {
+            return Some(start_index); // Not enough characters to check for comment
+        }
+
+        if self.source_text[start_index_usize..].starts_with(b"//")
+            || (self.source_text[start_index_usize..].starts_with(b"#")
+                && !self.source_text[start_index_usize + 1..].starts_with(b"["))
+        {
+            return self.skip_to_line_end_or_closing_tag(Some(start_index));
+        }
+
+        if self.source_text[start_index_usize..].starts_with(b"/*") {
+            // Find the closing */
+            if let Some(end_pos) = memchr::memmem::find(&self.source_text[start_index_usize + 2..], b"*/") {
+                let end_index = start_index_usize + 2 + end_pos + 2; // +2 for the "*/" itself
+
+                // Check if there's a newline between /* and */
+                let comment_text = &self.source_text[start_index_usize..end_index];
+                if !comment_text.contains(&b'\n') && !comment_text.contains(&b'\r') {
+                    return Some(end_index as u32);
+                }
+
+                // If there's a newline, we don't consider it an inline comment
+                // so we don't skip it
+            }
+        }
+
+        Some(start_index)
+    }
+
+    #[inline]
+    fn is_insignificant(&self, start_index: u32, end_index: u32) -> bool {
+        let start_index = start_index as usize;
+        let end_index = end_index as usize;
+
+        if start_index >= end_index || end_index > self.source_text.len() {
+            return false;
+        }
+
+        self.source_text[start_index..end_index].iter().copied().all(is_insignificant)
+    }
+
+    #[inline]
+    fn skip_to_line_end(&self, start_index: Option<u32>) -> Option<u32> {
+        let mut index = self.skip(start_index, false, is_insignificant);
+        index = self.skip_inline_comments(index);
+        index
+    }
+
+    #[inline]
+    fn skip_spaces(&self, start_index: Option<u32>, backwards: bool) -> Option<u32> {
+        self.skip(start_index, backwards, is_space)
+    }
+
+    #[inline]
+    fn skip_spaces_and_new_lines(&self, start_index: Option<u32>, backwards: bool) -> Option<u32> {
+        self.skip(start_index, backwards, is_line_terminator_or_space)
+    }
+
+    #[inline]
+    fn skip<F>(&self, start_index: Option<u32>, backwards: bool, f: F) -> Option<u32>
+    where
+        F: Fn(u8) -> bool,
+    {
+        let start_index = start_index? as usize;
+        let mut index = start_index;
+        if backwards {
+            for &c in self.source_text[..=start_index].iter().rev() {
+                if !f(c) {
+                    return Some(index as u32);
+                }
+                index -= 1;
+            }
+        } else {
+            let source_bytes = self.source_text;
+            let text_len = source_bytes.len();
+            while index < text_len {
+                if !f(source_bytes[index]) {
+                    return Some(index as u32);
+                }
+
+                index += 1;
+            }
+        }
+
+        None
+    }
+
+    /// Skips forward from a starting index until a newline or a `?>` tag is found.
+    #[inline]
+    fn skip_to_line_end_or_closing_tag(&self, start_index: Option<u32>) -> Option<u32> {
+        let mut index = start_index? as usize;
+        let source_bytes = self.source_text;
+        let text_len = source_bytes.len();
+
+        while index < text_len {
+            let byte = source_bytes[index];
+
+            // Stop if we find a newline character.
+            if is_line_terminator(byte) {
+                return Some(index as u32);
+            }
+
+            // Stop if we find a `?>` sequence.
+            if byte == b'?' && index + 1 < text_len && source_bytes[index + 1] == b'>' {
+                return Some(index as u32);
+            }
+
+            index += 1;
+        }
+
+        None
+    }
+
+    #[inline]
+    fn skip_newline(&self, start_index: Option<u32>, backwards: bool) -> Option<u32> {
+        let start_index = start_index?;
+        let start_index_usize = start_index as usize;
+        let c = if backwards {
+            self.source_text[..=start_index_usize].iter().copied().next_back()
+        } else {
+            self.source_text[start_index_usize..].iter().copied().next()
+        }?;
+
+        if matches!(c, b'\n') {
+            return Some(if backwards { start_index - 1 } else { start_index + 1 });
+        }
+
+        if matches!(c, b'\r') {
+            let next_index = if backwards { start_index_usize - 1 } else { start_index_usize + 1 };
+            let next_c = if backwards {
+                self.source_text.get(..=next_index).and_then(|s| s.iter().copied().next_back())
+            } else {
+                self.source_text.get(next_index..).and_then(|s| s.iter().copied().next())
+            };
+
+            if matches!(next_c, Some(b'\n')) {
+                // \r\n (CRLF) — skip both
+                return Some(if backwards { start_index - 2 } else { start_index + 2 });
+            }
+
+            // bare \r — still a line terminator (classic Mac OS line ending)
+            return Some(if backwards { start_index - 1 } else { start_index + 1 });
+        }
+
+        Some(start_index)
+    }
+
+    #[inline]
+    fn has_newline(&self, start_index: u32, backwards: bool) -> bool {
+        if (backwards && start_index == 0) || (!backwards && (start_index as usize) == self.source_text.len()) {
+            return false;
+        }
+        let start_index = if backwards { start_index - 1 } else { start_index };
+        let idx = self.skip_spaces(Some(start_index), backwards);
+        let idx2 = self.skip_newline(idx, backwards);
+        idx != idx2
+    }
+
+    #[inline]
+    fn split_lines(&self, slice: &'arena [u8]) -> BumpVec<'arena, &'arena [u8], A> {
+        let mut lines = utils::split_any_newline(slice).collect_in::<BumpVec<'arena, _, A>>(self.arena);
+        if lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+
+        lines
+    }
+
+    /// Returns the ignore region that contains this offset, if any.
+    pub(crate) fn get_ignore_region_for(&self, offset: u32) -> Option<&IgnoreRegion> {
+        self.ignore_regions.iter().find(|r| offset >= r.start && offset < r.end)
+    }
+
+    /// Get source text slice for a given range.
+    pub(crate) fn get_source_slice(&self, start: u32, end: u32) -> &'arena [u8] {
+        &self.source_text[start as usize..end as usize]
+    }
+
+    /// Advance the comment index past a given offset.
+    pub(crate) fn skip_comments_until(&mut self, end_offset: u32) {
+        while let Some(comment) = self.all_comments.get(self.next_comment_index) {
+            if comment.span.end.offset <= end_offset {
+                self.next_comment_index += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Checks if there's an ignore-next marker before this statement and consumes it.
+    /// Returns the marker's start offset if the next statement should be ignored.
+    pub(crate) fn consume_ignore_next_before(&mut self, stmt_start: u32) -> Option<u32> {
+        if let Some(marker) = self.ignore_next_markers.get(self.next_ignore_next_index) {
+            // The marker should be before this statement
+            if marker.comment_end < stmt_start {
+                // Verify the gap between the marker and the statement contains only
+                // insignificant characters (whitespace, `;`, `,`) and comments.
+                // If there's anything else, the marker was inside a sub-expression
+                // (e.g., match arm, array element) and should not be consumed here.
+                if !is_gap_insignificant(self.source_text, marker.comment_end, stmt_start) {
+                    // Skip this stale marker so it doesn't match future statements either.
+                    self.next_ignore_next_index += 1;
+                    return None;
+                }
+
+                self.next_ignore_next_index += 1;
+                return Some(marker.comment_start);
+            }
+        }
+        None
+    }
+}
+
+impl<A> HasFileId for FormatterState<'_, '_, A>
+where
+    A: Arena,
+{
+    fn file_id(&self) -> FileId {
+        self.file.id
+    }
+}
+
+#[inline]
+const fn is_insignificant(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b';' | b',')
+}
+
+/// Checks that the source text between two offsets contains only whitespace,
+/// newlines, semicolons, commas, and comments. Returns `false` if there is
+/// any significant code in between, meaning the marker was inside a
+/// sub-expression and should not be consumed by an outer construct.
+fn is_gap_insignificant(source: &[u8], from: u32, to: u32) -> bool {
+    let bytes = source;
+    let mut i = from as usize;
+    let end = to as usize;
+    while i < end && i < bytes.len() {
+        let c = bytes[i];
+        if is_insignificant(c) || is_line_terminator_or_space(c) {
+            i += 1;
+            continue;
+        }
+
+        // Skip single-line comments (// ... or # ...)
+        if (c == b'/' && i + 1 < end && bytes[i + 1] == b'/') || (c == b'#' && !(i + 1 < end && bytes[i + 1] == b'[')) {
+            while i < end && i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+
+            continue;
+        }
+
+        // Skip block comments (/* ... */)
+        if c == b'/' && i + 1 < end && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < end && i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+
+            i += 2; // skip */
+            continue;
+        }
+
+        return false;
+    }
+
+    true
+}
+
+#[inline]
+const fn is_line_terminator(c: u8) -> bool {
+    matches!(c, b'\n' | b'\r')
+}
+
+#[inline]
+const fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t')
+}
+
+#[inline]
+const fn is_line_terminator_or_space(c: u8) -> bool {
+    is_line_terminator(c) || is_space(c)
+}

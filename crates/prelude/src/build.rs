@@ -1,0 +1,115 @@
+use std::borrow::Cow;
+
+use mago_allocator::Arena;
+use mago_allocator::LocalArena;
+use rust_embed::RustEmbed;
+
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::populator::populate_codebase;
+use mago_codex::reference::SymbolReferences;
+use mago_codex::scanner::scan_program;
+use mago_database::DatabaseReader;
+use mago_database::ReadDatabase;
+use mago_database::file::File;
+use mago_database::file::FileType;
+use mago_names::resolver::NameResolver;
+use mago_syntax::parser::parse_file;
+
+use crate::Prelude;
+
+#[derive(RustEmbed)]
+#[folder = "$CARGO_MANIFEST_DIR/assets"]
+#[prefix = "mago_prelude_"]
+#[include = "*.php"]
+struct PHPAssets;
+
+pub(crate) fn build_prelude_internal() -> Prelude {
+    let mut arena = LocalArena::new();
+    let database = get_prelude_database();
+    let read_db = database.read_only();
+    let mut metadata = get_prelude_metadata(&mut arena, &read_db);
+    let mut symbol_references = SymbolReferences::default();
+
+    #[allow(clippy::default_trait_access)]
+    populate_codebase(&mut metadata, &mut symbol_references, Default::default(), Default::default());
+
+    // The embedded prelude is immutable between analyses. Persisting its top-level symbols as
+    // safe lets the runtime population pass skip already-populated built-ins while still
+    // repopulating every project symbol merged into this metadata.
+    let mut safe_symbols = std::mem::take(&mut metadata.safe_symbols);
+    safe_symbols.extend(metadata.class_likes.keys().copied());
+    safe_symbols
+        .extend(metadata.function_likes.keys().filter_map(|(scope, member)| member.is_empty().then_some(*scope)));
+    safe_symbols.extend(metadata.constants.keys().copied());
+    metadata.safe_symbols = safe_symbols;
+
+    Prelude { database, metadata, symbol_references }
+}
+
+fn get_prelude_database() -> mago_database::Database<'static> {
+    let configuration =
+        mago_database::DatabaseConfiguration::new(std::path::Path::new("/"), vec![], vec![], vec![], vec![])
+            .into_static();
+    let mut db = mago_database::Database::new(configuration);
+    for filename in PHPAssets::iter() {
+        let Some(embedded) = PHPAssets::get(&filename) else { continue };
+
+        let content = match embedded.data {
+            Cow::Borrowed(slice) => {
+                let Ok(string) = std::str::from_utf8(slice) else { continue };
+
+                Cow::Borrowed(string)
+            }
+            Cow::Owned(vector) => {
+                let Ok(string) = String::from_utf8(vector) else { continue };
+
+                Cow::Owned(string)
+            }
+        };
+
+        let name = match filename {
+            Cow::Borrowed(str) => Cow::Borrowed(str.as_bytes()),
+            Cow::Owned(str) => Cow::Owned(str.into_bytes()),
+        };
+
+        let content = match content {
+            Cow::Borrowed(s) => Cow::Borrowed(s.as_bytes()),
+            Cow::Owned(s) => Cow::Owned(s.into_bytes()),
+        };
+
+        db.add(File::new(name, FileType::Builtin, None, content));
+    }
+
+    db
+}
+
+fn get_prelude_metadata(arena: &mut LocalArena, database: &ReadDatabase) -> CodebaseMetadata {
+    let mut metadata = CodebaseMetadata::default();
+    for file in database.files() {
+        arena.reset();
+
+        let file_metadata = scan_file_for_metadata(&file, arena);
+
+        metadata.extend(file_metadata);
+    }
+
+    metadata
+}
+
+fn scan_file_for_metadata<A>(source_file: &File, arena: &A) -> CodebaseMetadata
+where
+    A: Arena,
+{
+    let program = parse_file(arena, source_file);
+    if program.has_errors() {
+        panic!(
+            "Prelude file '{}' has parse errors, which is not allowed.",
+            String::from_utf8_lossy(source_file.name.as_ref())
+        );
+    }
+
+    let resolver = NameResolver::new(arena);
+    let resolved_names = resolver.resolve(program);
+
+    scan_program(arena, source_file, program, &resolved_names, mago_php_version::PHPVersion::LATEST)
+}

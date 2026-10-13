@@ -1,0 +1,816 @@
+use mago_allocator::Arena;
+use std::sync::Arc;
+
+use mago_algebra::assertion_set::AssertionSet;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::add_optional_union_type;
+use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_null;
+use mago_codex::ttype::get_void;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::union::TUnion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Call;
+use mago_word::Word;
+use mago_word::WordMap;
+use mago_word::ascii_lowercase_word;
+use mago_word::concat_word;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallTarget;
+use crate::artifacts::ResolvedMethodCall;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::context::scope::control_action::ControlAction;
+use crate::error::AnalysisError;
+use crate::expression::access::analyze_null_safe_class_value;
+use crate::expression::access::class_value_classes;
+use crate::expression::access::report_full_name;
+use crate::expression::access::report_member_of_mixed_kinds;
+use crate::invocation::Invocation;
+use crate::invocation::InvocationArgumentsSource;
+use crate::invocation::InvocationTarget;
+use crate::invocation::MethodInvocationKind;
+use crate::invocation::MethodTargetContext;
+use crate::invocation::analyzer::analyze_invocation;
+use crate::invocation::post_process::post_invocation_process;
+use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
+use crate::plugin::hook::StaticCall;
+use crate::reconciler::assertion_reconciler;
+use crate::utils::names::display_function_like_identifier;
+
+pub mod function_call;
+pub mod method_call;
+pub mod pipe;
+pub mod static_method_call;
+
+fn record_external_method_call<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    targets: &[InvocationTarget<'_>],
+    span: Span,
+) where
+    A: Arena,
+{
+    record_external_method_call_targets(
+        context,
+        artifacts,
+        targets.iter().filter_map(|target| {
+            let FunctionLikeIdentifier::Method(class, method) = target.get_function_like_identifier()? else {
+                return None;
+            };
+            Some((
+                target
+                    .get_method_context()
+                    .map_or(*class, |method_context| method_context.class_like_metadata.original_name),
+                *method,
+            ))
+        }),
+        span,
+    );
+}
+
+pub(super) fn record_external_method_call_targets<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    targets: impl IntoIterator<Item = (Word, Word)>,
+    span: Span,
+) where
+    A: Arena,
+{
+    if !context.plugin_registry.has_external_method_call_analysis_hooks() {
+        return;
+    }
+
+    let span = (span.start.offset, span.end.offset);
+    for (class, method) in targets {
+        if artifacts
+            .resolved_method_calls
+            .iter()
+            .rev()
+            .take_while(|target| target.span == span)
+            .any(|target| target.class == class && target.method == method)
+        {
+            continue;
+        }
+        artifacts.resolved_method_calls.push(ResolvedMethodCall { span, class, method });
+    }
+}
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        match self {
+            Call::Function(call) => call.analyze(context, block_context, artifacts),
+            // As a call with an invalid target, it gets no type, and only its arguments are analyzed.
+            Call::Method(call) if report_full_name(context, call.object, None) => {
+                call.argument_list.analyze(context, block_context, artifacts)
+            }
+            // PHP# writes the static call `Class::m()` as `Class.m()`, with a bare name the binder bound to a class.
+            Call::Method(call)
+                if context.dialect.is_sharp()
+                    && let Some(static_call) = StaticCall::from_method_call(call, context.resolved_names) =>
+            {
+                static_method_call::analyze_static_method_call(context, block_context, artifacts, static_call)
+            }
+            // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`.
+            Call::Method(call) if class_value_classes(context, block_context, call.object).is_some() => {
+                let static_call = StaticCall {
+                    class: call.object,
+                    method: &call.method,
+                    argument_list: &call.argument_list,
+                    span: call.span(),
+                };
+
+                static_method_call::analyze_static_method_call(context, block_context, artifacts, static_call)
+            }
+            Call::Method(call) => {
+                call.analyze(context, block_context, artifacts)?;
+                report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);
+
+                Ok(())
+            }
+            // PHP# calls a static method through a class value that may be null, `type?.m()`, as PHP's `$type::m()`
+            // when `type` holds a class.
+            Call::NullSafeMethod(call) if class_value_classes(context, block_context, call.object).is_some() => {
+                let static_call = StaticCall {
+                    class: call.object,
+                    method: &call.method,
+                    argument_list: &call.argument_list,
+                    span: call.span(),
+                };
+
+                analyze_null_safe_class_value(
+                    context,
+                    block_context,
+                    artifacts,
+                    call.object,
+                    call.span(),
+                    |context, block_context, artifacts| {
+                        static_method_call::analyze_static_method_call(context, block_context, artifacts, static_call)
+                    },
+                )
+            }
+            Call::NullSafeMethod(call) => {
+                call.analyze(context, block_context, artifacts)?;
+                report_member_of_mixed_kinds(context, artifacts, call.object, &call.method, true);
+
+                Ok(())
+            }
+            Call::StaticMethod(call) => call.analyze(context, block_context, artifacts),
+        }
+    }
+}
+
+fn analyze_invocation_targets<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    mut template_result: TemplateResult,
+    invocation_targets: Vec<InvocationTarget<'ctx>>,
+    invocation_arguments: InvocationArgumentsSource<'ast, 'arena>,
+    call_span: Span,
+    this_variable: Option<Word>,
+    encountered_invalid_targets: bool,
+    encountered_mixed_targets: bool,
+    should_add_null: bool,
+    object_has_nullsafe_null: bool,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let method_name_for_assertions: Option<Word> = invocation_targets.iter().find_map(|target| {
+        if let InvocationTarget::FunctionLike {
+            identifier: FunctionLikeIdentifier::Method(_, _),
+            method_context: Some(_),
+            metadata,
+            ..
+        } = target
+        {
+            Some(metadata.original_name)
+        } else {
+            None
+        }
+    });
+
+    let method_call_is_stable = matches!(
+        invocation_arguments,
+        InvocationArgumentsSource::ArgumentList(arguments) if arguments.arguments.is_empty()
+    ) && !invocation_targets.is_empty()
+        && invocation_targets.iter().all(|target| {
+            let InvocationTarget::FunctionLike { metadata, method_context: Some(_), .. } = target else {
+                return false;
+            };
+
+            (metadata.flags.is_pure() || metadata.flags.is_mutation_free()) && !metadata.flags.suspends_fiber()
+        });
+
+    let class_related_argument_variables = this_variable
+        .map(|receiver| block_context.get_class_type_relation_sources(receiver))
+        .filter(|variables| !variables.is_empty());
+
+    let mut resulting_type = None;
+    let mut all_targets_non_nullable_return = !invocation_targets.is_empty();
+    for target in invocation_targets {
+        if let InvocationTarget::FunctionLike { metadata, .. } = &target {
+            let name = metadata.name;
+            match true {
+                _ if name.as_bytes().eq_ignore_ascii_case(b"mago\\inspect") => {
+                    inspect_arguments(context, block_context, artifacts, &target, &invocation_arguments)?;
+
+                    resulting_type =
+                        Some(add_optional_union_type(get_void(), resulting_type.as_ref(), context.codebase));
+
+                    continue;
+                }
+                _ if name.as_bytes().eq_ignore_ascii_case(b"mago\\confirm") => {
+                    confirm_argument_type(context, block_context, artifacts, &target, &invocation_arguments)?;
+
+                    resulting_type =
+                        Some(add_optional_union_type(get_void(), resulting_type.as_ref(), context.codebase));
+
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(identifier) = target.get_function_like_identifier() {
+            if context.dialect.is_sharp() {
+                let class = target.get_method_context().map(|method_context| method_context.class_like_metadata.name);
+                artifacts.record_call_target(call_span, CallTarget::FunctionLike { callee: *identifier, class });
+            }
+
+            match identifier {
+                FunctionLikeIdentifier::Function(function_name) => {
+                    let normalized_name = ascii_lowercase_word(function_name.as_ref());
+                    artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, normalized_name, false);
+                }
+                FunctionLikeIdentifier::Method(class_name, method_name) => {
+                    artifacts.symbol_references.add_reference_for_method_call(
+                        &block_context.scope,
+                        &MethodIdentifier::new(*class_name, *method_name),
+                    );
+                }
+                _ => {
+                    // Closures don't need reference tracking for invalidation
+                }
+            }
+        }
+
+        let mut invocation: Invocation<'ctx, 'ast, 'arena> = Invocation::new(target, invocation_arguments, call_span);
+        let mut argument_types = WordMap::default();
+
+        analyze_invocation(
+            context,
+            block_context,
+            artifacts,
+            &mut invocation,
+            None,
+            class_related_argument_variables.as_ref(),
+            &mut template_result,
+            &mut argument_types,
+        )?;
+
+        let return_type = fetch_invocation_return_type(
+            context,
+            block_context,
+            artifacts,
+            &invocation,
+            &template_result,
+            &argument_types,
+        )?;
+
+        all_targets_non_nullable_return &= !return_type.is_nullable();
+        resulting_type = Some(add_optional_union_type(return_type, resulting_type.as_ref(), context.codebase));
+
+        post_invocation_process(
+            context,
+            block_context,
+            artifacts,
+            &invocation,
+            this_variable.as_ref().map(Word::as_bytes),
+            &template_result,
+            &argument_types,
+            true,
+        )?;
+    }
+
+    let resulting_type = if let Some(resulting_type) = resulting_type {
+        if encountered_invalid_targets {
+            return Ok(());
+        } else if encountered_mixed_targets {
+            get_mixed()
+        } else if should_add_null {
+            let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
+            if all_targets_non_nullable_return {
+                result_with_null.set_nullsafe_null(true);
+            }
+
+            result_with_null
+        } else if object_has_nullsafe_null && all_targets_non_nullable_return {
+            let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
+            result_with_null.set_nullsafe_null(true);
+            result_with_null
+        } else {
+            resulting_type
+        }
+    } else {
+        analyze_invocation_arguments_source(context, block_context, artifacts, &invocation_arguments)?;
+
+        if encountered_mixed_targets {
+            get_mixed()
+        } else {
+            return Ok(());
+        }
+    };
+
+    if method_call_is_stable
+        && let (Some(this_variable), Some(method_name)) = (this_variable, method_name_for_assertions)
+    {
+        block_context.stable_method_calls.insert(concat_word!(this_variable, "->", method_name, "()"));
+    }
+
+    let resulting_type = apply_method_call_assertions(
+        context,
+        block_context,
+        this_variable.as_ref().map(Word::as_bytes),
+        method_name_for_assertions,
+        method_call_is_stable,
+        resulting_type,
+    );
+
+    if resulting_type.is_never() && !block_context.flags.inside_loop() {
+        artifacts.set_expression_type(&call_span, resulting_type);
+
+        block_context.flags.set_has_returned(true);
+        block_context.control_actions.insert(ControlAction::End);
+        return Ok(());
+    }
+    artifacts.set_expression_type(&call_span, resulting_type);
+
+    Ok(())
+}
+
+/// Applies active method call assertions to narrow the return type.
+///
+/// When inside a conditional like `if ($obj->isValid())` where `isValid` has method call
+/// assertions like `@phpstan-assert-if-true Statement $this->first()`, this function
+/// narrows the return type of `first()` from `Statement|null` to `Statement`.
+fn apply_method_call_assertions<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    this_variable: Option<&[u8]>,
+    method_name: Option<Word>,
+    method_is_stable: bool,
+    mut return_type: TUnion,
+) -> TUnion
+where
+    A: Arena,
+{
+    let Some(this_var) = this_variable else {
+        return return_type;
+    };
+
+    let Some(method) = method_name else {
+        return return_type;
+    };
+
+    let method_call_key = concat_word!(this_var, "->", method, "()");
+
+    let mut apply_assertions = |assertions: &AssertionSet| {
+        for clause in assertions {
+            for assertion in clause {
+                return_type = assertion_reconciler::reconcile(
+                    context,
+                    assertion,
+                    Some(&return_type),
+                    None,
+                    block_context.flags.inside_loop(),
+                    None,
+                    false,
+                    false,
+                );
+            }
+        }
+    };
+
+    if method_is_stable && let Some(assertions) = block_context.stable_method_call_assertions.get(&method_call_key) {
+        apply_assertions(assertions);
+    }
+
+    if let Some(assertions) = block_context.active_method_call_assertions.get(&method_call_key) {
+        apply_assertions(assertions);
+    }
+
+    return_type
+}
+
+fn get_function_like_target<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    function_like: FunctionLikeIdentifier,
+    alternative: Option<FunctionLikeIdentifier>,
+    span: Span,
+    inferred_return_type: Option<Arc<TUnion>>,
+) -> Option<InvocationTarget<'ctx>>
+where
+    A: Arena,
+{
+    get_function_like_target_inner(context, function_like, alternative, span, inferred_return_type, false)
+}
+
+pub(super) fn get_function_like_target_with_skip<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    function_like: FunctionLikeIdentifier,
+    alternative: Option<FunctionLikeIdentifier>,
+    span: Span,
+    inferred_return_type: Option<Arc<TUnion>>,
+    skip_error_on_not_found: bool,
+) -> Option<InvocationTarget<'ctx>>
+where
+    A: Arena,
+{
+    get_function_like_target_inner(
+        context,
+        function_like,
+        alternative,
+        span,
+        inferred_return_type,
+        skip_error_on_not_found,
+    )
+}
+
+fn get_function_like_target_inner<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    function_like: FunctionLikeIdentifier,
+    alternative: Option<FunctionLikeIdentifier>,
+    span: Span,
+    inferred_return_type: Option<Arc<TUnion>>,
+    skip_error_on_not_found: bool,
+) -> Option<InvocationTarget<'ctx>>
+where
+    A: Arena,
+{
+    let mut identifier = function_like;
+    let original_class_for_method_context =
+        if let FunctionLikeIdentifier::Method(class_name, _) = function_like { Some(class_name) } else { None };
+
+    let metadata = context
+        .codebase
+        .get_function_like(&identifier)
+        .or_else(|| {
+            // If this is a method and we can't find it, try looking up the inheritance chain
+            if let FunctionLikeIdentifier::Method(class_name, method_name) = identifier {
+                if let Some(class_metadata) = context.codebase.get_class_like(class_name.as_bytes()) {
+                    // Try to find the method in parent classes
+                    if let Some(declaring_method_id) = class_metadata.declaring_method_ids.get(&method_name) {
+                        let declaring_class_id = declaring_method_id.get_class_name();
+                        context
+                            .codebase
+                            .get_function_like(&FunctionLikeIdentifier::Method(declaring_class_id, method_name))
+                            .inspect(|_| {
+                                identifier = FunctionLikeIdentifier::Method(declaring_class_id, method_name);
+                            })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else if let Some(alternative) = alternative {
+                context.codebase.get_function_like(&alternative).inspect(|_| {
+                    identifier = alternative;
+                })
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if let Some(alternative) = alternative {
+                context.codebase.get_function_like(&alternative).inspect(|_| {
+                    identifier = alternative;
+                })
+            } else {
+                None
+            }
+        });
+
+    let Some(metadata) = metadata else {
+        if !skip_error_on_not_found {
+            let title_str = function_like.title_kind_str();
+            let kind_str = function_like.kind_str();
+            let name_str = display_function_like_identifier(context, &function_like);
+
+            let issue = if let Some(alt_id) = alternative {
+                let alt_name_str = display_function_like_identifier(context, &alt_id);
+
+                Issue::error(format!(
+                    "Could not find definition for {kind_str} `{name_str}` (also tried as `{alt_name_str}` in a broader scope)."
+                )).with_annotation(
+                    Annotation::primary(span).with_message(format!("Attempted to use {kind_str} `{name_str}` which is undefined")),
+                ).with_note(
+                    format!("Neither `{name_str}` (e.g., in current namespace) nor `{alt_name_str}` (e.g., global fallback) could be resolved."),
+                )
+            } else {
+                Issue::error(format!("{title_str} `{name_str}` could not be found.")).with_annotation(
+                    Annotation::primary(span).with_message(format!("Undefined {kind_str} `{name_str}` called here")),
+                )
+            };
+
+            context.collector.report_with_code(
+                IssueCode::NonExistentFunction,
+                issue.with_note("This often means the function/method is misspelled, not imported correctly (e.g., missing `use` statement for namespaced functions), or not defined/autoloaded.")
+                    .with_help(format!("Check for typos in `{name_str}`. Verify namespace imports if applicable, and ensure the {kind_str} is defined and accessible."))
+            );
+        }
+
+        return None;
+    };
+
+    if !metadata.is_available_in_version(context.settings.version) {
+        let display_name = display_function_like_identifier(context, &identifier);
+        match identifier {
+            FunctionLikeIdentifier::Function(_) => {
+                crate::utils::availability::check_function_availability(context, metadata, &display_name, span);
+            }
+            FunctionLikeIdentifier::Method(..) => {
+                crate::utils::availability::check_method_availability(context, metadata, &display_name, span);
+            }
+            FunctionLikeIdentifier::Closure(..) => {}
+        }
+    }
+
+    // If this is a method, we need to create a method context so that static types can be resolved properly
+    let method_context = if let Some(original_class_name) = original_class_for_method_context {
+        // Look up the class metadata for the class this method is being called on (not where it's declared)
+        if let Some(class_like_metadata) = context.codebase.get_class_like(original_class_name.as_bytes()) {
+            // Create the method identifier using the looked up identifier (which points to where the method is declared)
+            let declaring_method_id = if let FunctionLikeIdentifier::Method(class_name, method_name) = identifier {
+                Some(MethodIdentifier::new(class_name, method_name))
+            } else {
+                None
+            };
+
+            Some(MethodTargetContext {
+                invocation_kind: MethodInvocationKind::Static,
+                declaring_method_id,
+                class_like_metadata,
+                class_type: StaticClassType::Name(original_class_name),
+                declaring_object_type: None,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Some(InvocationTarget::FunctionLike {
+        identifier,
+        metadata,
+        inferred_return_type,
+        effective_signature: None,
+        method_context,
+        span,
+    })
+}
+
+fn inspect_arguments<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    target: &InvocationTarget<'ctx>,
+    invocation_arguments: &InvocationArgumentsSource<'_, 'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    analyze_invocation_arguments_source(context, block_context, artifacts, invocation_arguments)?;
+
+    let mut argument_annotations = vec![];
+    for (idx, argument) in invocation_arguments.iter_arguments().enumerate() {
+        let Some(argument_expression) = argument.value() else {
+            continue;
+        };
+
+        let argument_span = argument_expression.span();
+        let argument_type_string = artifacts
+            .get_expression_type(argument_expression)
+            .map_or_else(|| "<unknown type>".to_string(), |t| t.get_id().to_string());
+
+        argument_annotations.push(
+            Annotation::secondary(argument_span)
+                .with_message(format!("Argument #{} type: `{argument_type_string}`", idx + 1,)),
+        );
+    }
+
+    let mut issue = Issue::help("Type information for arguments of `Mago\\inspect()` call.")
+        .with_annotation(Annotation::primary(target.span()).with_message("Type inspection point"));
+
+    for annotation in argument_annotations {
+        issue = issue.with_annotation(annotation);
+    }
+
+    context.collector.report_with_code(
+        IssueCode::TypeInspection,
+        issue
+            .with_note(
+                "The `Mago\\inspect()` function is a static analysis debugging utility; it has no effect at runtime.",
+            )
+            .with_help("Remember to remove `Mago\\inspect()` calls before deploying to production."),
+    );
+
+    Ok(())
+}
+
+fn confirm_argument_type<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    target: &InvocationTarget<'ctx>,
+    invocation_arguments: &InvocationArgumentsSource<'_, 'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    analyze_invocation_arguments_source(context, block_context, artifacts, invocation_arguments)?;
+
+    let argument_count = invocation_arguments.argument_count();
+
+    if argument_count != 2 {
+        context.collector.report_with_code(
+            IssueCode::TypeConfirmation,
+            Issue::error(format!(
+                "`Mago\\confirm()` expects exactly 2 arguments (a value and an expected type string), but {} {} provided.",
+                argument_count,
+                if argument_count == 1 { "was" } else { "were" }
+            ))
+            .with_annotation(Annotation::primary(target.span())
+                .with_message(if argument_count < 2 {
+                    "Too few arguments provided: expected a value and a type string."
+                } else {
+                    "Too many arguments provided: expected only a value and a type string."
+                }))
+            .with_note("The `Mago\\confirm()` function is a debugging utility and requires these two specific arguments to function.")
+            .with_help("Usage: `Mago\\confirm($value_to_check, \"ExpectedTypeAsString\");`. Remember to remove before committing."),
+        );
+
+        return Ok(());
+    }
+
+    let Some(value_to_check_argument) = invocation_arguments.get_argument(0) else {
+        return Ok(());
+    };
+    let Some(expected_type_string_argument) = invocation_arguments.get_argument(1) else {
+        return Ok(());
+    };
+
+    let Some(value_expression) = value_to_check_argument.value() else {
+        return Ok(());
+    };
+
+    let Some(expected_type_expression) = expected_type_string_argument.value() else {
+        return Ok(());
+    };
+
+    let Some(actual_argument_type) = artifacts.get_expression_type(value_expression) else {
+        context.collector.report_with_code(
+            IssueCode::TypeConfirmation,
+            Issue::error("Cannot determine the type of the first argument passed to `Mago\\confirm()`.")
+                .with_annotation(
+                    Annotation::primary(value_expression.span())
+                        .with_message("The type of this expression could not be determined here"),
+                )
+                .with_annotation(Annotation::secondary(target.span()).with_message(
+                    "`Mago\\confirm()` expects a value to check and a string representing the expected type.",
+                ))
+                .with_note("`Mago\\confirm()` needs to know the type of the value to perform the confirmation.")
+                .with_note("This debugging utility (`Mago\\confirm()`) should be removed before committing code.")
+                .with_help("Ensure the expression is well-formed and its type can be inferred by the analyzer."),
+        );
+
+        return Ok(());
+    };
+
+    let Some(expected_type_expression_type) = artifacts.get_expression_type(expected_type_expression) else {
+        context.collector.report_with_code(
+            IssueCode::TypeConfirmation,
+            Issue::error(
+                "Cannot determine the type of the second argument (the expected type string) passed to `Mago\\confirm()`."
+            )
+            .with_annotation(
+                Annotation::primary(expected_type_expression.span())
+                    .with_message("The type of this expression (expected to be a literal string) is unknown"),
+            )
+            .with_annotation(Annotation::secondary(target.span())
+                .with_message("`Mago\\confirm()` expects a value to check and a string representing the expected type."))
+            .with_note("`Mago\\confirm()` requires the second argument to be a literal string representing the type.")
+            .with_note("This debugging utility (`Mago\\confirm()`) should be removed before committing code.")
+            .with_help("Ensure the second argument is a literal string (e.g., `\"int\"`)."),
+        );
+
+        return Ok(());
+    };
+
+    let Some(expected_type_literal_string) = expected_type_expression_type.get_single_literal_string_value() else {
+        context.collector.report_with_code(
+            IssueCode::TypeConfirmation,
+            Issue::error(format!(
+                "Second argument to `Mago\\confirm()` must be a literal string, but found type `{}`.",
+                expected_type_expression_type.get_id()
+            ))
+            .with_annotation(Annotation::primary(expected_type_expression.span())
+                .with_message(format!("Expected a literal string here, not type `{}`", expected_type_expression_type.get_id())))
+            .with_annotation(Annotation::secondary(target.span())
+                .with_message("`Mago\\confirm()` expects a value to check and a string representing the expected type."))
+            .with_note("`Mago\\confirm()` uses the second argument as a string representation of the expected type for comparison.")
+            .with_note("This debugging utility (`Mago\\confirm()`) should be removed before committing code.")
+            .with_help("Provide the expected type as a literal string, e.g., `\"int\"`, `\"literal-string\"`, or `\"Collection<int>\"`."),
+        );
+
+        return Ok(());
+    };
+
+    let actual_argument_type_string = actual_argument_type.get_id();
+    let is_match = expected_type_literal_string.eq_ignore_ascii_case(actual_argument_type_string.as_bytes());
+    let expected_type_literal_string = mago_bytes::BytesDisplay(expected_type_literal_string);
+
+    if is_match {
+        context.collector.report_with_code(
+            IssueCode::TypeConfirmation,
+            Issue::help(format!("Type of expression is `{actual_argument_type_string}` as expected.",))
+                .with_annotation(
+                    Annotation::primary(value_expression.span())
+                        .with_message(format!("Confirmed type: `{actual_argument_type_string}`")),
+                )
+                .with_annotation(
+                    Annotation::secondary(expected_type_expression.span())
+                        .with_message(format!("Matches expected type: `{expected_type_literal_string}`")),
+                )
+                .with_note("`Mago\\confirm()` successfully confirmed the type of the expression.")
+                .with_help("This debugging utility (`Mago\\confirm()`) should be removed before committing code."),
+        );
+    } else {
+        context.collector.report_with_code(
+            IssueCode::TypeConfirmation,
+            Issue::error(format!(
+                "Type of expression is `{actual_argument_type_string}`, but expected `{expected_type_literal_string}`."
+            ))
+            .with_annotation(
+                Annotation::primary(value_expression.span())
+                    .with_message(format!("Actual type: `{actual_argument_type_string}`")),
+            )
+            .with_annotation(
+                Annotation::secondary(expected_type_expression.span())
+                    .with_message(format!("Expected type: `{expected_type_literal_string}`")),
+            )
+            .with_note("`Mago\\confirm()` failed to confirm the type of the expression.")
+            .with_help("This debugging utility (`Mago\\confirm()`) should be removed before committing code."),
+        );
+    }
+
+    Ok(())
+}
+
+fn analyze_invocation_arguments_source<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    invocation_arguments: &InvocationArgumentsSource<'_, 'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    match invocation_arguments {
+        InvocationArgumentsSource::ArgumentList(argument_list) => {
+            argument_list.analyze(context, block_context, artifacts)?;
+        }
+        InvocationArgumentsSource::PipeInput(pipe) => {
+            let was_inside_call = block_context.flags.inside_call();
+            let was_inside_general_use = block_context.flags.inside_general_use();
+            block_context.flags.set_inside_call(true);
+            block_context.flags.set_inside_general_use(true);
+            pipe.input.analyze(context, block_context, artifacts)?;
+            block_context.flags.set_inside_call(was_inside_call);
+            block_context.flags.set_inside_general_use(was_inside_general_use);
+        }
+        _ => {}
+    }
+
+    Ok(())
+}

@@ -1,0 +1,132 @@
+use foldhash::HashMap;
+use foldhash::fast::RandomState;
+use indexmap::IndexMap;
+
+use mago_word::Word;
+
+use crate::misc::GenericParent;
+use crate::ttype::union::TUnion;
+
+pub mod bounds;
+pub mod definition_type_replacer;
+pub mod inferred_type_replacer;
+pub mod variance;
+
+/// Represents a template parameter definition with its source and constraint type.
+///
+/// This struct pairs a `GenericParent` (identifying where the template is defined)
+/// with a `TUnion` (the constraint type for the template parameter).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct GenericTemplate {
+    /// The entity (class or function) where this template parameter is defined.
+    pub defining_entity: GenericParent,
+    /// The constraint type for this template parameter (e.g., `object` for `@template T of object`).
+    pub constraint: TUnion,
+    /// The default type used when no explicit generic argument is provided
+    /// (e.g., `string` for `@template T of int|string = string`).
+    pub default: Option<TUnion>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TemplateResult {
+    pub template_types: IndexMap<Word, Vec<GenericTemplate>, RandomState>,
+    pub lower_bounds: HashMap<Word, HashMap<GenericParent, Vec<TemplateBound>>>,
+    pub projections: HashMap<Word, crate::ttype::template::variance::Variance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TemplateBound {
+    pub bound_type: TUnion,
+    pub appearance_depth: usize,
+    pub argument_offset: Option<usize>,
+}
+
+impl GenericTemplate {
+    /// Creates a new `GenericTemplate` with the given source and constraint type.
+    #[must_use]
+    pub fn new(template_source: GenericParent, template_type: TUnion) -> Self {
+        Self { defining_entity: template_source, constraint: template_type, default: None }
+    }
+
+    /// Returns the same `GenericTemplate` with the given default type set.
+    #[must_use]
+    pub fn with_default(mut self, default: Option<TUnion>) -> Self {
+        self.default = default;
+        self
+    }
+}
+
+impl TemplateResult {
+    #[must_use]
+    pub fn new(
+        template_types: IndexMap<Word, Vec<GenericTemplate>, RandomState>,
+        lower_bounds: HashMap<Word, HashMap<GenericParent, TUnion>>,
+    ) -> TemplateResult {
+        let mut new_lower_bounds = HashMap::default();
+
+        for (k, v) in lower_bounds {
+            let mut th = HashMap::default();
+
+            for (vk, vv) in v {
+                th.insert(vk, vec![TemplateBound::new(vv, 0, None)]);
+            }
+
+            new_lower_bounds.insert(k, th);
+        }
+
+        TemplateResult { template_types, lower_bounds: new_lower_bounds, projections: HashMap::default() }
+    }
+
+    #[must_use]
+    pub fn has_template_types(&self) -> bool {
+        !self.template_types.is_empty()
+    }
+
+    pub fn add_lower_bounds(&mut self, lower_bounds: HashMap<Word, HashMap<GenericParent, TUnion>>) {
+        for (k, v) in lower_bounds {
+            let mut th = HashMap::default();
+
+            for (vk, vv) in v {
+                th.insert(vk, vec![TemplateBound::new(vv, 0, None)]);
+            }
+
+            self.lower_bounds.insert(k, th);
+        }
+    }
+
+    pub fn add_lower_bound(&mut self, parameter_name: Word, generic_parent: GenericParent, bound: TUnion) {
+        let entry = self.lower_bounds.entry(parameter_name).or_default();
+
+        entry.entry(generic_parent).or_default().push(TemplateBound::new(bound, 0, None));
+    }
+
+    pub fn add_template_type(&mut self, parameter_name: Word, generic_parent: GenericParent, constraint: TUnion) {
+        let entry = self.template_types.entry(parameter_name).or_default();
+        entry.push(GenericTemplate::new(generic_parent, constraint));
+    }
+
+    #[must_use]
+    pub fn has_lower_bound(&self, parameter_name: Word, generic_parent: &GenericParent) -> bool {
+        self.lower_bounds
+            .get(&parameter_name)
+            .and_then(|bounds| bounds.get(generic_parent))
+            .is_some_and(|bounds| !bounds.is_empty())
+    }
+
+    #[must_use]
+    pub fn get_lower_bounds_for_class_like(
+        &self,
+        parameter_name: Word,
+        classlike_name: Word,
+    ) -> Option<&Vec<TemplateBound>> {
+        self.lower_bounds.get(&parameter_name).and_then(|bounds| bounds.get(&GenericParent::ClassLike(classlike_name)))
+    }
+}
+
+impl TemplateBound {
+    #[must_use]
+    pub fn new(bound_type: TUnion, appearance_depth: usize, argument_offset: Option<usize>) -> Self {
+        Self { bound_type, appearance_depth, argument_offset }
+    }
+}

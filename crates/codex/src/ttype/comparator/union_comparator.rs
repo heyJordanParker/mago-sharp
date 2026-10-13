@@ -1,0 +1,485 @@
+use std::sync::Arc;
+
+use crate::metadata::CodebaseMetadata;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::array::keyed::TKeyedArray;
+use crate::ttype::atomic::generic::TGenericParameter;
+use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::scalar::TScalar;
+use crate::ttype::combine_union_types;
+use crate::ttype::combiner::CombinerOptions;
+use crate::ttype::comparator::ComparisonResult;
+use crate::ttype::comparator::atomic_comparator;
+use crate::ttype::comparator::iterable_comparator;
+use crate::ttype::template::TemplateBound;
+use crate::ttype::union::TUnion;
+use crate::ttype::wrap_atomic;
+
+use super::integer_comparator;
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn is_contained_by(
+    codebase: &CodebaseMetadata,
+    input_type: &TUnion,
+    container_type: &TUnion,
+    ignore_null: bool,
+    ignore_false: bool,
+    inside_assertion: bool,
+    union_comparison_result: &mut ComparisonResult,
+) -> bool {
+    if input_type == container_type {
+        return true;
+    }
+
+    let container_has_template = container_type.has_template_or_static();
+    let all_matched =
+        are_parts_contained_by(input_type.types.as_ref(), union_comparison_result, |input_type_part, result| {
+            is_contained_by_atomic(
+                codebase,
+                input_type,
+                input_type_part,
+                container_type,
+                container_has_template,
+                ignore_null,
+                ignore_false,
+                inside_assertion,
+                result,
+            )
+        });
+
+    if all_matched
+        && union_comparison_result.replacement_union_type.is_none()
+        && input_type.is_literal_of(container_type)
+    {
+        union_comparison_result.replacement_union_type = Some(container_type.clone());
+    }
+
+    all_matched
+}
+
+/// Whether every one of `parts` fits, by `is_part_contained_by`. A failed comparison sets `int_for_float` only when
+/// every part it refuses was refused for an `int`.
+fn are_parts_contained_by<'part>(
+    parts: impl IntoIterator<Item = &'part TAtomic>,
+    union_comparison_result: &mut ComparisonResult,
+    mut is_part_contained_by: impl FnMut(&TAtomic, &mut ComparisonResult) -> bool,
+) -> bool {
+    let mut all_matched = true;
+    let mut refused_otherwise = false;
+
+    for part in parts {
+        let matched = is_part_contained_by(part, union_comparison_result);
+        let refused_for_int = std::mem::take(&mut union_comparison_result.int_for_float);
+
+        refused_otherwise |= !matched && !refused_for_int;
+        all_matched &= matched;
+    }
+
+    union_comparison_result.int_for_float = !all_matched && !refused_otherwise;
+
+    all_matched
+}
+
+/// Checks containment while treating omitted, non-defaulted generic arguments in the
+/// container as erased runtime wildcards.
+///
+/// This is intentionally narrower than normal generic containment. It is used where a
+/// native, non-generic PHP type declaration is compared with a PHPDoc specialization.
+pub fn is_contained_by_with_erased_template_arguments(
+    codebase: &CodebaseMetadata,
+    input_type: &TUnion,
+    container_type: &TUnion,
+    union_comparison_result: &mut ComparisonResult,
+) -> bool {
+    let mut direct_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
+    if is_contained_by(codebase, input_type, container_type, false, false, false, &mut direct_result) {
+        *union_comparison_result = direct_result;
+        return true;
+    }
+
+    let Some(relaxed_container) = replace_erased_template_arguments(input_type, container_type) else {
+        *union_comparison_result = direct_result;
+        return false;
+    };
+
+    is_contained_by(codebase, input_type, &relaxed_container, false, false, false, union_comparison_result)
+}
+
+fn replace_erased_template_arguments(input_type: &TUnion, container_type: &TUnion) -> Option<TUnion> {
+    let mut relaxed = container_type.clone();
+    let mut replaced = false;
+
+    for container_atomic in relaxed.types.to_mut() {
+        let TAtomic::Object(TObject::Named(container_object)) = container_atomic else {
+            continue;
+        };
+        let Some(container_parameters) = container_object.type_parameters.as_mut() else {
+            continue;
+        };
+
+        let Some(input_parameters) = input_type.types.iter().find_map(|input_atomic| {
+            let TAtomic::Object(TObject::Named(input_object)) = input_atomic else {
+                return None;
+            };
+
+            input_object
+                .name
+                .as_bytes()
+                .eq_ignore_ascii_case(container_object.name.as_bytes())
+                .then_some(input_object.type_parameters.as_deref())
+                .flatten()
+        }) else {
+            continue;
+        };
+
+        for (container_parameter, input_parameter) in container_parameters.iter_mut().zip(input_parameters) {
+            if container_parameter.from_unspecified_template() {
+                *container_parameter = input_parameter.clone();
+                replaced = true;
+            }
+        }
+    }
+
+    replaced.then_some(relaxed)
+}
+
+#[inline]
+pub fn is_return_type_contained_by(
+    codebase: &CodebaseMetadata,
+    input_type: &TUnion,
+    container_type: &TUnion,
+    ignore_false: bool,
+    union_comparison_result: &mut ComparisonResult,
+) -> bool {
+    (input_type.is_void() && container_type.accepts_null())
+        || is_contained_by(codebase, input_type, container_type, false, ignore_false, false, union_comparison_result)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn is_contained_by_atomic(
+    codebase: &CodebaseMetadata,
+    input_type: &TUnion,
+    input_type_part: &TAtomic,
+    container_type: &TUnion,
+    container_has_template: bool,
+    ignore_null: bool,
+    ignore_false: bool,
+    inside_assertion: bool,
+    union_comparison_result: &mut ComparisonResult,
+) -> bool {
+    match input_type_part {
+        TAtomic::Null if ignore_null => return true,
+        TAtomic::Scalar(TScalar::Bool(bool)) if bool.is_false() && ignore_false => return true,
+        TAtomic::Variable(name) => {
+            if container_type.is_single()
+                && let TAtomic::Variable(container_name) = container_type.get_single()
+                && container_name == name
+            {
+                return true;
+            }
+
+            union_comparison_result
+                .type_variable_upper_bounds
+                .push((*name, TemplateBound::new(container_type.clone(), 0, None)));
+
+            return true;
+        }
+        TAtomic::GenericParameter(TGenericParameter { intersection_types: None, constraint, .. })
+            if !container_has_template =>
+        {
+            return are_parts_contained_by(
+                constraint.types.as_ref(),
+                union_comparison_result,
+                |constraint_type_part, result| {
+                    is_contained_by_atomic(
+                        codebase,
+                        input_type,
+                        constraint_type_part,
+                        container_type,
+                        container_has_template,
+                        ignore_null,
+                        ignore_false,
+                        inside_assertion,
+                        result,
+                    )
+                },
+            );
+        }
+        _ => (),
+    }
+
+    let container_atomic_types = container_type.types.as_ref();
+    let input_from_template_fallback = input_type.from_template_fallback();
+    let mut type_match_found = false;
+    let mut some_type_coerced = false;
+    let mut some_type_coerced_from_nested_mixed = false;
+    let mut int_for_float = false;
+
+    if matches!(input_type_part, TAtomic::Scalar(TScalar::ArrayKey)) {
+        if container_type.has_int_and_string() {
+            return true;
+        }
+
+        let mut has_int = false;
+        let mut has_string = false;
+
+        for container_atomic_type in container_atomic_types {
+            if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = container_atomic_type {
+                if constraint.has_int_and_string() {
+                    return true;
+                }
+
+                if constraint.has_int() {
+                    has_int = true;
+                }
+
+                if constraint.has_string() {
+                    has_string = true;
+                }
+            }
+        }
+
+        if has_int && has_string {
+            return true;
+        }
+    }
+
+    if matches!(input_type_part, TAtomic::Scalar(TScalar::Generic))
+        && !container_type.has_scalar()
+        && container_type.has_scalar_combination()
+    {
+        return true;
+    }
+
+    if let TAtomic::Iterable(_) = input_type_part
+        && !container_type.has_iterable()
+        && container_type.has_array()
+        && container_type.has_traversable(codebase)
+    {
+        let mut matched_all = true;
+        for container_atomic_type in container_atomic_types {
+            if !container_atomic_type.is_array() && !container_atomic_type.is_traversable(codebase) {
+                continue;
+            }
+
+            matched_all &= iterable_comparator::is_contained_by(
+                codebase,
+                input_type_part,
+                container_atomic_type,
+                inside_assertion,
+                union_comparison_result,
+            );
+        }
+
+        if matched_all {
+            return true;
+        }
+    }
+
+    if let TAtomic::Scalar(TScalar::Integer(input_integer)) = input_type_part
+        && container_type.has_int()
+        && integer_comparator::is_contained_by_union(*input_integer, container_type)
+    {
+        return true;
+    }
+
+    for container_type_part in container_atomic_types {
+        if ignore_null && matches!(container_type_part, TAtomic::Null) && !matches!(input_type_part, TAtomic::Null) {
+            continue;
+        }
+
+        if ignore_false
+            && matches!(container_type_part, TAtomic::Scalar(TScalar::Bool(bool)) if bool.is_false())
+            && !matches!(input_type_part, TAtomic::Scalar(TScalar::Bool(bool)) if bool.is_false())
+        {
+            continue;
+        }
+
+        if let TAtomic::Variable(name) = &container_type_part {
+            union_comparison_result
+                .type_variable_lower_bounds
+                .push((*name, TemplateBound::new(input_type.clone(), 0, None)));
+
+            type_match_found = true;
+
+            continue;
+        }
+
+        let mut atomic_comparison_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
+        let is_atomic_contained_by = atomic_comparator::is_contained_by(
+            codebase,
+            input_type_part,
+            container_type_part,
+            inside_assertion,
+            &mut atomic_comparison_result,
+        );
+        int_for_float |= atomic_comparison_result.int_for_float;
+
+        if is_atomic_contained_by {
+            if let Some(replacement_atomic_type) = atomic_comparison_result.replacement_atomic_type {
+                if let Some(replacement_union_type) = &mut union_comparison_result.replacement_union_type {
+                    replacement_union_type.replace_type(input_type_part, replacement_atomic_type);
+                } else {
+                    union_comparison_result.replacement_union_type = Some(wrap_atomic(replacement_atomic_type));
+                }
+            }
+
+            union_comparison_result
+                .type_variable_lower_bounds
+                .extend(atomic_comparison_result.type_variable_lower_bounds);
+
+            union_comparison_result
+                .type_variable_upper_bounds
+                .extend(atomic_comparison_result.type_variable_upper_bounds);
+        }
+
+        if atomic_comparison_result.type_coerced.unwrap_or(false) {
+            some_type_coerced = true;
+        }
+
+        if atomic_comparison_result.type_coerced_from_nested_mixed.unwrap_or(false) {
+            some_type_coerced_from_nested_mixed = true;
+        }
+
+        if is_atomic_contained_by {
+            type_match_found = true;
+        }
+    }
+
+    if type_match_found {
+        return true;
+    }
+
+    if !container_has_template
+        && let Some(combined_container_type) =
+            get_combined_keyed_array_union_container(codebase, input_type_part, container_atomic_types)
+    {
+        let mut atomic_comparison_result = ComparisonResult::with_sharp_rules(union_comparison_result.sharp_rules);
+        if atomic_comparator::is_contained_by(
+            codebase,
+            input_type_part,
+            &combined_container_type,
+            inside_assertion,
+            &mut atomic_comparison_result,
+        ) {
+            if let Some(replacement_atomic_type) = atomic_comparison_result.replacement_atomic_type {
+                if let Some(replacement_union_type) = &mut union_comparison_result.replacement_union_type {
+                    replacement_union_type.replace_type(input_type_part, replacement_atomic_type);
+                } else {
+                    union_comparison_result.replacement_union_type = Some(wrap_atomic(replacement_atomic_type));
+                }
+            }
+
+            union_comparison_result
+                .type_variable_lower_bounds
+                .extend(atomic_comparison_result.type_variable_lower_bounds);
+            union_comparison_result
+                .type_variable_upper_bounds
+                .extend(atomic_comparison_result.type_variable_upper_bounds);
+
+            return true;
+        }
+
+        some_type_coerced |= atomic_comparison_result.type_coerced.unwrap_or(false);
+        some_type_coerced_from_nested_mixed |= atomic_comparison_result.type_coerced_from_nested_mixed.unwrap_or(false);
+        int_for_float |= atomic_comparison_result.int_for_float;
+    }
+
+    union_comparison_result.int_for_float = int_for_float;
+
+    if some_type_coerced {
+        union_comparison_result.type_coerced = Some(true);
+    }
+
+    if some_type_coerced_from_nested_mixed {
+        union_comparison_result.type_coerced_from_nested_mixed = Some(true);
+
+        if input_from_template_fallback {
+            union_comparison_result.type_coerced_from_as_mixed = Some(true);
+        }
+    }
+
+    false
+}
+
+#[inline]
+fn get_combined_keyed_array_union_container(
+    codebase: &CodebaseMetadata,
+    input_type_part: &TAtomic,
+    container_atomic_types: &[TAtomic],
+) -> Option<TAtomic> {
+    let TAtomic::Array(TArray::Keyed(input)) = input_type_part else {
+        return None;
+    };
+
+    if input.known_items.is_some() {
+        return None;
+    }
+
+    let (input_key, _) = input.parameters.as_ref()?;
+    let mut matching = container_atomic_types.iter().filter_map(|atomic| {
+        let TAtomic::Array(TArray::Keyed(array)) = atomic else {
+            return None;
+        };
+
+        let (key, value) = array.parameters.as_ref()?;
+        (array.known_items.is_none() && (Arc::ptr_eq(input_key, key) || input_key.as_ref() == key.as_ref()))
+            .then_some((array, value.as_ref()))
+    });
+
+    let (first, first_value) = matching.next()?;
+    let (second, second_value) = matching.next()?;
+    let mut value = combine_union_types(first_value, second_value, codebase, CombinerOptions::default());
+    let mut non_empty = first.non_empty && second.non_empty;
+    let mut known_non_list = first.known_non_list && second.known_non_list;
+
+    for (array, next_value) in matching {
+        value = combine_union_types(&value, next_value, codebase, CombinerOptions::default());
+        non_empty &= array.non_empty;
+        known_non_list &= array.known_non_list;
+    }
+
+    Some(TAtomic::Array(TArray::Keyed(TKeyedArray {
+        known_items: None,
+        parameters: Some((Arc::clone(input_key), Arc::new(value))),
+        non_empty,
+        known_non_list,
+    })))
+}
+
+#[must_use]
+pub fn can_expression_types_be_identical(
+    codebase: &CodebaseMetadata,
+    type1: &TUnion,
+    type2: &TUnion,
+    inside_assertion: bool,
+    allow_type_coercion: bool,
+) -> bool {
+    // If either type is mixed, they can be identical
+    if type1.has_mixed() || type1.has_mixed_template() || type2.has_mixed() || type2.has_mixed_template() {
+        return true;
+    }
+
+    if (type1.is_nullable() && type2.has_nullish()) || (type2.is_nullable() && type1.has_nullish()) {
+        return true;
+    }
+
+    for type1_part in type1.types.as_ref() {
+        for type2_part in type2.types.as_ref() {
+            if atomic_comparator::can_be_identical(
+                codebase,
+                type1_part,
+                type2_part,
+                inside_assertion,
+                allow_type_coercion,
+            ) {
+                return true;
+            }
+        }
+    }
+
+    false
+}

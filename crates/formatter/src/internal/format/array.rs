@@ -1,0 +1,707 @@
+use mago_allocator::Arena;
+use mago_allocator::CollectIn;
+use mago_allocator::vec::Vec;
+use mago_allocator::vec_in;
+
+use mago_php_version::feature::Feature;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Array;
+use mago_syntax::cst::ArrayElement;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::LegacyArray;
+use mago_syntax::cst::List;
+
+use crate::document::BreakMode;
+use crate::document::Document;
+use crate::document::Group;
+use crate::document::IfBreak;
+use crate::document::Line;
+use crate::document::clone_in_arena;
+use crate::document::group::GroupIdentifier;
+use crate::internal::FormatterState;
+use crate::internal::format::Format;
+use crate::internal::format::alignment::AlignmentRun;
+use crate::internal::format::alignment::AlignmentWidths;
+use crate::internal::format::alignment::detect_alignment_runs;
+use crate::internal::format::alignment::get_alignment;
+use crate::internal::format::alignment::has_blank_line_between;
+use crate::internal::format::alignment::has_comment_between;
+use crate::internal::format::assignment::AssignmentAlignment;
+use crate::internal::format::misc;
+use crate::internal::format::misc::get_document_width;
+use crate::internal::format::misc::is_expandable_expression;
+use crate::internal::format::misc::is_string_word_type;
+use crate::internal::utils;
+use crate::internal::utils::get_expression_width;
+
+#[derive(Debug, Clone, Copy)]
+pub enum ArrayLike<'arena> {
+    Array(&'arena Array<'arena>),
+    List(&'arena List<'arena>),
+    LegacyArray(&'arena LegacyArray<'arena>),
+}
+
+impl<'arena> ArrayLike<'arena> {
+    #[inline]
+    fn elements<A>(&self, arena: &'arena A) -> Vec<'arena, &'arena ArrayElement<'arena>, A>
+    where
+        A: Arena,
+    {
+        let elements_sequence = match self {
+            Self::Array(array) => &array.elements,
+            Self::LegacyArray(array) => &array.elements,
+            Self::List(list) => &list.elements,
+        };
+
+        let mut elements: Vec<'arena, &'arena ArrayElement<'arena>, A> =
+            elements_sequence.iter().collect_in::<Vec<'arena, _, A>>(arena);
+
+        while let Some(ArrayElement::Missing(_)) = elements.last() {
+            elements.pop();
+        }
+
+        elements
+    }
+
+    #[inline]
+    pub fn get_left_delimiter_span(&self) -> Span {
+        match self {
+            Self::Array(array) => array.left_bracket.span(),
+            Self::List(list) => list.left_parenthesis.span(),
+            Self::LegacyArray(array) => array.left_parenthesis.span(),
+        }
+    }
+
+    #[inline]
+    pub const fn get_left_delimiter(&self) -> &'static [u8] {
+        if matches!(self, Self::List(_) | Self::LegacyArray(_)) { b"(" } else { b"[" }
+    }
+
+    #[inline]
+    pub fn get_right_delimiter_span(&self) -> Span {
+        match self {
+            Self::Array(array) => array.right_bracket.span(),
+            Self::List(list) => list.right_parenthesis.span(),
+            Self::LegacyArray(array) => array.right_parenthesis.span(),
+        }
+    }
+
+    #[inline]
+    pub const fn get_right_delimiter(&self) -> &'static [u8] {
+        if matches!(self, Self::List(_) | Self::LegacyArray(_)) { b")" } else { b"]" }
+    }
+
+    fn prefix<A>(&self, f: &mut FormatterState<'_, 'arena, A>) -> Option<Document<'arena, A>>
+    where
+        A: Arena,
+    {
+        match self {
+            Self::List(list) => Some(list.list.format(f)),
+            Self::LegacyArray(array) => Some(array.array.format(f)),
+            _ => None,
+        }
+    }
+}
+
+impl HasSpan for ArrayLike<'_> {
+    fn span(&self) -> Span {
+        match self {
+            Self::Array(array) => array.span(),
+            Self::List(list) => list.span(),
+            Self::LegacyArray(array) => array.span(),
+        }
+    }
+}
+
+pub(super) fn print_array_like<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    array_like: ArrayLike<'arena>,
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    let group_id = f.next_id();
+    let left_delimiter = {
+        let mut left_delimiter_content = vec_in![f.arena;];
+        if let Some(prefix) = array_like.prefix(f) {
+            left_delimiter_content.push(prefix);
+        }
+
+        left_delimiter_content.push(Document::String(array_like.get_left_delimiter()));
+        if let Some(s) = f.print_trailing_comments(array_like.get_left_delimiter_span()) {
+            left_delimiter_content.push(s);
+        }
+
+        Document::Array(left_delimiter_content)
+    };
+
+    let get_right_delimiter = |f: &mut FormatterState<'_, 'arena, A>, array_like: &ArrayLike<'arena>| {
+        let mut right_delimiter_content = vec_in![f.arena;];
+        right_delimiter_content.push(Document::String(array_like.get_right_delimiter()));
+        if let Some(s) = f.print_trailing_comments(array_like.get_right_delimiter_span()) {
+            right_delimiter_content.push(s);
+        }
+
+        Document::Array(right_delimiter_content)
+    };
+
+    let mut parts = vec_in![f.arena;left_delimiter];
+    let elements = array_like.elements(f.arena);
+
+    if elements.is_empty() {
+        if let Some(dangling_comments) = f.print_dangling_comments(array_like.span(), true) {
+            parts.push(dangling_comments);
+        }
+
+        parts.push(get_right_delimiter(f, &array_like));
+
+        return Document::Group(Group::new(parts));
+    }
+
+    let preserve_break = f.settings.preserve_breaking_array_like
+        && misc::has_new_line_in_range(f.source_text, array_like.start_offset(), elements[0].start_offset());
+    let has_floating_comments = has_floating_comments(f, &array_like);
+    let should_break = preserve_break || has_floating_comments;
+
+    if !should_break && let Some(element) = inline_single_element(f, &array_like) {
+        parts.push(element);
+        parts.push(get_right_delimiter(f, &array_like));
+
+        return Document::Group(Group::new(parts));
+    }
+
+    // Check if we should use table-style formatting
+    let column_widths =
+        if f.settings.array_table_style_alignment { get_table_style_column_widths(f, &array_like) } else { None };
+    let use_table_style = column_widths.is_some();
+
+    let outer_alignment = f.alignment_context();
+    f.set_alignment_context(None);
+
+    parts.push(Document::Indent({
+        let len = elements.len();
+        let mut indent_parts = vec_in![f.arena;];
+        indent_parts.push(Document::Line(Line::soft()));
+
+        if let Some(widths) = column_widths {
+            for (i, element) in elements.into_iter().enumerate() {
+                let element_span = element.span();
+                let formatted_element = element.format(f);
+                if i == len - 1 {
+                    indent_parts.push(format_row_with_alignment(f, formatted_element, &widths));
+                    break;
+                }
+
+                indent_parts.push(format_row_with_alignment(f, formatted_element, &widths));
+                indent_parts.push(Document::String(b","));
+                indent_parts.push(Document::Line(Line::hard()));
+                if f.is_next_line_empty(element_span) {
+                    indent_parts.push(Document::Line(Line::hard()));
+                }
+            }
+        } else {
+            let kv_alignment_runs = detect_array_element_alignment_runs(f, &elements);
+
+            // Standard formatting with optional key-value alignment
+            for (i, element) in elements.into_iter().enumerate() {
+                let element_span = element.span();
+
+                // Set alignment context if this element is in an alignment run
+                if let Some(widths) = get_alignment(&kv_alignment_runs, i) {
+                    let alignment = calculate_array_element_alignment(element, &widths, group_id);
+                    f.set_alignment_context(Some(alignment));
+                }
+
+                indent_parts.push(element.format(f));
+
+                // Clear alignment context after formatting
+                f.set_alignment_context(None);
+
+                if i == len - 1 {
+                    break;
+                }
+
+                indent_parts.push(Document::String(b","));
+                indent_parts.push(Document::Line(Line::default()));
+                if f.is_next_line_empty(element_span) {
+                    indent_parts.push(Document::Line(Line::hard()));
+                }
+            }
+        }
+
+        indent_parts
+    }));
+
+    f.set_alignment_context(outer_alignment);
+
+    let trailing_comma = match &array_like {
+        ArrayLike::Array(_) | ArrayLike::LegacyArray(_) => f.settings.trailing_comma,
+        ArrayLike::List(_) => f.trailing_comma_for(Feature::TrailingCommaInListSyntax),
+    };
+
+    if trailing_comma {
+        parts.push(Document::IfBreak(IfBreak::then(f.arena, Document::String(b","))));
+    }
+
+    if let Some(dangling_comments) = f.print_dangling_comments(array_like.span(), true) {
+        parts.push(dangling_comments);
+    } else {
+        parts.push(Document::Line(Line::soft()));
+    }
+
+    parts.push(get_right_delimiter(f, &array_like));
+
+    let force_break = use_table_style || has_floating_comments;
+
+    Document::Group(Group::new(parts).with_id(group_id).with_break_mode(if force_break {
+        BreakMode::Force
+    } else if preserve_break {
+        BreakMode::Preserve
+    } else {
+        BreakMode::Auto
+    }))
+}
+
+#[inline]
+fn has_floating_comments<'arena, A>(f: &mut FormatterState<'_, 'arena, A>, array_like: &ArrayLike<'arena>) -> bool
+where
+    A: Arena,
+{
+    let has_comments = |prev: &ArrayElement, next: &ArrayElement| {
+        f.has_inner_comment(Span::new(prev.span().file_id, prev.end_position(), next.start_position()))
+    };
+
+    for element in array_like.elements(f.arena).windows(2) {
+        let [prev, next] = element else { continue };
+        if has_comments(prev, next) {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[inline]
+fn inline_single_element<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    array_like: &ArrayLike<'arena>,
+) -> Option<Document<'arena, A>>
+where
+    A: Arena,
+{
+    let elements = array_like.elements(f.arena);
+    if elements.len() != 1 {
+        return None; // Only inline single-element arrays
+    }
+
+    match elements[0] {
+        ArrayElement::KeyValue(element) => {
+            if !((element.key.is_literal() || is_string_word_type(element.key))
+                && is_expandable_expression(element.value, true))
+            {
+                return None;
+            }
+
+            if has_nested_array_like_value(element.value) {
+                return None;
+            }
+
+            if !value_has_internal_break_point(element.value) {
+                return None;
+            }
+
+            let key = element.key.format(f);
+            let value = element.value.format(f);
+            Some(Document::Group(Group::new(vec_in![f.arena;
+                key,
+                Document::space(),
+                Document::String(b"=>"),
+                Document::space(),
+                value,
+            ])))
+        }
+        ArrayElement::Value(element) => is_expandable_expression(element.value, true).then(|| element.format(f)),
+        ArrayElement::Variadic(element) => is_expandable_expression(element.value, true).then(|| element.format(f)),
+        ArrayElement::Missing(_) => None,
+    }
+}
+
+#[inline]
+fn value_has_internal_break_point<'arena>(expression: &'arena Expression<'arena>) -> bool {
+    match expression {
+        Expression::Parenthesized(inner) => value_has_internal_break_point(inner.expression),
+        Expression::UnaryPrefix(op) => value_has_internal_break_point(op.operand),
+        Expression::Throw(throw) => value_has_internal_break_point(throw.exception),
+        Expression::Array(_) | Expression::LegacyArray(_) | Expression::List(_) => true,
+        Expression::Closure(_) | Expression::AnonymousClass(_) | Expression::Match(_) => true,
+        Expression::PartialApplication(_) => true,
+        Expression::Call(call) => argument_list_is_substantial(call.get_argument_list()),
+        Expression::Instantiation(instantiation) => {
+            instantiation.argument_list.as_ref().is_some_and(argument_list_is_substantial)
+        }
+        _ => false,
+    }
+}
+
+#[inline]
+fn argument_list_is_substantial<'arena>(argument_list: &'arena mago_syntax::cst::ArgumentList<'arena>) -> bool {
+    if argument_list.arguments.len() >= 2 {
+        return true;
+    }
+    argument_list.arguments.first().is_some_and(|arg| value_has_internal_break_point(arg.value()))
+}
+
+#[inline]
+fn has_nested_array_like_value(expression: &Expression<'_>) -> bool {
+    fn element_contains_array_like(element: &ArrayElement<'_>) -> bool {
+        let value = match element {
+            ArrayElement::KeyValue(key_value) => key_value.value,
+            ArrayElement::Value(value) => value.value,
+            ArrayElement::Variadic(value) => value.value,
+            ArrayElement::Missing(_) => return false,
+        };
+
+        matches!(value, Expression::Array(_) | Expression::LegacyArray(_) | Expression::List(_))
+            || has_nested_array_like_value(value)
+    }
+
+    match expression {
+        Expression::Array(array) => array.elements.iter().any(element_contains_array_like),
+        Expression::LegacyArray(array) => array.elements.iter().any(element_contains_array_like),
+        Expression::List(list) => list.elements.iter().any(element_contains_array_like),
+        _ => false,
+    }
+}
+
+#[inline]
+fn format_row_with_alignment<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    document: Document<'arena, A>,
+    column_widths: &[usize],
+) -> Document<'arena, A>
+where
+    A: Arena,
+{
+    match document {
+        Document::Array(mut elements) => {
+            let Some(last_element) = elements.pop() else {
+                return Document::Array(elements);
+            };
+
+            let formatted_row = format_row_with_alignment(f, last_element, column_widths);
+            if elements.is_empty() {
+                formatted_row
+            } else {
+                elements.push(formatted_row);
+
+                Document::Array(elements)
+            }
+        }
+        Document::Group(group) => {
+            if let Some((opening_delimiter, elements, closing_delimiter)) = extract_array_elements(f, &group.contents) {
+                let formatted_elements = format_elements_with_alignment(f, elements, column_widths);
+
+                Document::Group(Group::new(vec_in![f.arena;
+                    opening_delimiter,
+                    Document::Array(formatted_elements),
+                    closing_delimiter,
+                ]))
+            } else {
+                Document::Group(group)
+            }
+        }
+        other => other,
+    }
+}
+
+type DelimitedArrayElements<'arena, A> =
+    (Document<'arena, A>, Vec<'arena, Document<'arena, A>, A>, Document<'arena, A>);
+
+#[inline]
+fn extract_array_elements<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    contents: &[Document<'arena, A>],
+) -> Option<DelimitedArrayElements<'arena, A>>
+where
+    A: Arena,
+{
+    let mut opening_delimiter = None;
+    let mut closing_delimiter = None;
+    let mut elements = vec_in![f.arena];
+    let mut in_elements = false;
+
+    for doc in contents {
+        match doc {
+            Document::Array(arr) => {
+                // Check if this array contains the left delimiter
+                for item in arr {
+                    if let Document::String(s) = item {
+                        if *s == b"[" || *s == b"(" {
+                            opening_delimiter = Some(clone_in_arena(f.arena, doc));
+                            in_elements = true;
+                            break;
+                        } else if !in_elements && *s == b"]" || *s == b")" {
+                            closing_delimiter = Some(clone_in_arena(f.arena, doc));
+                            break;
+                        }
+                    }
+                }
+            }
+            Document::Indent(indent_docs) if in_elements => {
+                // Extract elements from the indented content
+                let mut element_start = 1;
+                for (i, item) in indent_docs.iter().enumerate() {
+                    match item {
+                        Document::String(s) if *s == b"," => {
+                            if i > element_start {
+                                elements.push(clone_in_arena(f.arena, &indent_docs[element_start]));
+                            }
+                            element_start = i + 2; // Skip comma and Line
+                        }
+                        _ => {}
+                    }
+                }
+                // Add last element
+                if element_start < indent_docs.len() {
+                    elements.push(clone_in_arena(f.arena, &indent_docs[element_start]));
+                }
+
+                in_elements = false;
+            }
+            _ => {}
+        }
+    }
+
+    match (opening_delimiter, closing_delimiter) {
+        (Some(opening_delimiter), Some(closing_delimiter)) => {
+            if elements.is_empty() {
+                None
+            } else {
+                Some((opening_delimiter, elements, closing_delimiter))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn format_elements_with_alignment<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    elements: Vec<'arena, Document<'arena, A>, A>,
+    column_widths: &[usize],
+) -> Vec<'arena, Document<'arena, A>, A>
+where
+    A: Arena,
+{
+    let mut formatted_elements = vec_in![f.arena;];
+
+    let len = elements.len();
+    for (i, element) in elements.into_iter().enumerate() {
+        let formatted = if i < len - 1 {
+            // For all elements except the last one, add padding
+            let element_width = get_document_width(&element);
+            let padding = column_widths[i].saturating_sub(element_width);
+
+            if padding > 0 {
+                // Create a padded document
+                Document::Array(vec_in![f.arena;
+                    element,
+                    Document::String(b","),
+                    Document::String(utils::spaces(f.arena, padding + 1))
+                ])
+            } else {
+                // No padding needed
+                Document::Array(vec_in![f.arena;element, Document::String(b","), Document::space()])
+            }
+        } else {
+            // Last element, no padding
+            element
+        };
+
+        formatted_elements.push(formatted);
+    }
+
+    formatted_elements
+}
+
+fn get_table_style_column_widths<'arena, A>(
+    f: &mut FormatterState<'_, 'arena, A>,
+    array_like: &ArrayLike<'arena>,
+) -> Option<Vec<'arena, usize, A>>
+where
+    A: Arena,
+{
+    // Arbitrary limit to prevent excessive column width
+    const WIGGLE_ROOM: usize = 20;
+
+    let elements = array_like.elements(f.arena);
+    if elements.len() < 2 {
+        return None; // Need at least two rows for table style to make sense
+    }
+
+    if f.settings.print_width <= WIGGLE_ROOM {
+        return None; // Not enough width for a table
+    }
+
+    let mut row_size = 0;
+    let mut sizes = vec_in![f.arena;];
+    let mut maximum_width = 0;
+    let mut column_maximum_widths: Vec<'arena, usize, A> = vec_in![f.arena;];
+
+    // Check if all elements are nested arrays with consistent row sizes
+    for element in elements {
+        if f.has_inner_comment(element.span()) {
+            return None; // Do not format if there are inner comments
+        }
+
+        let ArrayElement::Value(element) = element else {
+            return None; // Only support Value elements
+        };
+
+        let (Expression::Array(Array { elements, .. }) | Expression::LegacyArray(LegacyArray { elements, .. })) =
+            element.value
+        else {
+            return None; // Not a nested array
+        };
+
+        let size = elements.len();
+        if 0 == size {
+            return None; // Empty row
+        }
+
+        // Check if row size is consistent
+        row_size = row_size.max(size);
+        sizes.push(size);
+        if column_maximum_widths.len() < size {
+            column_maximum_widths.resize(size, 0);
+        }
+
+        // Check if all inner elements are simple (strings, numbers, etc.)
+        let mut elements_width = 0;
+        for (column, inner_element) in elements.iter().enumerate() {
+            let ArrayElement::Value(inner_value) = inner_element else {
+                return None; // Only support Value elements
+            };
+
+            let width = get_expression_width(inner_value.value)?;
+            elements_width += width;
+            column_maximum_widths[column] = column_maximum_widths[column].max(width);
+        }
+
+        let total_width = elements_width + ((size - 1) * 2);
+        if total_width > (f.settings.print_width - WIGGLE_ROOM) {
+            return None; // Exceeds column width limit
+        }
+
+        maximum_width = maximum_width.max(total_width);
+    }
+
+    if maximum_width < WIGGLE_ROOM {
+        return None; // Too narrow to be a table
+    }
+
+    // At least 60% of the rows should have the same size
+    let consistent = (sizes.iter().filter(|size| **size == row_size).count() as f64) / (sizes.len() as f64) >= 0.6;
+
+    consistent.then_some(column_maximum_widths)
+}
+
+/// Detect alignment runs in array elements for key-value pairs.
+fn detect_array_element_alignment_runs<'arena, A>(
+    f: &FormatterState<'_, 'arena, A>,
+    elements: &[&'arena ArrayElement<'arena>],
+) -> std::vec::Vec<AlignmentRun>
+where
+    A: Arena,
+{
+    if !f.settings.align_assignment_like || elements.is_empty() {
+        return std::vec::Vec::new();
+    }
+
+    detect_alignment_runs(
+        elements.len(),
+        |i| matches!(elements[i], ArrayElement::KeyValue(_)).then_some(()),
+        |i| {
+            if i == 0 {
+                return false;
+            }
+
+            let prev_span = elements[i - 1].span();
+            let curr_span = elements[i].span();
+
+            has_blank_line_between(f, prev_span, curr_span) || has_comment_between(f, prev_span, curr_span)
+        },
+        |start, end, ()| calculate_array_element_widths(f, &elements[start..end]),
+    )
+}
+
+fn calculate_array_element_widths<A>(
+    f: &FormatterState<'_, '_, A>,
+    elements: &[&ArrayElement<'_>],
+) -> Option<AlignmentWidths>
+where
+    A: Arena,
+{
+    let mut max_key_width = 0usize;
+
+    for element in elements {
+        if let ArrayElement::KeyValue(kv) = element {
+            let key_width = get_expression_span_width(kv.key);
+            max_key_width = max_key_width.max(key_width);
+        }
+    }
+
+    let widths = AlignmentWidths::new(max_key_width);
+
+    array_element_alignment_fits(f, elements, &widths).then_some(widths)
+}
+
+fn array_element_alignment_fits<A>(
+    f: &FormatterState<'_, '_, A>,
+    elements: &[&ArrayElement<'_>],
+    widths: &AlignmentWidths,
+) -> bool
+where
+    A: Arena,
+{
+    const KEY_VALUE_SEPARATOR_WIDTH: usize = " => ".len();
+    const COMMA_WIDTH: usize = 1;
+
+    let available_width = f.settings.print_width.saturating_sub(f.settings.tab_width);
+
+    elements.iter().all(|element| {
+        let ArrayElement::KeyValue(element) = element else {
+            return true;
+        };
+
+        let Some(value_width) = get_expression_width(element.value) else {
+            return true;
+        };
+
+        widths
+            .name_width
+            .saturating_add(KEY_VALUE_SEPARATOR_WIDTH)
+            .saturating_add(value_width)
+            .saturating_add(COMMA_WIDTH)
+            <= available_width
+    })
+}
+
+fn get_expression_span_width(expr: &Expression<'_>) -> usize {
+    (expr.end_offset() - expr.start_offset()) as usize
+}
+
+fn calculate_array_element_alignment(
+    element: &ArrayElement<'_>,
+    widths: &AlignmentWidths,
+    break_group_id: GroupIdentifier,
+) -> AssignmentAlignment {
+    let current_key_width = match element {
+        ArrayElement::KeyValue(kv) => get_expression_span_width(kv.key),
+        _ => 0,
+    };
+
+    let name_padding = widths.name_width.saturating_sub(current_key_width);
+
+    AssignmentAlignment { type_padding: 0, name_padding, break_group_id: Some(break_group_id) }
+}

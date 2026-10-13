@@ -1,0 +1,2446 @@
+use mago_allocator::Arena;
+use std::collections::BTreeMap;
+use std::ops::Add;
+use std::ops::Sub;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use mago_word::empty_word;
+use mago_word::f64_word;
+use mago_word::i64_word;
+use mago_word::word;
+
+use mago_bytes::BytesDisplay;
+
+use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::array::list::TList;
+use mago_codex::ttype::atomic::mixed::TMixed;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::float::TFloat;
+use mago_codex::ttype::atomic::scalar::int::TInteger;
+use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
+use mago_codex::ttype::combiner::combine;
+use mago_codex::ttype::get_arraykey;
+use mago_codex::ttype::get_bool;
+use mago_codex::ttype::get_false;
+use mago_codex::ttype::get_float;
+use mago_codex::ttype::get_int;
+use mago_codex::ttype::get_int_or_float;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_named_object;
+use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_object;
+use mago_codex::ttype::get_string;
+use mago_codex::ttype::get_true;
+use mago_codex::ttype::get_void;
+use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
+use mago_php_version::PHPVersion;
+use mago_reporting::Annotation;
+use mago_reporting::Issue;
+use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::UnaryPostfix;
+use mago_syntax::cst::UnaryPostfixOperator;
+use mago_syntax::cst::UnaryPrefix;
+use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Variable;
+use mago_text_edit::TextEdit;
+
+use crate::analyzable::Analyzable;
+use crate::artifacts::AnalysisArtifacts;
+use crate::code::IssueCode;
+use crate::context::Context;
+use crate::context::block::BlockContext;
+use crate::error::AnalysisError;
+use crate::expression::assignment::PropertyWriteKind;
+use crate::expression::assignment::assign_to_expression;
+use crate::expression::assignment::read_before_write;
+use crate::expression::assignment::write_after_read;
+use crate::expression::binary::utils::analyze_instance_operator;
+use crate::expression::binary::utils::refuse_non_int_operands;
+use crate::expression::call::method_call::analyze_implicit_method_call;
+use crate::expression::is_refused_type;
+use crate::utils::expression::get_block_expression_id;
+use crate::utils::names::display_atomic;
+use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_type;
+use crate::utils::php_emulation::str_increment_bytes;
+use crate::utils::php_emulation::str_is_numeric_bytes;
+use crate::utils::php_emulation::string_to_int;
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let is_negation = matches!(self.operator, UnaryPrefixOperator::Not(_));
+        let is_reference = matches!(self.operator, UnaryPrefixOperator::Reference(_));
+        let is_variable_reference = is_reference && matches!(self.operand, Expression::Variable(Variable::Direct(_)));
+
+        let was_in_negation = block_context.flags.inside_negation();
+        let was_in_reference = block_context.flags.inside_reference();
+        let was_in_variable_reference = block_context.flags.inside_variable_reference();
+        let was_in_general_use = block_context.flags.inside_general_use();
+        block_context.flags.set_inside_general_use(true);
+        block_context.flags.set_inside_reference(is_reference);
+        block_context.flags.set_inside_variable_reference(is_variable_reference);
+        block_context.flags.set_inside_negation(if is_negation { !was_in_negation } else { was_in_negation });
+
+        let (analyzed, read_issues) =
+            if matches!(self.operator, UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)) {
+                read_before_write(context, |context| self.operand.analyze(context, block_context, artifacts))
+            } else {
+                (self.operand.analyze(context, block_context, artifacts), None)
+            };
+        analyzed?;
+
+        block_context.flags.set_inside_negation(was_in_negation);
+        block_context.flags.set_inside_reference(was_in_reference);
+        block_context.flags.set_inside_general_use(was_in_general_use);
+        block_context.flags.set_inside_variable_reference(was_in_variable_reference);
+
+        let operand_type = artifacts.get_rc_expression_type(&self.operand).cloned();
+        if let Some(operand_type) = &operand_type
+            && is_refused_type(operand_type)
+        {
+            artifacts.set_expression_type(self, TUnion::clone(operand_type));
+            return Ok(());
+        }
+
+        if context.dialect.is_sharp()
+            && let Some(cast_type) = sharp_number_cast_type(&self.operator)
+            && let Some(operand_type) = &operand_type
+            && !operand_type.is_int_or_float()
+            && !operand_type.is_never()
+        {
+            let operand_type_str = display_type(context, operand_type);
+
+            context.collector.report_with_code(
+                IssueCode::InvalidOperand,
+                Issue::error(format!(
+                    "`{}` converts only a number, but this is `{operand_type_str}`.",
+                    BytesDisplay(self.operator.as_bytes())
+                ))
+                .with_annotation(
+                    Annotation::primary(self.span()).with_message("This value is not an `int` or a `float`."),
+                )
+                .with_note("`(int)`, `(float)` and `(string)` convert between numbers only.")
+                .with_help("Parse a string with `Int.parse` or `Float.parse`, and compare a value to get a `bool`."),
+            );
+
+            artifacts.set_expression_type(self, cast_type);
+            return Ok(());
+        }
+
+        // A PHP# `-` on an instance runs the unary `operator -` its class declares, checked as the static call it runs
+        // as.
+        if context.dialect.is_sharp()
+            && let UnaryPrefixOperator::Negation(operator) = self.operator
+            && let Some(operand_type) = &operand_type
+            && let Some(resulting_type) = analyze_instance_operator(
+                context,
+                artifacts,
+                &BinaryOperator::Subtraction(operator),
+                &[(self.operand, operand_type.as_ref())],
+                self.span(),
+            )
+        {
+            artifacts.set_expression_type(self, resulting_type);
+            return Ok(());
+        }
+
+        if context.dialect.is_sharp()
+            && let UnaryPrefixOperator::BitwiseNot(operator) = self.operator
+            && let Some(operand_type) = &operand_type
+        {
+            let resulting_type = refuse_non_int_operands(context, operator, &[(self.operand, operand_type.as_ref())])
+                .unwrap_or_else(get_int);
+
+            artifacts.set_expression_type(self, resulting_type);
+            return Ok(());
+        }
+
+        // The semantic checks take `@` in any file under the namespace `Sharp`, because the engine compiles the
+        // standard library from `vendor/` as any other code. Only the analyzer knows the file's package.
+        if context.dialect.is_sharp() && self.operator.is_error_control() && !context.source_file.is_standard_library {
+            context.collector.report_with_code(
+                IssueCode::SilenceOutsideLibrary,
+                Issue::error(
+                    "`@` hides PHP's warnings, and only the standard library uses it: handle the failure where it happens.",
+                )
+                .with_annotation(Annotation::primary(self.operator.span()).with_message("Written here.")),
+            );
+        }
+
+        match self.operator {
+            // operators that always retain the type of the operand
+            UnaryPrefixOperator::Reference(_) => {
+                let mut referenced_type = operand_type.map_or_else(get_mixed, |t| t.as_ref().clone());
+                referenced_type.set_by_reference(true);
+
+                artifacts.set_rc_expression_type(self, Rc::new(referenced_type));
+            }
+            UnaryPrefixOperator::BitwiseNot(_) if operand_type.as_ref().is_some_and(|t| t.is_int()) => {
+                artifacts.set_expression_type(self, get_int());
+            }
+            UnaryPrefixOperator::ErrorControl(_) | UnaryPrefixOperator::BitwiseNot(_) => {
+                if let Some(operand_type) = operand_type {
+                    artifacts.set_rc_expression_type(self, operand_type);
+                } else {
+                    artifacts.set_expression_type(self, get_mixed());
+                }
+            }
+            UnaryPrefixOperator::Plus(_) => {
+                if let Some(operand_type) = operand_type {
+                    if operand_type.is_numeric() && !operand_type.is_int_or_float() {
+                        artifacts.set_expression_type(self, get_int_or_float());
+                    } else {
+                        artifacts.set_rc_expression_type(self, operand_type);
+                    }
+                } else {
+                    artifacts.set_expression_type(self, get_mixed());
+                }
+            }
+            UnaryPrefixOperator::Not(_) => {
+                context.report_non_bool_condition(self.operand, operand_type.as_deref(), "!");
+
+                let resulting_type = match operand_type {
+                    Some(t) if t.is_always_truthy() => get_false(),
+                    Some(t) if t.is_always_falsy() => get_true(),
+                    _ => get_bool(),
+                };
+
+                artifacts.set_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::Negation(_) => {
+                let mut resulting_types = vec![];
+                let mut invalid_operand_messages: Vec<(String, Span)> = vec![];
+                let operand_span = self.operand.span();
+
+                for operand_part in operand_type.as_ref().map(|o| o.types.as_ref()).unwrap_or_default() {
+                    match operand_part {
+                        TAtomic::Null | TAtomic::Void => {
+                            // -null results in int(0).
+                            resulting_types.push(TAtomic::Scalar(TScalar::literal_int(0)));
+                        }
+                        TAtomic::Scalar(scalar) => match scalar {
+                            TScalar::Bool(boolean) => match boolean.value {
+                                None => {
+                                    resulting_types.push(TAtomic::Scalar(TScalar::literal_int(0)));
+                                    resulting_types.push(TAtomic::Scalar(TScalar::literal_int(-1)));
+                                }
+                                Some(true) => {
+                                    resulting_types.push(TAtomic::Scalar(TScalar::literal_int(-1)));
+                                }
+                                Some(false) => {
+                                    resulting_types.push(TAtomic::Scalar(TScalar::literal_int(0)));
+                                }
+                            },
+                            TScalar::Integer(integer) => {
+                                resulting_types.push(TAtomic::Scalar(TScalar::Integer(integer.negated())));
+                            }
+                            TScalar::Float(float) => match float {
+                                TFloat::Literal(value) => {
+                                    resulting_types.push(TAtomic::Scalar(TScalar::literal_float(-value.0)));
+                                }
+                                _ => {
+                                    resulting_types.push(TAtomic::Scalar(TScalar::float()));
+                                }
+                            },
+                            TScalar::String(string) => {
+                                if string.is_numeric {
+                                    // numeric-string → valid, produces int|float
+                                    resulting_types.push(TAtomic::Scalar(TScalar::int()));
+                                    resulting_types.push(TAtomic::Scalar(TScalar::float()));
+                                } else if let Some(TStringLiteral::Value(value)) = &string.literal {
+                                    // literal string with known value → check if numeric
+                                    if str_is_numeric_bytes(value.as_bytes()) {
+                                        resulting_types.push(TAtomic::Scalar(TScalar::int()));
+                                        resulting_types.push(TAtomic::Scalar(TScalar::float()));
+                                    } else {
+                                        // non-numeric literal string → FATAL in PHP
+                                        invalid_operand_messages.push((
+                                            format!("Cannot negate non-numeric string literal `\"{value}\"`"),
+                                            operand_span,
+                                        ));
+                                    }
+                                } else {
+                                    // general string (could be numeric at runtime) → possibly invalid
+                                    invalid_operand_messages.push((
+                                        "Cannot reliably negate `string`; it may not be numeric".to_string(),
+                                        operand_span,
+                                    ));
+                                    resulting_types.push(TAtomic::Scalar(TScalar::int()));
+                                    resulting_types.push(TAtomic::Scalar(TScalar::float()));
+                                }
+                            }
+                            _ => {
+                                // Other scalars (ClassLikeString, etc.) - treat as possibly valid
+                                resulting_types.push(TAtomic::Scalar(TScalar::int()));
+                                resulting_types.push(TAtomic::Scalar(TScalar::float()));
+                            }
+                        },
+                        TAtomic::GenericParameter(parameter) => {
+                            if parameter.constraint.is_int_or_float() {
+                                resulting_types.push(TAtomic::GenericParameter(parameter.clone()));
+                            } else if parameter.constraint.is_numeric() {
+                                // numeric constraint includes numeric-string
+                                resulting_types.push(TAtomic::Scalar(TScalar::int()));
+                                resulting_types.push(TAtomic::Scalar(TScalar::float()));
+                            } else {
+                                invalid_operand_messages.push((
+                                    format!(
+                                        "Cannot negate template parameter `{}` with constraint `{}`",
+                                        parameter.parameter_name,
+                                        display_type(context, &parameter.constraint)
+                                    ),
+                                    operand_span,
+                                ));
+                            }
+                        }
+                        TAtomic::Array(_) => {
+                            invalid_operand_messages.push(("Cannot negate `array`".to_string(), operand_span));
+                        }
+                        TAtomic::Object(_) => {
+                            let type_id = display_atomic(context, operand_part);
+                            invalid_operand_messages
+                                .push((format!("Cannot negate object of type `{type_id}`"), operand_span));
+                        }
+                        TAtomic::Resource(_) => {
+                            invalid_operand_messages.push(("Cannot negate `resource`".to_string(), operand_span));
+                        }
+                        TAtomic::Mixed(_) => {
+                            context.collector.report_with_code(
+                                IssueCode::MixedOperand,
+                                Issue::error("Cannot reliably negate a `mixed` operand.")
+                                    .with_annotation(
+                                        Annotation::primary(operand_span)
+                                            .with_message("Operand is `mixed`."),
+                                    )
+                                    .with_note(
+                                        "Negating `mixed` is unsafe as the actual runtime type is unknown.",
+                                    )
+                                    .with_help(
+                                        "Ensure the operand has a known type (e.g., `int`, `float`) using type hints, assertions, or checks.",
+                                    ),
+                            );
+                            resulting_types.push(TAtomic::Scalar(TScalar::int()));
+                            resulting_types.push(TAtomic::Scalar(TScalar::float()));
+                        }
+                        _ => {
+                            // Other types - don't add to resulting_types, don't report
+                        }
+                    }
+                }
+
+                if !invalid_operand_messages.is_empty() {
+                    let is_definitely_invalid = resulting_types.is_empty();
+                    let issue_code = if is_definitely_invalid {
+                        IssueCode::InvalidOperand
+                    } else {
+                        IssueCode::PossiblyInvalidOperand
+                    };
+
+                    let mut issue = if is_definitely_invalid {
+                        Issue::error("Invalid operand for negation.".to_string())
+                    } else {
+                        Issue::warning("Possibly invalid operand for negation.".to_string())
+                    };
+
+                    let mut is_first = true;
+                    for (msg, span) in invalid_operand_messages {
+                        issue = issue.with_annotation(if is_first {
+                            Annotation::primary(span).with_message(msg)
+                        } else {
+                            Annotation::secondary(span).with_message(msg)
+                        });
+
+                        is_first = false;
+                    }
+
+                    issue = issue
+                        .with_note("Negation requires a numeric operand (int, float, bool, null, or numeric-string).")
+                        .with_help("Ensure the operand is a numeric type.");
+
+                    context.collector.report_with_code(issue_code, issue);
+                }
+
+                if resulting_types.is_empty() {
+                    artifacts.set_expression_type(self, get_never());
+                } else {
+                    let resulting_type = TUnion::from_vec(combine(
+                        resulting_types,
+                        context.codebase,
+                        context.settings.combiner_options(),
+                    ));
+                    artifacts.set_expression_type(self, resulting_type);
+                }
+            }
+            UnaryPrefixOperator::PreIncrement(_) => {
+                let resulting_type = write_after_read(context, read_issues.as_ref(), |context| {
+                    increment_operand(context, block_context, artifacts, self.operand, self.span())
+                })?;
+                artifacts.set_rc_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::PreDecrement(_) => {
+                let resulting_type = write_after_read(context, read_issues.as_ref(), |context| {
+                    decrement_operand(context, block_context, artifacts, self.operand, self.span())
+                })?;
+                artifacts.set_rc_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::IntCast(_, _) | UnaryPrefixOperator::IntegerCast(_, _) => {
+                let resulting_type = match operand_type {
+                    Some(t) => {
+                        // we intentionally do not report redundant casts here, as
+                        // what we think is an integer, might be a float at runtime.
+                        //
+                        // Example:
+                        //
+                        // ```
+                        // function factorial(int $number): int {
+                        //     if ($number <= 1) {
+                        //         return 1;
+                        //     }
+                        //
+                        //     return $number * factorial($number - 1);
+                        // }
+                        // ```
+                        //
+                        // While this function looks like it always returns an integer,
+                        // it could result in a float ( via overflow ) at runtime.
+                        //
+                        // While currently we do not report overflows, we should allow the
+                        // user to explicitly cast the result to an integer.
+                        //
+                        // ---
+                        //
+                        // if t.is_int() {
+                        //     report_redundant_type_cast(&self.operator, self, &t, context);
+                        // }
+                        cast_type_to_int(&t, self.operand, artifacts, context)
+                    }
+                    None => get_int(),
+                };
+
+                artifacts.set_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::ArrayCast(_, _) => {
+                let resulting_type = match operand_type {
+                    Some(t) => {
+                        if t.is_array() {
+                            report_redundant_type_cast(&self.operator, self, &t, context);
+                        }
+
+                        cast_type_to_array(&t, context, self)
+                    }
+                    None => wrap_atomic(TAtomic::Array(TArray::Keyed(TKeyedArray::new()))),
+                };
+
+                artifacts.set_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::BoolCast(_, _) | UnaryPrefixOperator::BooleanCast(_, _) => {
+                let resulting_type = match operand_type {
+                    Some(t) => {
+                        if t.is_bool() {
+                            report_redundant_type_cast(&self.operator, self, &t, context);
+                        }
+
+                        cast_type_to_bool(&t, context, self)
+                    }
+                    None => get_bool(),
+                };
+
+                artifacts.set_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::DoubleCast(_, _)
+            | UnaryPrefixOperator::RealCast(_, _)
+            | UnaryPrefixOperator::FloatCast(_, _) => {
+                let resulting_type = match operand_type {
+                    Some(t) => {
+                        if t.is_float() {
+                            report_redundant_type_cast(&self.operator, self, &t, context);
+                        }
+
+                        cast_type_to_float(&t, context, self)
+                    }
+                    None => get_float(),
+                };
+
+                artifacts.set_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::ObjectCast(_, _) => {
+                let resulting_type = match operand_type {
+                    Some(t) => {
+                        if t.is_objecty() {
+                            report_redundant_type_cast(&self.operator, self, &t, context);
+                        }
+
+                        cast_type_to_object(&t, context, self)
+                    }
+                    None => get_object(),
+                };
+
+                artifacts.set_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::BinaryCast(_, _) | UnaryPrefixOperator::StringCast(_, _) => {
+                let resulting_type = match operand_type {
+                    Some(t) => {
+                        if t.is_any_string() {
+                            report_redundant_type_cast(&self.operator, self, &t, context);
+                        }
+
+                        let operand_expression_id = get_block_expression_id(self.operand, context, block_context);
+
+                        cast_type_to_string(
+                            &t,
+                            operand_expression_id.as_ref().map(|w| w.as_bytes()),
+                            context,
+                            block_context,
+                            artifacts,
+                            self.span(),
+                        )?
+                    }
+                    None => get_string(),
+                };
+
+                artifacts.set_expression_type(self, resulting_type);
+            }
+            UnaryPrefixOperator::UnsetCast(_, _) => {
+                // unsupported, but we can ignore it.
+            }
+            UnaryPrefixOperator::VoidCast(_, _) => {
+                artifacts.set_expression_type(self, get_void());
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPostfix<'arena> {
+    fn analyze<'ctx, A>(
+        &'ast self,
+        context: &mut Context<'ctx, 'arena, A>,
+        block_context: &mut BlockContext<'ctx>,
+        artifacts: &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>
+    where
+        A: Arena,
+    {
+        let was_in_general_use = block_context.flags.inside_general_use();
+        block_context.flags.set_inside_general_use(true);
+        let (analyzed, read_issues) =
+            read_before_write(context, |context| self.operand.analyze(context, block_context, artifacts));
+        analyzed?;
+        block_context.flags.set_inside_general_use(was_in_general_use);
+
+        write_after_read(context, read_issues.as_ref(), |context| match self.operator {
+            UnaryPostfixOperator::PostIncrement(span) => {
+                increment_operand(context, block_context, artifacts, self.operand, span)
+            }
+            UnaryPostfixOperator::PostDecrement(span) => {
+                decrement_operand(context, block_context, artifacts, self.operand, span)
+            }
+        })?;
+
+        if let Some(operand_type) = artifacts.get_rc_expression_type(&self.operand).cloned() {
+            artifacts.set_rc_expression_type(self, operand_type);
+        }
+
+        Ok(())
+    }
+}
+
+/// The type a PHP# cast between numbers gives, or `None` for any other prefix operator. The checker refuses every
+/// other cast in a `.sharp` file.
+fn sharp_number_cast_type(operator: &UnaryPrefixOperator<'_>) -> Option<TUnion> {
+    match operator {
+        UnaryPrefixOperator::IntCast(..) => Some(get_int()),
+        UnaryPrefixOperator::FloatCast(..) => Some(get_float()),
+        UnaryPrefixOperator::StringCast(..) => Some(get_string()),
+        _ => None,
+    }
+}
+
+fn adjust_numeric_string(value: Option<&[u8]>, adjustment: i64) -> Vec<TAtomic> {
+    if let Some(value) = value
+        && let Ok(value) = std::str::from_utf8(value)
+    {
+        let value = value.trim();
+        if let Ok(value) = value.parse::<i64>() {
+            return vec![TAtomic::Scalar(match value.checked_add(adjustment) {
+                Some(value) => TScalar::literal_int(value),
+                None => TScalar::literal_float(value as f64 + adjustment as f64),
+            })];
+        }
+
+        if let Ok(value) = value.parse::<f64>() {
+            return vec![TAtomic::Scalar(TScalar::literal_float(value + adjustment as f64))];
+        }
+    }
+
+    vec![TAtomic::Scalar(TScalar::int()), TAtomic::Scalar(TScalar::float())]
+}
+
+fn report_deprecated_string_increment<A>(context: &mut Context<'_, '_, A>, operand_span: Span, value: &[u8])
+where
+    A: Arena,
+{
+    if context.settings.version < PHPVersion::PHP83 || str_is_numeric_bytes(value) {
+        return;
+    }
+
+    let is_alphanumeric = !value.is_empty() && value.iter().all(u8::is_ascii_alphanumeric);
+    if context.settings.version < PHPVersion::PHP85 && is_alphanumeric {
+        return;
+    }
+
+    context.collector.report_with_code(
+        IssueCode::DeprecatedFeature,
+        Issue::warning("Incrementing a non-numeric string is deprecated.")
+            .with_annotation(Annotation::primary(operand_span).with_message("Deprecated string increment"))
+            .with_note(if is_alphanumeric {
+                "Incrementing non-numeric strings is deprecated as of PHP 8.5."
+            } else {
+                "Incrementing empty or non-alphanumeric strings is deprecated as of PHP 8.3."
+            })
+            .with_help("Use `str_increment()` for alphanumeric string increments."),
+    );
+}
+
+fn report_deprecated_string_decrement<A>(context: &mut Context<'_, '_, A>, operand_span: Span, value: &[u8])
+where
+    A: Arena,
+{
+    if context.settings.version < PHPVersion::PHP83 || str_is_numeric_bytes(value) {
+        return;
+    }
+
+    context.collector.report_with_code(
+        IssueCode::DeprecatedFeature,
+        Issue::warning("Decrementing a non-numeric string is deprecated.")
+            .with_annotation(Annotation::primary(operand_span).with_message("Deprecated string decrement"))
+            .with_note("Decrementing empty or non-numeric strings is deprecated as of PHP 8.3.")
+            .with_help("Handle the string explicitly or ensure it is numeric before decrementing it."),
+    );
+}
+
+fn report_ineffective_increment_or_decrement<A>(
+    context: &mut Context<'_, '_, A>,
+    operand_span: Span,
+    operation: &str,
+    operand_type: &str,
+) where
+    A: Arena,
+{
+    if context.settings.version < PHPVersion::PHP83 {
+        return;
+    }
+
+    context.collector.report_with_code(
+        IssueCode::InvalidOperand,
+        Issue::warning(format!("{operation} a value of type `{operand_type}` has no effect."))
+            .with_annotation(Annotation::primary(operand_span).with_message("This operation has no effect"))
+            .with_note("PHP emits an `E_WARNING` for this operation as of PHP 8.3.")
+            .with_help("Remove the operation or convert the value to an integer first."),
+    );
+}
+
+/// Increments the given operand and returns its type after incrementing.
+///
+/// If the operand is a variable-like entity, the function attempts to assign the incremented value back to it.
+///
+/// # Arguments
+///
+/// * `context` - The analysis context.
+/// * `block_context` - Mutable context for the current code block.
+/// * `artifacts` - Mutable store for analysis results.
+/// * `operand` - The expression CST node representing the operand to be incremented.
+/// * `operation_span` - The span of the entire increment operation (e.g., `++$x` or `$x++`).
+///
+/// # Returns
+///
+/// An `TUnion` representing the type of the operand *after* the increment operation.
+///
+/// Returns `mixed|any` if the operand's type cannot be determined or if a fatal error occurs.
+fn increment_operand<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    operand: &Expression<'arena>,
+    operation_span: Span,
+) -> Result<Rc<TUnion>, AnalysisError>
+where
+    A: Arena,
+{
+    let Some(operand_type) = artifacts.get_expression_type(operand) else {
+        return Ok(Rc::new(get_mixed()));
+    };
+
+    let mut possibilities = vec![];
+    let mut reported_invalid = false;
+    for operand_atomic_type in operand_type.types.as_ref() {
+        match operand_atomic_type {
+            TAtomic::Scalar(scalar) => match scalar {
+                TScalar::Integer(int_scalar) => {
+                    let resulting_integer = int_scalar.add(TInteger::literal(1));
+
+                    if block_context.flags.inside_loop() {
+                        possibilities.push(TAtomic::Scalar(TScalar::Integer(match resulting_integer {
+                            TInteger::Literal(value) => TInteger::From(value),
+                            integer => integer,
+                        })));
+                    } else {
+                        possibilities.push(TAtomic::Scalar(TScalar::Integer(resulting_integer)));
+                    }
+                }
+                TScalar::Float(float_scalar) => {
+                    if block_context.flags.inside_loop() {
+                        // Do not set literal value in loop context.
+                        possibilities.push(TAtomic::Scalar(TScalar::float()));
+                    } else if let TFloat::Literal(value) = float_scalar {
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_float(value.0 + 1.0)));
+                    } else {
+                        possibilities.push(TAtomic::Scalar(TScalar::float()));
+                    }
+                }
+                TScalar::Numeric => {
+                    possibilities.push(TAtomic::Scalar(TScalar::int()));
+                    possibilities.push(TAtomic::Scalar(TScalar::float()));
+                }
+                TScalar::String(string_scalar) => {
+                    if let Some(TStringLiteral::Value(string_val)) = &string_scalar.literal {
+                        report_deprecated_string_increment(context, operand.span(), string_val.as_bytes());
+                    }
+
+                    if string_scalar.is_numeric {
+                        let value = if block_context.flags.inside_loop() {
+                            None
+                        } else {
+                            match &string_scalar.literal {
+                                Some(TStringLiteral::Value(value)) => Some(value.as_bytes()),
+                                _ => None,
+                            }
+                        };
+
+                        possibilities.extend(adjust_numeric_string(value, 1));
+                    } else if !block_context.flags.inside_loop()
+                        && let Some(TStringLiteral::Value(string_val)) = &string_scalar.literal
+                    {
+                        if string_val.is_empty() {
+                            possibilities.push(TAtomic::Scalar(TScalar::literal_string(word(b"1"))));
+                        } else if let Some(incremented) = str_increment_bytes(string_val.as_bytes()) {
+                            possibilities.push(TAtomic::Scalar(TScalar::literal_string(word(incremented.as_bytes()))));
+                        } else {
+                            possibilities
+                                .push(TAtomic::Scalar(TScalar::String(string_scalar.with_unspecified_literal())));
+                        }
+                    } else {
+                        possibilities.push(TAtomic::Scalar(TScalar::int()));
+                        possibilities.push(TAtomic::Scalar(TScalar::float()));
+                        possibilities.push(TAtomic::Scalar(TScalar::string()));
+                    }
+                }
+                TScalar::Bool(boolean_scalar) => {
+                    report_ineffective_increment_or_decrement(context, operand.span(), "Incrementing", "bool");
+
+                    // PHP: ++true remains true, ++false remains false. The type remains bool.
+                    possibilities.push(TAtomic::Scalar(TScalar::Bool(*boolean_scalar)));
+                }
+                TScalar::ClassLikeString(_) => {
+                    // Incrementing a class name string is highly unusual.
+                    context.collector.report_with_code(
+                        IssueCode::InvalidOperand,
+                        Issue::warning(
+                            "Incrementing a class-string is unusual and likely a bug."
+                        )
+                        .with_annotation(Annotation::primary(operand.span()).with_message("Class-string incremented"))
+                        .with_note("PHP will treat the class name as a regular string for increment, which might not be the intended behavior.")
+                        .with_help("Verify if this operation is intended. If string manipulation is needed, ensure it's on a regular string variable."),
+                    );
+
+                    // Result is a generic string as the incremented class name is unknown.
+                    possibilities.push(TAtomic::Scalar(TScalar::string()));
+                }
+                TScalar::Generic | TScalar::ArrayKey => {
+                    let scalar_str = display_atomic(context, &TAtomic::Scalar(scalar.clone()));
+
+                    context.collector.report_with_code(
+                        IssueCode::InvalidOperand,
+                        Issue::warning(format!(
+                            "Incrementing a generic scalar type (`{scalar_str}`). This may not yield the expected result."
+                        ))
+                        .with_annotation(Annotation::primary(operand.span()).with_message(format!("Type is `{scalar_str}`")))
+                        .with_help("Ensure the generic type resolves to a numeric type or string suitable for increment, or provide a more specific type."),
+                    );
+
+                    possibilities.push(TAtomic::Scalar(scalar.clone()));
+                }
+            },
+            TAtomic::Null | TAtomic::Void => {
+                // ++null results in int(1).
+                possibilities.push(TAtomic::Scalar(TScalar::literal_int(1)));
+            }
+            TAtomic::Callable(callable) => {
+                if callable
+                    .get_signature()
+                    .is_none_or(mago_codex::ttype::atomic::callable::TCallableSignature::is_closure)
+                {
+                    context.collector.report_with_code(
+                        IssueCode::InvalidOperand,
+                        Issue::error("Cannot increment a closure.")
+                            .with_annotation(Annotation::primary(operand.span()).with_message("This is a closure"))
+                            .with_note("PHP throws a TypeError when attempting to increment a closure object."),
+                    );
+
+                    possibilities.push(TAtomic::Never);
+                } else {
+                    let callable_str = display_atomic(context, &TAtomic::Callable(callable.clone()));
+
+                    context.collector.report_with_code(
+                            IssueCode::InvalidOperand,
+                            Issue::error(format!("Cannot reliably increment callable of type `{callable_str}`."))
+                            .with_annotation(Annotation::primary(operand.span()).with_message("Invalid callable type for increment"))
+                            .with_note("Incrementing array callables or invocable objects without specific overload behavior leads to errors."),
+                        );
+
+                    possibilities.push(TAtomic::Mixed(TMixed::new()));
+                }
+            }
+            TAtomic::Never => {
+                // never type is unreachable, don't produce mixed, just skip.
+            }
+            // A refused operand has no value, and its refusal is its only report.
+            TAtomic::Error => possibilities.push(TAtomic::Error),
+            TAtomic::Mixed(_) => {
+                context.collector.report_with_code(
+                    IssueCode::MixedOperand,
+                    Issue::error("Cannot reliably increment a `mixed` operand.")
+                        .with_annotation(
+                            Annotation::primary(operand.span()).with_message("Operand is `mixed`."),
+                        )
+                        .with_note(
+                            "Incrementing `mixed` is unsafe as the actual runtime type is unknown.",
+                        )
+                        .with_help(
+                            "Ensure the operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks.",
+                        ),
+                );
+
+                possibilities.push(TAtomic::Mixed(TMixed::new()));
+            }
+            _ => {
+                if !reported_invalid {
+                    reported_invalid = true;
+                    let type_name = display_type(context, operand_type);
+                    context.collector.report_with_code(
+                        IssueCode::InvalidOperand,
+                        Issue::error(format!(
+                            "Cannot increment value of type `{type_name}`."
+                        ))
+                        .with_annotation(Annotation::primary(operand.span()).with_message(format!("Type `{type_name}` cannot be incremented")))
+                        .with_note(match operand_atomic_type {
+                            TAtomic::Array(_) => "Incrementing an array results in a `TypeError` exception.",
+                            TAtomic::Object(_) => "Incrementing an object without operator overloading support results in a `TypeError` exception.",
+                            TAtomic::Resource(_) => "Incrementing a resource results in a `TypeError` exception.",
+                            _ => "This type is not suitable for increment operations."
+                        })
+                        .with_help("Ensure the operand is a number or a string suitable for incrementing."),
+                    );
+                }
+
+                possibilities.push(TAtomic::Mixed(TMixed::new()));
+            }
+        }
+    }
+
+    let resulting_type_union = Rc::new(if possibilities.is_empty() {
+        if operand_type.is_never() { get_never() } else { get_mixed() }
+    } else {
+        TUnion::from_vec(combine(possibilities, context.codebase, context.settings.combiner_options()))
+    });
+
+    let operand_id = get_block_expression_id(operand, context, block_context);
+    let successful = assign_to_expression(
+        context,
+        block_context,
+        artifacts,
+        operand,
+        operand_id,
+        None,
+        Rc::clone(&resulting_type_union),
+        false,
+        PropertyWriteKind::Mutation,
+    )?;
+
+    if !successful {
+        context.collector.report_with_code(
+            IssueCode::InvalidOperand,
+            Issue::error("Failed to assign incremented value to operand.")
+                .with_annotation(Annotation::primary(operation_span).with_message("Failed to assign incremented value"))
+                .with_note("The operand's type may not support assignment after incrementing.")
+                .with_help("Ensure the operand is a variable-like entity that can be assigned a new value."),
+        );
+    }
+
+    Ok(resulting_type_union)
+}
+
+/// Decrements the given operand and returns its type after decrementing.
+///
+/// If the operand is a variable-like entity (e.g., a direct variable), the function
+/// attempts to assign the decremented value back to it.
+///
+/// This function reports issues for types that are problematic or behave unexpectedly
+/// when decremented.
+///
+/// # Arguments
+///
+/// * `context` - The analysis context.
+/// * `block_context` - Mutable context for the current code block.
+/// * `artifacts` - Mutable store for analysis results.
+/// * `operand` - The expression CST node representing the operand to be decremented.
+/// * `operation_span` - The span of the entire decrement operation (e.g., `--$x` or `$x--`).
+///
+/// # Returns
+///
+/// An `TUnion` representing the type of the operand *after* the decrement operation.
+fn decrement_operand<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    operand: &Expression<'arena>,
+    operation_span: Span,
+) -> Result<Rc<TUnion>, AnalysisError>
+where
+    A: Arena,
+{
+    // Changed return to Result for consistency
+    let Some(operand_type) = artifacts.get_expression_type(operand) else {
+        return Ok(Rc::new(get_mixed()));
+    };
+
+    let mut possibilities = vec![];
+
+    for operand_atomic_type in operand_type.types.as_ref() {
+        match operand_atomic_type {
+            TAtomic::Scalar(scalar) => {
+                match scalar {
+                    TScalar::Integer(int_scalar) => {
+                        if block_context.flags.inside_loop() {
+                            // Do not set literal value in loop context.
+                            // TODO(azjez): we should set the type to a range here.
+                            possibilities.push(TAtomic::Scalar(TScalar::int()));
+                        } else {
+                            possibilities.push(TAtomic::Scalar(TScalar::Integer(int_scalar.sub(TInteger::literal(1)))));
+                        }
+                    }
+                    TScalar::Float(float_scalar) => {
+                        if let TFloat::Literal(value) = float_scalar
+                            && !block_context.flags.inside_loop()
+                        {
+                            possibilities.push(TAtomic::Scalar(TScalar::literal_float(value.0 - 1.0)));
+                        } else {
+                            possibilities.push(TAtomic::Scalar(TScalar::float()));
+                        }
+                    }
+                    TScalar::Numeric => {
+                        possibilities.push(TAtomic::Scalar(TScalar::int()));
+                        possibilities.push(TAtomic::Scalar(TScalar::float()));
+                    }
+                    TScalar::String(string_scalar) => {
+                        if let Some(TStringLiteral::Value(string_val)) = &string_scalar.literal {
+                            report_deprecated_string_decrement(context, operand.span(), string_val.as_bytes());
+                        }
+
+                        if string_scalar.is_numeric {
+                            let value = if block_context.flags.inside_loop() {
+                                None
+                            } else {
+                                match &string_scalar.literal {
+                                    Some(TStringLiteral::Value(value)) => Some(value.as_bytes()),
+                                    _ => None,
+                                }
+                            };
+
+                            possibilities.extend(adjust_numeric_string(value, -1));
+                        } else if !block_context.flags.inside_loop()
+                            && let Some(TStringLiteral::Value(string_val)) = &string_scalar.literal
+                        {
+                            if string_val.is_empty() {
+                                possibilities.push(TAtomic::Scalar(TScalar::literal_int(-1)));
+                            } else {
+                                possibilities.push(TAtomic::Scalar(TScalar::String(*string_scalar)));
+                            }
+                        } else {
+                            possibilities.push(TAtomic::Scalar(TScalar::int()));
+                            possibilities.push(TAtomic::Scalar(TScalar::float()));
+                            possibilities.push(TAtomic::Scalar(TScalar::string()));
+                        }
+                    }
+                    TScalar::Bool(boolean_scalar) => {
+                        report_ineffective_increment_or_decrement(context, operand.span(), "Decrementing", "bool");
+
+                        possibilities.push(TAtomic::Scalar(TScalar::Bool(*boolean_scalar)));
+                    }
+                    TScalar::ClassLikeString(_) => {
+                        // Incrementing a class name string is highly unusual.
+                        context.collector.report_with_code(
+                            IssueCode::InvalidOperand,
+                            Issue::warning(
+                                "Decrementing a class-string is unusual and likely a bug."
+                            )
+                                .with_annotation(Annotation::primary(operand.span()).with_message("Class-string decremented"))
+                                .with_note("PHP will treat the class name as a regular string for decrement, which might not be the intended behavior.")
+                                .with_help("Verify if this operation is intended. If string manipulation is needed, ensure it's on a regular string variable."),
+                        );
+
+                        // Result is a generic string as the incremented class name is unknown.
+                        possibilities.push(TAtomic::Scalar(TScalar::string()));
+                    }
+                    TScalar::Generic | TScalar::ArrayKey => {
+                        let scalar_str = display_atomic(context, &TAtomic::Scalar(scalar.clone()));
+
+                        context.collector.report_with_code(
+                            IssueCode::InvalidOperand,
+                            Issue::warning(format!(
+                                "Decrementing a generic scalar type (`{scalar_str}`). This may not yield the expected result."
+                            ))
+                                .with_annotation(Annotation::primary(operand.span()).with_message(format!("Type is `{scalar_str}`")))
+                                .with_help("Ensure the generic type resolves to a numeric type or string suitable for increment, or provide a more specific type."),
+                        );
+
+                        possibilities.push(TAtomic::Scalar(scalar.clone()));
+                    }
+                }
+            }
+            TAtomic::Null | TAtomic::Void => {
+                report_ineffective_increment_or_decrement(context, operand.span(), "Decrementing", "null");
+
+                // --null results in `null`
+                possibilities.push(TAtomic::Null);
+            }
+            TAtomic::Callable(callable) => {
+                if callable
+                    .get_signature()
+                    .is_none_or(mago_codex::ttype::atomic::callable::TCallableSignature::is_closure)
+                {
+                    context.collector.report_with_code(
+                        IssueCode::InvalidOperand,
+                        Issue::error("Cannot decrement a closure.")
+                            .with_annotation(Annotation::primary(operand.span()).with_message("This is a closure"))
+                            .with_note("PHP throws a TypeError when attempting to decrement a closure object."),
+                    );
+
+                    possibilities.push(TAtomic::Never);
+                } else {
+                    let callable_str = display_atomic(context, &TAtomic::Callable(callable.clone()));
+
+                    context.collector.report_with_code(
+                        IssueCode::InvalidOperand,
+                        Issue::error(format!("Cannot reliably decrement callable of type `{callable_str}`."))
+                            .with_annotation(Annotation::primary(operand.span()).with_message("Invalid callable type for decrement"))
+                            .with_note("Decrementing array callables or invocable objects without specific overload behavior leads to errors."),
+                    );
+
+                    possibilities.push(TAtomic::Mixed(TMixed::new()));
+                }
+            }
+            TAtomic::Never => {
+                // never type is unreachable, don't produce mixed, just skip.
+            }
+            // A refused operand has no value, and its refusal is its only report.
+            TAtomic::Error => possibilities.push(TAtomic::Error),
+            TAtomic::Mixed(_) => {
+                context.collector.report_with_code(
+                    IssueCode::MixedOperand,
+                    Issue::error("Cannot reliably decrement a `mixed` operand.")
+                        .with_annotation(
+                            Annotation::primary(operand.span()).with_message("Operand is `mixed`."),
+                        )
+                        .with_note(
+                            "Decrementing `mixed` is unsafe as the actual runtime type is unknown.",
+                        )
+                        .with_help(
+                            "Ensure the operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks.",
+                        ),
+                );
+
+                possibilities.push(TAtomic::Mixed(TMixed::new()));
+            }
+            _ => {
+                let type_name = display_atomic(context, operand_atomic_type);
+                context.collector.report_with_code(
+                        IssueCode::InvalidOperand,
+                        Issue::error(format!(
+                            "Cannot decrement value of type `{type_name}`."
+                        ))
+                            .with_annotation(Annotation::primary(operand.span()).with_message(format!("Type `{type_name}` cannot be decremented")))
+                            .with_note(match operand_atomic_type {
+                                TAtomic::Array(_) => "Decrementing an array results in a `TypeError` exception.",
+                                TAtomic::Object(_) => "Decrementing an object without operator overloading support results in a `TypeError` exception.",
+                                TAtomic::Resource(_) => "Decrementing a resource results in a `TypeError` exception.",
+                                _ => "This type is not suitable for decrement operations."
+                            })
+                            .with_help("Ensure the operand is a number or a string suitable for decrementing."),
+                    );
+
+                possibilities.push(TAtomic::Mixed(TMixed::new()));
+            }
+        }
+    }
+
+    let resulting_type_union = Rc::new(if possibilities.is_empty() {
+        if operand_type.is_never() { get_never() } else { get_mixed() }
+    } else {
+        TUnion::from_vec(combine(possibilities, context.codebase, context.settings.combiner_options()))
+    });
+
+    let operand_id = get_block_expression_id(operand, context, block_context);
+    let successful = assign_to_expression(
+        context,
+        block_context,
+        artifacts,
+        operand,
+        operand_id,
+        None,
+        Rc::clone(&resulting_type_union),
+        false,
+        PropertyWriteKind::Mutation,
+    )?;
+
+    if !successful {
+        context.collector.report_with_code(
+            IssueCode::InvalidOperand,
+            Issue::error("Failed to assign decremented value to operand.")
+                .with_annotation(Annotation::primary(operation_span).with_message("Failed to assign decremented value"))
+                .with_note("The operand's type may not support assignment after decrementing.")
+                .with_help("Ensure the operand is a variable-like entity that can be assigned a new value."),
+        );
+    }
+
+    Ok(resulting_type_union)
+}
+
+fn report_redundant_type_cast<'ast, 'arena, A>(
+    cast_operator: &'ast UnaryPrefixOperator,
+    expression: &'ast UnaryPrefix<'arena>,
+    known_type: &TUnion,
+    context: &mut Context<'_, 'arena, A>,
+) where
+    A: Arena,
+{
+    let known_type = display_type(context, known_type);
+
+    context.collector.propose_with_code(
+        IssueCode::RedundantCast,
+        Issue::help(format!(
+            "Redundant cast to `{}`: the expression already has this type.",
+            BytesDisplay(cast_operator.as_bytes())
+        ))
+        .with_annotation(
+            Annotation::primary(expression.operand.span())
+                .with_message(format!("This expression already has type `{known_type}`.")),
+        )
+        .with_note("Casting a value to a type it already possesses has no effect.")
+        .with_help(format!("Remove the redundant `{}` cast.", BytesDisplay(cast_operator.as_bytes()))),
+        |edits| {
+            // Delete the cast operator, keep only the operand
+            // For `(string)$var`, delete `(string)` and keep `$var`
+            edits.push(TextEdit::delete(expression.operator.span()));
+        },
+    );
+}
+
+fn cast_type_to_array<'arena, A>(
+    operand_type: &TUnion,
+    context: &mut Context<'_, 'arena, A>,
+    cast_expression: &UnaryPrefix<'arena>,
+) -> TUnion
+where
+    A: Arena,
+{
+    if operand_type.is_never() {
+        context.collector.report_with_code(
+            IssueCode::InvalidTypeCast,
+            Issue::error("Cannot cast type `never` to `array`.")
+                .with_annotation(
+                    Annotation::primary(cast_expression.span()).with_message("Invalid cast from `never` to `array`"),
+                )
+                .with_note("An expression of type `never` does not produce a value and thus cannot be cast.")
+                .with_help("Ensure the expression being cast can complete normally."),
+        );
+
+        return get_never();
+    }
+
+    let mut resulting_array_atomics = Vec::new();
+    let mut reported_object_warning = false;
+
+    for atomic_type in operand_type.types.as_ref() {
+        match atomic_type {
+            TAtomic::Array(arr) => {
+                // If it's already an array, it remains as is.
+                resulting_array_atomics.push(TAtomic::Array(arr.clone()));
+            }
+            TAtomic::Null | TAtomic::Void => {
+                // null or void cast to an empty array.
+                context.collector.report_with_code(
+                    IssueCode::InvalidTypeCast,
+                    Issue::error(format!(
+                        "Casting type `{}` to `array` will produce an empty array.",
+                        atomic_type.get_id()
+                    ))
+                    .with_annotation(
+                        Annotation::primary(cast_expression.span())
+                            .with_message(format!("Invalid cast from `{}` to `array`", atomic_type.get_id()))
+                    )
+                    .with_note("Casting `null` or `void` to `array` produces an empty array. This is often a sign of an uninitialized variable or logic error.")
+                    .with_help("Initialize the variable with an array or handle the `null`/`void` case explicitly before casting."),
+                );
+
+                resulting_array_atomics.push(TAtomic::Array(TArray::Keyed(TKeyedArray::new())));
+            }
+            TAtomic::Scalar(_) | TAtomic::Resource(_) | TAtomic::Callable(_) => {
+                // Scalars (int, float, string, bool) become a list with one element at key 0.
+                let mut scalar_list = TList::new(Arc::new(get_never()));
+                scalar_list.known_count = Some(1);
+                scalar_list.non_empty = true;
+                scalar_list.known_elements =
+                    Some(BTreeMap::from_iter([(0, (false, wrap_atomic(atomic_type.clone())))]));
+
+                resulting_array_atomics.push(TAtomic::Array(TArray::List(scalar_list)));
+            }
+            TAtomic::Object(casted_object) => {
+                let is_stdclass = casted_object.get_name().is_some_and(|name| {
+                    // Check if the object is stdClass
+                    name.as_bytes().eq_ignore_ascii_case(b"stdClass")
+                });
+
+                // Object to array: properties become key-value pairs.
+                // Keys are strings (property names), values are mixed (property values).
+                // stdClass is a special case where we do not report a warning.
+                if !reported_object_warning && !is_stdclass {
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::warning(format!(
+                            "Object of type `{}` cast to `array`. Property visibility (public, protected, private) affects the resulting array.",
+                            atomic_type.get_id()
+                        ))
+                        .with_annotation(Annotation::primary(cast_expression.span()).with_message("Object cast to array"))
+                        .with_note("Casting an object to an array converts its properties to key-value pairs. Private/protected properties will have mangled keys.")
+                        .with_help("For reliable object-to-array conversion, consider implementing a `toArray()` method or using specific library functions that handle visibility and structure as intended."),
+                    );
+
+                    reported_object_warning = true;
+                }
+
+                let mut obj_array = TKeyedArray::new();
+                obj_array.parameters = Some((Arc::new(get_string()), Arc::new(get_mixed())));
+
+                resulting_array_atomics.push(TAtomic::Array(TArray::Keyed(obj_array)));
+            }
+            TAtomic::Mixed(_) => {
+                // Mixed to array: result is array<array-key, mixed>.
+                if !reported_object_warning {
+                    // Reuse flag to avoid spamming for mixed as well
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::warning("Casting `mixed` to `array`.".to_string())
+                            .with_annotation(Annotation::primary(cast_expression.operand.span()).with_message("This expression has type `mixed`"))
+                            .with_note("The structure and element types of the resulting array cannot be determined statically when casting `mixed`.")
+                            .with_help("Ensure the value is an array or use type checks before casting if a specific array structure is expected."),
+                    );
+                    reported_object_warning = true;
+                }
+
+                resulting_array_atomics.push(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                    Arc::new(get_arraykey()),
+                    Arc::new(get_mixed()),
+                ))));
+            }
+            _ => {
+                if !reported_object_warning {
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::error(format!(
+                            "Cannot reliably cast type `{}` to `array`.",
+                            atomic_type.get_id()
+                        ))
+                        .with_annotation(Annotation::primary(cast_expression.span())
+                            .with_message(format!("Unclear cast from `{}` to `array`", atomic_type.get_id())))
+                        .with_help("Ensure the expression being cast has a defined conversion to array (e.g., scalar, null, object, or already an array)."),
+                    );
+
+                    reported_object_warning = true;
+                }
+
+                // Fallback to a generic array type if cast is ambiguous
+                resulting_array_atomics.push(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                    Arc::new(get_arraykey()),
+                    Arc::new(get_mixed()),
+                ))));
+            }
+        }
+    }
+
+    // Combine all potential array types resulting from the cast.
+    TUnion::from_vec(combine(resulting_array_atomics, context.codebase, context.settings.combiner_options()))
+}
+
+fn cast_type_to_bool<'arena, A>(
+    operand_type: &TUnion,
+    context: &mut Context<'_, 'arena, A>,
+    cast_expression: &UnaryPrefix<'arena>,
+) -> TUnion
+where
+    A: Arena,
+{
+    if operand_type.is_never() {
+        return get_never();
+    }
+
+    let mut truthy_counts = 0;
+    let mut falsy_counts = 0;
+    let mut has_non_literal_bool = false;
+
+    for atomic_type in operand_type.types.as_ref() {
+        if atomic_type.is_truthy() {
+            truthy_counts += 1;
+
+            continue;
+        }
+
+        if atomic_type.is_falsy() {
+            falsy_counts += 1;
+
+            continue;
+        }
+
+        if atomic_type.is_mixed() {
+            context.collector.report_with_code(
+                IssueCode::MixedOperand,
+                Issue::warning("Casting `mixed` to `bool`.".to_string()) // Warning, as it's a valid cast but loses type info
+                    .with_annotation(Annotation::primary(cast_expression.operand.span()).with_message("This expression has type `mixed`"))
+                    .with_note("The truthiness of `mixed` cannot be determined statically. The result will be a general `bool`.")
+                    .with_help("Consider adding type assertions or checks if a more specific boolean outcome is expected."),
+            );
+        }
+
+        has_non_literal_bool = true;
+    }
+
+    if !has_non_literal_bool {
+        if truthy_counts > 0 && falsy_counts == 0 {
+            return get_true();
+        }
+
+        if falsy_counts > 0 && truthy_counts == 0 {
+            return get_false();
+        }
+    }
+
+    get_bool()
+}
+
+fn cast_type_to_float<'arena, A>(
+    operand_type: &TUnion,
+    context: &mut Context<'_, 'arena, A>,
+    cast_expression: &UnaryPrefix<'arena>,
+) -> TUnion
+where
+    A: Arena,
+{
+    if operand_type.is_never() {
+        return get_never();
+    }
+
+    let mut resulting_float_atomics = Vec::new();
+    let mut reported_error_for_object = false;
+
+    for atomic_type in operand_type.types.as_ref() {
+        match atomic_type {
+            TAtomic::Null | TAtomic::Void => resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(0.0))),
+            TAtomic::Scalar(scalar) => {
+                match scalar {
+                    TScalar::Bool(b) => {
+                        if let Some(val) = b.value {
+                            resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(if val {
+                                1.0
+                            } else {
+                                0.0
+                            })));
+                        } else {
+                            resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(0.0)));
+                            resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(1.0)));
+                        }
+                    }
+                    TScalar::Integer(i) => {
+                        if let Some(val) = i.get_literal_value() {
+                            resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(val as f64)));
+                        } else {
+                            return get_float();
+                        }
+                    }
+                    TScalar::Float(f) => resulting_float_atomics.push(TAtomic::Scalar(TScalar::Float(*f))),
+                    TScalar::String(s) => {
+                        if let Some(TStringLiteral::Value(val)) = &s.literal {
+                            let val_bytes = val.as_bytes();
+                            let mut num_str = String::new();
+                            for &b in val_bytes {
+                                let ch = b as char;
+                                if ch.is_ascii_digit() || ch == '.' || (num_str.is_empty() && (ch == '+' || ch == '-'))
+                                {
+                                    num_str.push(ch);
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            if let Ok(f_val) = num_str.parse::<f64>() {
+                                resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(f_val)));
+                            } else {
+                                resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(0.0)));
+                            }
+
+                            if !val.is_empty() && num_str.is_empty() && val_bytes != b"0" {
+                                context.collector.report_with_code(
+                                    IssueCode::InvalidTypeCast,
+                                    Issue::warning(format!("String `{val}` implicitly cast to float `0.0`."))
+                                        .with_annotation(Annotation::primary(cast_expression.operand.span()).with_message("Non-numeric string cast to float"))
+                                        .with_help("Explicitly cast or ensure string is numeric if float conversion is intended."),
+                                );
+                            }
+                        } else {
+                            if !s.is_numeric {
+                                context.collector.report_with_code(
+                                    IssueCode::InvalidTypeCast,
+                                    Issue::warning(format!("Non numeric string of type `{}` implicitly cast to `float`.", s.get_id()))
+                                        .with_annotation(Annotation::primary(cast_expression.operand.span()).with_message("String cast to float"))
+                                        .with_note("PHP will attempt to parse a leading numeric value; otherwise, it results in `0.0`. This can be error-prone.")
+                                        .with_help("Ensure the string is numeric or use explicit parsing if a specific float value is expected."),
+                                );
+                            }
+
+                            return get_float();
+                        }
+                    }
+                    TScalar::ClassLikeString(_) => {
+                        context.collector.report_with_code(
+                            IssueCode::InvalidTypeCast,
+                            Issue::warning("Class-like string implicitly cast to float `0.0`.".to_string())
+                                .with_annotation(
+                                    Annotation::primary(cast_expression.operand.span())
+                                        .with_message("Class-string cast to float"),
+                                )
+                                .with_help("Casting class names to float is usually not intended."),
+                        );
+
+                        resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(0.0)));
+                    }
+                    _ => {
+                        return get_float();
+                    }
+                }
+            }
+            TAtomic::Array(arr) => {
+                if arr.is_non_empty() {
+                    resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(1.0)));
+                } else {
+                    resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(0.0)));
+                    resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(1.0)));
+                }
+            }
+            TAtomic::Object(_) => {
+                if !reported_error_for_object {
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::error(format!(
+                            "Object of type `{}` cannot be cast to `float`. PHP will attempt this and produce `1.0` after an error.",
+                            atomic_type.get_id()
+                        ))
+                        .with_annotation(Annotation::primary(cast_expression.span()).with_message("Invalid cast from object to float"))
+                        .with_note("This operation will raise an `E_WARNING` and result in `1.0`.")
+                        .with_help("Avoid casting objects directly to float. Extract a numeric property or implement a specific conversion method."),
+                    );
+
+                    reported_error_for_object = true;
+                }
+
+                resulting_float_atomics.push(TAtomic::Scalar(TScalar::literal_float(1.0)));
+            }
+            TAtomic::Resource(_) => {
+                context.collector.report_with_code(
+                    IssueCode::InvalidTypeCast,
+                    Issue::warning("Implicit conversion of `resource` to `float` (its ID).".to_string())
+                        .with_annotation(Annotation::primary(cast_expression.operand.span()).with_message("Resource ID used as float"))
+                        .with_note("PHP converts resources to their numeric ID when cast to float. This is rarely the intended behavior.")
+                        .with_help("Avoid casting resources directly to float. Use resource-specific functions to get relevant numeric data if needed."),
+                );
+
+                return get_float();
+            }
+            TAtomic::Never => return get_never(),
+            TAtomic::Mixed(_) => {
+                context.collector.report_with_code(
+                    IssueCode::InvalidTypeCast,
+                    Issue::warning("Casting `mixed` to `float`.".to_string())
+                        .with_annotation(Annotation::primary(cast_expression.operand.span()).with_message("This expression has type `mixed`"))
+                        .with_note("The float value of `mixed` cannot be determined statically. The result will be a general `float`.")
+                        .with_help("Consider adding type assertions or checks if a more specific float outcome is expected."),
+                );
+
+                return get_float();
+            }
+            _ => return get_float(), // Other types default to general float
+        }
+    }
+
+    if resulting_float_atomics.is_empty() {
+        return get_float();
+    }
+
+    TUnion::from_vec(combine(resulting_float_atomics, context.codebase, context.settings.combiner_options()))
+}
+
+#[derive(Clone, Copy)]
+struct NumericInterval {
+    minimum: f64,
+    maximum: f64,
+}
+
+impl NumericInterval {
+    fn new(minimum: f64, maximum: f64) -> Option<Self> {
+        (minimum.is_finite() && maximum.is_finite() && minimum <= maximum).then_some(Self { minimum, maximum })
+    }
+
+    fn from_expression(expression: &Expression<'_>, artifacts: &AnalysisArtifacts) -> Option<Self> {
+        match expression {
+            Expression::Parenthesized(parenthesized) => Self::from_expression(parenthesized.expression, artifacts),
+            Expression::UnaryPrefix(unary) => match unary.operator {
+                UnaryPrefixOperator::Plus(_)
+                | UnaryPrefixOperator::DoubleCast(_, _)
+                | UnaryPrefixOperator::RealCast(_, _)
+                | UnaryPrefixOperator::FloatCast(_, _) => Self::from_expression(unary.operand, artifacts),
+                UnaryPrefixOperator::Negation(_) => {
+                    let interval = Self::from_expression(unary.operand, artifacts)?;
+                    Self::new(-interval.maximum, -interval.minimum)
+                }
+                _ => Self::from_type(artifacts.get_expression_type(expression)?),
+            },
+            Expression::Binary(binary) => {
+                let expression_type = artifacts.get_expression_type(expression)?;
+                if !expression_type.has_float() {
+                    return Self::from_type(expression_type);
+                }
+
+                let left = Self::from_expression(binary.lhs, artifacts)?;
+                let right = Self::from_expression(binary.rhs, artifacts)?;
+
+                match binary.operator {
+                    BinaryOperator::Addition(_) => {
+                        Self::new(left.minimum + right.minimum, left.maximum + right.maximum)
+                    }
+                    BinaryOperator::Subtraction(_) => {
+                        Self::new(left.minimum - right.maximum, left.maximum - right.minimum)
+                    }
+                    BinaryOperator::Multiplication(_) => Self::from_candidates([
+                        left.minimum * right.minimum,
+                        left.minimum * right.maximum,
+                        left.maximum * right.minimum,
+                        left.maximum * right.maximum,
+                    ]),
+                    BinaryOperator::Division(_) if right.minimum > 0.0 || right.maximum < 0.0 => {
+                        Self::from_candidates([
+                            left.minimum / right.minimum,
+                            left.minimum / right.maximum,
+                            left.maximum / right.minimum,
+                            left.maximum / right.maximum,
+                        ])
+                    }
+                    _ => None,
+                }
+            }
+            _ => Self::from_type(artifacts.get_expression_type(expression)?),
+        }
+    }
+
+    fn from_type(operand_type: &TUnion) -> Option<Self> {
+        const MAX_EXACT_INTEGER: i64 = 1i64 << 53;
+
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+
+        for atomic in operand_type.types.as_ref() {
+            let interval = match atomic {
+                TAtomic::Scalar(TScalar::Integer(integer)) => {
+                    let (Some(minimum), Some(maximum)) = integer.get_bounds() else { return None };
+                    if minimum < -MAX_EXACT_INTEGER || maximum > MAX_EXACT_INTEGER {
+                        return None;
+                    }
+
+                    Self { minimum: minimum as f64, maximum: maximum as f64 }
+                }
+                TAtomic::Scalar(TScalar::Float(TFloat::Literal(value))) => Self::new(value.0, value.0)?,
+                TAtomic::GenericParameter(parameter) => Self::from_type(&parameter.constraint)?,
+                _ => return None,
+            };
+
+            minimum = minimum.min(interval.minimum);
+            maximum = maximum.max(interval.maximum);
+        }
+
+        Self::new(minimum, maximum)
+    }
+
+    fn from_candidates(candidates: [f64; 4]) -> Option<Self> {
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+
+        for candidate in candidates {
+            minimum = minimum.min(candidate);
+            maximum = maximum.max(candidate);
+        }
+
+        Self::new(minimum, maximum)
+    }
+
+    fn into_integer(self) -> Option<TInteger> {
+        let minimum = self.minimum.trunc();
+        let maximum = self.maximum.trunc();
+        let upper_limit = -(i64::MIN as f64);
+        if minimum < i64::MIN as f64 || maximum >= upper_limit {
+            return None;
+        }
+
+        Some(TInteger::from_bounds(Some(minimum as i64), Some(maximum as i64)))
+    }
+}
+
+fn cast_type_to_int<A>(
+    operand_type: &TUnion,
+    operand: &Expression<'_>,
+    artifacts: &AnalysisArtifacts,
+    context: &Context<'_, '_, A>,
+) -> TUnion
+where
+    A: Arena,
+{
+    if operand_type.has_float()
+        && let Some(integer) =
+            NumericInterval::from_expression(operand, artifacts).and_then(NumericInterval::into_integer)
+    {
+        return TUnion::from_atomic(TAtomic::Scalar(TScalar::Integer(integer)));
+    }
+
+    let mut possibilities = vec![];
+    for t in operand_type.types.as_ref() {
+        let possible = match t {
+            TAtomic::Null | TAtomic::Void => TAtomic::Scalar(TScalar::literal_int(0)),
+            TAtomic::Array(array) => {
+                if !array.is_non_empty() {
+                    possibilities.push(TAtomic::Scalar(TScalar::literal_int(0)));
+                }
+
+                TAtomic::Scalar(TScalar::literal_int(1))
+            }
+            TAtomic::Object(_) => TAtomic::Scalar(TScalar::literal_int(1)),
+            TAtomic::Callable(callable)
+                if callable
+                    .get_signature()
+                    .is_none_or(mago_codex::ttype::atomic::callable::TCallableSignature::is_closure) =>
+            {
+                TAtomic::Scalar(TScalar::literal_int(1))
+            }
+            TAtomic::Never => return get_never(),
+            TAtomic::Scalar(scalar) => match scalar {
+                TScalar::Numeric | TScalar::ArrayKey => {
+                    return get_int();
+                }
+                TScalar::Bool(bool_scalar) => match bool_scalar.value {
+                    Some(true) => TAtomic::Scalar(TScalar::literal_int(1)),
+                    Some(false) => TAtomic::Scalar(TScalar::literal_int(0)),
+                    None => {
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_int(0)));
+
+                        TAtomic::Scalar(TScalar::literal_int(1))
+                    }
+                },
+                TScalar::Integer(int_scalar) => match int_scalar.get_literal_value() {
+                    Some(i) => TAtomic::Scalar(TScalar::literal_int(i)),
+                    None => {
+                        return get_int();
+                    }
+                },
+                TScalar::Float(float_scalar) => match float_scalar {
+                    TFloat::Literal(f) => {
+                        if f.is_nan() {
+                            return get_int();
+                        }
+
+                        TAtomic::Scalar(TScalar::literal_int(f.0 as i64))
+                    }
+                    _ => {
+                        return get_int();
+                    }
+                },
+                TScalar::String(string_scalar) => match &string_scalar.literal {
+                    Some(TStringLiteral::Value(string_literal)) => {
+                        TAtomic::Scalar(TScalar::literal_int(string_to_int(string_literal.as_bytes())))
+                    }
+                    _ => {
+                        return get_int();
+                    }
+                },
+                TScalar::ClassLikeString(_) => TAtomic::Scalar(TScalar::literal_int(0)),
+                TScalar::Generic => {
+                    return get_int();
+                }
+            },
+            _ => return get_int(),
+        };
+
+        possibilities.push(possible);
+    }
+
+    TUnion::from_vec(combine(possibilities, context.codebase, context.settings.combiner_options()))
+}
+
+fn cast_type_to_object<'arena, A>(
+    operand_type: &TUnion,
+    context: &mut Context<'_, 'arena, A>,
+    cast_expression: &UnaryPrefix<'arena>,
+) -> TUnion
+where
+    A: Arena,
+{
+    let mut possibilities = vec![];
+    for t in operand_type.types.as_ref() {
+        match t {
+            TAtomic::Resource(_) => {
+                context.collector.report_with_code(
+                    IssueCode::InvalidTypeCast,
+                    Issue::error("Cannot cast type `resource` to `object`.")
+                        .with_annotation(
+                            Annotation::primary(cast_expression.span())
+                                .with_message("Invalid cast from `resource` to `object`."),
+                        )
+                        .with_note(
+                            "Casting a `resource` to `object` is disallowed and will throw an `Error` at runtime.",
+                        )
+                        .with_help("Remove the cast or ensure the expression being cast is not a `resource`."),
+                );
+
+                return get_never();
+            }
+            TAtomic::Never => return get_never(),
+            TAtomic::Callable(callable)
+                if callable
+                    .get_signature()
+                    .is_none_or(mago_codex::ttype::atomic::callable::TCallableSignature::is_closure) =>
+            {
+                possibilities.push(t.clone());
+            }
+            TAtomic::Object(_) => {
+                possibilities.push(t.clone());
+            }
+            TAtomic::Array(TArray::Keyed(keyed_array)) => {
+                let mut known_properties = BTreeMap::new();
+                if let Some(known_items) = &keyed_array.known_items {
+                    for (key, item) in known_items {
+                        let property_name = key.to_atom();
+
+                        known_properties.insert(property_name, item.clone());
+                    }
+
+                    // Casting an array to an object produces a `stdClass` instance in PHP,
+                    // so intersect the shape with `stdClass` to preserve both the shape
+                    // information and the nominal `stdClass` type.
+                    let mut named = TNamedObject::new(word("stdClass"));
+                    named.intersection_types = Some(vec![TAtomic::Object(TObject::new_with_properties(
+                        keyed_array.parameters.is_none(),
+                        known_properties,
+                    ))]);
+
+                    possibilities.push(TAtomic::Object(TObject::Named(named)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if possibilities.is_empty() {
+        return get_named_object(word("stdClass"), None);
+    }
+
+    TUnion::from_vec(combine(possibilities, context.codebase, context.settings.combiner_options()))
+}
+
+pub fn cast_type_to_string<'ctx, A>(
+    operand_type: &TUnion,
+    operand_expression_id: Option<&[u8]>,
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    expression_span: Span,
+) -> Result<TUnion, AnalysisError>
+where
+    A: Arena,
+{
+    let (has_array, has_non_array) = operand_type
+        .types
+        .iter()
+        .fold((false, false), |(arr, non), t| if matches!(t, TAtomic::Array(_)) { (true, non) } else { (arr, true) });
+    let is_mixed_union = has_array && has_non_array;
+
+    let mut possibilities = Vec::with_capacity(operand_type.types.len());
+
+    for t in operand_type.types.as_ref() {
+        match t {
+            TAtomic::Scalar(scalar) => match scalar {
+                TScalar::Bool(boolean) => {
+                    if boolean.is_true() {
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_string(word("1"))));
+                    } else if boolean.is_false() {
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_string(empty_word())));
+                    } else {
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_string(empty_word())));
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_string(word("1"))));
+                    }
+                }
+                TScalar::Integer(integer) => {
+                    if let Some(value) = integer.get_literal_value() {
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_string(i64_word(value))));
+                    } else {
+                        possibilities.push(TAtomic::Scalar(TScalar::numeric_string()));
+                    }
+                }
+                TScalar::Float(float) => {
+                    if let Some(value) = float.get_literal_value() {
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_string(f64_word(value))));
+                    } else {
+                        possibilities.push(TAtomic::Scalar(TScalar::numeric_string()));
+                    }
+                }
+                TScalar::Numeric => possibilities.push(TAtomic::Scalar(TScalar::numeric_string())),
+                TScalar::String(string) => possibilities.push(TAtomic::Scalar(TScalar::String(*string))),
+                TScalar::ClassLikeString(class_string) => {
+                    if let Some(value) = class_string.literal_value() {
+                        possibilities.push(TAtomic::Scalar(TScalar::literal_string(value)));
+                    } else {
+                        possibilities.push(TAtomic::Scalar(TScalar::non_empty_string()));
+                    }
+                }
+                _ => possibilities.push(TAtomic::Scalar(TScalar::string())),
+            },
+
+            TAtomic::Callable(callable) => {
+                if callable.is_closure() {
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::error("Cannot cast type `Closure` to `string`.")
+                            .with_annotation(
+                                Annotation::primary(expression_span.span())
+                                    .with_message("Invalid cast from `Closure` to `string`."),
+                            )
+                            .with_note(
+                                "Casting a `Closure` to `string` is disallowed and will throw an `Error` at runtime.",
+                            )
+                            .with_help("Remove the cast or ensure the expression being cast is not a `Closure`."),
+                    );
+                } else {
+                    let callable_str = display_atomic(context, &TAtomic::Callable(callable.clone()));
+
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::warning(format!("Cannot reliably cast callable of type `{callable_str}` to `string`."))
+                        .with_annotation(
+                            Annotation::primary(expression_span.span())
+                                .with_message("Invalid cast from callable to string"),
+                        )
+                        .with_note("Casting a callable to `string` is ambiguous and may not yield a meaningful result.")
+                        .with_help("Ensure the callable can be represented as a string or use a specific callable type that guarantees string representation."),
+                    );
+
+                    possibilities.push(TAtomic::Scalar(TScalar::string()));
+                }
+            }
+
+            TAtomic::Object(object) => {
+                if let TObject::HasMethod(has_method) = object
+                    && has_method.has_method(b"__toString")
+                {
+                    possibilities.push(TAtomic::Scalar(TScalar::string()));
+                    continue;
+                }
+
+                if let Some(result) = find_to_string_in_intersections(
+                    t,
+                    operand_expression_id,
+                    context,
+                    block_context,
+                    artifacts,
+                    expression_span,
+                ) {
+                    possibilities.extend(result?.types.into_owned());
+                    continue;
+                }
+
+                let class_like_name = match object {
+                    TObject::Named(named_object) => named_object.get_name(),
+                    TObject::Enum(enum_instance) => enum_instance.get_name(),
+                    _ => {
+                        context.collector.report_with_code(
+                            IssueCode::InvalidTypeCast,
+                            Issue::error("Cannot reliably cast generic `object` to `string`.")
+                            .with_annotation(
+                                Annotation::primary(expression_span.span()).with_message("Casting generic `object` to `string`")
+                            )
+                            .with_note(
+                                "The object might implement `Stringable` or have a `__toString()` method, but this cannot be determined statically for a generic `object` type."
+                            )
+                            .with_note(
+                                "If the object is not stringable at runtime, this cast will cause a fatal error."
+                            )
+                            .with_help(
+                                "Ensure the object is stringable before casting, use a more specific object type, or avoid the cast."
+                            ),
+                        );
+
+                        possibilities.push(TAtomic::Scalar(TScalar::string()));
+                        continue;
+                    }
+                };
+
+                let Some(class_metadata) = context.codebase.get_class_like(class_like_name.as_bytes()) else {
+                    let missing_class = display_class_like_name(context, class_like_name);
+
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::error(format!(
+                            "Cannot cast object of type `{missing_class}` to `string` because the class does not exist.",
+                        ))
+                        .with_annotation(
+                            Annotation::primary(expression_span.span())
+                                .with_message(format!("Class `{missing_class}` does not exist."))
+                        )
+                        .with_note("Casting an object to `string` requires the class to exist and implement `Stringable` or have a `__toString()` method.")
+                        .with_help("Ensure the class exists or avoid casting this object type to `string`."),
+                    );
+
+                    possibilities.push(TAtomic::Scalar(TScalar::string()));
+                    continue;
+                };
+
+                if class_metadata.kind.is_enum() {
+                    let enum_name = if context.dialect.is_sharp() {
+                        display_class_like_name(context, class_like_name)
+                    } else {
+                        class_like_name
+                    };
+
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::error(format!(
+                            "Cannot cast enum instance of type `{}` to `string`.",
+                            display_atomic(context, t),
+                        ))
+                        .with_annotation(
+                            Annotation::primary(expression_span.span())
+                                .with_message(format!("Enum `{enum_name}` cannot be cast to `string`."))
+                        )
+                        .with_note("Casting an enum instance to `string` is not allowed and will throw a fatal error at runtime.")
+                        .with_help("Use the enum's name or value instead, or avoid casting the enum instance to `string`."),
+                    );
+
+                    possibilities.push(TAtomic::Scalar(TScalar::string()));
+                    continue;
+                }
+
+                let to_string_method_id = word(b"__toString");
+                let declaring_method_id = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(
+                    class_metadata.original_name,
+                    to_string_method_id,
+                ));
+
+                if let Some(to_string_metadata) = context.codebase.get_method(
+                    declaring_method_id.get_class_name().as_bytes(),
+                    declaring_method_id.get_method_name().as_bytes(),
+                ) {
+                    let result = analyze_implicit_method_call(
+                        context,
+                        block_context,
+                        artifacts,
+                        object,
+                        operand_expression_id,
+                        declaring_method_id,
+                        class_metadata,
+                        to_string_metadata,
+                        None,
+                        expression_span,
+                    )?;
+
+                    possibilities.extend(result.types.into_owned());
+                } else {
+                    let class_name_str = display_class_like_name(context, class_metadata.original_name);
+
+                    context.collector.report_with_code(
+                        IssueCode::InvalidTypeCast,
+                        Issue::error(format!(
+                            "Cannot cast object of type `{class_name_str}` to `string` because it does not implement `Stringable`.",
+                        ))
+                        .with_code(IssueCode::InvalidTypeCast)
+                        .with_annotation(
+                            Annotation::primary(expression_span.span())
+                                .with_message(format!("`{class_name_str}` does not implement `Stringable`."))
+                        )
+                        .with_note(
+                            "Casting an object to `string` requires it to have a `__toString()` method (implicitly via `Stringable` interface)."
+                        )
+                        .with_note(
+                            "This cast will cause a fatal error at runtime."
+                        )
+                        .with_help(
+                            format!(
+                                "Implement the `Stringable` interface (or add a `__toString()` method) on class `{class_name_str}` or avoid casting this object type to `string`.",
+                            )
+                        ),
+                    );
+
+                    possibilities.push(TAtomic::Scalar(TScalar::string()));
+                }
+            }
+            TAtomic::Array(_) => {
+                if is_mixed_union {
+                    context.collector.report_with_code(
+                        IssueCode::ArrayToStringConversion,
+                        Issue::warning("Potentially casting `array` to `string`.")
+                            .with_annotation(
+                                Annotation::primary(expression_span.span())
+                                    .with_message("This expression may be an array."),
+                            )
+                            .with_note(
+                                "Casting an array to string produces the literal 'Array' and triggers a PHP warning.",
+                            )
+                            .with_help(
+                                "Add a type check (e.g., `is_numeric()`) before casting to ensure the value is not an array.",
+                            ),
+                    );
+                } else {
+                    context.collector.report_with_code(
+                        IssueCode::ArrayToStringConversion,
+                        Issue::warning(
+                            "Casting `array` to `string` is deprecated and produces the literal string 'Array'.",
+                        )
+                        .with_annotation(
+                            Annotation::primary(expression_span.span())
+                                .with_message("Casting `array` to `string`."),
+                        )
+                        .with_note(
+                            "PHP raises an `E_WARNING` (or `E_NOTICE` in older versions) when an array is cast to a string, resulting in the literal string 'Array'.",
+                        )
+                        .with_help(
+                            "Do not cast arrays to strings directly. Use functions like `implode()`, `json_encode()`, or loop through the array to create a string representation.",
+                        ),
+                    );
+                }
+                possibilities.push(TAtomic::Scalar(TScalar::literal_string(word("Array"))));
+            }
+
+            TAtomic::Null | TAtomic::Void => possibilities.push(TAtomic::Scalar(TScalar::literal_string(word("")))),
+            TAtomic::Resource(_) => possibilities.push(TAtomic::Scalar(TScalar::non_empty_string())),
+            TAtomic::Never => {}
+            _ => {
+                if let Some(result) = find_to_string_in_intersections(
+                    t,
+                    operand_expression_id,
+                    context,
+                    block_context,
+                    artifacts,
+                    expression_span,
+                ) {
+                    possibilities.extend(result?.types.to_vec());
+                } else if let TAtomic::GenericParameter(parameter) = t {
+                    possibilities.extend(
+                        cast_type_to_string(
+                            parameter.get_constraint(),
+                            operand_expression_id,
+                            context,
+                            block_context,
+                            artifacts,
+                            expression_span,
+                        )?
+                        .types
+                        .into_owned(),
+                    );
+                } else {
+                    possibilities.push(TAtomic::Scalar(TScalar::string()));
+                }
+            }
+        }
+    }
+
+    if possibilities.is_empty() {
+        // If no possibilities were found, push a default string type
+        // This likely indicates that the operand type is `never`
+        possibilities.push(TAtomic::Scalar(TScalar::string()));
+    }
+
+    Ok(TUnion::from_vec(combine(possibilities, context.codebase, context.settings.combiner_options())))
+}
+
+fn find_to_string_in_intersections<'ctx, A>(
+    atomic: &TAtomic,
+    operand_expression_id: Option<&[u8]>,
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    expression_span: Span,
+) -> Option<Result<TUnion, AnalysisError>>
+where
+    A: Arena,
+{
+    let intersection_types = atomic.get_intersection_types()?;
+    let to_string_id = word(b"__toString");
+
+    for intersection in intersection_types {
+        match intersection {
+            TAtomic::Object(TObject::HasMethod(has_method)) if has_method.has_method(to_string_id.as_bytes()) => {
+                return Some(Ok(get_string()));
+            }
+
+            TAtomic::Object(TObject::Named(named)) => {
+                let intersection_name = named.get_name();
+                let Some(intersection_class) = context.codebase.get_class_like(intersection_name.as_bytes()) else {
+                    continue;
+                };
+
+                let intersection_method_id = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(
+                    intersection_class.original_name,
+                    to_string_id,
+                ));
+
+                let Some(method) = context.codebase.get_method(
+                    intersection_method_id.get_class_name().as_bytes(),
+                    intersection_method_id.get_method_name().as_bytes(),
+                ) else {
+                    continue;
+                };
+
+                return Some(analyze_implicit_method_call(
+                    context,
+                    block_context,
+                    artifacts,
+                    &TObject::Named(named.clone()),
+                    operand_expression_id,
+                    intersection_method_id,
+                    intersection_class,
+                    method,
+                    None,
+                    expression_span,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+    use mago_php_version::PHPVersion;
+
+    use crate::code::IssueCode;
+    use crate::settings::Settings;
+    use crate::test_analysis;
+
+    test_analysis! {
+        name = unary_increment_decrement_operators,
+        settings = Settings::new(PHPVersion::PHP82),
+        code = indoc! {"
+            <?php
+
+            /**
+             * @param 2 $_a
+             * @param 2 $_b
+             * @param 125 $_c
+             */
+            function example(int $_a, int $_b, int $_c): void
+            {
+            }
+
+            $arr = ['a' => '123', 'b' => 2, 'c' => -1];
+            $arr['a'] = '';
+            $arr['b'] = null;
+            $arr['c'] = 123;
+            $arr['a']++;
+            $arr['b']++;
+            $arr['c']++;
+            $arr['a']--;
+            $arr['b']--;
+            $arr['c']--;
+            $arr['a'] = $arr['a']--;
+            $arr['c'] = $arr['c']--;
+            $arr['b'] = $arr['b']--;
+            $arr['a'] = $arr['a']++;
+            $arr['b'] = $arr['b']++;
+            $arr['c'] = $arr['c']++;
+            $arr['a'] = $arr['a'] + 1;
+            $arr['b'] = $arr['b'] + 1;
+            $arr['c'] = $arr['c'] + 1;
+            $arr['a'] = --$arr['a'];
+            $arr['b'] = --$arr['b'];
+            $arr['c'] = --$arr['c'];
+            $arr['a'] = $arr['a'] + 1;
+            $arr['b'] = $arr['b'] + 1;
+            $arr['c'] = $arr['c'] + 1;
+            $arr['a'] = ++$arr['a'];
+            $arr['b'] = ++$arr['b'];
+            $arr['c'] = ++$arr['c'];
+
+            example($arr['a'], $arr['b'], $arr['c']);
+        "}
+    }
+
+    test_analysis! {
+        name = implicit_to_string_call,
+        code = indoc! {r#"
+            <?php
+
+            /**
+             * @param non-empty-string $command
+             * @param non-empty-list<non-empty-string> $args
+             * @param non-empty-string $cwd
+             */
+            function shell_execute(string $command, array $args, string $cwd = '.'): void {
+                echo "Executing command: $command [" . $args[0] . ", ..] in directory: $cwd\n";
+            }
+
+            final class CheckedOutRepository {
+                /** @param non-empty-string $path */
+                private function __construct(
+                    private readonly string $path,
+                ) {}
+
+                /** @param non-empty-string $path */
+                public static function fromPath(string $path): self {
+                    return new self($path);
+                }
+
+                /** @return non-empty-string */
+                public function __toString(): string {
+                    return $this->path;
+                }
+            }
+
+            final class GetVersionCollectionFromGitRepository {
+                private CheckedOutRepository $repoPath;
+
+                public function __construct(CheckedOutRepository $repoPath) {
+                    $this->repoPath = $repoPath;
+                }
+
+                /** @param non-empty-string $tagName */
+                public function makeTag(string $tagName): void {
+                    $path = (string) $this->repoPath;
+
+                    shell_execute('git', ['tag', $tagName], $path);
+                }
+            }
+        "#}
+    }
+
+    test_analysis! {
+        name = negate_integer_ranges,
+        code = indoc! {"
+            <?php
+
+            final readonly class Duration
+            {
+                /**
+                 * @param int $hours
+                 * @param int<-59, 59> $minutes
+                 * @param int<-59, 59> $seconds
+                 * @param int<-999999999, 999999999> $nanoseconds
+                 *
+                 * @pure
+                 */
+                public function __construct(
+                    public int $hours,
+                    public int $minutes = 0,
+                    public int $seconds = 0,
+                    public int $nanoseconds = 0,
+                ) {}
+
+                /**
+                 * @return Duration
+                 */
+                public function invert(): Duration
+                {
+                    return new Duration(-$this->hours, -$this->minutes, -$this->seconds, -$this->nanoseconds);
+                }
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = cast_stdclass_to_array,
+        code = indoc! {"
+            <?php
+
+            class stdClass
+            {
+                // built-in
+            }
+
+            /** @return array<string, mixed> */
+            function example(stdClass $obj): array
+            {
+                return (array) $obj;
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = negative_numeric_string_increment_decrement,
+        code = indoc! {"
+            <?php
+
+            /**
+             * @param -4 $a
+             * @param -6 $b
+             */
+            function check(int $a, int $b): void {}
+
+            $a = '-5';
+            $a++;
+            $b = '-5';
+            $b--;
+            check($a, $b);
+        "}
+    }
+
+    test_analysis! {
+        name = increment_decrement_runtime_types,
+        settings = Settings::new(PHPVersion::PHP82),
+        code = indoc! {"
+            <?php
+
+            function increment_string(string $value): int|float|string
+            {
+                return ++$value;
+            }
+
+            function decrement_string(string $value): int|float|string
+            {
+                return --$value;
+            }
+
+            /** @return 'fop' */
+            function increment_literal(): string
+            {
+                $value = 'foo';
+                return ++$value;
+            }
+
+            /** @return 'foo' */
+            function decrement_literal(): string
+            {
+                $value = 'foo';
+                return --$value;
+            }
+
+            /** @return -1 */
+            function decrement_empty_string(): int
+            {
+                $value = '';
+                return --$value;
+            }
+
+            function increment_bool(bool $value): bool
+            {
+                return ++$value;
+            }
+
+            function decrement_bool(bool $value): bool
+            {
+                return --$value;
+            }
+
+            function decrement_null(): null
+            {
+                $value = null;
+                return --$value;
+            }
+        "}
+    }
+
+    test_analysis! {
+        name = increment_decrement_diagnostics_php83,
+        settings = Settings::new(PHPVersion::PHP83),
+        code = indoc! {"
+            <?php
+
+            $increment_empty = '';
+            ++$increment_empty;
+
+            $increment_non_alphanumeric = '-cc';
+            ++$increment_non_alphanumeric;
+
+            $increment_alphanumeric = 'foo';
+            ++$increment_alphanumeric;
+
+            $decrement_empty = '';
+            --$decrement_empty;
+
+            $decrement_string = 'foo';
+            --$decrement_string;
+
+            $bool = true;
+            ++$bool;
+            --$bool;
+
+            $null = null;
+            --$null;
+        "},
+        issues = [
+            IssueCode::DeprecatedFeature,
+            IssueCode::DeprecatedFeature,
+            IssueCode::DeprecatedFeature,
+            IssueCode::DeprecatedFeature,
+            IssueCode::InvalidOperand,
+            IssueCode::InvalidOperand,
+            IssueCode::InvalidOperand,
+        ]
+    }
+
+    test_analysis! {
+        name = non_numeric_string_increment_deprecated_php85,
+        settings = Settings::new(PHPVersion::PHP85),
+        code = indoc! {"
+            <?php
+
+            $value = 'foo';
+            ++$value;
+        "},
+        issues = [
+            IssueCode::DeprecatedFeature,
+        ]
+    }
+}
