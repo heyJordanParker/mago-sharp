@@ -19,6 +19,7 @@ use crate::issues;
 use crate::lean::VENDOR;
 use crate::lean::proof_file;
 use crate::package;
+use crate::package::Failed;
 use crate::package::Message;
 use crate::package::Package;
 use crate::package::Root;
@@ -212,7 +213,7 @@ pub(crate) fn check(
     let proved: HashSet<FileId> = issues.keys().copied().collect();
     let mut built = Vec::new();
     for file in files {
-        if !failed.contains(&file.module) {
+        if !failed.modules.contains(&file.module) {
             if file.role == Role::Rules {
                 built.push(file);
             }
@@ -290,7 +291,7 @@ fn errors<'file>(
     roots: &[Root],
     package: &Package,
     files: &'file [LeanFile],
-    failed: &[String],
+    failed: &Failed,
     file: &'file LeanFile,
 ) -> io::Result<(&'file LeanFile, Vec<Message>)> {
     let mut cause = file;
@@ -313,14 +314,14 @@ fn errors<'file>(
                 return Ok((cause, vec![Message::error(line, message)]));
             }
         }
-        let Some(imported) = imports(&text)
-            .find_map(|(_, import)| files.iter().find(|file| file.module == import && failed.contains(&file.module)))
-        else {
+        let Some(imported) = imports(&text).find_map(|(_, import)| {
+            files.iter().find(|file| file.module == import && failed.modules.contains(&file.module))
+        }) else {
             break;
         };
         cause = imported;
     }
-    let mut errors = package.errors(&package::source_of(&cause.module))?;
+    let mut errors = package.errors(&cause.module, failed)?;
     if errors.is_empty() {
         errors.push(Message::error(0, "Lake failed".to_owned()));
     }

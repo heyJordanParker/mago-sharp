@@ -21,6 +21,8 @@ use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::Inheritance;
+use mago_syntax::cst::Interface;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -145,10 +147,7 @@ impl Translator<'_, '_> {
             }
             Statement::Class(class) => self.class(class),
             Statement::Enum(r#enum) => self.r#enum(r#enum),
-            Statement::Interface(interface) => {
-                let full = self.checked.names().get(&interface.name);
-                self.name_module(full, interface.name.span);
-            }
+            Statement::Interface(interface) => self.interface(interface),
             Statement::Module(module) => self.module(module),
             _ => {}
         }
@@ -242,6 +241,7 @@ impl Translator<'_, '_> {
             types.push(r#type);
         }
         lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
+        lines.extend(self.coercions(&mut body, &lean, class.inheritance.as_ref()));
         self.declare(body, lean.clone(), class.name.span, lines.join("\n"), false);
 
         self.constructor(full, &lean, &short, class.name.span, constructor, &fields, &types);
@@ -332,6 +332,7 @@ impl Translator<'_, '_> {
             }
         }
         lines.push("  deriving Repr, DecidableEq, Inhabited".to_owned());
+        lines.extend(self.coercions(&mut body, &lean, r#enum.inheritance.as_ref()));
         self.declare(body, lean.clone(), r#enum.name.span, lines.join("\n"), false);
 
         if let Some(backing) = &r#enum.backing_type_hint {
@@ -345,6 +346,47 @@ impl Translator<'_, '_> {
         }
 
         self.members(full, &lean, &short, &r#enum.members);
+    }
+
+    /// An interface as a type Lean knows nothing about, `Interface "App.Shop.Payment"`, so a proof holds for every class
+    /// that implements it. A call of its methods is not translated, since an implementation can have effects.
+    fn interface(&mut self, interface: &Interface) {
+        let full = self.checked.names().get(&interface.name);
+        self.name_module(full, interface.name.span);
+        if !self.reach.reaches(full, b"") {
+            return;
+        }
+
+        let lean = names::full_name(full);
+        let short = names::short_name(full);
+        let mut body = Body::new(self.checked, self.reach, full, short.clone());
+        let mut lines = vec![format!("abbrev {lean} : Type := Interface \"{lean}\"")];
+        lines.extend(self.coercions(&mut body, &lean, interface.inheritance.as_ref()));
+        self.declare(body, lean.clone(), interface.name.span, lines.join("\n"), false);
+        self.members(full, &lean, &short, &interface.members);
+    }
+
+    /// A `Coe` from the class-like `lean` to each interface its header names that a law reaches, so a value of it
+    /// passes where the interface is expected. The interface's value is `upcast`'s, of which Lean knows nothing, as of
+    /// every interface value. They follow the class-like's own declaration, so every declaration that uses it can use
+    /// them.
+    fn coercions(&self, body: &mut Body<'_, '_>, lean: &str, inheritance: Option<&Inheritance>) -> Vec<String> {
+        let mut coercions = Vec::new();
+        for (index, name) in inheritance.iter().flat_map(|inheritance| inheritance.types.iter()).enumerate() {
+            let parent = self.checked.names().get(name);
+            let translated = self.reach.class(parent).is_some_and(|reached| reached.sharp);
+            if self.checked.types().class_declaration(parent).kind != DeclarationKind::Interface
+                || !translated
+                || !self.reach.reaches(parent, b"")
+            {
+                continue;
+            }
+
+            let interface = body.class_type(name.span(), parent);
+            coercions.push(format!("instance {lean}.«$coe{index}» : Coe {lean} {interface} := ⟨upcast⟩"));
+        }
+
+        coercions
     }
 
     /// The reached methods and constants, and every law, of a class-like.
