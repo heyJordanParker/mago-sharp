@@ -789,6 +789,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Ok(()) => {
                     let variable = property.first_variable();
                     check_declared_name(variable.name, variable.span, context);
+                    report_static_without_initial_value(property, context);
 
                     Some(FieldOrProperty)
                 }
@@ -837,7 +838,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             if let Some(initial_value) = &property.initial_value
                 && !context.names.has_storage(&property.hook_list)
             {
-                report_no_storage(variable, initial_value.value.span(), "its initial value", context);
+                report_no_storage(variable, initial_value.value.span(), context);
             }
 
             Some(FieldOrProperty)
@@ -1033,10 +1034,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 && parameter.modifiers.contains_visibility()
             {
                 check_accessors(&parameter.modifiers, accessors, parameter.variable.span, context);
-                check_accessor_bodies(accessors, parameter.variable.name, context);
-                if !context.names.has_storage(accessors) {
-                    report_no_storage(&parameter.variable, parameter.variable.span, "the constructor to set", context);
-                }
+                report_parameter_accessor_bodies(parameter, accessors, context);
             }
 
             Some(Parameter)
@@ -2227,6 +2225,52 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
     }
 }
 
+/// Reports each accessor body of a member declared on a constructor parameter. Spec section 9: such a member takes
+/// access levels and attributes only, and an accessor body goes on a member in the class body. So every member a
+/// parameter declares has storage for the constructor to set.
+fn report_parameter_accessor_bodies(
+    parameter: &FunctionLikeParameter,
+    accessors: &PropertyHookList,
+    context: &mut Context<'_, '_, '_>,
+) {
+    for accessor in &accessors.hooks {
+        let PropertyHookBody::Concrete(body) = &accessor.body else {
+            continue;
+        };
+
+        context.report(
+            Issue::error(format!(
+                "Declare `{}` in the class body to give it an accessor body: a member declared on a constructor parameter takes access levels and attributes only.",
+                BytesDisplay(parameter.variable.name)
+            ))
+            .with_annotation(Annotation::primary(body.span()).with_message("An accessor body on a parameter.")),
+        );
+    }
+}
+
+/// Reports a static field or a static property with storage that has no initial value and isn't `T?`, spec section 6.
+/// No constructor sets a static, so it would be read before anything set it. A `T?` one starts as null.
+fn report_static_without_initial_value(property: &Property, context: &mut Context<'_, '_, '_>) {
+    if property.modifiers().get_static().is_none()
+        || property.initial_value().is_some()
+        || matches!(property, Property::Computed(_))
+    {
+        return;
+    }
+    let Some(hint) = property.hint().filter(|hint| !matches!(hint, Hint::Nullable(_))) else {
+        return;
+    };
+
+    let variable = property.first_variable();
+    let name = BytesDisplay(variable.name);
+    let written = BytesDisplay(context.get_code_snippet(hint));
+    let nullable = if matches!(hint, Hint::Union(_)) { format!("({written})?") } else { format!("{written}?") };
+    context.report(
+        Issue::error(format!("Give `{name}` an initial value, or make it `{nullable}`: no constructor sets a static."))
+            .with_annotation(Annotation::primary(variable.span).with_message("Declared without a value here.")),
+    );
+}
+
 /// Reports each method named as a property of its class, compared ignoring case as PHP finds a method. Spec section 14
 /// calls a property holding a function as `order.priceOf(line)`, and the engine calls the property only when the
 /// class has no method of that name, so one name declares one member, as in C#.
@@ -2251,6 +2295,10 @@ fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_
         let ClassLikeMember::Method(method) = member else {
             continue;
         };
+        // A constructor is written with its class's name, and PHP names it `__construct`, so it shares no name.
+        if php_method_name(method) == b"__construct" {
+            continue;
+        }
 
         if let Some(property) = properties.iter().find(|property| property.name.eq_ignore_ascii_case(method.name.value))
         {
@@ -2374,11 +2422,11 @@ fn is_slice_accessor(accessor: &PropertyHook) -> bool {
         }
 }
 
-/// Reports a property without storage that something sets: an initial value, or a constructor that receives it.
-fn report_no_storage(property: &DirectVariable, span: Span, set_by: &str, context: &mut Context<'_, '_, '_>) {
+/// Reports a property without storage that has an initial value.
+fn report_no_storage(property: &DirectVariable, span: Span, context: &mut Context<'_, '_, '_>) {
     context.report(
         Issue::error(format!(
-            "The property `{}` has no storage for {set_by}: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
+            "The property `{}` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
             BytesDisplay(property.name)
         ))
         .with_annotation(Annotation::primary(span).with_message("Set here."))

@@ -1438,88 +1438,6 @@ fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
 }
 
 /// ```php
-/// public function __construct(
-///     public string $title { get => $this->title; set { $this->title = \trim($value); } },
-///     public protected(set) int $id { get => $this->id; },
-/// ) {}
-/// ```
-///
-/// A property declared on a constructor parameter carries its hooks as the parameter's last child.
-#[test]
-fn a_promoted_property_with_accessor_bodies_is_a_promoted_parameter_with_hooks() {
-    let lowered = Lowered::new(
-        "class Report\n{\n    public Report(public string title { get => field; set => field = trim(value); }, public int id { get => field; })\n    {\n    }\n}\n",
-    );
-    let parameters: Vec<String> = lowered
-        .nodes()
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_PARAM)
-        .map(|(index, _)| lowered.render(index as u32))
-        .collect();
-
-    assert_eq!(
-        parameters,
-        [
-            indoc! {r#"
-                PARAM [1]
-                  ZVAL [1] "string"
-                  ZVAL "title"
-                  null
-                  null
-                  null
-                  STMT_LIST
-                    PROPERTY_HOOK "get" @3-3
-                      null
-                      null
-                      PROPERTY_HOOK_SHORT_BODY
-                        PROP
-                          VAR
-                            ZVAL "this"
-                          ZVAL "title"
-                      null
-                      null
-                    PROPERTY_HOOK "set" @3-3
-                      null
-                      null
-                      STMT_LIST
-                        ASSIGN
-                          PROP
-                            VAR
-                              ZVAL "this"
-                            ZVAL "title"
-                          CALL
-                            ZVAL "trim"
-                            ARG_LIST
-                              VAR
-                                ZVAL "value"
-                      null
-                      null
-            "#},
-            indoc! {r#"
-                PARAM [2049]
-                  ZVAL [1] "int"
-                  ZVAL "id"
-                  null
-                  null
-                  null
-                  STMT_LIST
-                    PROPERTY_HOOK "get" @3-3
-                      null
-                      null
-                      PROPERTY_HOOK_SHORT_BODY
-                        PROP
-                          VAR
-                            ZVAL "this"
-                          ZVAL "id"
-                      null
-                      null
-            "#},
-        ]
-    );
-}
-
-/// ```php
 /// public int $price = 0 { set { if ($value < 0) { throw new \InvalidArgumentException("negative"); } $this->price = $value; } }
 /// public Address $shipping { get => $this->getAttribute("shipping"); set { $this->setAttribute("shipping", $value); } }
 /// ```
@@ -8634,25 +8552,6 @@ fn position_current_in_a_set_body_names_its_property() {
     );
 
     assert_eq!(positions(&lowered), ["5:29 App.Tenant.Report.folder", "6:46 App.Tenant.Report.title"]);
-}
-
-/// ```php
-/// public function __construct(
-///     public string $code { get { return (new \Sharp\Position(__FILE__, 5, 53, 'App.Tenant.Report.code'))->function; } set { $this->code = $value; } },
-/// ) {
-///     $here = new \Sharp\Position(__FILE__, 7, 22, 'App.Tenant.Report.Report');
-/// }
-/// ```
-///
-/// A property declared on a constructor parameter names itself in its bodies, and the constructor's body after it
-/// names the constructor again.
-#[test]
-fn position_current_in_a_constructor_parameters_get_body_names_its_property_and_the_body_after_names_the_constructor() {
-    let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public Report(public string code { get { return Position.current().function; } set => field = value; })\n    {\n        const here = Position.current();\n    }\n}\n",
-    );
-
-    assert_eq!(positions(&lowered), ["5:53 App.Tenant.Report.code", "7:22 App.Tenant.Report.Report"]);
 }
 
 /// ```php

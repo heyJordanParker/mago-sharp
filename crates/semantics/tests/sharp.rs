@@ -2541,7 +2541,7 @@ fn a_promoted_member_follows_the_rules_of_the_same_declaration_in_the_class_body
         [
             "5:30 A PHP# property needs a `get` accessor.",
             "5:63 The `set` accessor of a PHP# property must be narrower than the property.",
-            "5:90 The property `c` has no storage for the constructor to set: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
+            "5:98 Declare `c` in the class body to give it an accessor body: a member declared on a constructor parameter takes access levels and attributes only.",
         ]
     );
 }
@@ -2581,6 +2581,27 @@ fn a_parameter_cannot_be_lazy() {
             "5:26 A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
             "5:48 A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
             "7:20 A parameter cannot be `lazy`: a lazy property computes its own value, and a parameter receives one.",
+        ]
+    );
+}
+
+/// Spec section 9: a member declared on a constructor parameter takes access levels and attributes only, so each
+/// accessor body is an error, an expression body or a block, on `get`, `set` or `init`. Access levels stay.
+#[test]
+fn an_accessor_body_on_a_constructor_parameter_is_an_error() {
+    let code = "namespace App.Tenant;\n\nclass Ledger\n{\n    public Ledger(\n        public string name { get; set => field = value.trim(); },\n        public int count { get => field; private set; },\n        public string code { get; init { field = value; } },\n        public int total { get; private set; },\n    ) {}\n}\n";
+    let message = |name: &str| {
+        format!(
+            "Declare `{name}` in the class body to give it an accessor body: a member declared on a constructor parameter takes access levels and attributes only."
+        )
+    };
+
+    assert_eq!(
+        issues(code),
+        [
+            format!("6:39 {}", message("name")),
+            format!("7:32 {}", message("count")),
+            format!("8:40 {}", message("code"))
         ]
     );
 }
@@ -3054,6 +3075,22 @@ fn a_field_or_a_property_may_be_static_with_a_constant_initial_value() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 6: no constructor sets a static, so a static field or property that isn't `T?` has an initial value.
+/// A `T?` one starts as null. The error names both fixes.
+#[test]
+fn a_static_that_is_not_nullable_needs_an_initial_value() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int hits = 0;\n    private static int misses;\n    public static string? region { get; set; }\n    public static string label { get; set; }\n    private static string? cached;\n    private static int|string key;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:24 Give `misses` an initial value, or make it `int?`: no constructor sets a static.",
+            "8:26 Give `label` an initial value, or make it `string?`: no constructor sets a static.",
+            "10:31 Give `key` an initial value, or make it `(int|string)?`: no constructor sets a static.",
+        ]
+    );
+}
+
 #[test]
 fn a_nullable_field_of_a_type_outside_the_slice_is_not_supported_yet() {
     let code =
@@ -3271,11 +3308,10 @@ fn properties_outside_the_slice_are_not_supported_yet() {
 }
 
 /// Spec section 6.1: `get` and `set` take a body, written `=> expr;` or as a block, which uses `field` for the
-/// property's storage and `value` for the incoming value. Each accessor keeps its own access level, and a
-/// constructor parameter declares the same property.
+/// property's storage and `value` for the incoming value. Each accessor keeps its own access level.
 #[test]
 fn accessor_bodies_are_in_the_slice() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string name { get => field; set => field = trim(value); }\n    public int count { get; private set { if (value < 0) { throw new Negative(value); } field = value; } }\n    public int total { get { return this.count + 1; } }\n    public string label { get => this.name; set => this.rename(value); }\n    public List<string> tags { get => field; set { field = value; } } = [];\n    public Map<string, int> hits { get => field; set { field = value; field[\"all\"] = 1; field.set(\"one\", 1); } } = [:];\n    public int seen { get => field; set { field += value; field++; } } = 0;\n\n    public Report(public string title { get => field; set => field = value; })\n    {\n    }\n\n    public void rename(string text)\n    {\n        this.name = text;\n        this.tags.add(text);\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string name { get => field; set => field = trim(value); }\n    public int count { get; private set { if (value < 0) { throw new Negative(value); } field = value; } }\n    public int total { get { return this.count + 1; } }\n    public string label { get => this.name; set => this.rename(value); }\n    public List<string> tags { get => field; set { field = value; } } = [];\n    public Map<string, int> hits { get => field; set { field = value; field[\"all\"] = 1; field.set(\"one\", 1); } } = [:];\n    public int seen { get => field; set { field += value; field++; } } = 0;\n\n    public void rename(string text)\n    {\n        this.name = text;\n        this.tags.add(text);\n    }\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
 }
@@ -3360,17 +3396,16 @@ fn a_property_with_accessor_bodies_that_overrides_a_parent_property_is_not_suppo
     assert_eq!(issues(code), ["7:28 Overriding a property is not supported yet in PHP#."]);
 }
 
-/// A property whose accessors all have bodies and never use `field` has no storage, as PHP's virtual property, so
-/// neither an initial value nor a constructor can set it.
+/// A property whose accessors all have bodies and never use `field` has no storage, as PHP's virtual property, so an
+/// initial value can't set it. A constructor parameter declares no accessor bodies, so its member always has storage.
 #[test]
-fn an_initial_value_or_a_constructor_parameter_needs_storage() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get => 1; } = 2;\n    public int b { get => field; } = 3;\n    public int c { get; set => this.save(value); } = 4;\n\n    public Report(public int d { get => 1; set => this.save(value); }, public int e { get => field; })\n    {\n    }\n\n    public void save(int value)\n    {\n    }\n}\n";
+fn an_initial_value_needs_storage() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get => 1; } = 2;\n    public int b { get => field; } = 3;\n    public int c { get; set => this.save(value); } = 4;\n\n    public void save(int value)\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:34 The property `a` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
-            "9:30 The property `d` has no storage for the constructor to set: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
+            "5:34 The property `a` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body."
         ]
     );
 }
@@ -4539,6 +4574,15 @@ fn a_method_named_as_a_property_of_its_class_is_an_error() {
             "12:17 The class `Report` declares a method and a property named `ready`.",
         ]
     );
+}
+
+/// A constructor is named after its class, and PHP names it `__construct`, so a property named as its class, in any
+/// case, is no clash, in the class body or declared by a constructor parameter.
+#[test]
+fn a_property_named_as_its_class_is_no_clash_with_the_constructor() {
+    let code = "namespace App.Tenant;\n\nclass Coupon\n{\n    public string coupon { get; }\n\n    public Coupon(string code)\n    {\n        this.coupon = code;\n    }\n}\n\nclass Label\n{\n    public Label(public string label { get; }) {}\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]

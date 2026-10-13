@@ -1103,8 +1103,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32) -> u32 {
         let name = self.string(0, self.line(parameter.variable.span), parameter.variable.name);
         let default = parameter.default_value.as_ref().map_or(NULL, |default| self.expression(default.value));
-        let (member_flags, hooks) =
-            if set_parameter(parameter).is_some() { (0, NULL) } else { self.member_flags_and_hooks(parameter) };
+        let member_flags = if set_parameter(parameter).is_some() { 0 } else { self.member_flags(parameter) };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
         let attributes = self.attributes(&parameter.attribute_lists, None);
 
@@ -1112,21 +1111,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             SHARP_AST_PARAM,
             member_flags | variadic_flag,
             self.line(parameter),
-            &[hint, name, default, attributes, NULL, hooks],
+            &[hint, name, default, attributes, NULL, NULL],
         )
     }
 
-    /// The flags and the hooks of the property a constructor parameter promotes, or none for any other parameter.
-    fn member_flags_and_hooks(&mut self, parameter: &FunctionLikeParameter) -> (u32, u32) {
-        let (accessor_flags, hooks) = match &parameter.hooks {
-            Some(accessors) => (
-                accessor_flags(&parameter.modifiers, accessors, self.names),
-                self.hooks(parameter.variable.name, accessors),
-            ),
-            None => (0, NULL),
-        };
+    /// The flags of the property a constructor parameter promotes, or none for any other parameter. Spec section 9
+    /// gives such a property access levels and no accessor bodies, so it has no hooks.
+    fn member_flags(&self, parameter: &FunctionLikeParameter) -> u32 {
+        let accessor_flags =
+            parameter.hooks.as_ref().map_or(0, |accessors| accessor_flags(&parameter.modifiers, accessors, self.names));
 
-        (modifier_flags(&parameter.modifiers) | accessor_flags, hooks)
+        modifier_flags(&parameter.modifiers) | accessor_flags
     }
 
     /// The property a promoted `Set` parameter declares, with the visibility, accessors and attributes it is written
@@ -1139,8 +1134,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let hint = self.hint(hint);
         let line = self.line(parameter.variable.span);
         let name = self.string(0, line, parameter.variable.name);
-        let (flags, hooks) = self.member_flags_and_hooks(parameter);
-        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
+        let flags = self.member_flags(parameter);
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, NULL]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let attributes = self.attributes(&parameter.attribute_lists, None);
 
