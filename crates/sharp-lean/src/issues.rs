@@ -6,6 +6,7 @@ use mago_reporting::Issue;
 use mago_span::Span;
 
 use crate::library;
+use crate::library::Stop;
 use crate::package;
 use crate::package::Message;
 use crate::runner::Refusal;
@@ -197,7 +198,7 @@ pub(crate) fn refused_rule(span: Span, rules: &str, namespace: &str, rule: &str,
             "it reaches {name}, which makes a namespace from a string. Name the namespace by its full name, as App.Shared.Schema"
         ),
         Refusal::Unevaluable(message) => format!("Lean cannot evaluate it: {}", one_line(message)),
-        Refusal::Stopped => stopped("the rule"),
+        Refusal::Stopped(stop) => stopped(*stop, "the rule"),
     };
 
     Issue::error(format!(
@@ -259,13 +260,18 @@ fn rejected_lean_error(span: Span, rejection: String, at: &str, error: &Message)
         .with_annotation(Annotation::primary(span))
 }
 
-/// Why Lean did not finish a file or a rule: it ran past the processor-time limit Mago sets on each Lean process.
-/// `what` names what to make end sooner, such as "the rule".
-pub(crate) fn stopped(what: &str) -> String {
-    format!(
-        "it ran past {} processor seconds, the limit Mago sets on each Lean process. Make {what} end sooner",
-        library::processor_seconds()
-    )
+/// Why Lean did not finish a file or a rule: it ran past the processor-time limit Mago sets on each Lean process, or it
+/// waited until Mago's deadline. `what` names what to make end sooner, such as "the rule".
+pub(crate) fn stopped(stop: Stop, what: &str) -> String {
+    match stop {
+        Stop::Processor => format!(
+            "it ran past {} processor seconds, the limit Mago sets on each Lean process. Make {what} end sooner",
+            library::processor_seconds()
+        ),
+        Stop::Waited => {
+            format!("it waited {} seconds without finishing. Make {what} end sooner", library::deadline().as_secs())
+        }
+    }
 }
 
 /// Lean's `message` on one line: each line trimmed and joined to the next by one space, without its final period.

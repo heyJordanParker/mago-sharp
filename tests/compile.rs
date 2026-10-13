@@ -2081,14 +2081,15 @@ fn compile_checks_a_structure_rule_over_thousands_of_imports() {
 }
 
 /// `mago compile` with each issue on one line, as `compile_lines` runs it, under a processor-time limit of `seconds`,
-/// which each Lean process it starts inherits, so a row reaches the limit long before 120 seconds, and the processor
-/// seconds it and every process it waited for used. Mago's own limit on each Lean process is `library.rs`'s
+/// which each Lean process it starts inherits, so a row reaches the limit long before 120 seconds and the deadline long
+/// before 480 seconds, and the processor seconds it and every process it waited for used. The limit is soft, or also
+/// hard when `hard` is set, as `ulimit -t` sets it. Mago's own limit on each Lean process is `library.rs`'s
 /// `each_process_a_lake_starts_runs_under_the_processor_time_limit`'s to prove: Mago takes the lower of 120 seconds and
 /// this limit, so no compile can tell the two apart.
 #[cfg(unix)]
 // `wait4` reaps the compile, which clippy can't see.
 #[allow(clippy::zombie_processes)]
-fn compile_lines_within(root: &Path, seconds: u64) -> (Output, f64) {
+fn compile_lines_within(root: &Path, seconds: u64, hard: bool) -> (Output, f64) {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::os::unix::process::ExitStatusExt;
@@ -2105,6 +2106,9 @@ fn compile_lines_within(root: &Path, seconds: u64) -> (Output, f64) {
                 return Err(std::io::Error::last_os_error());
             }
             limit.rlim_cur = seconds;
+            if hard {
+                limit.rlim_max = seconds;
+            }
             if libc::setrlimit(libc::RLIMIT_CPU, &raw const limit) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -2145,86 +2149,146 @@ fn slow(length: u64) -> String {
     ENDLESS.replace("1000000000000", &(30_000_000 + length).to_string())
 }
 
-/// Lean work that runs past the processor-time limit stops there once instead of holding the compile, and is reported
-/// where it sits while every other rule runs. Each row runs after a compile that built the runtime library.
+/// Lean work that runs past the processor-time limit, or waits until the deadline, stops there once instead of holding
+/// the compile, and is reported where it sits while every other rule runs. Each row runs after a compile that built the
+/// runtime library.
 ///
 /// Work that never ends runs under a limit of 30 seconds, and costs the compile less than two limits, which leaves room
 /// for the dozen Lean processes the rest of the compile starts on a slow machine: a rule that never ends is refused at
 /// its name, and the other rule of its `Module.lean` still judges `StoreService.sharp`; a `#eval` that never ends
 /// refuses each file its `Module.lean` judges; and a proof that never ends under `set_option maxHeartbeats 0`, which
-/// lifts Lean's own limit, refuses its law's file. Those rows run at once, each on its own thread.
+/// lifts Lean's own limit, refuses its law's file. Work that waits runs under a limit of 10 seconds, so its deadline is
+/// 40 seconds: a rule that sleeps is refused as waited, and the rule after it still judges `StoreService.sharp`; and a
+/// `#eval` that sleeps refuses each file its `Module.lean` judges. Those rows run at once, each on its own thread.
 ///
 /// Then slow rules run under a limit of 10 seconds, one row at a time, since a loaded machine raises the processor time
-/// of each rule: a slow rule that ends within the limit runs, and ten slow rules that together run past the limit all
-/// run, since each rule gets the limit of its own.
+/// of each rule. Each takes about 2 processor seconds, so ten of them pass the runner's own limit of twice the limit:
+/// a slow rule runs; ten slow rules that one `attribute [rule]` line marks all run; ten slow rules a macro of a helper
+/// file declares all run; and ten shorter rules under a hard limit of 10 seconds, which keeps the runner's own limit
+/// at 9 seconds, all run.
 #[cfg(unix)]
 #[test]
-fn lean_work_that_never_ends_stops_once_at_the_processor_time_limit_and_every_other_rule_runs() {
+fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other_rule_runs() {
     compile_succeeds(lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]).path());
-    let limit = 30;
-    let stopped = format!("it ran past {limit} processor seconds, the limit Mago sets on each Lean process");
+    let stopped = "it ran past 30 processor seconds, the limit Mago sets on each Lean process";
+    let waited = "it waited 40 seconds without finishing";
     let store_breaks = "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.";
+    let refused = |file: &str, rule: &str, why: &str| {
+        format!(
+            "app/Tenant/Store/{file}.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and its rule {rule} at line 5, column 13 does not run: {why}. Make the rule end sooner."
+        )
+    };
+    let rejected = |file: &str, why: &str| {
+        format!(
+            "app/Tenant/Store/{file}.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and Lean rejected app/Tenant/Store/Module.lean: {why}. Make its proofs and rules end sooner."
+        )
+    };
     let endless_rule = rules(
         "App.Tenant.Store",
         &format!("{IMPORTS_ONLY}\n@[rule] def endless : Rule := .imports fun _ _ => {ENDLESS}"),
     );
-    let refused = |file: &str| {
-        format!(
-            "app/Tenant/Store/{file}.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and its rule endless at line 5, column 13 does not run: {stopped}. Make the rule end sooner."
-        )
-    };
-    let slow_rule = rules(
-        "App.Tenant.Store",
-        &format!("{IMPORTS_ONLY}\n@[rule] def slow : Rule := .imports fun _ _ => {}", slow(0)),
-    );
-    // Each loop has its own length, so Lean shares no loop between rules.
-    let slow_rules: String =
-        (1..=10).map(|rule| format!("\n@[rule] def slow{rule} : Rule := .imports fun _ _ => {}", slow(rule))).collect();
-    let slow_rules = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}{slow_rules}"));
     let endless_eval = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}\n#eval {ENDLESS}"));
-    let rejected = |file: &str| {
-        format!(
-            "app/Tenant/Store/{file}.sharp:1:11:error - broken-rule: This file is in App.Tenant.Store, whose structure rules app/Tenant/Store/Module.lean holds, and Lean rejected app/Tenant/Store/Module.lean: {stopped}. Make its proofs and rules end sooner."
-        )
-    };
     let endless_proof = MONEY_PROOF
         .replace("theorem", "set_option maxHeartbeats 0 in\ntheorem")
         .replace("  simp [App.Shared.Money.addKeepsCurrency, App.Shared.Money.add]", "  repeat (first | skip)");
     let money_rejected = format!(
         "app/Shared/Money.sharp:3:14:error - unproven-law: Lean rejected app/Shared/Money.lean: {stopped}. Make its proofs and rules end sooner"
     );
-    let endless = [
+    let sleeping_rule = rules(
+        "App.Tenant.Store",
+        &format!(
+            "{IMPORTS_ONLY}\n@[rule] def sleeps : Rule := .imports fun _ _ => dbgSleep 4000000000 fun _ => false\n@[rule] def after : Rule := .neverImports App.Shared"
+        ),
+    );
+    let sleeping_eval = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}\n#eval IO.sleep 4000000000"));
+    let slow_rule = rules(
+        "App.Tenant.Store",
+        &format!("{IMPORTS_ONLY}\n@[rule] def slow : Rule := .imports fun _ _ => {}", slow(0)),
+    );
+    // Each loop has its own length, so Lean shares no loop between rules.
+    let slow_definitions: String =
+        (1..=10).map(|rule| format!("\ndef slow{rule} : Rule := .imports fun _ _ => {}", slow(rule))).collect();
+    let marked_rules = rules(
+        "App.Tenant.Store",
+        &format!(
+            "{IMPORTS_ONLY}{slow_definitions}\nattribute [rule] slow1 slow2 slow3 slow4 slow5 slow6 slow7 slow8 slow9 slow10"
+        ),
+    );
+    let slow_macro = format!(
+        "import Code.App.Tenant.Store.Slow\nopen Sharp\n\nmacro \"slow_rule \" name:ident length:num : command =>\n  `(@[rule] def $name : Rule := .imports fun _ _ => {})\n",
+        slow(0).replace("30000000", "$length").replace('\n', "\n    ")
+    );
+    let macro_rules: String = (1..=10).map(|rule| format!("\nslow_rule slow{rule} {}", 30_000_000 + rule)).collect();
+    let macro_rules = format!(
+        "import Code.App.Tenant.Store.Module\nimport App.Tenant.Store.Slow\nopen Sharp\n\n{IMPORTS_ONLY}{macro_rules}\n"
+    );
+    // Two thirds of a slow rule, so a runner's start and its first rule stay within the 9 seconds a hard limit of 10
+    // leaves on a machine twice as slow, while ten of them pass it on a machine twice as fast.
+    let shorter_rules: String = (1..=10)
+        .map(|rule| {
+            let loop_ = ENDLESS.replace("1000000000000", &(20_000_000 + rule).to_string());
+            format!("\n@[rule] def shorter{rule} : Rule := .imports fun _ _ => {loop_}")
+        })
+        .collect();
+    let shorter_rules = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}{shorter_rules}"));
+    let stopping = [
         (
+            30,
             vec![("app/Tenant/Store/Module.lean", endless_rule.as_str())],
-            vec![LEDGER_BREAKS.to_owned(), refused("Receipts"), store_breaks.to_owned(), refused("StoreService")],
+            vec![
+                LEDGER_BREAKS.to_owned(),
+                refused("Receipts", "endless", stopped),
+                store_breaks.to_owned(),
+                refused("StoreService", "endless", stopped),
+            ],
         ),
         (
+            30,
             vec![("app/Tenant/Store/Module.lean", endless_eval.as_str())],
-            vec![LEDGER_BREAKS.to_owned(), rejected("Receipts"), rejected("StoreService")],
+            vec![LEDGER_BREAKS.to_owned(), rejected("Receipts", stopped), rejected("StoreService", stopped)],
         ),
         (
+            30,
             vec![("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Money.lean", endless_proof.as_str())],
             vec![LEDGER_BREAKS.to_owned(), money_rejected, store_breaks.to_owned()],
         ),
+        (
+            10,
+            vec![("app/Tenant/Store/Module.lean", sleeping_rule.as_str())],
+            vec![
+                LEDGER_BREAKS.to_owned(),
+                refused("Receipts", "sleeps", waited),
+                refused("StoreService", "sleeps", waited),
+                store_breaks.to_owned(),
+                "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule after in app/Tenant/Store/Module.lean.".to_owned(),
+            ],
+        ),
+        (
+            10,
+            vec![("app/Tenant/Store/Module.lean", sleeping_eval.as_str())],
+            vec![LEDGER_BREAKS.to_owned(), rejected("Receipts", waited), rejected("StoreService", waited)],
+        ),
     ];
     let slow = [
+        (vec![("app/Tenant/Store/Module.lean", slow_rule.as_str())], false),
+        (vec![("app/Tenant/Store/Module.lean", marked_rules.as_str())], false),
         (
-            vec![("app/Tenant/Store/Module.lean", slow_rule.as_str())],
-            vec![LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
+            vec![
+                ("app/Tenant/Store/Slow.lean", slow_macro.as_str()),
+                ("app/Tenant/Store/Module.lean", macro_rules.as_str()),
+            ],
+            false,
         ),
-        (
-            vec![("app/Tenant/Store/Module.lean", slow_rules.as_str())],
-            vec![LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
-        ),
+        (vec![("app/Tenant/Store/Module.lean", shorter_rules.as_str())], true),
     ];
     std::thread::scope(|scope| {
-        let rows: Vec<_> = endless
+        let rows: Vec<_> = stopping
             .into_iter()
-            .map(|(files, expected)| {
+            .map(|(limit, files, expected)| {
                 scope.spawn(move || {
                     let directory = structured(&files);
 
-                    let (output, seconds) = compile_lines_within(directory.path(), limit);
+                    let (output, seconds) = compile_lines_within(directory.path(), limit, false);
 
                     assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
                     assert!(
@@ -2239,13 +2303,63 @@ fn lean_work_that_never_ends_stops_once_at_the_processor_time_limit_and_every_ot
             row.join().unwrap();
         }
     });
-    for (files, expected) in slow {
+    for (files, hard) in slow {
         let directory = structured(&files);
 
-        let (output, _) = compile_lines_within(directory.path(), 10);
+        let (output, _) = compile_lines_within(directory.path(), 10, hard);
 
-        assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
+        assert_eq!(
+            issue_lines(&output),
+            [LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
+            "{files:?}: {}",
+            printed(&output)
+        );
     }
+}
+
+/// Ctrl-C ends a compile and the Lean it waits on, though Mago runs Lake in a process group of its own so it can end
+/// Lake's at the deadline: the terminal sends it to the compile's group, and Mago sends it on to Lake's.
+#[cfg(unix)]
+#[test]
+fn ctrl_c_ends_a_compile_and_the_lean_it_waits_on() {
+    use std::os::unix::process::CommandExt;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    let sleeping_eval = rules("App.Tenant.Store", &format!("{IMPORTS_ONLY}\n#eval IO.sleep 4000000000"));
+    let directory = structured(&[("app/Tenant/Store/Module.lean", sleeping_eval.as_str())]);
+    let sleeping = format!(
+        "{}/.sharp/.lean/Proofs/App/Tenant/Store/Module.lean",
+        directory.path().file_name().unwrap().to_string_lossy()
+    );
+    let leans = || String::from_utf8(Command::new("pgrep").args(["-f", &sleeping]).output().unwrap().stdout).unwrap();
+    let mut compile = command(directory.path(), "never")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while leans().is_empty() {
+        assert!(started.elapsed() < Duration::from_secs(300), "the sleeping Lean never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // SAFETY: `kill` only sends a signal, to the group the compile leads, as a terminal's Ctrl-C does.
+    assert_eq!(unsafe { libc::kill(-i32::try_from(compile.id()).unwrap(), libc::SIGINT) }, 0);
+
+    assert_eq!(compile.wait().unwrap().signal(), Some(libc::SIGINT));
+    let ended = Instant::now();
+    while !leans().is_empty() && ended.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let left = leans();
+    if !left.is_empty() {
+        Command::new("pkill").args(["-f", &sleeping]).status().unwrap();
+    }
+    assert_eq!(left, "", "Lean outlived the compile");
 }
 
 #[test]

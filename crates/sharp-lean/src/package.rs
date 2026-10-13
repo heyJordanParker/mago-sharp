@@ -22,6 +22,7 @@ use serde::Serialize;
 use crate::issues;
 use crate::library;
 use crate::library::Lake;
+use crate::library::Stop;
 use crate::translate::Declaration;
 use crate::translate::Translation;
 use crate::translate::Unmodeled;
@@ -439,27 +440,29 @@ struct LeanLib<'lakefile> {
 pub(crate) struct Failed {
     /// In the order the build was asked for them.
     pub(crate) modules: Vec<String>,
-    /// The modules in which the build's Lean ran past `library::processor_seconds()`.
-    stopped: Vec<String>,
+    /// The modules whose Lean the build stopped before it finished, and how.
+    unfinished: Vec<(String, Stop)>,
 }
 
-/// The modules in which the processor-time limit stopped Lean, from the log of a `lake build`: Lake heads the log of
-/// each module it failed to build with `✖ [<job>/<jobs>] Building <module>`, and reports how Lean exited in it.
-fn stopped_modules(log: &str) -> Vec<String> {
-    let mut building = None;
-    let mut stopped = Vec::new();
+/// Each module Lake failed to build, from the log of a `lake build`, and whether the processor-time limit stopped its
+/// Lean: Lake heads the log of each module it failed to build with `✖ [<job>/<jobs>] Building <module>`, and reports
+/// how Lean exited in it.
+fn logged_failures(log: &str) -> Vec<(String, bool)> {
+    let mut failures: Vec<(String, bool)> = Vec::new();
     for line in log.lines() {
         if let Some(job) = line.strip_prefix("✖ [") {
-            building = job.split_once("] Building ").and_then(|(_, module)| module.split(' ').next());
+            if let Some(module) = job.split_once("] Building ").and_then(|(_, module)| module.split(' ').next()) {
+                failures.push((module.to_owned(), false));
+            }
         } else if let Some(code) = line.trim().strip_prefix("error: Lean exited with code ")
             && code.parse().is_ok_and(library::stopped_code)
-            && let Some(module) = building.take()
+            && let Some((_, stopped)) = failures.last_mut()
         {
-            stopped.push(module.to_owned());
+            *stopped = true;
         }
     }
 
-    stopped
+    failures
 }
 
 /// One message of `lean --json`.
@@ -606,43 +609,49 @@ impl Package {
 
     /// Builds `modules` with Lake, and returns the ones that did not build. One build runs them all; when it fails, each
     /// module that build did not finish is out of date, which `lake build --no-build` tells apart without running Lean
-    /// again.
+    /// again. A build Mago ended at `library::deadline()` logged no failure for the modules it was building, which
+    /// waited, nor for those that waited on them, which `rules::check` traces to the module they import.
     pub(crate) fn build(&self, modules: &[String]) -> io::Result<Failed> {
         if modules.is_empty() {
             return Ok(Failed::default());
         }
-        let output = self.lake.command().arg("build").args(modules).current_dir(&self.directory).output()?;
+        let (output, waited) = library::output_before_deadline(
+            self.lake.command().arg("build").args(modules).current_dir(&self.directory),
+        )?;
         if output.status.success() {
             return Ok(Failed::default());
         }
 
-        let mut failed =
-            Failed { stopped: stopped_modules(&String::from_utf8_lossy(&output.stdout)), ..Failed::default() };
+        let logged = logged_failures(&String::from_utf8_lossy(&output.stdout));
+        let mut failed = Failed::default();
         for module in modules {
             let built =
                 self.lake.command().args(["build", "--no-build"]).arg(module).current_dir(&self.directory).output()?;
-            if !built.status.success() {
-                failed.modules.push(module.clone());
+            if built.status.success() {
+                continue;
+            }
+            failed.modules.push(module.clone());
+            if waited && !logged.iter().any(|(failure, _)| failure == module) {
+                failed.unfinished.push((module.clone(), Stop::Waited));
             }
         }
+        failed
+            .unfinished
+            .extend(logged.into_iter().filter(|(_, stopped)| *stopped).map(|(module, _)| (module, Stop::Processor)));
 
         Ok(failed)
     }
 
     /// The errors Lean reports for `module`, which `failed` holds, with each error's line, from `lake env lean --json`:
-    /// Lake's own log keeps a message's position only inside its text. A module in which the build stopped Lean at its
-    /// processor-time limit is not elaborated again, since it would only stop there again.
+    /// Lake's own log keeps a message's position only inside its text. A module whose Lean the build stopped is not
+    /// elaborated again, since it would only stop there again.
     pub(crate) fn errors(&self, module: &str, failed: &Failed) -> io::Result<Vec<Message>> {
-        if failed.stopped.iter().any(|stopped| stopped == module) {
-            return Ok(vec![Message::error(0, issues::stopped("its proofs and rules"))]);
+        if let Some((_, stop)) = failed.unfinished.iter().find(|(unfinished, _)| unfinished == module) {
+            return Ok(vec![Message::error(0, issues::stopped(*stop, "its proofs and rules"))]);
         }
-        let output = self
-            .lake
-            .command()
-            .args(["env", "lean", "--json"])
-            .arg(source_of(module))
-            .current_dir(&self.directory)
-            .output()?;
+        let (output, waited) = library::output_before_deadline(
+            self.lake.command().args(["env", "lean", "--json"]).arg(source_of(module)).current_dir(&self.directory),
+        )?;
 
         let mut errors = Vec::new();
         for line in String::from_utf8_lossy(&output.stdout).lines().filter(|line| line.starts_with('{')) {
@@ -651,8 +660,10 @@ impl Package {
                 errors.push(message);
             }
         }
-        if library::stopped(output.status) {
-            errors.push(Message::error(0, issues::stopped("its proofs and rules")));
+        if waited {
+            errors.push(Message::error(0, issues::stopped(Stop::Waited, "its proofs and rules")));
+        } else if library::stopped(output.status) {
+            errors.push(Message::error(0, issues::stopped(Stop::Processor, "its proofs and rules")));
         } else if errors.is_empty() && !output.status.success() {
             errors.push(Message::error(
                 1,
@@ -840,7 +851,7 @@ mod tests {
     /// Lake's log of a build in which the limit stopped Lean in one module, and Lean rejected another.
     #[cfg(unix)]
     #[test]
-    fn only_a_module_whose_lean_the_processor_time_limit_ended_is_stopped() {
+    fn lake_logs_each_failed_module_and_only_one_whose_lean_the_processor_time_limit_ended_is_stopped() {
         let log = "✔ [2/7] Built App.Fine (372ms)\n\
                    ✖ [4/7] Building App.Tenant.Store.Module (10.1s)\n\
                    trace: .> LEAN_PATH=.lake/build/lib/lean lean App/Tenant/Store/Module.lean --json\n\
@@ -853,7 +864,7 @@ mod tests {
                    - App.Bad\n\
                    error: build failed\n";
 
-        assert_eq!(stopped_modules(log), ["App.Tenant.Store.Module"]);
+        assert_eq!(logged_failures(log), [("App.Tenant.Store.Module".to_owned(), true), ("App.Bad".to_owned(), false)]);
     }
 
     #[test]

@@ -210,16 +210,6 @@ structure RulesModule where
   /-- Dot separated: "App.Shared". -/
   namespace_ : String
 
-/-- A request: the rules modules, the facts of every `.sharp` file, the rules an earlier runner judged, which this runner
-skips, the rules an earlier runner was judging when it stopped at its processor-time limit, which this runner refuses
-without judging them, and the processor milliseconds each rule may use. -/
-structure Rules where
-  modules : Array RulesModule
-  files : Array (Array Fact)
-  judged : Array String
-  stopped : Array String
-  limit : Nat
-
 def location (file : String) : Decode Location :=
   return ⟨file, (← u32).toNat, (← u32).toNat, (← u32).toNat, (← u32).toNat⟩
 
@@ -240,11 +230,6 @@ def file : Decode (Array Fact) := do
   let path ← string
   many (fact path)
 
-def rules : Decode Rules := do
-  let modules ← many do return { module := (← string).toName, namespace_ := ← string }
-  let files ← many file
-  return { modules, files, judged := ← many string, stopped := ← many string, limit := (← u32).toNat }
-
 /-- Why the runner does not run a rule: it trusts more than Lean's kernel checks, or it builds a namespace from a string
 instead of naming one `Code` declares, so a misspelled name would never fire. -/
 inductive Refusal where
@@ -256,8 +241,10 @@ inductive Refusal where
   /-- `Sharp.Namespace.mk` or `Sharp.Rule.breaks`, which only the runtime library and the runner use. -/
   | reserved (name : Name)
   | unevaluable (message : String)
-  /-- A runner Mago stopped at its processor-time limit was judging the rule. -/
+  /-- The rule ran past its processor-time limit. -/
   | stopped
+  /-- The rule waited until its deadline. -/
+  | waited
 
 def Refusal.code : Refusal → UInt8
   | .gap => 1
@@ -267,9 +254,36 @@ def Refusal.code : Refusal → UInt8
   | .reserved _ => 5
   | .unevaluable _ => 6
   | .stopped => 7
+  | .waited => 8
+
+/-- A request: the rules modules, the facts of every `.sharp` file, the rules an earlier runner judged, which this runner
+skips, the rules an earlier runner stopped, which this runner refuses as it stopped them without judging them, and the
+processor milliseconds and the milliseconds each rule may use. -/
+structure Rules where
+  modules : Array RulesModule
+  files : Array (Array Fact)
+  judged : Array String
+  stopped : Array (String × Refusal)
+  limit : Nat
+  deadline : Nat
+
+/-- A rule an earlier runner stopped, and the code of how. -/
+def stoppedRule : Decode (String × Refusal) := do
+  let name ← string
+  match ← u8 with
+  | 7 => return (name, .stopped)
+  | 8 => return (name, .waited)
+  | k => throw s!"unknown stop {k}"
+
+def rules : Decode Rules := do
+  let modules ← many do return { module := (← string).toName, namespace_ := ← string }
+  let files ← many file
+  return {
+    modules, files, judged := ← many string, stopped := ← many stoppedRule, limit := (← u32).toNat,
+    deadline := (← u32).toNat }
 
 def Refusal.detail : Refusal → String
-  | .gap | .stopped => ""
+  | .gap | .stopped | .waited => ""
   | .axiom_ name | .unsafe_ name | .implementedBy name | .reserved name => name.toString
   | .unevaluable message => message
 
@@ -343,25 +357,30 @@ def processorTime : IO Int := do
   let usage ← Std.IO.Process.getResourceUsage
   return usage.cpuUserTime.toInt + usage.cpuSystemTime.toInt
 
-/-- How the runner exits when a rule runs past its limit: the status `lake env` reports for a process `SIGXCPU` ended, 128
-plus the signal, so Mago takes the same path for both. -/
-def stoppedStatus : UInt8 := 152
+/-- How the runner exits when a rule runs past its processor-time limit: `PAST_LIMIT` in `src/runner.rs`. It is not 152,
+which only the kernel's `SIGXCPU` gives, once the runner itself runs past its own limit. -/
+def pastLimit : UInt8 := 124
 
-/-- Runs `act` on a thread of its own while this thread reads the processor time every 50 milliseconds, and ends the
-runner as `stoppedStatus` once `act` has used `limit` processor milliseconds. Lean holds no global lock, so evaluated code
-never keeps this thread from reading. -/
-def watched {α : Type} (limit : Nat) (act : IO α) : IO α := do
+/-- How the runner exits when a rule waits until its deadline: `PAST_DEADLINE` in `src/runner.rs`. -/
+def pastDeadline : UInt8 := 125
+
+/-- Runs `act` on a thread of its own while this thread reads the time every 50 milliseconds, and ends the runner as
+`pastLimit` once `act` has used `limit` processor milliseconds, or as `pastDeadline` once `deadline` milliseconds have
+passed, as when it waits. Lean holds no global lock, so evaluated code never keeps this thread from reading. -/
+def watched {α : Type} (limit deadline : Nat) (act : IO α) : IO α := do
   let started ← processorTime
+  let startedAt ← IO.monoMsNow
   let task ← IO.asTask act (prio := .dedicated)
   while !(← IO.hasFinished task) do
-    if (← processorTime) - started ≥ limit then IO.Process.exit stoppedStatus
+    if (← processorTime) - started ≥ limit then IO.Process.exit pastLimit
+    if (← IO.monoMsNow) - startedAt ≥ deadline then IO.Process.exit pastDeadline
     IO.sleep 50
   IO.ofExcept task.get
 
 /-- Writes the answer's header, then the `entry` of each rule of each rules module an earlier runner did not judge, in
-request order, each as soon as it is judged, so the rules it judged survive a stop at the processor-time limit. Before
-it judges a rule, it writes `judging` and the rule's name on standard error, so Mago knows which rule ran when the
-runner stopped. Each rule gets the request's `limit` of its own, which `watched` keeps. -/
+request order, each as soon as it is judged, so the rules it judged survive a stop. Before it judges a rule, it writes
+`judging` and the rule's name on standard error, so Mago knows which rule ran when the runner stopped. Each rule gets
+the request's `limit` and `deadline` of its own, which `watched` keeps. -/
 unsafe def judge (env : Environment) (request : Rules) : IO Unit := do
   let stdout ← IO.getStdout
   let stderr ← IO.getStderr
@@ -380,10 +399,12 @@ unsafe def judge (env : Environment) (request : Rules) : IO Unit := do
     for name in ruleAttribute.ext.getModuleEntries env moduleIndex do
       if request.judged.contains name.toString then continue
       let judged : Except (Refusal × Nat × Nat) (Array (UInt32 × UInt32)) ←
-        if request.stopped.contains name.toString then pure (.error (.stopped, ← placeOf env name)) else do
+        if let some (_, refusal) := request.stopped.find? (·.1 == name.toString) then
+          pure (.error (refusal, ← placeOf env name))
+        else do
           stderr.putStrLn s!"judging {name}"
           stderr.flush
-          watched request.limit do
+          watched request.limit request.deadline do
             let evaluated : Except Refusal Rule ← match ← refusalOf env name with
               | some refusal => pure (.error refusal)
               | none => pure <| (env.evalConst Rule {} name).mapError Refusal.unevaluable

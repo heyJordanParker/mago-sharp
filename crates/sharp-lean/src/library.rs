@@ -4,11 +4,26 @@
 use std::fmt::Write;
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Child;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Output;
+use std::process::Stdio;
+#[cfg(unix)]
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::Once;
+#[cfg(unix)]
+use std::sync::PoisonError;
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use mago_build_id::BUILD_ID;
@@ -201,6 +216,150 @@ pub(crate) fn stopped_code(code: i32) -> bool {
         let _ = code;
         false
     }
+}
+
+/// How Mago ended Lean work that did not finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// It ran past `processor_seconds()`.
+    Processor,
+    /// It went `deadline()` without finishing: it waited, since work that computes reaches the processor limit first.
+    Waited,
+}
+
+/// The wall-clock time Lean work may go without finishing: four times `processor_seconds()`.
+pub(crate) fn deadline() -> Duration {
+    Duration::from_secs(processor_seconds().saturating_mul(4))
+}
+
+/// The process group `output_before_deadline` waits on, or 0. It is not Mago's own group, so a terminal's Ctrl-C reaches
+/// it only through `forward`.
+#[cfg(unix)]
+static WAITED_ON: AtomicI32 = AtomicI32::new(0);
+
+/// Keeps `output_before_deadline` to one group at a time, the one `WAITED_ON` holds.
+#[cfg(unix)]
+static ONE_GROUP: Mutex<()> = Mutex::new(());
+
+/// Runs `command` in a process group of its own and returns how it exited and what it wrote, and whether it wrote
+/// nothing for `deadline()`, so Mago ended the group. The deadline counts from the last thing it wrote, so a
+/// `lake build` that reports each module it builds never reaches it however many modules it builds, while a Lean that
+/// waits does. A signal that ends Mago ends the group too, as it did while the group was Mago's own.
+pub(crate) fn output_before_deadline(command: &mut Command) -> io::Result<(Output, bool)> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    let _one = {
+        std::os::unix::process::CommandExt::process_group(command, 0);
+        forward_signals();
+        ONE_GROUP.lock().unwrap_or_else(PoisonError::into_inner)
+    };
+    let mut child = command.spawn()?;
+    #[cfg(unix)]
+    WAITED_ON.store(libc::pid_t::try_from(child.id()).map_err(io::Error::other)?, Ordering::SeqCst);
+    let output = wait_before_deadline(&mut child);
+    #[cfg(unix)]
+    WAITED_ON.store(0, Ordering::SeqCst);
+
+    output
+}
+
+/// Sends each signal that ends Mago from a terminal or `kill`, which Mago does not ignore, to the group `WAITED_ON`
+/// holds, then ends Mago with it as before.
+#[cfg(unix)]
+fn forward_signals() {
+    static FORWARDING: Once = Once::new();
+    FORWARDING.call_once(|| {
+        for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP, libc::SIGTERM] {
+            // SAFETY: `sigaction` is plain data, which zeroes make valid.
+            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            // SAFETY: `sigaction` only reads the handler of `signal` into `previous`.
+            if unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut previous) } != 0
+                || previous.sa_sigaction != libc::SIG_DFL
+            {
+                continue;
+            }
+            // SAFETY: as for `previous`.
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            // `sigaction` takes the handler as its address.
+            #[allow(clippy::fn_to_numeric_cast_any)]
+            let handler = forward as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_sigaction = handler;
+            action.sa_flags = libc::SA_RESETHAND;
+            // SAFETY: `action` is a valid `sigaction`, and `forward` is async-signal-safe.
+            unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
+        }
+    });
+}
+
+/// Sends `signal` to the group `WAITED_ON` holds, then raises it again, which `SA_RESETHAND` made end Mago.
+#[cfg(unix)]
+extern "C" fn forward(signal: libc::c_int) {
+    let group = WAITED_ON.load(Ordering::SeqCst);
+    if group != 0 {
+        // SAFETY: `kill` is async-signal-safe.
+        unsafe { libc::kill(-group, signal) };
+    }
+    // SAFETY: `raise` is async-signal-safe.
+    unsafe { libc::raise(signal) };
+}
+
+/// What `child` wrote and how it exited, and whether Mago ended its group at `deadline()`.
+fn wait_before_deadline(child: &mut Child) -> io::Result<(Output, bool)> {
+    let missing = || io::Error::other("a Lean process has no output stream");
+    let (stdout, stderr) = (child.stdout.take().ok_or_else(missing)?, child.stderr.take().ok_or_else(missing)?);
+    let (wrote, written) = mpsc::channel();
+    let stdout = read_all(stdout, wrote.clone());
+    let stderr = read_all(stderr, wrote);
+    let waited = loop {
+        match written.recv_timeout(deadline()) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                #[cfg(unix)]
+                end_group(child)?;
+                #[cfg(not(unix))]
+                child.kill()?;
+                break true;
+            }
+        }
+    };
+    let status = child.wait()?;
+    let joined = |reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+        reader.join().map_err(|_| io::Error::other("a reader of a Lean process panicked"))?
+    };
+
+    Ok((Output { status, stdout: joined(stdout)?, stderr: joined(stderr)? }, waited))
+}
+
+/// Reads `stream` to its end on a thread of its own, and sends on `wrote` each time it reads something.
+fn read_all(
+    mut stream: impl Read + Send + 'static,
+    wrote: mpsc::Sender<()>,
+) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 8192];
+        loop {
+            let read = stream.read(&mut chunk)?;
+            if read == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            let _ = wrote.send(());
+        }
+    })
+}
+
+/// Ends `child` and every process of its group, such as each `lean` a `lake` started.
+#[cfg(unix)]
+fn end_group(child: &Child) -> io::Result<()> {
+    let group = libc::pid_t::try_from(child.id()).map_err(io::Error::other)?;
+    // SAFETY: `killpg` only sends a signal, to the group `child` leads since it started with `process_group(0)`.
+    if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 /// The runner executable in the library's build.

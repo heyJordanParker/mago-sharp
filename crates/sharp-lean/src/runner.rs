@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Output;
 use std::process::Stdio;
+use std::time::Duration;
 
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
@@ -13,6 +14,7 @@ use mago_extension::PayloadWriter;
 use crate::facts::Facts;
 use crate::facts::Kind;
 use crate::library;
+use crate::library::Stop;
 use crate::package::Package;
 
 const LAW_PROTOCOL_MAGIC: [u8; 4] = *b"MLAW";
@@ -25,6 +27,12 @@ const BROKEN_RESPONSE: u16 = 4;
 
 /// What the runner writes on its standard error before the name of each rule it judges.
 const JUDGING: &str = "judging ";
+
+/// How the runner exits when a rule runs past `library::processor_seconds()`: `pastLimit` in `Runner.lean`.
+const PAST_LIMIT: i32 = 124;
+
+/// How the runner exits when a rule waits until `library::deadline()`: `pastDeadline` in `Runner.lean`.
+const PAST_DEADLINE: i32 = 125;
 
 /// One law a request asks about.
 pub(crate) struct Question<'question> {
@@ -96,8 +104,8 @@ pub(crate) enum Refusal {
     Reserved(String),
     /// Lean's message when it could not evaluate the rule.
     Unevaluable(String),
-    /// The runner ran past `library::processor_seconds()` while it judged the rule.
-    Stopped,
+    /// The rule ran past `library::processor_seconds()`, or waited until `library::deadline()`.
+    Stopped(Stop),
 }
 
 /// Runs the runner of `library` on the modules Lake built in `package`, which imports `module` and answers each
@@ -116,32 +124,40 @@ pub(crate) fn check(
 
 /// Runs the runner of `library` on the modules Lake built in `package`, which imports every rules module, each named
 /// with the namespace its rules constrain, and answers with each rule and the facts of `files` that break it, or why it
-/// did not run the rule. `rules` is at least the number of rules the modules hold.
+/// did not run the rule.
 ///
 /// The runner names each rule on its standard error before it judges it, writes each judged rule as soon as it has one,
-/// and gives each rule `library::processor_seconds()` of its own: it watches the processor time each rule uses, and
-/// exits as `SIGXCPU` would once a rule passes the limit. That rule is refused as `Refusal::Stopped`, and a new runner
-/// judges the rules no runner judged, so every other rule still runs. The runner's own processor-time limit is the limit
-/// of every rule and one more, so a runner whose watch failed still ends.
+/// and watches each rule: once a rule runs past `library::processor_seconds()` or waits until `library::deadline()`,
+/// the runner exits as `PAST_LIMIT` or `PAST_DEADLINE`. That rule is refused as `Refusal::Stopped`, and a new runner
+/// judges the rules no runner judged, so every other rule still runs. The runner's own processor-time limit is twice
+/// the limit, so a runner whose watch failed still ends: `SIGXCPU` then starts a new runner from the rule it stopped,
+/// which is refused only when it was the first its runner judged, since it then had that limit to itself.
 pub(crate) fn rules(
     library: &Path,
     package: &Package,
     modules: &[(&str, &str)],
     files: &[(&str, &Facts)],
-    rules: usize,
 ) -> io::Result<Vec<Broken>> {
     let seconds = library::processor_seconds();
-    let limit = u32::try_from(seconds.saturating_mul(1000)).unwrap_or(u32::MAX);
-    let backstop = seconds.saturating_mul(u64::try_from(rules).unwrap_or(u64::MAX).saturating_add(1));
+    let milliseconds = |duration: Duration| u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
+    let limits = (milliseconds(Duration::from_secs(seconds)), milliseconds(library::deadline()));
     let mut judged: Vec<Broken> = Vec::new();
-    let mut stopped: Vec<String> = Vec::new();
+    let mut stopped: Vec<(String, Stop)> = Vec::new();
     loop {
-        let output = run(library, package, &encode_rules(modules, files, &judged, &stopped, limit)?, backstop)?;
-        if library::stopped(output.status)
-            && let Some(rule) = judging(&output.stderr)
+        let request = encode_rules(modules, files, &judged, &stopped, limits)?;
+        let output = run(library, package, &request, seconds.saturating_mul(2))?;
+        let started = judging(&output.stderr);
+        let stop = match output.status.code() {
+            Some(PAST_LIMIT) => Some(Stop::Processor),
+            Some(PAST_DEADLINE) => Some(Stop::Waited),
+            _ if library::stopped(output.status) && started.len() == 1 => Some(Stop::Processor),
+            _ => None,
+        };
+        if let Some(rule) = started.last()
+            && (stop.is_some() || library::stopped(output.status))
         {
             judged.extend(decode_broken(&output.stdout, modules.len(), files).map_err(io::Error::other)?);
-            stopped.push(rule);
+            stopped.extend(stop.map(|stop| (rule.clone(), stop)));
             continue;
         }
 
@@ -150,9 +166,9 @@ pub(crate) fn rules(
     }
 }
 
-/// The rule the runner judged last, from the last `judging <rule>` line of its standard error.
-fn judging(stderr: &[u8]) -> Option<String> {
-    String::from_utf8_lossy(stderr).lines().rev().find_map(|line| line.strip_prefix(JUDGING)).map(str::to_owned)
+/// The rules the runner started to judge, in order, from the `judging <rule>` lines of its standard error.
+fn judging(stderr: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stderr).lines().filter_map(|line| line.strip_prefix(JUDGING)).map(str::to_owned).collect()
 }
 
 /// The answer the runner wrote, or an error with its exit status and the rest of its standard error.
@@ -286,14 +302,14 @@ fn decode(payload: &[u8], questions: usize) -> Result<Vec<Answer>, String> {
 }
 
 /// A `Rules` request: each module and its namespace, then each file's path and facts, then each rule an earlier runner
-/// judged, which the runner skips, then each rule it refuses as `Refusal::Stopped` without judging it, then the
-/// processor milliseconds each rule may use.
+/// judged, which the runner skips, then each rule it refuses as `Refusal::Stopped` without judging it, with the code of
+/// its refusal, then the processor milliseconds and the milliseconds each rule may use.
 fn encode_rules(
     modules: &[(&str, &str)],
     files: &[(&str, &Facts)],
     judged: &[Broken],
-    stopped: &[String],
-    limit: u32,
+    stopped: &[(String, Stop)],
+    (limit, deadline): (u32, u32),
 ) -> io::Result<Vec<u8>> {
     let mut writer = header(RULES_REQUEST);
     writer.write_length(modules.len()).map_err(io::Error::other)?;
@@ -334,10 +350,15 @@ fn encode_rules(
         writer.write_string(&broken.rule).map_err(io::Error::other)?;
     }
     writer.write_length(stopped.len()).map_err(io::Error::other)?;
-    for rule in stopped {
+    for (rule, stop) in stopped {
         writer.write_string(rule).map_err(io::Error::other)?;
+        writer.write_u8(match stop {
+            Stop::Processor => 7,
+            Stop::Waited => 8,
+        });
     }
     writer.write_u32(limit);
+    writer.write_u32(deadline);
 
     Ok(writer.finish())
 }
@@ -367,7 +388,8 @@ fn decode_broken(payload: &[u8], modules: usize, files: &[(&str, &Facts)]) -> Re
                 4 => Refusal::ImplementedBy(detail),
                 5 => Refusal::Reserved(detail),
                 6 => Refusal::Unevaluable(detail),
-                7 => Refusal::Stopped,
+                7 => Refusal::Stopped(Stop::Processor),
+                8 => Refusal::Stopped(Stop::Waited),
                 code => return Err(format!("the runner answered with the unknown rule refusal {code}")),
             };
             let line = reader.read_u32("rule line").map_err(error)?;
@@ -408,12 +430,12 @@ mod tests {
         let mut writer = header(BROKEN_RESPONSE);
         writer.write_u32(0);
         writer.write_string("App.Shared.Module.neverReachesTenant")?;
-        writer.write_u8(8);
+        writer.write_u8(9);
         writer.write_string("App.Shared.Ledgr")?;
 
         assert_eq!(
             decode_broken(&writer.finish(), 1, &[]).err().as_deref(),
-            Some("the runner answered with the unknown rule refusal 8")
+            Some("the runner answered with the unknown rule refusal 9")
         );
 
         Ok(())
