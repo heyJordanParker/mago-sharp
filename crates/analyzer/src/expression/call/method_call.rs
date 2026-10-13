@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_word::Word;
 use mago_word::WordMap;
+use mago_word::word;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -42,6 +43,7 @@ use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
 use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
@@ -76,6 +78,7 @@ use crate::resolver::method::report_non_existent_method;
 use crate::resolver::method::resolve_method_targets;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::resolver::static_property::StaticProperty;
+use crate::resolver::static_property::StaticPropertyName;
 use crate::statement::keys_mix_a_backed_enum;
 use crate::statement::report_keys_read_back;
 use crate::statement::report_keys_sharing_entries;
@@ -509,6 +512,11 @@ where
         )?;
     }
 
+    // The arguments a changing method stores have their types once the invocation is analyzed.
+    if context.dialect.is_sharp() && changes_collection {
+        check_stored_in_static(context, artifacts, object, argument_list);
+    }
+
     // A search compares each element with the value as `==` does, so it runs once the value's type is known. A value
     // that is no element is refused by its argument check.
     if searches_list
@@ -625,6 +633,36 @@ where
     );
 
     true
+}
+
+/// A method that changes a static collection, as `Cache.all.add(this.store)`, stores its arguments in the static, which
+/// holds no `foreign` object, spec section 29.
+fn check_stored_in_static<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    collection: &Expression<'_>,
+    argument_list: &ArgumentList<'_>,
+) where
+    A: Arena,
+{
+    let Expression::Access(Access::Property(access)) = collection.unparenthesized() else {
+        return;
+    };
+    let Some(StaticProperty {
+        class: Expression::ConstantAccess(class),
+        name: StaticPropertyName::Identifier(name),
+        ..
+    }) = StaticProperty::from_property_access(access, context.resolved_names)
+    else {
+        return;
+    };
+
+    let class = word(context.resolved_names.get(&class.name));
+    for argument in argument_list.arguments.iter() {
+        if let Some(stored) = artifacts.get_expression_type(argument.value()) {
+            check_foreign_static_write(context, class, word(name.value), stored, argument.value().span());
+        }
+    }
 }
 
 /// A method that changes a PHP# collection writes it back where it lives, as spec section 12 decides, so the

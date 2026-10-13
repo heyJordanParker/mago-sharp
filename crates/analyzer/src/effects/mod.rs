@@ -142,10 +142,27 @@ pub(crate) struct Impurity {
     pub(crate) effect: Option<Effect>,
 }
 
+/// The cause of the effect a member of a `foreign` class has by itself, spec section 29, which no call or write gives:
+/// an empty class and an empty member.
+pub(crate) fn member_of_foreign_class() -> (Word, Word) {
+    (empty_word(), empty_word())
+}
+
 impl Impurity {
     /// The reason as a sentence's predicate, such as "calls `getenv`, which has no `extern` declaration", with each
     /// class named by `class_name` and each effect by `effect_name`.
     pub(crate) fn describe(&self, class_name: &dyn Fn(Word) -> String, effect_name: &dyn Fn(Word) -> String) -> String {
+        if self.cause == member_of_foreign_class()
+            && let Some(Effect::Foreign(effect)) = self.effect
+        {
+            let class = format!("a member of the `foreign` class `{}`", effect_name(effect));
+
+            return match self.path.last() {
+                Some(body) => format!("reaches `{}`, {class}", written(*body, class_name)),
+                None => format!("is {class}"),
+            };
+        }
+
         let cause = written(self.cause, class_name);
         match (self.path.last().map(|body| written(*body, class_name)), self.effect) {
             (None, Some(Effect::Foreign(effect))) => {

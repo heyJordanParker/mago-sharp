@@ -61,6 +61,7 @@ use crate::effects::EffectSummary;
 use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
+use crate::effects::member_of_foreign_class;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
@@ -87,6 +88,12 @@ pub(crate) fn record<'ast, 'arena, A>(
     let function_values = std::mem::take(&mut artifacts.function_values);
     let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
     summary.function_values = function_values;
+    // Code that reaches a `foreign` object has its class's effect, whatever its members do (spec section 29), so each
+    // member has it too. A pure declaration then refuses a `foreign` implementation, and a call through an interface or
+    // a base class has the effect of the `foreign` override it reaches.
+    if let Some(effect) = foreign_class(context.codebase, class) {
+        summary.effects.insert(0, (Effect::Foreign(effect), code.span(), member_of_foreign_class()));
+    }
     artifacts.effect_summaries.push(summary);
     artifacts.effect_summaries.append(&mut lambdas);
 }

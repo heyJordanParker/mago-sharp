@@ -10,6 +10,8 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::union::TUnion;
+use mago_names::binding::MethodParts;
 use mago_names::display_sharp_member;
 use mago_names::short_name;
 use mago_reporting::Annotation;
@@ -344,10 +346,28 @@ pub(crate) fn check_uses<A>(
             continue;
         }
 
-        let mut foreign: Vec<String> = context
+        // The message names the `foreign` classes the file can name without another import: the standard library's,
+        // its namespace's and its imports'. The file depends on each class it could name, so the message follows a
+        // class that becomes `foreign` or stops being one, as a compile from scratch gives it.
+        let namespace = context.scope.namespace_name().unwrap_or_default();
+        let nameable: Vec<_> = context
             .codebase
             .class_likes
             .values()
+            .filter(|class| {
+                let name = class.original_name.as_bytes();
+                let class_namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&b""[..], |end| &name[..end]);
+
+                class_namespace.eq_ignore_ascii_case(b"Sharp")
+                    || class_namespace.eq_ignore_ascii_case(namespace)
+                    || context.imported_names.contains_key(&ascii_lowercase_word(name))
+            })
+            .collect();
+        for class in &nameable {
+            artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, class.name, false);
+        }
+        let mut foreign: Vec<String> = nameable
+            .into_iter()
             .filter(|class| class.flags.is_foreign())
             .map(|class| {
                 sharp_class_like_name(
@@ -364,7 +384,7 @@ pub(crate) fn check_uses<A>(
         context.collector.report_with_code(
             IssueCode::InvalidEffect,
             Issue::error(format!(
-                "`{}` is not an effect: `uses` takes {} or {}.",
+                "`{}` is not an effect: `uses` takes {}, {} or a `foreign` class.",
                 String::from_utf8_lossy(name.value),
                 effects.join(", "),
                 short_name(events()),
@@ -375,28 +395,32 @@ pub(crate) fn check_uses<A>(
     }
 }
 
-/// The names every effect `uses` of a program writes. A method with a body names only its function parameters in
-/// `uses`, as the semantics checker holds it to, so its `uses` names no effect.
+/// The names every effect `uses` of a program writes. A method's `uses` also names its function parameters, with or
+/// without a body, which are no effect, and a method with a body names only those, as the semantics checker holds it
+/// to.
 struct UsesWalker;
 
-/// The names [`UsesWalker`] collects, and the `uses` of the methods with a body it skips.
+/// The names [`UsesWalker`] collects, and the `uses` of the methods it read already.
 #[derive(Default)]
 struct UsesNames<'ast, 'arena> {
     names: Vec<&'ast LocalIdentifier<'arena>>,
-    parameters: Vec<Span>,
+    methods: Vec<Span>,
 }
 
 impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker {
     fn walk_in_method(&self, method: &'ast Method<'arena>, found: &mut UsesNames<'ast, 'arena>) {
-        if let Some(uses) = method.uses
-            && !method.is_abstract()
-        {
-            found.parameters.push(uses.span());
+        let Some(uses) = method.uses else {
+            return;
+        };
+
+        found.methods.push(uses.span());
+        if method.is_abstract() {
+            found.names.extend(MethodParts::of_method(method).uses_effects());
         }
     }
 
     fn walk_in_uses(&self, uses: &'ast Uses<'arena>, found: &mut UsesNames<'ast, 'arena>) {
-        if !found.parameters.contains(&uses.span()) {
+        if !found.methods.contains(&uses.span()) {
             found.names.extend(uses.names.iter());
         }
     }
@@ -416,30 +440,66 @@ where
             continue;
         };
 
-        let held = declared.type_union.get_all_child_nodes().into_iter().find_map(|node| match node {
-            TypeRef::Atomic(TAtomic::Object(object)) => object
-                .get_name()
-                .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
-                .filter(|held| held.flags.is_foreign()),
-            _ => None,
-        });
-        let Some(held) = held else {
-            continue;
-        };
-
-        let held = sharp_class_like_name(
-            context.codebase,
-            &context.imported_names,
-            &context.short_name_counts,
-            held.original_name,
-        );
-        let property_name = display_member(context, class.original_name, property.name.0);
-        context.collector.report_with_code(
-            IssueCode::ForeignInStatic,
-            Issue::error(format!("`{property_name}` is static, so it cannot hold a `{held}`."))
-                .with_annotation(Annotation::primary(property.name_span.unwrap_or(declared.span)))
-                .with_note("A `foreign` object reaches code only through constructors, so no static holds one.")
-                .with_help(format!("Take the `{held}` as a constructor parameter instead.")),
+        report_foreign_in_static(
+            context,
+            class.original_name,
+            property.name.0,
+            &declared.type_union,
+            property.name_span.unwrap_or(declared.span),
         );
     }
+}
+
+/// Spec section 29: a write of a value of `value_type` at `span` to the static `property` of `class` stores no
+/// `foreign` object, whatever the static's declared type, as `Cache.loose = this.store` into an `Any?` would.
+pub(crate) fn check_foreign_static_write<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    property: Word,
+    value_type: &TUnion,
+    span: Span,
+) where
+    A: Arena,
+{
+    let class = context.codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
+
+    report_foreign_in_static(context, class, property, value_type, span);
+}
+
+/// Reports `foreign-in-static` at `span` when `held_type`, a type the static `property` of `class` holds, holds a
+/// `foreign` object, alone or inside a collection.
+fn report_foreign_in_static<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    property: Word,
+    held_type: &TUnion,
+    span: Span,
+) where
+    A: Arena,
+{
+    let held = held_type.get_all_child_nodes().into_iter().find_map(|node| match node {
+        TypeRef::Atomic(TAtomic::Object(object)) => object
+            .get_name()
+            .and_then(|name| context.codebase.get_class_like(name.as_bytes()))
+            .filter(|held| held.flags.is_foreign()),
+        _ => None,
+    });
+    let Some(held) = held else {
+        return;
+    };
+
+    let held = sharp_class_like_name(
+        context.codebase,
+        &context.imported_names,
+        &context.short_name_counts,
+        held.original_name,
+    );
+    let property_name = display_member(context, class, property);
+    context.collector.report_with_code(
+        IssueCode::ForeignInStatic,
+        Issue::error(format!("`{property_name}` is static, so it cannot hold a `{held}`."))
+            .with_annotation(Annotation::primary(span))
+            .with_note("A `foreign` object reaches code only through constructors, so no static holds one.")
+            .with_help(format!("Take the `{held}` as a constructor parameter instead.")),
+    );
 }

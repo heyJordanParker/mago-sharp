@@ -4,10 +4,13 @@ use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::FunctionLikeReturnTypeHint;
+use mago_syntax::cst::Hint;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::NamedConstructor;
+use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Sequence;
@@ -91,6 +94,23 @@ impl<'ast, 'arena> MethodParts<'ast, 'arena> {
             returns_value: method.returns_value(),
             returns_by_reference: method.ampersand.is_some(),
         }
+    }
+
+    /// The effects the method's `uses` names, spec section 29: every name but one of its function-typed parameters,
+    /// nullable or not, as `f` in `apply(Function<int(int)> f) uses f`, whose effects a call takes from the function
+    /// it passes.
+    pub fn uses_effects(&self) -> impl Iterator<Item = &'ast LocalIdentifier<'arena>> + '_ {
+        let parameters = self.parameter_list;
+
+        self.uses.into_iter().flat_map(|uses| uses.names.iter()).filter(move |name| {
+            !parameters.parameters.iter().any(|parameter| {
+                parameter.variable.name == name.value
+                    && matches!(
+                        parameter.hint,
+                        Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
+                    )
+            })
+        })
     }
 
     /// The parts of an operator, named at its symbol, or none for an operator a class cannot declare, which semantics

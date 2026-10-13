@@ -1637,6 +1637,13 @@ mod tests {
             ("app/Lib/Mailer.php", "<?php\n\nnamespace Mail;\n\nfinal class Mailer\n{\n    public static function subject(string $text): string\n    {\n        return $text;\n    }\n}\n".to_string()),
             ("app/Stubs/Mail.sharp", "namespace App.Stubs;\n\nimport Mail.Mailer;\n\nextern Mailer;\n".to_string()),
             ("app/Shop/Notice.sharp", "namespace App.Shop;\n\nimport Mail.Mailer;\n\npublic class Notice\n{\n    public Notice(private string name) { }\n\n    public string text => Mailer.subject(this.name);\n}\n".to_string()),
+            ("app/Shop/Rates.sharp", "namespace App.Shop;\n\npublic interface Rates\n{\n    int rate(int id);\n}\n".to_string()),
+            ("app/Shop/Quote.sharp", "namespace App.Shop;\n\npublic class Quote\n{\n    public Quote(private Rates rates) { }\n\n    public int price => this.rates.rate(1);\n}\n".to_string()),
+            ("app/Shop/Payments.sharp", "namespace App.Shop;\n\npublic class Payments\n{\n    public int charge(int cents) => cents;\n}\n".to_string()),
+            ("app/Shop/Checkout.sharp", "namespace App.Shop;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.charge(100);\n}\n".to_string()),
+            ("app/Shop/Base.sharp", "namespace App.Shop;\n\npublic abstract class Base\n{\n    public int size() => 1;\n}\n".to_string()),
+            ("app/Shop/Kept.sharp", "namespace App.Shop;\n\npublic class Kept : Base\n{\n}\n".to_string()),
+            ("app/Shop/Shelf.sharp", "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Kept kept) { }\n\n    public int count => this.kept.size();\n}\n".to_string()),
         ]
     }
 
@@ -1664,6 +1671,9 @@ mod tests {
             ("app/Shop/Taxable.sharp", "Taxable : Payable", "Taxable"),
             ("app/Shop/Status.sharp", "Status : Payable", "Status"),
             ("app/Stubs/Mail.sharp", "extern Mailer;", "extern Mailer uses Http;"),
+            ("app/Shop/Rates.sharp", "int rate(int id);", "int rate(int id) uses Http;"),
+            ("app/Shop/Payments.sharp", "public class Payments", "public foreign class Payments"),
+            ("app/Shop/Base.sharp", "public abstract class Base", "public abstract foreign class Base"),
         ] {
             let mut files = headers();
             let (_, contents) =
@@ -1684,6 +1694,46 @@ mod tests {
                 "`{to}` refuses a file that reads {edited_file}: {:#?}",
                 outcomes(&clean)
             );
+            assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
+        }
+    }
+
+    /// A `uses` that names no effect is refused with the effects its file can name. A class elsewhere that becomes
+    /// `foreign`, in the file's namespace or in another, gives the same message after the edit as a clean compile does.
+    #[test]
+    fn a_uses_refusal_after_another_class_becomes_foreign_matches_a_clean_compile() {
+        let files = || {
+            vec![
+                (
+                    "app/Shop/Gateway.sharp",
+                    "namespace App.Shop;\n\npublic interface Gateway\n{\n    int charge(int cents) uses Payments;\n}\n"
+                        .to_string(),
+                ),
+                ("app/Shop/Payments.sharp", "namespace App.Shop;\n\npublic class Payments\n{\n}\n".to_string()),
+                ("app/Shop/Base.sharp", "namespace App.Shop;\n\npublic abstract class Base\n{\n}\n".to_string()),
+                ("app/Vault/Vault.sharp", "namespace App.Vault;\n\npublic class Vault\n{\n}\n".to_string()),
+            ]
+        };
+        let base = shop_project(&files());
+
+        for (edited_file, from, to) in [
+            ("app/Shop/Base.sharp", "public abstract class Base", "public abstract foreign class Base"),
+            ("app/Vault/Vault.sharp", "public class Vault", "public foreign class Vault"),
+        ] {
+            let mut edited_files = files();
+            let (_, contents) =
+                edited_files.iter_mut().find(|(name, _)| *name == edited_file).expect("the edited file exists");
+            *contents = contents.replace(from, to);
+            let edited = shop_project(&edited_files);
+
+            let mut warm = analyzed(&base);
+            compile(&mut warm, empty_stamp);
+            warm.update_database(edited.read_only());
+            warm.analyze_incremental(None).expect("the warm path runs");
+            let warm = compile(&mut warm, empty_stamp);
+            let clean = compile(&mut analyzed(&edited), empty_stamp);
+
+            assert!(outcomes(&clean)["app/Shop/Gateway.sharp"].is_err(), "{:#?}", outcomes(&clean));
             assert_eq!(outcomes(&warm), outcomes(&clean), "{edited_file}: `{from}` to `{to}`");
         }
     }

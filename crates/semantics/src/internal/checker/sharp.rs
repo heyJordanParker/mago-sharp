@@ -4,6 +4,7 @@ use mago_names::binding::Binding;
 use mago_names::binding::BindingError;
 use mago_names::binding::Local;
 use mago_names::binding::LocalKind;
+use mago_names::binding::MethodParts;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
 use mago_names::scope::php_name;
@@ -1779,18 +1780,11 @@ fn is_extern(method: &Method) -> bool {
 /// may have. A function parameter in `uses`, as `charge(…) uses prepare => …` writes it, belongs to function effects,
 /// so it passes.
 fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
-    let Some(uses) = &method.uses else {
-        return;
-    };
     if method.is_abstract() {
         return;
     }
 
-    for name in &uses.names {
-        if is_function_parameter(method, name.value) {
-            continue;
-        }
-
+    for name in MethodParts::of_method(method).uses_effects() {
         context.report(
             Issue::error(format!(
                 "A method with a body takes no effect in `uses`, and `{}` is not one of its function parameters.",
@@ -1801,17 +1795,6 @@ fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
             .with_help("Remove it from `uses`, or declare the method without a body."),
         );
     }
-}
-
-/// Whether `name` is a parameter of `method` whose type is a function type, nullable or not.
-fn is_function_parameter(method: &Method, name: &[u8]) -> bool {
-    method.parameter_list.parameters.iter().any(|parameter| {
-        parameter.variable.name == name
-            && matches!(
-                parameter.hint,
-                Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
-            )
-    })
 }
 
 /// The place of a method's parts, refusing an `extern` method that is not `static`, in a static or `foreign` class,

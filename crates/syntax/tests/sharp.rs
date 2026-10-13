@@ -3201,7 +3201,7 @@ fn a_module_service_or_parent_is_one_not_supported_error_and_the_module_parses_o
         ),
         (
             "",
-            "singleton RedisStore = new RedisStore(Environment.require(\"REDIS_URL\"));",
+            "singleton RedisStore = new RedisStore(\"redis://localhost\");",
             "A `singleton` service is not supported yet in PHP#.",
             "singleton",
         ),
