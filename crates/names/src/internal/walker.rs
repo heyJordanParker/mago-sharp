@@ -96,21 +96,25 @@ use crate::binding::Binding;
 use crate::binding::BindingError;
 use crate::binding::Local;
 use crate::binding::LocalKind;
+use crate::default_class;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
 use crate::kind::NameKind;
+use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
 use crate::scope::trim_start_byte;
+use crate::shadowable_default_classes;
+use crate::shadows_a_default_class;
 
 /// A CST visitor (`MutWalker`) that traverses a PHP Concrete Syntax Tree
 /// to resolve names (classes, functions, constants, etc.) according to
 /// PHP's scoping and aliasing rules.
 ///
 /// In a PHP# file it is also the binder: it classifies every bare name as a local, `this`,
-/// a class or a constant, from the scopes of the file alone.
-#[derive(Debug, Default)]
-pub struct NameWalker<'arena> {
+/// a class or a constant, from the scopes of the file and the [`NamespaceClasses`] of its project.
+#[derive(Debug)]
+pub struct NameWalker<'arena, 'classes> {
     /// Accumulates the resolved names found during the CST walk.
     pub resolved_names: ResolvedNames<'arena>,
     /// Whether the walked program is PHP#.
@@ -128,6 +132,8 @@ pub struct NameWalker<'arena> {
     accessors: Option<Span>,
     /// The names of the class-likes the file declares, compared as PHP compares class names.
     declared_classes: foldhash::HashSet<IgnoringCase<'arena>>,
+    /// The class-likes of the project that win over a default class-like in their namespace.
+    namespace_classes: &'classes NamespaceClasses,
     /// The extension block being walked in PHP#, whose receiver each of its members declares as a parameter.
     extension: Option<ExtensionReceiver<'arena>>,
 }
@@ -171,12 +177,24 @@ impl Hash for IgnoringCase<'_> {
     }
 }
 
-impl<'arena> NameWalker<'arena> {
-    pub fn new(program: &Program<'arena>) -> Self {
+impl<'arena, 'classes> NameWalker<'arena, 'classes> {
+    pub fn new(program: &Program<'arena>, namespace_classes: &'classes NamespaceClasses) -> Self {
         let sharp = program.dialect.is_sharp();
         let declared_classes = if sharp { declared_class_names(program) } else { foldhash::HashSet::default() };
 
-        Self { sharp, declared_classes, ..Self::default() }
+        Self {
+            resolved_names: ResolvedNames::default(),
+            sharp,
+            locals: LocalScopes::default(),
+            member_objects: HashSet::new(),
+            class_members: std::vec::Vec::new(),
+            pattern_kinds: std::vec::Vec::new(),
+            lambdas: std::vec::Vec::new(),
+            accessors: None,
+            declared_classes,
+            namespace_classes,
+            extension: None,
+        }
     }
 
     fn declare(&mut self, name: &'arena [u8], declaration: Span, kind: LocalKind) {
@@ -310,32 +328,49 @@ impl<'arena> NameWalker<'arena> {
         self.locals.exit_block();
     }
 
-    /// Resolves a name written where a class goes. In a PHP# file a bare name of the standard library is the class in
-    /// the `Sharp` namespace, unless the file imports or declares a class-like of that name, spec section 23.
-    fn resolve_class<A>(&self, context: &NameResolutionContext<'arena, A>, name: &[u8]) -> (&'arena [u8], bool)
+    /// Resolves a name written where a class goes, as [`class_meaning`](Self::class_meaning) does. The class-like of
+    /// the file's namespace that would win over a default one is recorded whether the namespace holds it or not, since
+    /// adding or removing it changes what the name means.
+    fn resolve_class<A>(&mut self, context: &NameResolutionContext<'arena, A>, name: &[u8]) -> (&'arena [u8], bool)
+    where
+        A: Arena,
+    {
+        let (meaning, namespace_class) = self.class_meaning(context, name);
+        if let Some(namespace_class) = namespace_class {
+            self.resolved_names.add_namespace_class(namespace_class);
+        }
+
+        meaning
+    }
+
+    /// What a name written where a class goes means, and whether it was imported. In a PHP# file a bare name of the
+    /// standard library is the class in the `Sharp` namespace, unless the file imports or declares a class-like of that
+    /// name or its namespace holds one, spec section 23. Also returns the class-like of the file's namespace that would
+    /// win over the default one, held or not.
+    fn class_meaning<A>(
+        &self,
+        context: &NameResolutionContext<'arena, A>,
+        name: &[u8],
+    ) -> ((&'arena [u8], bool), Option<&'arena [u8]>)
     where
         A: Arena,
     {
         let (fqn, imported) = context.resolve(NameKind::Default, name);
         if !self.sharp || imported || self.declared_classes.contains(&IgnoringCase(name)) {
-            return (fqn, imported);
+            return ((fqn, imported), None);
         }
 
-        if let Some(effect) = standard_effect(name) {
-            return (effect, false);
-        }
-
-        let class: &'static [u8] = match name {
-            b"Int" => b"Sharp\\Int",
-            b"Float" => b"Sharp\\Float",
-            b"Bool" => b"Sharp\\Bool",
-            b"Position" => b"Sharp\\Position",
-            b"List" => b"Sharp\\List",
-            b"Replaces" => b"Sharp\\Replaces",
-            _ => return (fqn, imported),
+        let Some(class) = default_class(name) else {
+            return ((fqn, imported), None);
         };
+        // A default class-like is the class-like of its own namespace, so no other one wins over it there.
+        if !shadows_a_default_class(name) || fqn.eq_ignore_ascii_case(class) {
+            return ((class, false), None);
+        }
 
-        (class, false)
+        let meaning = if self.namespace_classes.contains(fqn) { (fqn, imported) } else { (class, false) };
+
+        (meaning, Some(fqn))
     }
 }
 
@@ -489,7 +524,7 @@ fn declared_class_names<'arena>(program: &Program<'arena>) -> foldhash::HashSet<
         .collect()
 }
 
-impl<'ast, 'arena, A> MutWalker<'ast, 'arena, NameResolutionContext<'arena, A>> for NameWalker<'arena>
+impl<'ast, 'arena, A> MutWalker<'ast, 'arena, NameResolutionContext<'arena, A>> for NameWalker<'arena, '_>
 where
     A: Arena,
 {
@@ -1376,7 +1411,20 @@ where
         }
     }
 
+    /// Records each default class-like whose short name names another class-like in the PHP# file, once the
+    /// namespace's imports and declarations are known, so a refusal's help names the default one in a form the file
+    /// can write. The class-like of the file's namespace is not recorded as one the file names: only a refused file's
+    /// help reads it, and a refused file is analyzed again on every run.
     fn walk_out_namespace(&mut self, _namespace: &Namespace<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        if self.sharp {
+            for class in shadowable_default_classes().map(str::as_bytes) {
+                let ((meaning, _), _) = self.class_meaning(context, &class[b"Sharp\\".len()..]);
+                if meaning != class {
+                    self.resolved_names.shadow_default_class(class);
+                }
+            }
+        }
+
         context.exit_namespace();
     }
 }

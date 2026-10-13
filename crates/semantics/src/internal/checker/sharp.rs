@@ -3529,37 +3529,55 @@ fn check_declared_name(name: &[u8], span: Span, context: &mut Context<'_, '_, '_
 
 /// Reports a PHP superglobal, written with `$` or bare, which spec section 29 removes.
 fn report_superglobal(span: Span, context: &mut Context<'_, '_, '_>) {
+    let (environment, after) = standard_class("Environment", context);
+
     context.report(
         Issue::error("PHP# has no superglobals; take a Request")
             .with_annotation(Annotation::primary(span).with_message("Written here."))
-            .with_note(
-                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `Environment`.",
-            ),
+            .with_note(format!(
+                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `{environment}`{after}."
+            )),
     );
 }
 
 /// Reports a PHP magic constant, or another `__Something__` name when `constant` is `None`, which spec section 27
 /// replaces with `Position`. The error names it as written.
 fn report_magic_constant(name: &[u8], span: Span, constant: Option<&MagicConstant>, context: &mut Context<'_, '_, '_>) {
+    let (position, after) = standard_class("Position", context);
     let instead = match constant {
-        Some(MagicConstant::Directory(_)) => "write `Position.current().directory`.",
-        Some(MagicConstant::File(_)) => "write `Position.current().file`.",
-        Some(MagicConstant::Line(_)) => "write `Position.current().line`.",
-        Some(MagicConstant::Function(_) | MagicConstant::Method(_)) => "write `Position.current().function`.",
-        Some(MagicConstant::Class(_)) => "write `typeof(Class)` with the class's name.",
-        Some(MagicConstant::Namespace(_)) => "write `Position.current().function`, which starts with the namespace.",
+        Some(MagicConstant::Directory(_)) => format!("write `{position}.current().directory`{after}."),
+        Some(MagicConstant::File(_)) => format!("write `{position}.current().file`{after}."),
+        Some(MagicConstant::Line(_)) => format!("write `{position}.current().line`{after}."),
+        Some(MagicConstant::Function(_) | MagicConstant::Method(_)) => {
+            format!("write `{position}.current().function`{after}.")
+        }
+        Some(MagicConstant::Class(_)) => "write `typeof(Class)` with the class's name.".to_owned(),
+        Some(MagicConstant::Namespace(_)) => {
+            format!("write `{position}.current().function`{after}, which starts with the namespace.")
+        }
         Some(MagicConstant::Trait(_) | MagicConstant::Property(_)) | None => {
-            "`Position.current()` gives the file, directory, line, column and function."
+            format!("`{position}.current()`{after} gives the file, directory, line, column and function.")
         }
     };
 
     report_removed(
         span,
         name,
-        instead,
-        "PHP# removes PHP's magic constants and every other `__Something__` name: `Position` says where code sits in its source.",
+        &instead,
+        "PHP# removes PHP's magic constants and every other `__Something__` name: `Sharp.Position` says where code sits in its source.",
         context,
     );
+}
+
+/// How the file writes the standard library's class-like `short`, as `Position` for `Sharp.Position`, and the import
+/// that form needs, as a help names them. A class-like the file imports or declares under the short name, or one of its
+/// namespace, wins over the default one, spec section 23, so the file then imports the standard one under an alias.
+fn standard_class(short: &str, context: &Context<'_, '_, '_>) -> (String, String) {
+    if context.names.shadows_default_class(format!("Sharp\\{short}").as_bytes()) {
+        (format!("Sharp{short}"), format!(" after `import Sharp.{short} as Sharp{short};`"))
+    } else {
+        (short.to_owned(), String::new())
+    }
 }
 
 /// Whether the slice has an assignment operator. Every operator is named, so a new one does not compile until it

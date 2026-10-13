@@ -2108,6 +2108,32 @@ fn a_magic_constant_or_another_double_underscore_name_is_an_error_that_names_pos
     );
 }
 
+/// Spec section 23: once an imported class takes the short name `Position` or `Environment`, a help names the standard
+/// one through an aliased import, which is the only form the file can write.
+#[test]
+fn a_help_names_a_standard_class_the_file_shadows_through_an_aliased_import() {
+    let code =
+        leak(method("        Store.keep(__DIR__);\n        Store.keep($_SERVER);\n        return extra;\n").replace(
+            "namespace App.Tenant;\n",
+            "namespace App.Tenant;\n\nimport App.Shared.Environment;\nimport App.Shared.Position;\n",
+        ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "10:20 PHP# has no `__DIR__`: write `SharpPosition.current().directory` after `import Sharp.Position as SharpPosition;`.",
+            "11:20 PHP# has no superglobals; take a Request",
+        ]
+    );
+    let superglobal = check("src/Report.sharp", code).into_iter().find(|issue| issue.message.contains("superglobals"));
+    assert_eq!(
+        superglobal.expect("the superglobal is refused").notes,
+        [
+            "Request data arrives as an object, such as a framework's `Request`, and the process environment as `SharpEnvironment` after `import Sharp.Environment as SharpEnvironment;`."
+        ]
+    );
+}
+
 /// A declared `__Something__` name is refused as a read of one is, in every kind of declaration. A method named as
 /// PHP's magic methods are, starting but not ending with `__`, keeps its own error.
 #[test]

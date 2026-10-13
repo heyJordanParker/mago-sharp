@@ -23,6 +23,7 @@ use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 use mago_analyzer::external::CodebaseScanFile;
 use mago_analyzer::external::CodebaseScanPlan;
 use mago_analyzer::external::ExternalAnalysisSession;
+use mago_analyzer::external::ExternalAnalyzerError;
 use mago_analyzer::external::FileAnalysisSnapshot;
 use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
@@ -50,6 +51,8 @@ use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::ResolvedNames;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
+use mago_php_version::PHPVersion;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_semantics::SemanticsChecker;
@@ -141,6 +144,9 @@ pub struct IncrementalAnalysisService {
     analysis_snapshots: HashMap<FileId, Arc<FileAnalysisSnapshot>>,
     codebase_scan_plan: Option<Arc<CodebaseScanPlan>>,
     codebase_scan_files: HashMap<FileId, CodebaseScanFile>,
+    /// The class-likes of the codebase that win over a default class-like in their namespace, which every file resolves
+    /// its names against.
+    namespace_classes: NamespaceClasses,
     use_progress_bars: bool,
     scan_only: bool,
     node_analysis_files: Option<HashSet<FileId>>,
@@ -170,6 +176,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("analysis_snapshots", &self.analysis_snapshots.len())
             .field("codebase_scan_plan", &self.codebase_scan_plan.is_some())
             .field("codebase_scan_files", &self.codebase_scan_files.len())
+            .field("namespace_classes", &self.namespace_classes)
             .field("use_progress_bars", &self.use_progress_bars)
             .field("scan_only", &self.scan_only)
             .field("node_analysis_files", &self.node_analysis_files.as_ref().map(HashSet::len))
@@ -217,6 +224,7 @@ impl IncrementalAnalysisService {
             analysis_snapshots: HashMap::default(),
             codebase_scan_plan: None,
             codebase_scan_files: HashMap::default(),
+            namespace_classes: NamespaceClasses::default(),
             use_progress_bars: false,
             scan_only: false,
             node_analysis_files: None,
@@ -257,6 +265,7 @@ impl IncrementalAnalysisService {
         self.analysis_snapshots.clear();
         self.codebase_scan_plan = None;
         self.codebase_scan_files.clear();
+        self.namespace_classes = NamespaceClasses::default();
     }
 
     /// Updates the database for a new analysis run.
@@ -482,44 +491,55 @@ impl IncrementalAnalysisService {
                 .into_par_iter()
                 .map_init(LocalArena::new, |arena, file| {
                     let content_hash = xxhash_rust::xxh3::xxh3_64(file.contents.as_ref());
-
-                    let program = parse_file_with_settings(arena, &file, parser_settings);
-                    if program.has_errors() {
-                        tracing::warn!(
-                            "Encountered {} parsing error(s) in '{}'. Codebase analysis may be incomplete.",
-                            program.errors.len(),
-                            mago_bytes::BytesDisplay(&file.name),
-                        );
-                    }
-
-                    let resolver = NameResolver::new(arena);
-                    let resolved_names = resolver.resolve(program);
-                    let file_signature = signature_builder::build_file_signature(program, &resolved_names);
-                    let mut metadata = scan_program(arena, &file, program, &resolved_names, php_version);
-                    metadata.set_file_signature(file.id, file_signature);
-                    if file.file_type.is_patch() {
-                        metadata.convert_partial_to_patch();
-                    }
-                    let codebase_scan =
-                        codebase_scan_plan.as_deref().map(|plan| plan.capture(&file, &metadata)).transpose()?.flatten();
+                    let (metadata, codebase_scan, namespace_classes) = scan_file(
+                        arena,
+                        &file,
+                        parser_settings,
+                        php_version,
+                        codebase_scan_plan.as_deref(),
+                        &NamespaceClasses::default(),
+                    )?;
 
                     arena.reset();
                     if let Some(compiling_bar) = &compiling_bar {
                         compiling_bar.inc(1);
                     }
 
-                    Ok((file.id, content_hash, metadata, codebase_scan))
+                    Ok((file, content_hash, metadata, codebase_scan, namespace_classes))
                 })
-                .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
+                .collect::<Result<Vec<_>, ExternalAnalyzerError>>()
         });
-        let mut per_file_results: Vec<(FileId, u64, CodebaseMetadata, Option<CodebaseScanFile>)> = per_file_results?;
+        let mut per_file_results = per_file_results?;
         if let Some(compiling_bar) = compiling_bar {
             remove_progress_bar(&compiling_bar);
         }
 
+        // A class-like's name never depends on how names resolve, so the first scan finds every class-like that wins
+        // over a default class-like, and the files that name one are scanned again against them.
+        self.namespace_classes = NamespaceClasses::new(per_file_results.iter().flat_map(|(_, _, metadata, _, _)| {
+            metadata.class_likes.values().map(|class_like| class_like.original_name)
+        }));
+        let namespace_classes = &self.namespace_classes;
+        per_file_results
+            .par_iter_mut()
+            .filter(|(_, _, _, _, named)| named.iter().any(|name| namespace_classes.contains(name.as_bytes())))
+            .try_for_each_init(LocalArena::new, |arena, (file, _, metadata, codebase_scan, _)| {
+                (*metadata, *codebase_scan, _) = scan_file(
+                    arena,
+                    file,
+                    parser_settings,
+                    php_version,
+                    codebase_scan_plan.as_deref(),
+                    namespace_classes,
+                )?;
+                arena.reset();
+
+                Ok::<_, ExternalAnalyzerError>(())
+            })?;
+
         self.codebase_scan_files = per_file_results
             .iter_mut()
-            .filter_map(|(file_id, _, _, codebase_scan)| codebase_scan.take().map(|scan| (*file_id, scan)))
+            .filter_map(|(file, _, _, codebase_scan, _)| codebase_scan.take().map(|scan| (file.id, scan)))
             .collect();
         let refinements = self
             .plugin_registry
@@ -527,16 +547,16 @@ impl IncrementalAnalysisService {
             .map_err(mago_analyzer::error::AnalysisError::from)?;
         apply_refinements(
             refinements,
-            per_file_results.iter_mut().map(|(file_id, _, metadata, _)| (*file_id, metadata)),
+            per_file_results.iter_mut().map(|(file, _, metadata, _, _)| (file.id, metadata)),
         )
         .map_err(mago_analyzer::error::AnalysisError::from)?;
 
         let staged: Vec<(FileId, u64, CodebaseEntryKeys)> = per_file_results
             .into_iter()
-            .map(|(file_id, content_hash, metadata, _)| {
+            .map(|(file, content_hash, metadata, _, _)| {
                 let declared_keys = metadata.extract_owned_keys(&metadata);
                 merged_codebase.extend(metadata);
-                (file_id, content_hash, declared_keys)
+                (file.id, content_hash, declared_keys)
             })
             .collect();
         merged_codebase.apply_patches_pass();
@@ -770,27 +790,18 @@ impl IncrementalAnalysisService {
         let parser_settings = self.parser_settings;
         let php_version = self.settings.version;
         let codebase_scan_plan = self.codebase_scan_plan.clone();
+        let namespace_classes = &self.namespace_classes;
         let scanned_files: Vec<(FileId, CodebaseMetadata, Option<CodebaseScanFile>)> = changed_files
             .into_par_iter()
             .map_init(LocalArena::new, |arena, file| {
-                let program = parse_file_with_settings(arena, file, parser_settings);
-                if program.has_errors() {
-                    tracing::warn!(
-                        "Encountered {} parsing error(s) in '{}'. Codebase analysis may be incomplete.",
-                        program.errors.len(),
-                        mago_bytes::BytesDisplay(&file.name),
-                    );
-                }
-
-                let resolver = NameResolver::new(arena);
-                let resolved_names = resolver.resolve(program);
-                let mut metadata = scan_program(arena, file, program, &resolved_names, php_version);
-                metadata.set_file_signature(file.id, signature_builder::build_file_signature(program, &resolved_names));
-                if file.file_type.is_patch() {
-                    metadata.convert_partial_to_patch();
-                }
-                let codebase_scan =
-                    codebase_scan_plan.as_deref().map(|plan| plan.capture(file, &metadata)).transpose()?.flatten();
+                let (metadata, codebase_scan, _) = scan_file(
+                    arena,
+                    file,
+                    parser_settings,
+                    php_version,
+                    codebase_scan_plan.as_deref(),
+                    namespace_classes,
+                )?;
 
                 arena.reset();
 
@@ -915,6 +926,30 @@ impl IncrementalAnalysisService {
                 .any(|file_id| !current_file_ids.contains(file_id) && !externs_in(&self.codebase, *file_id).is_empty());
 
         if externs_changed {
+            return self.analyze();
+        }
+
+        // A class-like that wins over a default class-like changes what a bare name means in every file of its
+        // namespace, and the unchanged files keep scans made without it.
+        let rescanned: HashSet<FileId> = new_file_scans
+            .iter()
+            .map(|(file_id, _)| *file_id)
+            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)).copied())
+            .collect();
+        let namespace_classes_before = NamespaceClasses::new(
+            self.codebase
+                .class_likes
+                .values()
+                .filter(|class_like| rescanned.contains(&class_like.span.file_id))
+                .map(|class_like| class_like.original_name),
+        );
+        let namespace_classes_after = NamespaceClasses::new(
+            new_file_scans
+                .iter()
+                .flat_map(|(_, metadata)| metadata.class_likes.values().map(|class_like| class_like.original_name)),
+        );
+
+        if namespace_classes_before != namespace_classes_after {
             return self.analyze();
         }
 
@@ -1372,7 +1407,7 @@ impl IncrementalAnalysisService {
 
         let arena = LocalArena::new();
         let program = parse_file_with_settings(&arena, &file, self.parser_settings);
-        let resolved_names = NameResolver::new(&arena).resolve(program);
+        let resolved_names = NameResolver::new(&arena).resolve_in(program, &self.namespace_classes);
 
         let mut issues = IssueCollection::new();
         if program.has_errors() {
@@ -1421,7 +1456,7 @@ impl IncrementalAnalysisService {
 
         let arena = LocalArena::new();
         let program = parse_file_with_settings(&arena, &file, self.parser_settings);
-        let resolved_names = NameResolver::new(&arena).resolve(program);
+        let resolved_names = NameResolver::new(&arena).resolve_in(program, &self.namespace_classes);
 
         let mut issues = IssueCollection::new();
         if program.has_errors() {
@@ -1548,6 +1583,7 @@ impl IncrementalAnalysisService {
             plugin_registry,
             settings,
             self.parser_settings,
+            &self.namespace_classes,
             external_session.as_deref(),
         )?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1583,6 +1619,7 @@ impl IncrementalAnalysisService {
         }
         let settings = settings.clone();
         let parser_settings = self.parser_settings;
+        let namespace_classes = &self.namespace_classes;
         let analyzing_bar = (self.use_progress_bars && !host_files.is_empty())
             .then(|| create_progress_bar(host_files.len(), "🔬 Analyzing", ProgressBarTheme::Green));
         #[cfg(not(target_arch = "wasm32"))]
@@ -1601,7 +1638,7 @@ impl IncrementalAnalysisService {
                 let mut analysis_result = AnalysisResult::new(SymbolReferences::new());
 
                 let program = parse_file_with_settings(arena, &source_file, parser_settings);
-                let resolved_names = NameResolver::new(arena).resolve(program);
+                let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes);
 
                 let semantics_checker = SemanticsChecker::new(settings.version);
                 let mut analyzer =
@@ -1902,6 +1939,37 @@ impl IncrementalAnalysisService {
             per_file_effect_issues,
         })
     }
+}
+
+/// Scans `file` into the codebase metadata it declares, with its signature and the scan `plan` captures of it, its
+/// names resolved against `namespace_classes`. Also returns each class-like of the file's namespace that would win over
+/// a default class-like the file names.
+fn scan_file(
+    arena: &LocalArena,
+    file: &Arc<File>,
+    parser_settings: ParserSettings,
+    php_version: PHPVersion,
+    plan: Option<&CodebaseScanPlan>,
+    namespace_classes: &NamespaceClasses,
+) -> Result<(CodebaseMetadata, Option<CodebaseScanFile>, Vec<Word>), ExternalAnalyzerError> {
+    let program = parse_file_with_settings(arena, file, parser_settings);
+    if program.has_errors() {
+        tracing::warn!(
+            "Encountered {} parsing error(s) in '{}'. Codebase analysis may be incomplete.",
+            program.errors.len(),
+            mago_bytes::BytesDisplay(&file.name),
+        );
+    }
+
+    let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes);
+    let mut metadata = scan_program(arena, file, program, &resolved_names, php_version);
+    metadata.set_file_signature(file.id, signature_builder::build_file_signature(program, &resolved_names));
+    if file.file_type.is_patch() {
+        metadata.convert_partial_to_patch();
+    }
+    let codebase_scan = plan.map(|plan| plan.capture(file, &metadata)).transpose()?.flatten();
+
+    Ok((metadata, codebase_scan, resolved_names.namespace_classes().map(mago_word::word).collect()))
 }
 
 /// The `extern` declarations in `file_id`, in the codebase's order. A body's summary records the effects of the
