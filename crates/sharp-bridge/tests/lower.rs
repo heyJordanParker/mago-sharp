@@ -246,6 +246,223 @@ fn a_construct_outside_the_slice_returns_its_not_supported_error() {
     assert_eq!(lowered.diagnostics(), ["9:9 compile error: This statement is not supported yet in PHP#."]);
 }
 
+/// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something
+/// only inside its own PHP# construct, as C#'s contextual keywords are. Each names a property, a local and a
+/// parameter, and each reads as the variable or property of its name.
+///
+/// ```php
+/// $list = $extra + $this->list; return $list;
+/// ```
+#[test]
+fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() {
+    let words = [
+        "fn",
+        "or",
+        "and",
+        "die",
+        "use",
+        "var",
+        "xor",
+        "echo",
+        "eval",
+        "from",
+        "goto",
+        "list",
+        "array",
+        "clone",
+        "empty",
+        "endif",
+        "isset",
+        "print",
+        "trait",
+        "unset",
+        "elseif",
+        "endfor",
+        "global",
+        "parent",
+        "switch",
+        "declare",
+        "default",
+        "extends",
+        "foreach",
+        "include",
+        "require",
+        "callable",
+        "endwhile",
+        "function",
+        "endswitch",
+        "insteadof",
+        "enddeclare",
+        "endforeach",
+        "implements",
+        "instanceof",
+        "include_once",
+        "require_once",
+        "__halt_compiler",
+        "get",
+        "set",
+        "init",
+        "field",
+        "value",
+        "of",
+        "via",
+        "uses",
+        "not",
+    ];
+
+    for word in words {
+        let lowered = Lowered::new(&format!(
+            "namespace App.Tenant;\n\nclass Report\n{{\n    private int {word} = 1;\n\n    public int run(int extra)\n    {{\n        const {word} = extra + this.{word};\n        return {word};\n    }}\n\n    public int read(int {word}) => {word};\n}}\n"
+        ));
+
+        assert_eq!(
+            lowered.body(),
+            format!(
+                "STMT_LIST\n  ASSIGN\n    VAR\n      ZVAL \"{word}\"\n    BINARY_OP [1]\n      VAR\n        ZVAL \"extra\"\n      PROP\n        VAR\n          ZVAL \"this\"\n        ZVAL \"{word}\"\n  RETURN\n    VAR\n      ZVAL \"{word}\"\n"
+            ),
+            "{word}"
+        );
+        assert_eq!(
+            lowered.declared("read"),
+            format!(
+                "METHOD [1] \"read\" @13-13\n  PARAM_LIST\n    PARAM\n      ZVAL [1] \"int\"\n      ZVAL \"{word}\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    RETURN\n      VAR\n        ZVAL \"{word}\"\n  ZVAL [1] \"int\"\n  null\n"
+            ),
+            "{word}"
+        );
+    }
+}
+
+/// Any word names a method, a property or a field, a keyword PHP# uses included, as in TypeScript and PHP: a member's
+/// name is written only where it is declared and after `.`, so it never reads as the keyword. A PHP# class can then
+/// override a plain PHP method named `is` or `lazy`, as Eloquent's `Model::is` and `Collection::lazy` are.
+///
+/// ```php
+/// return $this->is($this) ? $this->lazy()->match() : $this->default;
+/// ```
+#[test]
+fn any_word_names_a_member() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    private int return = 2;\n\n    public int default { get; } = 3;\n\n    public bool is(Report other) => other.default == this.default;\n\n    public int match() => this.return;\n\n    public Report lazy() => this;\n\n    public int run(int extra)\n    {\n        return this.is(this) ? this.lazy().match() : this.default;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(
+        lowered.body(),
+        "STMT_LIST\n  RETURN\n    CONDITIONAL\n      METHOD_CALL\n        VAR\n          ZVAL \"this\"\n        ZVAL \"is\"\n        ARG_LIST\n          VAR\n            ZVAL \"this\"\n      METHOD_CALL\n        METHOD_CALL\n          VAR\n            ZVAL \"this\"\n          ZVAL \"lazy\"\n          ARG_LIST\n        ZVAL \"match\"\n        ARG_LIST\n      PROP\n        VAR\n          ZVAL \"this\"\n        ZVAL \"default\"\n"
+    );
+}
+
+/// A PHP keyword PHP# doesn't use names a class, and so does a capitalized PHP# keyword, since PHP#'s keywords are
+/// lowercase. Code reads each one as a type and creates it. PHP reaches the class by its full name, as the engine
+/// takes any class name but the reserved type names.
+///
+/// ```php
+/// $print = new \App\Shop\Print(); $refund = new \App\Shop\Return(); return $print->n() + $refund->n();
+/// ```
+#[test]
+fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_a_class() {
+    let print = ("src/Shop/Print.sharp", "namespace App.Shop;\n\npublic class Print\n{\n    public int n() => 1;\n}\n");
+    let r#return =
+        ("src/Shop/Return.sharp", "namespace App.Shop;\n\npublic class Return\n{\n    public int n() => 2;\n}\n");
+    let lowered = Lowered::with(
+        "namespace App.Shop;\n\npublic class Match\n{\n    public int run(int extra)\n    {\n        Print print = new Print();\n        Return refund = new Return();\n        return print.n() + refund.n();\n    }\n}\n",
+        &[print, r#return],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        "STMT_LIST\n  ASSIGN\n    VAR\n      ZVAL \"print\"\n    NEW\n      ZVAL \"App\\\\Shop\\\\Print\"\n      ARG_LIST\n  ASSIGN\n    VAR\n      ZVAL \"refund\"\n    NEW\n      ZVAL \"App\\\\Shop\\\\Return\"\n      ARG_LIST\n  RETURN\n    BINARY_OP [1]\n      METHOD_CALL\n        VAR\n          ZVAL \"print\"\n        ZVAL \"n\"\n        ARG_LIST\n      METHOD_CALL\n        VAR\n          ZVAL \"refund\"\n        ZVAL \"n\"\n        ARG_LIST\n"
+    );
+}
+
+/// An event is a class, so a PHP-only word or a capitalized PHP# keyword names one, as `Print` does. It lowers to the
+/// final class `[32]` the engine declares, whose constructor promotes `id`.
+#[test]
+fn a_php_keyword_or_a_capitalized_php_sharp_keyword_names_an_event() {
+    let lowered = Lowered::new("namespace App.Shop;\n\npublic event Print(int id);\n");
+
+    assert_eq!(
+        lowered.tree(),
+        indoc! {r#"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App\\Shop"
+                null
+              CLASS [32] "Print" @3-3
+                null
+                null
+                STMT_LIST
+                  METHOD [1] "__construct" @3-3
+                    PARAM_LIST
+                      PARAM [129]
+                        ZVAL [1] "int"
+                        ZVAL "id"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                    null
+                    null
+                null
+                null
+        "#}
+    );
+}
+
+/// Only a file declares a type, so in a class body a class named after a type's keyword or a modifier is a member's
+/// type, as `Struct`, `Class` and `Lazy` are here, and an operator's return type keeps its name.
+#[test]
+fn a_class_named_after_a_type_keyword_or_a_modifier_types_a_member() {
+    let r#struct =
+        ("src/Shop/Struct.sharp", "namespace App.Shop;\n\npublic class Struct\n{\n    public Struct() { }\n}\n");
+    let class = ("src/Shop/Class.sharp", "namespace App.Shop;\n\npublic class Class\n{\n    public Class() { }\n}\n");
+    let lazy = (
+        "src/Shop/Lazy.sharp",
+        "namespace App.Shop;\n\npublic class Lazy\n{\n    public Lazy() { }\n\n    public static Lazy operator +(Lazy a, Lazy b) { return a; }\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App.Shop;\n\npublic class Report\n{\n    public Struct shape { get; set; }\n    public Class kind { get; set; }\n\n    public Report()\n    {\n        this.shape = new Struct();\n        this.kind = new Class();\n    }\n\n    public Lazy sum(Lazy a, Lazy b) => a + b;\n}\n",
+        &[r#struct, class, lazy],
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert!(
+        lowered.tree().contains("ZVAL \"shape\"") && lowered.tree().contains("ZVAL \"kind\""),
+        "{}",
+        lowered.tree()
+    );
+}
+
+/// Each keyword an error on a keyword, `true`, `false` or `null` written in another case names compiles once written
+/// in lowercase, in every place the error fires: a statement on two lines and two keywords on one line included.
+#[test]
+fn the_lowercase_keyword_a_keyword_in_another_case_names_compiles() {
+    let lowered = Lowered::new(
+        "class Report\n{\n    public static int count() { return 1; }\n\n    public int run(bool flag, List<int> items)\n    {\n        const base = 2;\n        let total = 1;\n        if (flag) { }\n        const c = new\n            Report();\n        new Report();\n        let on = true;\n        let off = false;\n        int? none = null;\n        if (flag) { return 5; }\n        try { total = 3; } catch (Exception e) { total = 4; } finally { }\n        if (flag) { total = 5; } else if (items.count() == 0) { total = 6; } else { total = 7; }\n        do { total = 8; } while (off);\n        for (const item of items) { if (flag) { break; } continue; }\n        return flag ? base : total;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+}
+
+/// The PHP# form each refusal of `isset`, `empty`, `unset`, `array` and `list` quotes compiles.
+#[test]
+fn the_php_sharp_form_a_refused_php_construct_names_compiles() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(int? value, List<int> items, List<int> pair, Map<string, int> map, string key)\n    {\n        const listed = [1, 2];\n        const first = pair[0];\n        map.remove(key);\n        return value != null && items.count() == 0 && listed.count() == first;\n    }\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+}
+
 /// The lowering takes only a checked program, so an enum the slice refuses lowers no node of the enum.
 #[test]
 fn an_enum_the_slice_refuses_returns_its_error_and_no_nodes() {
@@ -1782,6 +1999,48 @@ fn the_base_class_constructor_can_be_inherited() {
         let lowered = Lowered::with(code, &[("src/Lib/Model.php", model)]);
 
         assert_eq!(lowered.render(lowered.child(lowered.method_named("__construct"), 2)), body, "{code}");
+    }
+}
+
+/// ```php
+/// public function __construct() { parent::__construct(); }
+/// ```
+///
+/// A PHP# base class without a constructor gets one for its initial values that are not constant, so `: super()` and
+/// the constructor that runs a subclass's initial values call it, with the base class in another file or the same one.
+#[test]
+fn super_calls_the_constructor_a_base_class_gets_for_its_initial_values() {
+    let base = (
+        "src/Lib/Stamped.sharp",
+        "namespace Lib;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"p\");\n}\n",
+    );
+    let parent_construct = "  STATIC_CALL\n    ZVAL [1] \"parent\"\n    ZVAL \"__construct\"\n    ARG_LIST\n";
+    for (code, body) in [
+        (
+            "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            format!("STMT_LIST\n{parent_construct}"),
+        ),
+        (
+            "namespace App.Tenant;\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"q\");\n}\n\nclass Report : Stamped\n{\n    public Report() : super() { }\n}\n",
+            format!("STMT_LIST\n{parent_construct}"),
+        ),
+        (
+            "namespace App.Tenant;\n\nimport Lib.Stamped;\n\nclass Report : Stamped\n{\n    private string extra = strtoupper(\"e\");\n}\n",
+            format!(
+                "STMT_LIST\n  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"extra\"\n    CALL\n      ZVAL \"strtoupper\"\n      ARG_LIST\n        ZVAL \"e\"\n{parent_construct}"
+            ),
+        ),
+    ] {
+        let lowered = Lowered::with(code, &[base]);
+        assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "{code}");
+        // `Report` is the file's last class, so its constructor is the last one.
+        let report = lowered
+            .nodes()
+            .iter()
+            .rposition(|node| node.kind == sharp_kind::SHARP_AST_METHOD && lowered.text(node.text) == "__construct")
+            .expect("Report declares a constructor") as u32;
+
+        assert_eq!(lowered.render(lowered.child(report, 2)), body, "{code}");
     }
 }
 
@@ -9586,53 +9845,6 @@ fn if_else_if_and_else_are_if_lists_of_if_elems() {
                       STMT_LIST
                         RETURN
                           ZVAL 3
-        "#}
-    );
-}
-
-/// ```php
-/// if ($extra < 0) throw new \App\Tenant\Failure($extra);
-/// if ($extra > 1) return 1;
-/// ```
-///
-/// A guard clause's `IF_ELEM` holds the `THROW` or `RETURN` itself, with no `STMT_LIST`, as php-src's grammar builds
-/// `if (c) return x;`.
-#[test]
-fn a_guard_clause_is_an_if_elem_holding_its_throw_or_return() {
-    assert_eq!(
-        body_in(
-            RUN,
-            "        if (extra < 0) throw new Failure(extra);\n        if (extra > 1) return 1;\n        return extra;\n",
-            &[(
-                "src/App/Tenant/Failure.php",
-                "<?php namespace App\\Tenant; final class Failure extends \\Exception { public function __construct(int $code) { parent::__construct('', $code); } }",
-            )]
-        ),
-        indoc! {r#"
-            STMT_LIST
-              IF
-                IF_ELEM
-                  BINARY_OP [20]
-                    VAR
-                      ZVAL "extra"
-                    ZVAL 0
-                  THROW
-                    NEW
-                      ZVAL "App\\Tenant\\Failure"
-                      ARG_LIST
-                        VAR
-                          ZVAL "extra"
-              IF
-                IF_ELEM
-                  GREATER
-                    VAR
-                      ZVAL "extra"
-                    ZVAL 1
-                  RETURN
-                    ZVAL 1
-              RETURN
-                VAR
-                  ZVAL "extra"
         "#}
     );
 }

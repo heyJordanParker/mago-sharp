@@ -136,7 +136,7 @@ where
             statements: {
                 let mut statements = self.new_vec();
                 loop {
-                    if matches!(self.stream.peek_kind(0)?, Some(T!["endfor"])) {
+                    if self.is_at_php_keyword(T!["endfor"])? {
                         break;
                     }
 

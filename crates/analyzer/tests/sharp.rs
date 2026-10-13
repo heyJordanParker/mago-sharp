@@ -360,7 +360,7 @@ fn a_local_reads_a_missing_property_as_in_php() {
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Calc.php", CALC)]);
     let php_issues = issues(("src/Demo/Report.php", php), &[("src/Lib/Calc.php", CALC)]);
 
-    assert!(!sharp_issues.is_empty());
+    assert!(!sharp_issues.is_empty(), "expected the missing property to be reported");
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
@@ -4699,39 +4699,71 @@ fn super_without_a_constructor_above_takes_no_arguments() {
     );
 }
 
-/// The interim ruling on an implicit `super()`: the constructor of a class whose base class has one, its own or
-/// inherited, plain PHP's included, calls it with `: super(…)`.
+/// Spec section 9.1: PHP# has no implicit `super()`, so the constructor of a class whose base class has one, its own or
+/// inherited, plain PHP's included, calls it with `: super(…)`. A PHP# base class without one gets one for its initial
+/// values that are not constant, in this file or another, and a class without initial values gets none.
 #[test]
 fn a_constructor_without_super_under_a_base_class_constructor_is_missing_super_call() {
     let model = "<?php\n\nnamespace Lib;\n\nclass Model\n{\n    public function __construct()\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(int id) { }\n}\n\nclass Shipment : Order\n{\n    public Shipment() { }\n}\n\nclass Saved : Model\n{\n    public Saved() { }\n}\n\nclass Middle : Entity\n{\n}\n\nclass Leaf : Middle\n{\n    public Leaf() { }\n}\n\nclass Plain\n{\n}\n\nclass Free : Plain\n{\n    public Free() { }\n}\n";
+    let sealed = "namespace Demo;\n\nclass Sealed\n{\n    public string stamp { get; set; } = strtoupper(\"s\");\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Order : Entity\n{\n    public Order(int id) { }\n}\n\nclass Shipment : Order\n{\n    public Shipment() { }\n}\n\nclass Saved : Model\n{\n    public Saved() { }\n}\n\nclass Middle : Entity\n{\n}\n\nclass Leaf : Middle\n{\n    public Leaf() { }\n}\n\nclass Plain\n{\n}\n\nclass Free : Plain\n{\n    public Free() { }\n}\n\nclass Stamped\n{\n    public string stamp { get; set; } = strtoupper(\"p\");\n}\n\nclass Unsuper : Stamped\n{\n    public Unsuper() { }\n}\n\nclass Unsealed : Sealed\n{\n    public Unsealed() { }\n}\n";
 
     assert_messages(
         sharp,
-        &[("src/Lib/Model.php", model)],
+        &[("src/Lib/Model.php", model), ("src/Demo/Sealed.sharp", sealed)],
         &[
             "12:12 missing-super-call: `Order`'s constructor must call `Entity`'s with `: super(…)`.",
             "17:12 missing-super-call: `Shipment`'s constructor must call `Order`'s with `: super(…)`.",
             "22:12 missing-super-call: `Saved`'s constructor must call `Model`'s with `: super(…)`.",
             "31:12 missing-super-call: `Leaf`'s constructor must call `Middle`'s with `: super(…)`.",
+            "50:12 missing-super-call: `Unsuper`'s constructor must call `Stamped`'s with `: super(…)`.",
+            "55:12 missing-super-call: `Unsealed`'s constructor must call `Sealed`'s with `: super(…)`.",
         ],
     );
 }
 
-/// A class without a constructor gets one for its initial values that run in the constructor, which calls the base
-/// class's constructor without arguments. So that is not supported yet when the base class's constructor takes any.
+/// Spec section 9.1: PHP# has no implicit `super()`. A class without a constructor gets one for its initial values that
+/// run in the constructor, and that one calls the base class's constructor without arguments. So when the base class's
+/// constructor takes any, the class declares its own, and the help writes it with every parameter the base one takes:
+/// `Any?` for one PHP declares without a type, each default PHP# writes alike, and the imports its types need. PHP
+/// passes a default the help can't write, and every one after it, so the help leaves them out.
 #[test]
-fn initial_values_in_the_constructor_under_a_base_class_constructor_with_parameters_are_not_supported_yet() {
-    let sharp = "namespace Demo;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n}\n\nclass Constant : Entity\n{\n    protected string label = \"x\";\n}\n\nclass Blank\n{\n    public Blank() { }\n}\n\nclass Filled : Blank\n{\n    protected string label = strtoupper(\"x\");\n}\n";
+fn initial_values_in_the_constructor_under_a_base_class_constructor_with_parameters_need_a_constructor() {
+    let library = [
+        (
+            "src/Lib/Ledger.php",
+            "<?php\n\nnamespace Lib;\n\nclass Ledger\n{\n    public function __construct(string $name, int ...$counts)\n    {\n    }\n}\n",
+        ),
+        (
+            "src/Lib/Legacy.php",
+            "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    /**\n     * @param list<int> $ids\n     */\n    public function __construct($x, array $items = [], array $ids = [], ?\\DateTimeImmutable $at = null, string $sign = '$', int $after = 2)\n    {\n    }\n}\n",
+        ),
+        ("src/Billing/Money.php", "<?php\n\nnamespace Billing;\n\nclass Money\n{\n}\n"),
+        (
+            "src/Lib/Priced.php",
+            "<?php\n\nnamespace Lib;\n\nclass Priced\n{\n    public function __construct(\\Billing\\Money $money, int $count = 0, string $label = 'each', bool $taxed = true, bool $fixed = false, float $rate = 1.5, int $after = 2)\n    {\n    }\n}\n",
+        ),
+    ];
+    let sharp = "namespace Demo;\n\nimport Lib.Ledger;\nimport Lib.Legacy;\nimport Lib.Priced;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n}\n\nclass Totals : Ledger\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Constant : Entity\n{\n    protected string label = \"x\";\n}\n\nclass Blank\n{\n    public Blank() { }\n}\n\nclass Filled : Blank\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass FromLegacy : Legacy\n{\n    protected string label = strtoupper(\"x\");\n}\n\nclass Bill : Priced\n{\n    protected string label = strtoupper(\"x\");\n}\n";
+    let fixed = "namespace Demo;\n\nimport Billing.Money;\nimport DateTimeImmutable;\nimport Lib.Ledger;\nimport Lib.Legacy;\nimport Lib.Priced;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = strtoupper(\"x\");\n\n    public Labeled(int id) : super(id) { }\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n\n    public Pinned(int id) : super(id) { }\n}\n\nclass Totals : Ledger\n{\n    protected string label = strtoupper(\"x\");\n\n    public Totals(string name, int ...counts) : super(name, ...counts) { }\n}\n\nclass FromLegacy : Legacy\n{\n    protected string label = strtoupper(\"x\");\n\n    public FromLegacy(Any? x, Map<int|string, Any?> items = [:], List<int> ids = [], DateTimeImmutable? at = null) : super(x, items, ids, at) { }\n\n    public static FromLegacy make() => new FromLegacy(1);\n}\n\nclass Bill : Priced\n{\n    protected string label = strtoupper(\"x\");\n\n    public Bill(Money money, int count = 0, string label = \"each\", bool taxed = true, bool fixed = false) : super(money, count, label, taxed, fixed) { }\n\n    public static Bill make() => new Bill(new Money());\n}\n";
 
-    assert_messages(
-        sharp,
-        &[],
-        &[
-            "8:7 not-supported-yet: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Labeled`'s initial values run in its constructor.",
-            "13:7 not-supported-yet: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`: `Entity`'s takes arguments, and `Pinned`'s initial values run in its constructor.",
-        ],
+    let found: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", sharp), &library)
+        .iter()
+        .map(|issue| {
+            format!("{}: {} {}", located(sharp, issue), issue.message, issue.help.as_deref().unwrap_or_default())
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "12:7 missing-super-call: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Labeled(int id) : super(id) { }`.",
+            "17:7 missing-super-call: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Pinned(int id) : super(id) { }`.",
+            "22:7 missing-super-call: `Totals` must declare a constructor that calls `Ledger`'s with `: super(…)`. Write `public Totals(string name, int ...counts) : super(name, ...counts) { }`.",
+            "42:7 missing-super-call: `FromLegacy` must declare a constructor that calls `Legacy`'s with `: super(…)`. Write `public FromLegacy(Any? x, Map<int|string, Any?> items = [:], List<int> ids = [], DateTimeImmutable? at = null) : super(x, items, ids, at) { }`. Add `import DateTimeImmutable;` to the file.",
+            "47:7 missing-super-call: `Bill` must declare a constructor that calls `Priced`'s with `: super(…)`. Write `public Bill(Money money, int count = 0, string label = \"each\", bool taxed = true, bool fixed = false) : super(money, count, label, taxed, fixed) { }`. Add `import Billing.Money;` to the file.",
+        ]
     );
+    assert_messages(fixed, &library, &[]);
 }
 
 /// Spec section 9.1: `new Artifact.sized(…)` calls the named constructor `sized`, so its arguments are checked against
@@ -4744,11 +4776,12 @@ fn new_with_a_named_constructor_checks_its_arguments_and_creates_its_class() {
 }
 
 /// Spec section 9.1: a named constructor is its own class's, so `new` on a subclass finds none, and `new` names only a
-/// named constructor the class declares. A subclass may declare its own of the same name, which keeps a signature PHP
-/// accepts for the static method it runs as.
+/// named constructor the class declares. `new Self.sized(…)` in the subclass names the class that declares it, as
+/// `own` writes it. A subclass may declare its own of the same name, which keeps a signature PHP accepts for the
+/// static method it runs as.
 #[test]
 fn a_named_constructor_is_not_inherited() {
-    let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n}\n\nclass Resized : Base\n{\n    public Resized(int size) : super(size) { }\n\n    public Resized.sized(int size) : this(size * 2) { }\n}\n\nclass Restrung : Base\n{\n    public Restrung(int size) : super(size) { }\n\n    public Restrung.sized(string size) : this(strlen(size)) { }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n    public static Base itself() => new Self.sized(1);\n}\n\nclass Resized : Base\n{\n    public Resized(int size) : super(size) { }\n\n    public Resized.sized(int size) : this(size * 2) { }\n}\n\nclass Restrung : Base\n{\n    public Restrung(int size) : super(size) { }\n\n    public Restrung.sized(string size) : this(strlen(size)) { }\n}\n";
 
     assert_messages(
         sharp,
@@ -4756,9 +4789,15 @@ fn a_named_constructor_is_not_inherited() {
         &[
             "14:47 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
             "15:46 non-existent-method: `Base` has no constructor `missing`.",
-            "30:21 incompatible-parameter-type: Parameter `size` of `Restrung.sized` expects type `string` but parent `Base.sized` expects type `int`",
+            "17:36 non-existent-method: `Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.",
+            "31:21 incompatible-parameter-type: Parameter `size` of `Restrung.sized` expects type `string` but parent `Base.sized` expects type `int`",
         ],
     );
+    let helps: Vec<Option<String>> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", sharp), &[])
+        .into_iter()
+        .map(|issue| issue.help)
+        .collect();
+    assert_eq!(helps[2].as_deref(), Some("Name its class: write `new Base.sized(1)`."));
 }
 
 /// Spec section 9.1: a named constructor runs as a static method, and PHP refuses a static and an instance method of
@@ -4773,9 +4812,9 @@ fn a_method_and_a_named_constructor_of_one_name_are_one_error() {
         sharp,
         &[],
         &[
-            "21:16 incompatible-static-modifier: `Instanced.sized` cannot share its name with `Base`'s named constructor `sized`.",
-            "28:18 incompatible-static-modifier: The named constructor `Clash.copy` cannot share its name with the method `Base.copy`.",
-            "35:18 incompatible-static-modifier: The named constructor `Sheet.copy` cannot share its name with the method `Copyable.copy`.",
+            "21:16 named-constructor-clash: `Instanced.sized` cannot share its name with `Base`'s named constructor `sized`.",
+            "28:18 named-constructor-clash: The named constructor `Clash.copy` cannot share its name with the method `Base.copy`.",
+            "35:18 named-constructor-clash: The named constructor `Sheet.copy` cannot share its name with the method `Copyable.copy`.",
         ],
     );
 }
@@ -4827,6 +4866,26 @@ fn this_arguments_are_checked_against_the_main_constructor() {
         "namespace Demo;\n\nclass Plain\n{\n    public Plain.full(int count) : this(count) { }\n}\n",
         &[],
         &["5:40 too-many-arguments: `Plain` has no constructor to call: remove the arguments."],
+    );
+}
+
+/// Spec section 9.1: the main constructor creates its object, and PHP discards a value it returns, so `return;` ends it
+/// and a returned value is an error, whose fix compiles. A `.php` constructor keeps PHP's rule.
+#[test]
+fn a_main_constructor_returns_no_value() {
+    let sharp = "namespace Demo;\n\nclass Ticket\n{\n    public Ticket(int seats)\n    {\n        if (seats > 0) {\n            return 5;\n        }\n    }\n}\n";
+    let fixed = "namespace Demo;\n\nclass Ticket\n{\n    public Ticket(int seats)\n    {\n        if (seats > 0) {\n            return;\n        }\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Ticket\n{\n    public function __construct(int $seats)\n    {\n        if ($seats > 0) {\n            return 5;\n        }\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &["8:20 invalid-return-statement: A constructor creates its object and returns nothing: write `return;`."],
+    );
+    assert_messages(fixed, &[], &[]);
+    assert!(
+        !issues(("src/Demo/Ticket.php", php), &[]).iter().any(|issue| issue.ends_with("invalid-return-statement")),
+        "PHP keeps its own rule for a constructor's return"
     );
 }
 
@@ -5590,25 +5649,17 @@ fn a_list_read_takes_any_int_index_under_strict_list_index_checks() {
 /// PHP `array<string, int>` keeps reading a handled key of any array key type, as PHP does.
 #[test]
 fn a_map_read_with_a_key_outside_its_key_type_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, string? name, int id, int|string either)\n    {\n        const a = counts[name] ?? 0;\n        const b = counts[id] ?? 0;\n        const c = counts[either] ?? 0;\n        const d = isset(counts[name]) ? 1 : 0;\n        return a + b + c + d;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Tally\n{\n    /**\n     * @param array<string, int> $counts\n     */\n    public function read(array $counts, ?string $name, int $id, int|string $either): int\n    {\n        $a = $counts[$name] ?? 0;\n        $b = $counts[$id] ?? 0;\n        $c = $counts[$either] ?? 0;\n        $d = isset($counts[$name]) ? 1 : 0;\n        return $a + $b + $c + $d;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, string? name, int id, int|string either)\n    {\n        const a = counts[name] ?? 0;\n        const b = counts[id] ?? 0;\n        const c = counts[either] ?? 0;\n        return a + b + c;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Tally\n{\n    /**\n     * @param array<string, int> $counts\n     */\n    public function read(array $counts, ?string $name, int $id, int|string $either): int\n    {\n        $a = $counts[$name] ?? 0;\n        $b = $counts[$id] ?? 0;\n        $c = $counts[$either] ?? 0;\n        return $a + $b + $c;\n    }\n}\n";
 
-    assert_eq!(
-        issues(("src/Demo/Tally.php", php), &[]),
-        ["12:22 possibly-null-array-index", "15:28 possibly-null-array-index"]
-    );
+    assert_eq!(issues(("src/Demo/Tally.php", php), &[]), ["12:22 possibly-null-array-index"]);
 
     let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[]);
     let located_issues: Vec<String> = sharp_issues.iter().map(|issue| located(sharp, issue)).collect();
 
     assert_eq!(
         located_issues,
-        [
-            "7:26 mismatched-array-index",
-            "8:26 mismatched-array-index",
-            "9:26 mismatched-array-index",
-            "10:32 mismatched-array-index",
-        ]
+        ["7:26 mismatched-array-index", "8:26 mismatched-array-index", "9:26 mismatched-array-index"]
     );
     assert_eq!(
         sharp_issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>()[..3],
@@ -5648,8 +5699,8 @@ fn a_map_read_with_a_key_outside_its_key_type_is_an_error() {
 /// and a `Status` reads a `Map<Status, int>`, which runs as its backing value.
 #[test]
 fn a_map_read_with_a_key_of_its_key_type_is_accepted() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, Map<Status, int> states, string name, Status status)\n    {\n        const named = [\"a\": 1];\n        const a = counts[name] ?? 0;\n        const b = states[status] ?? 0;\n        const c = isset(counts[name]) ? 1 : 0;\n        const d = named[name] ?? 0;\n        return a + b + c + d;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Status;\n\nclass Tally\n{\n    /**\n     * @param array<string, int> $counts\n     * @param array<string, int> $states\n     */\n    public function read(array $counts, array $states, string $name, Status $status): int\n    {\n        $named = ['a' => 1];\n        $a = $counts[$name] ?? 0;\n        $b = $states[$status->value] ?? 0;\n        $c = isset($counts[$name]) ? 1 : 0;\n        $d = $named[$name] ?? 0;\n        return $a + $b + $c + $d;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int read(Map<string, int> counts, Map<Status, int> states, string name, Status status)\n    {\n        const named = [\"a\": 1];\n        const a = counts[name] ?? 0;\n        const b = states[status] ?? 0;\n        const c = named[name] ?? 0;\n        return a + b + c;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Status;\n\nclass Tally\n{\n    /**\n     * @param array<string, int> $counts\n     * @param array<string, int> $states\n     */\n    public function read(array $counts, array $states, string $name, Status $status): int\n    {\n        $named = ['a' => 1];\n        $a = $counts[$name] ?? 0;\n        $b = $states[$status->value] ?? 0;\n        $c = $named[$name] ?? 0;\n        return $a + $b + $c;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
@@ -7304,6 +7355,64 @@ fn a_sharp_call_keeps_a_functions_template_bounds_unless_it_keys_a_map() {
 /// where it is used: a parameter, a `Map` key, a local, a field's and a property's initial value, a return, in a block or an
 /// expression body, and an argument. A PHP declaration that names
 /// no type stays checked where PHP# meets it, so a call that passes it a wrong value is refused.
+/// `CONST base = 2;` reads as a local whose type is `CONST`, as `Cart base = …;` does. When no type has that name, the
+/// type is the keyword `const` or `let` written in another case, and the help writes the line in lowercase.
+#[test]
+fn a_local_typed_const_or_let_in_another_case_is_the_keyword_written_in_another_case() {
+    let method = |body: &'static str| -> &'static str {
+        Box::leak(
+            format!("namespace Demo;\n\nclass Report\n{{\n    public int run()\n    {{\n{body}    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    for (body, keyword) in [
+        ("        CONST base = 2;\n        return base;\n", "const"),
+        ("        Let total = 1;\n        return total;\n", "let"),
+        ("        LET total = 1; return total;\n", "let"),
+    ] {
+        assert_eq!(
+            refusals(("src/Demo/Report.sharp", method(body)), &[]),
+            [format!("7:9 parse Write the keyword `{keyword}` in lowercase. | ")],
+            "{body}"
+        );
+    }
+
+    let let_class = ("src/Demo/Let.php", "<?php\n\nnamespace Demo;\n\nclass Let\n{\n}\n");
+    let typed = method("        Let total = new Let();\n        return 1;\n");
+    assert_eq!(issues(("src/Demo/Report.sharp", typed), &[let_class]), Vec::<String>::new());
+}
+
+/// The semantic checks refuse a `.sharp` file's `declare`, whose help writes its body without it, so its body runs as
+/// written, and its `return` ends the method. Plain PHP keeps Mago's reading, which skips a `declare` body.
+#[test]
+fn a_declare_body_runs_as_written_in_a_sharp_file() {
+    for body in
+        ["declare(ticks=1) { return 1; }", "declare(ticks=1) return 1;", "declare(ticks=1): return 1; enddeclare;"]
+    {
+        let code = Box::leak(
+            format!("namespace Demo;\n\nclass Report\n{{\n    public int run()\n    {{\n        {body}\n    }}\n}}\n")
+                .into_boxed_str(),
+        );
+        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), Vec::<String>::new(), "{body}");
+    }
+
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function run(): int\n    {\n        declare(ticks=1) { return 1; }\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["7:21 missing-return-statement"]);
+}
+
+/// The semantic checks refuse `TRUE` as `true` written in another case, so its value keeps its type and adds no issue.
+#[test]
+fn true_false_or_null_in_another_case_keeps_its_value_type() {
+    for (returns, value) in [("bool", "TRUE"), ("bool", "False"), ("int?", "NULL")] {
+        let code = Box::leak(
+            format!("namespace Demo;\n\nclass Report\n{{\n    public {returns} run()\n    {{\n        return {value};\n    }}\n}}\n")
+                .into_boxed_str(),
+        );
+        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), Vec::<String>::new(), "{value}");
+    }
+}
+
 #[test]
 fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_is() {
     let sharp = "namespace Demo;\n\nclass Tally\n{\n    public Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        Missing? local = null;\n        return 0;\n    }\n}\n";

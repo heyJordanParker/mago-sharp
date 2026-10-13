@@ -215,7 +215,7 @@ fn parse_error_implements_display() {
     let tpl = parse(&arena, "{% if a %}body");
     let err = tpl.errors.first().expect("expected a deferred error");
     let msg = err.message();
-    assert!(!msg.is_empty());
+    assert!(!msg.is_empty(), "expected a message");
 }
 
 fn run_with_large_stack<F>(f: F)

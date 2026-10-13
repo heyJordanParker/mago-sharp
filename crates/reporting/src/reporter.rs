@@ -301,9 +301,9 @@ mod tests {
 
     #[test]
     fn human_formats_write_nothing_when_empty() {
-        assert!(report_empty(ReportingFormat::Rich).is_empty());
-        assert!(report_empty(ReportingFormat::Medium).is_empty());
-        assert!(report_empty(ReportingFormat::Short).is_empty());
+        assert_eq!(report_empty(ReportingFormat::Rich), b"");
+        assert_eq!(report_empty(ReportingFormat::Medium), b"");
+        assert_eq!(report_empty(ReportingFormat::Short), b"");
     }
 
     #[test]
