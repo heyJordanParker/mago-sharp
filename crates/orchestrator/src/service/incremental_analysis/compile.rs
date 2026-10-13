@@ -1770,14 +1770,24 @@ mod tests {
 
     /// Spec section 23: a class of the file's namespace wins over the class `Sharp` imports by default, so the unchanged
     /// `Shape`, whose bare `Cache` meant the missing `Sharp.Cache`, compiles once `app/App/Cache.sharp` declares
-    /// `App.Cache`, and is refused again once it is removed, in a one-off compile and under `mago analyze --watch`.
+    /// `App.Cache`, and is refused again once it is removed, in a one-off compile and under `mago analyze --watch`. An
+    /// edit to `Shape` itself keeps its bare `Cache` naming `App.Cache`.
     #[test]
     fn a_compile_after_the_namespace_gains_or_loses_a_class_named_like_a_default_class_matches_a_clean_compile() {
         let alone = vec![("app/App/Shape.sharp", SHAPE.to_string())];
         let beside = vec![("app/App/Shape.sharp", SHAPE.to_string()), ("app/App/Cache.sharp", CACHE.to_string())];
+        let edited_shape = SHAPE.replace(
+            "Cache.size();\n",
+            "Cache.size();\n\n    public int twice(Cache cache) => this.size(cache) * 2;\n",
+        );
+        let shape_edited = vec![("app/App/Shape.sharp", edited_shape), ("app/App/Cache.sharp", CACHE.to_string())];
 
         for diff in [false, true] {
-            for (before, after, accepted) in [(&alone, &beside, true), (&beside, &alone, false)] {
+            for (name, before, after, accepted) in [
+                ("Cache added", &alone, &beside, true),
+                ("Cache removed", &beside, &alone, false),
+                ("Shape edited", &beside, &shape_edited, true),
+            ] {
                 let (base, edited) = (shop_project(before), shop_project(after));
 
                 let mut warm = analyzed_with(&base, Settings { diff, ..Settings::default() });
@@ -1787,7 +1797,7 @@ mod tests {
                 let warm_compiled = compile(&mut warm, empty_stamp);
                 let clean_compiled = compile(&mut analyzed(&edited), empty_stamp);
 
-                let row = format!("diff {diff}: {} to {} files", before.len(), after.len());
+                let row = format!("diff {diff}: {name}");
                 assert_eq!(outcomes(&clean_compiled)["app/App/Shape.sharp"].is_ok(), accepted, "{row}");
                 assert_eq!(outcomes(&warm_compiled), outcomes(&clean_compiled), "{row}");
             }
@@ -1806,6 +1816,56 @@ mod tests {
             messages(&service.analyze_file_with_artifacts(shape).expect("the file exists").0),
             Vec::<String>::new()
         );
+    }
+
+    /// Spec section 23: once `App.Position` and `App.Environment` take the short names, the help of each refused magic
+    /// constant and superglobal names the standard class through an aliased import, and the help's fix compiles.
+    #[test]
+    fn a_help_names_a_standard_class_its_namespace_shadows_through_an_aliased_import() {
+        let position =
+            "namespace App;\n\npublic class Position\n{\n    public Position(public string title { get; }) { }\n}\n";
+        let environment = "namespace App;\n\npublic class Environment\n{\n    public int level() => 1;\n}\n";
+        let paths = "namespace App;\n\npublic class Paths\n{\n    public string here() => __DIR__;\n\n    public string file() => __FILE__;\n\n    public int line() => __LINE__;\n\n    public string caller() => __FUNCTION__;\n\n    public string space() => __NAMESPACE__;\n\n    public string held() => __TRAIT__;\n\n    public string home() => $_SERVER[\"HOME\"];\n}\n";
+        let fixed = "namespace App;\n\nimport Sharp.Environment as SharpEnvironment;\nimport Sharp.Position as SharpPosition;\n\npublic class Fixed\n{\n    public string here() => SharpPosition.current().directory;\n\n    public string file() => SharpPosition.current().file;\n\n    public int line() => SharpPosition.current().line;\n\n    public string caller() => SharpPosition.current().function;\n\n    public string folder(SharpEnvironment environment) => environment.currentDirectory;\n\n    public string title(Position position) => position.title;\n\n    public int level(Environment environment) => environment.level();\n}\n";
+        let database = project(&[
+            ("app/App/Position.sharp", position),
+            ("app/App/Environment.sharp", environment),
+            ("app/App/Paths.sharp", paths),
+            ("app/App/Fixed.sharp", fixed),
+        ]);
+        let mut service = analyzed(&database);
+        let import = "after `import Sharp.Position as SharpPosition;`";
+
+        let issues = service.analyze_file(FileId::new(b"app/App/Paths.sharp"));
+        let removed: Vec<String> =
+            messages(&issues).into_iter().filter(|message| message.starts_with("PHP# has no")).collect();
+        assert_eq!(
+            removed,
+            [
+                format!("PHP# has no `__DIR__`: write `SharpPosition.current().directory` {import}."),
+                format!("PHP# has no `__FILE__`: write `SharpPosition.current().file` {import}."),
+                format!("PHP# has no `__FUNCTION__`: write `SharpPosition.current().function` {import}."),
+                format!("PHP# has no `__LINE__`: write `SharpPosition.current().line` {import}."),
+                format!(
+                    "PHP# has no `__NAMESPACE__`: write `SharpPosition.current().function` {import}, which starts with the namespace."
+                ),
+                format!(
+                    "PHP# has no `__TRAIT__`: `SharpPosition.current()` {import} gives the file, directory, line, column and function."
+                ),
+                "PHP# has no superglobals; take a Request".to_owned(),
+            ]
+        );
+        let superglobal = issues.iter().find(|issue| issue.message.starts_with("PHP# has no superglobals"));
+        assert_eq!(
+            superglobal.expect("the superglobal is refused").notes,
+            [
+                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `SharpEnvironment` after `import Sharp.Environment as SharpEnvironment;`."
+            ]
+        );
+
+        let compiled = compile(&mut service, empty_stamp);
+        let fixed = &outcomes(&compiled)["app/App/Fixed.sharp"];
+        assert!(fixed.is_ok(), "the help's fix compiles: {fixed:?}");
     }
 
     /// Only a class named like a default class changes what a bare name means, so adding another class to `App`

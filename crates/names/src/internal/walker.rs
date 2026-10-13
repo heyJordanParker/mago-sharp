@@ -102,6 +102,7 @@ use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
 use crate::scope::trim_start_byte;
+use crate::shadowable_default_classes;
 use crate::shadows_a_default_class;
 
 /// A CST visitor (`MutWalker`) that traverses a PHP Concrete Syntax Tree
@@ -298,28 +299,49 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         self.locals.exit_block();
     }
 
-    /// Resolves a name written where a class goes. In a PHP# file a bare name of the standard library is the class in
-    /// the `Sharp` namespace, unless the file imports or declares a class-like of that name or its namespace holds
-    /// one, spec section 23. The class-like of its namespace is recorded either way, since adding or removing it
-    /// changes what the name means.
+    /// Resolves a name written where a class goes, as [`class_meaning`](Self::class_meaning) does. The class-like of
+    /// the file's namespace that would win over a default one is recorded whether the namespace holds it or not, since
+    /// adding or removing it changes what the name means.
     fn resolve_class<A>(&mut self, context: &NameResolutionContext<'arena, A>, name: &[u8]) -> (&'arena [u8], bool)
+    where
+        A: Arena,
+    {
+        let (meaning, namespace_class) = self.class_meaning(context, name);
+        if let Some(namespace_class) = namespace_class {
+            self.resolved_names.add_namespace_class(namespace_class);
+        }
+
+        meaning
+    }
+
+    /// What a name written where a class goes means, and whether it was imported. In a PHP# file a bare name of the
+    /// standard library is the class in the `Sharp` namespace, unless the file imports or declares a class-like of that
+    /// name or its namespace holds one, spec section 23. Also returns the class-like of the file's namespace that would
+    /// win over the default one, held or not.
+    fn class_meaning<A>(
+        &self,
+        context: &NameResolutionContext<'arena, A>,
+        name: &[u8],
+    ) -> ((&'arena [u8], bool), Option<&'arena [u8]>)
     where
         A: Arena,
     {
         let (fqn, imported) = context.resolve(NameKind::Default, name);
         if !self.sharp || imported || self.declared_classes.contains(&IgnoringCase(name)) {
-            return (fqn, imported);
+            return ((fqn, imported), None);
         }
 
         let Some(class) = default_class(name) else {
-            return (fqn, imported);
+            return ((fqn, imported), None);
         };
-        if !shadows_a_default_class(name) {
-            return (class, false);
+        // A default class-like is the class-like of its own namespace, so no other one wins over it there.
+        if !shadows_a_default_class(name) || fqn.eq_ignore_ascii_case(class) {
+            return ((class, false), None);
         }
 
-        self.resolved_names.add_namespace_class(fqn);
-        if self.namespace_classes.contains(fqn) { (fqn, imported) } else { (class, false) }
+        let meaning = if self.namespace_classes.contains(fqn) { (fqn, imported) } else { (class, false) };
+
+        (meaning, Some(fqn))
     }
 }
 
@@ -1313,7 +1335,20 @@ where
         }
     }
 
+    /// Records each default class-like whose short name names another class-like in the PHP# file, once the
+    /// namespace's imports and declarations are known, so a refusal's help names the default one in a form the file
+    /// can write. The class-like of the file's namespace is not recorded as one the file names: only a refused file's
+    /// help reads it, and a refused file is analyzed again on every run.
     fn walk_out_namespace(&mut self, _namespace: &Namespace<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        if self.sharp {
+            for class in shadowable_default_classes().map(str::as_bytes) {
+                let ((meaning, _), _) = self.class_meaning(context, &class[b"Sharp\\".len()..]);
+                if meaning != class {
+                    self.resolved_names.shadow_default_class(class);
+                }
+            }
+        }
+
         context.exit_namespace();
     }
 }
