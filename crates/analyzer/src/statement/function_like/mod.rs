@@ -1855,19 +1855,22 @@ where
 /// PHP# class type names the class itself, as `Class<PaginatedList>` does, so its class needs none.
 ///
 /// A declaration is checked where it is written, so the mistake is reported at the declaration
-/// rather than at whichever call first happens to reach it.
-pub fn report_invalid_template_arguments<A>(context: &mut Context<'_, '_, A>, type_metadata: &TypeMetadata)
+/// rather than at whichever call first happens to reach it. Returns whether a class in it has the
+/// wrong number of type arguments or none, so a type in a body gives what it tests no type the
+/// next check would report again.
+pub fn report_invalid_template_arguments<A>(context: &mut Context<'_, '_, A>, type_metadata: &TypeMetadata) -> bool
 where
     A: Arena,
 {
     if type_metadata.inferred {
-        return;
+        return false;
     }
 
     report_map_keys_without_backing_value(context, &type_metadata.type_union, type_metadata.span);
     report_unsupported_set_elements(context, &type_metadata.type_union, type_metadata.span);
 
     let codebase = context.codebase;
+    let mut is_refused = false;
     let mut type_refs = type_metadata.type_union.get_child_nodes();
     while let Some(type_ref) = type_refs.pop() {
         match type_ref {
@@ -1883,22 +1886,22 @@ where
             continue;
         };
 
-        match &named.type_parameters {
-            Some(arguments) => {
-                check_template_arguments(
-                    context,
-                    class.original_name,
-                    class.name_span.unwrap_or(class.span),
-                    &class.template_types,
-                    arguments,
-                    type_metadata.span,
-                    &TemplateResult::default(),
-                );
-            }
+        is_refused |= match &named.type_parameters {
+            Some(arguments) => !check_template_arguments(
+                context,
+                class.original_name,
+                class.name_span.unwrap_or(class.span),
+                &class.template_types,
+                arguments,
+                type_metadata.span,
+                &TemplateResult::default(),
+            ),
             None if !named.is_static => report_missing_type_arguments(context, class, type_metadata.span),
-            None => {}
-        }
+            None => false,
+        };
     }
+
+    is_refused
 }
 
 /// Reports `arguments`, applied at `span` to the templates `owner` declares at `owner_span`, when their number differs
@@ -1960,7 +1963,7 @@ where
     }
 
     let generic_owner = match templates.values().next().map(|template| template.defining_entity) {
-        Some(GenericParent::FunctionLike(_)) if is_sharp => {
+        Some(GenericParent::FunctionLike(_)) => {
             let names: Vec<String> = templates.keys().map(ToString::to_string).collect();
 
             format!("{owner}<{}>", names.join(", "))

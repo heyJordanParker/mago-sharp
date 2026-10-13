@@ -302,7 +302,7 @@ where
         }
 
         if self.is_at_type_of()? {
-            return Ok(self.arena.alloc(Expression::TypeOf(self.parse_type_of()?)));
+            return Ok(self.arena.alloc(self.parse_type_of()?));
         }
 
         // `super.label()` calls the parent's method, spec section 22, as PHP's `parent::label()`.

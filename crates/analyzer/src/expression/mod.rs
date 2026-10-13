@@ -15,6 +15,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::union::TUnion;
+use mago_codex::ttype::wrap_atomic;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -368,8 +369,9 @@ pub(crate) fn analyze_php_shape<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    let mut is_refused = false;
     for hint in hints {
-        report_hint_type_arguments(context, block_context, artifacts, hint);
+        is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint);
     }
 
     let Some(PhpShape { php, temporaries, tests }) =
@@ -493,7 +495,13 @@ where
     context.collector.extend(issues);
     result?;
 
-    if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
+    // A refused type, as `value as Box` writes, gives the expression no type, so where its value goes reports nothing
+    // again.
+    if let Node::Expression(expression) = node
+        && is_refused
+    {
+        artifacts.set_expression_type(expression, wrap_atomic(TAtomic::Error));
+    } else if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
         && let Some(php_type) = artifacts.get_rc_expression_type(php).cloned()
     {
         artifacts.set_rc_expression_type(expression, php_type);

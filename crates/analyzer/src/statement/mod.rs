@@ -22,6 +22,7 @@ use mago_codex::ttype::get_backing_key_type;
 use mago_codex::ttype::get_sole_backed_enum;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::union::populate_union_type;
+use mago_codex::ttype::wrap_atomic;
 use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -382,26 +383,33 @@ where
         return None;
     };
 
-    report_hint_type_arguments(context, block_context, artifacts, hint);
-
-    let local_type = (Rc::new(get_type_from_hint(context, block_context, artifacts, hint)), hint.span());
+    // A refused type gives the local no type, so its later uses report nothing again.
+    let local_type = if report_hint_type_arguments(context, block_context, artifacts, hint) {
+        wrap_atomic(TAtomic::Error)
+    } else {
+        get_type_from_hint(context, block_context, artifacts, hint)
+    };
+    let local_type = (Rc::new(local_type), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
     Some(local_type)
 }
 
 /// Reports the type arguments a PHP# `hint` in a body leaves out or gets wrong, as a local's type, a type test or a
-/// `catch` writes it, spec section 11: a type names the type arguments of a generic class.
+/// `catch` writes it, spec section 11: a type names the type arguments of a generic class. Returns whether it refused a
+/// class's type arguments, as [`report_invalid_template_arguments`] does.
 pub(crate) fn report_hint_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
     artifacts: &mut AnalysisArtifacts,
     hint: &Hint<'_>,
-) where
+) -> bool
+where
     A: Arena,
 {
     let written_type = get_written_type_from_hint(context, block_context, artifacts, hint);
-    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()));
+
+    report_invalid_template_arguments(context, &TypeMetadata::new(written_type, hint.span()))
 }
 
 /// The type a PHP# `hint` writes inside the scope of `block_context`, where it may name the type parameters of the

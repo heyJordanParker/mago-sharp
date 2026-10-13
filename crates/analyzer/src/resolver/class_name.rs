@@ -404,6 +404,9 @@ where
                     );
                 } else if atomic.is_null() && expression_is_nullsafe(expression) {
                     // Nullsafe in chain short-circuits, skip error
+                } else if matches!(atomic, TAtomic::Error) {
+                    // A refused expression's own error already reports it.
+                    possible_types.push(ResolvedClassname::invalid());
                 } else if atomic.is_null() {
                     context.collector.report_with_code(
                         IssueCode::PossiblyNullPropertyAccess,

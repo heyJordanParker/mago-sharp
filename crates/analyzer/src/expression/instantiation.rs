@@ -389,6 +389,22 @@ where
                 return Ok(get_never());
             }
 
+            // The checker refuses a generic class's named constructor where it is declared, and its call here, so
+            // where the call's object goes reports nothing again.
+            if context.dialect.is_sharp() && metadata.flags.is_sharp() && !metadata.template_types.is_empty() {
+                context.collector.report_with_code(
+                    IssueCode::NotSupportedYet,
+                    Issue::error(format!(
+                        "A named constructor is not supported yet in a generic class, because it runs as a static method every `{}<…>` shares.",
+                        short_name(metadata.original_name)
+                    ))
+                    .with_annotation(Annotation::primary(instantiation_span).with_message("Not supported yet.")),
+                );
+                argument_list.analyze(context, block_context, artifacts)?;
+
+                return Ok(wrap_atomic(TAtomic::Error));
+            }
+
             (constructor_id, MethodInvocationKind::Static)
         }
         None => (MethodIdentifier::new(metadata.original_name, word("__construct")), MethodInvocationKind::Instance),
@@ -403,6 +419,7 @@ where
 
     let mut template_result = TemplateResult::new(IndexMap::with_hasher(RandomState::default()), HashMap::default());
 
+    let mut is_refused = false;
     let written_type_parameters = match type_arguments {
         Some(type_arguments) => seed_type_arguments(
             context,
@@ -426,10 +443,9 @@ where
 
             own_type_parameters
         }
-        // The checker refuses a named constructor of a generic class, so its call names no type arguments to report.
-        None if is_new_on_generic_class_value || constructor.is_some() => None,
+        None if is_new_on_generic_class_value => None,
         None => {
-            report_missing_type_arguments(context, metadata, class_expression_span);
+            is_refused = report_missing_type_arguments(context, metadata, class_expression_span);
 
             None
         }
@@ -638,6 +654,11 @@ where
         return Ok(get_never());
     }
 
+    // A refused `new Box(…)` reports nothing again where its object goes.
+    if is_refused {
+        return Ok(wrap_atomic(TAtomic::Error));
+    }
+
     if written_type_parameters.is_some() {
         type_parameters = written_type_parameters;
     }
@@ -667,13 +688,18 @@ where
 }
 
 /// Reports `class` written at `span` in a PHP# file without type arguments, as a type or after `new`, when it is a
-/// generic PHP# class, which spec section 11 refuses, as C# does (CS0305).
-pub(crate) fn report_missing_type_arguments<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, span: Span)
+/// generic PHP# class, which spec section 11 refuses, as C# does (CS0305). Returns whether it refused it, so the caller
+/// gives the refused type no type the next check would report again.
+pub(crate) fn report_missing_type_arguments<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    span: Span,
+) -> bool
 where
     A: Arena,
 {
     if !context.dialect.is_sharp() || !class.flags.is_sharp() || class.template_types.is_empty() {
-        return;
+        return false;
     }
 
     let class_name = short_name(class.original_name);
@@ -688,6 +714,8 @@ where
             .with_annotation(Annotation::primary(span).with_message(format!("`{class_name}` has type parameters")))
             .with_note("A type and `new` name the type arguments of a generic class."),
     );
+
+    true
 }
 
 /// Analyzes the constructor invocation for an anonymous class.

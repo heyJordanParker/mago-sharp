@@ -693,6 +693,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let line = self.line(&event.parameter_list);
+        let metadata = self.types.method_metadata(self.class, b"__construct");
+        parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
         let constructor = self.declaration(
@@ -783,16 +785,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             parameters.push(self.parameter(parameter));
         }
         let line = self.line(&method.parameter_list);
-        // A method that a call gives type arguments, or whose argument a call from plain PHP is checked against, ends
-        // its parameter list with its metadata: its bounds and the type each parameter is checked against.
-        if let (bounds, checks @ Some(_)) | (bounds @ Some(_), checks) =
-            self.types.method_metadata(self.class, php_method_name(method))
-        {
-            let bounds = bounds.map_or(NULL, |bounds| self.string(0, line, bounds.as_bytes()));
-            let checks = checks.map_or(NULL, |checks| self.string(0, line, checks.as_bytes()));
-            parameters.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[bounds, checks]));
-        }
-
+        let metadata = self.types.method_metadata(self.class, php_method_name(method));
+        parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let mut statements = if matches!(method.body, MethodBody::Abstract(_)) && first_statements.is_empty() {
             Vec::new()
@@ -822,6 +816,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             php_method_name(method),
             &[parameters, NULL, body, return_type, attributes],
         )
+    }
+
+    /// The metadata that ends the parameter list of a function a call gives type arguments, or whose argument a call
+    /// from plain PHP is checked against: `metadata`, its bounds and the type each parameter is checked against, as
+    /// [`Types::method_metadata`] gives them. None when it has neither.
+    fn parameter_metadata(&mut self, metadata: (Option<String>, Option<String>), line: u32) -> Option<u32> {
+        let (bounds, checks) = metadata;
+        if bounds.is_none() && checks.is_none() {
+            return None;
+        }
+
+        let bounds = bounds.map_or(NULL, |bounds| self.string(0, line, bounds.as_bytes()));
+        let checks = checks.map_or(NULL, |checks| self.string(0, line, checks.as_bytes()));
+
+        Some(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[bounds, checks]))
     }
 
     /// `parent::__construct(…)` with `arguments`, the call `: super(…)` runs as, a static call of `parent` as
@@ -884,7 +893,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             });
         }
 
-        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&operator.parameter_list), &parameters);
+        let line = self.line(&operator.parameter_list);
+        let metadata = self.types.method_metadata(self.class, name);
+        parameters.extend(self.parameter_metadata(metadata, line));
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let mut prologue = self.set_parameters(&operator.parameter_list);
         if lifted {
             prologue.push(self.null_lifting(&operator.parameter_list));
@@ -915,7 +927,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             parameters.push(self.parameter(parameter));
         }
 
-        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, self.line(&constructor.parameter_list), &parameters);
+        let line = self.line(&constructor.parameter_list);
+        let metadata = self.types.method_metadata(self.class, constructor.name.value);
+        parameters.extend(self.parameter_metadata(metadata, line));
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
         let mut statements = self.set_parameters(&constructor.parameter_list);
         let line = self.line(initializer);
         let object = self.variable(initializer.keyword.span, b"this#1");
@@ -2553,7 +2568,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `Set` parameter, which `fn` has no statement before its expression to make a `Set`.
     fn arrow_function(&mut self, arrow_function: &ArrowFunction) -> u32 {
         let lambda = arrow_function.span();
-        let parameters = self.lambda_parameters(&arrow_function.parameter_list);
+        let parameters = self.lambda_parameters(lambda, &arrow_function.parameter_list);
         let ((mut statements, value), captures_type_arguments) = self.lambda_body(|lowering| {
             (lowering.set_parameters(&arrow_function.parameter_list), lowering.expression(arrow_function.expression))
         });
@@ -2583,7 +2598,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// each `Set` parameter a `Set` first.
     fn closure(&mut self, closure: &Closure) -> u32 {
         let lambda = closure.span();
-        let parameters = self.lambda_parameters(&closure.parameter_list);
+        let parameters = self.lambda_parameters(lambda, &closure.parameter_list);
         let (body, captures_type_arguments) = self.lambda_body(|lowering| {
             let mut statements = lowering.set_parameters(&closure.parameter_list);
             for statement in &closure.body.statements {
@@ -2597,15 +2612,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, NULL, NULL])
     }
 
-    /// A lambda's parameters, each with its type or a null type, as PHP writes a parameter without one.
-    fn lambda_parameters(&mut self, list: &FunctionLikeParameterList) -> u32 {
+    /// The parameters of the lambda at `lambda`, each with its type or a null type, as PHP writes a parameter without
+    /// one, and the metadata plain PHP's call of it is checked against, as a method's.
+    fn lambda_parameters(&mut self, lambda: Span, list: &FunctionLikeParameterList) -> u32 {
         let mut parameters = Vec::new();
         for parameter in &list.parameters {
             let hint = parameter.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
             parameters.push(self.parameter_of_type(parameter, hint));
         }
+        let line = self.line(list);
+        let metadata = self.types.lambda_metadata(lambda);
+        parameters.extend(self.parameter_metadata(metadata, line));
 
-        self.node(SHARP_AST_PARAM_LIST, 0, self.line(list), &parameters)
+        self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters)
     }
 
     /// The `use` list of a `CLOSURE`: each local the lambda captures, in first-use order, by reference with

@@ -947,7 +947,7 @@ fn analyze_and_compile_report_the_same_error_after_a_throw_in_a_sharp_file() {
             .collect()
     };
     let expected = [
-        "src/App/Page.sharp:17:16:error - invalid-return-statement: Invalid return type for method `Page.never`: expected `Box<int>`, but found `Box<string>`.",
+        "src/App/Page.sharp:17:16:error - invalid-return-statement: Box<string> cannot be used as Box<int>.",
     ];
 
     assert_eq!(errors(&analyzed), expected, "{}", String::from_utf8_lossy(&analyzed.stdout));

@@ -227,11 +227,11 @@ pub fn get_generic_parameter_for_offset(
     get_mixed()
 }
 
-/// Rewrites `issue`, reported with `code` for `input` where `expected` is required, when only a missing `out` or `in`
-/// blocks the substitution in a PHP# file: `C<A>` given where `C<B>` is expected, `C` a PHP# class, and the one type
-/// argument that differs belongs to an invariant type parameter whose `out` (`A` within `B`) or `in` (`B` within `A`)
-/// would accept it. The value is then of another type, not a wider one, so the issue becomes `invalid`, with spec
-/// section 11.1's message and note and no help, since the help names a marker only once R4 checks variance.
+/// Rewrites `issue`, reported with `code` for `input` where `expected` is required, when invariance blocks the
+/// substitution in a PHP# file: `C<A>` given where `C<B>` is expected, `C` a PHP# class, and every type argument that
+/// differs belongs to an invariant type parameter, however many differ and whether or not one holds the other. The
+/// value is then of another type, not a wider one, so the issue becomes `invalid`, with spec section 11.1's message and
+/// note and no help, since the help names a marker only once R4 checks variance.
 pub(crate) fn explain_blocked_substitution<A>(
     context: &Context<'_, '_, A>,
     input: &TUnion,
@@ -267,9 +267,6 @@ where
     };
     let given_arguments = given_object.get_type_parameters().unwrap_or_default();
     let wanted_arguments = wanted_object.get_type_parameters().unwrap_or_default();
-    if given_arguments.len() != wanted_arguments.len() {
-        return unchanged(issue);
-    }
 
     let contains = |input: &TUnion, container: &TUnion| {
         union_comparator::is_contained_by(
@@ -283,16 +280,15 @@ where
         )
     };
 
+    // A refused type argument past the class's count stays out of the comparison, so `Holder<Order, int>` compares its
+    // `Order` alone.
     let mut blocked = false;
     for (index, (given_argument, wanted_argument)) in given_arguments.iter().zip(wanted_arguments).enumerate() {
-        let widens = contains(given_argument, wanted_argument);
-        let narrows = contains(wanted_argument, given_argument);
-        if widens && narrows {
+        if contains(given_argument, wanted_argument) && contains(wanted_argument, given_argument) {
             continue;
         }
 
-        let is_invariant = class.template_variance.get(index).is_none_or(Variance::is_invariant);
-        if blocked || !is_invariant || !(widens || narrows) {
+        if !class.template_variance.get(index).is_none_or(Variance::is_invariant) {
             return unchanged(issue);
         }
 
@@ -303,7 +299,12 @@ where
         return unchanged(issue);
     }
 
-    let given = display_sharp_type(context, input);
+    // A type argument PHP# writes holds no literal, so `wrap(5)`'s `Box<5>` reads as the `Box<int>` code writes.
+    let mut written = given_object.clone();
+    if let Some(arguments) = written.type_parameters.as_mut() {
+        arguments.iter_mut().for_each(TUnion::widen_literals);
+    }
+    let given = display_sharp_type(context, &wrap_atomic(TAtomic::Object(TObject::Named(written))));
     issue.message = format!("{given} cannot be used as {}.", display_sharp_type(context, &wrap_atomic(wanted.clone())));
     for annotation in &mut issue.annotations {
         if matches!(annotation.kind, AnnotationKind::Primary) {

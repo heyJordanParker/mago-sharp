@@ -83,21 +83,32 @@ where
         };
 
         let hint = self.parse_type_hint()?;
-        // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1.
+        // A named constructor, `public Report.fromJson(string json) : this(…) {}` in spec section 9.1. It takes its
+        // class's type arguments, as Dart's does, so one written with type parameters parses whole and is left out.
         if let Hint::Identifier(Identifier::Local(class)) = hint
             && self.stream.is_at(T!["."])?
-            && self.stream.peek_kind(2)? == Some(T!["("])
+            && matches!(self.stream.peek_kind(2)?, Some(T!["(" | "<"]))
         {
-            return Ok(ClassLikeMember::NamedConstructor(NamedConstructor {
+            let dot = self.stream.eat_span(T!["."])?;
+            let name = self.parse_local_identifier()?;
+            let type_parameters = self.parse_optional_type_parameter_list()?;
+            let constructor = NamedConstructor {
                 attribute_lists: attributes,
                 modifiers,
                 class,
-                dot: self.stream.eat_span(T!["."])?,
-                name: self.parse_local_identifier()?,
+                dot,
+                name,
                 parameter_list: self.parse_function_like_parameter_list()?,
                 initializer: self.parse_optional_constructor_initializer()?,
                 body: self.parse_method_body()?,
-            }));
+            };
+            if let Some(type_parameters) = type_parameters {
+                let class_name = String::from_utf8_lossy(class.value).into_owned().into_boxed_str();
+
+                return Err(ParseError::NamedConstructorTypeParametersInSharp(class_name, type_parameters.span()));
+            }
+
+            return Ok(ClassLikeMember::NamedConstructor(constructor));
         }
         if let Hint::Identifier(Identifier::Local(name)) = hint
             && self.stream.is_at(T!["("])?

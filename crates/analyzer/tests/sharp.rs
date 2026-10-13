@@ -7839,13 +7839,19 @@ fn a_generic_method_returns_a_generic_class_of_its_inferred_type_argument() {
 }
 
 /// A type argument outside its type parameter's bound is reported where it is written, and an inferred one where the
-/// call passes it. Several bounds joined with `&` each hold.
+/// call passes it. Several bounds joined with `&` each hold. A union bound, which the checker refuses, bounds nothing,
+/// so `Either<Report>` reports nothing more.
 #[test]
 fn a_written_or_inferred_type_argument_outside_its_bound_is_reported() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any lines(Repository repository, Query<Line> query) => repository.list(query);\n\n    public static Any shared(Shelf<SharedOrder> shelf) => shelf;\n\n    public static Any plain(Shelf<Order> shelf) => shelf;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any lines(Repository repository, Query<Line> query) => repository.list(query);\n\n    public static Any shared(Shelf<SharedOrder> shelf) => shelf;\n\n    public static Any plain(Shelf<Order> shelf) => shelf;\n\n    public static Any either(Either<Report> either) => either;\n}\n";
+    let either =
+        "namespace Demo;\n\npublic class Either<TItem : Line|SharedOrder>\n{\n    public TItem? item() => null;\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        issues(
+            ("src/Demo/Report.sharp", sharp),
+            &[("src/Demo/Paging.sharp", PAGING), ("src/Demo/Either.sharp", either)]
+        ),
         ["5:90 template-constraint-violation", "9:29 template-constraint-violation"]
     );
 }
@@ -8310,7 +8316,7 @@ fn new_self_carries_the_type_parameters_of_its_class() {
         explained(("src/Demo/Box.sharp", boxes), &[]),
         [
             "11:43 invalid-argument Invalid argument type for argument #1 of `Box.__construct`: expected `TItem`, but found `int`. Change the argument value to match `TItem`, or update the parameter's type declaration.",
-            "11:34 invalid-return-statement Invalid return type for method `Box.counted`: expected `Box<int>`, but found `Box<TItem>`. Change the return value to match `Box<int>`, or update the method's return type declaration.",
+            "11:34 invalid-return-statement Box<TItem> cannot be used as Box<int>.",
         ]
     );
 }
@@ -8443,14 +8449,15 @@ fn an_override_that_changes_a_bound_names_the_bound() {
 /// A type, `new` and a type test name the type arguments of a generic PHP# class, spec section 11, as C# refuses a
 /// generic type without them (CS0305): a property's, a parameter's, a return type and a typed local's, `new` of a class
 /// with one or two type parameters, and `is`, `as`, a `match` arm and `catch` of a class declared in another file. `Self`
-/// names its class's own type parameters, and a class without type parameters takes none. The plain PHP twins keep
-/// Mago's issues.
+/// names its class's own type parameters, and a class without type parameters takes none. A refused `as Box` or
+/// `new Box()` reports nothing again where a `Box<int>` goes, whether returned or passed to `this(…)`. The plain PHP
+/// twins keep Mago's issues.
 #[test]
 fn a_type_new_and_a_type_test_name_the_type_arguments_of_a_generic_class() {
     let types = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public Self same(TFirst first, TSecond second) => this;\n}\n\npublic class Report\n{\n    public PaginatedList? shelf { get; set; }\n\n    public static void f(PaginatedList page)\n    {\n    }\n\n    public static Pair paired(Order order) => new Pair<Order, Order>();\n\n    public static Any local(PaginatedList<Order> given)\n    {\n        PaginatedList page = given;\n        return page;\n    }\n\n    public static Any listed(List<Order> orders) => new PaginatedList(orders);\n\n    public static Any pair() => new Pair();\n}\n";
     let php_types = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass PaginatedList\n{\n    /** @return TItem|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n}\n\nclass Report\n{\n    public ?PaginatedList $shelf = null;\n\n    public static function f(PaginatedList $page): void\n    {\n    }\n}\n";
     let classes = "namespace Demo;\n\nimport RuntimeException;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Plain\n{\n}\n\npublic class Failure<TItem> : RuntimeException\n{\n    public TItem? first() => null;\n}\n";
-    let tests = "namespace Demo;\n\npublic class Report\n{\n    public static bool held(Any? value) => value is Box;\n\n    public static Any? kept(Any? value) => value as Box;\n\n    public static int matched(Any? value) => match (value) { Box => 1, default => 0 };\n\n    public static bool plain(Any? value) => value is Plain;\n\n    public static int run()\n    {\n        try {\n            return 1;\n        } catch (Failure failure) {\n            return 0;\n        }\n    }\n}\n";
+    let tests = "namespace Demo;\n\npublic class Report\n{\n    public static bool held(Any? value) => value is Box;\n\n    public static Any? kept(Any? value) => value as Box;\n\n    public static int matched(Any? value) => match (value) { Box => 1, default => 0 };\n\n    public static bool plain(Any? value) => value is Plain;\n\n    public static int run()\n    {\n        try {\n            return 1;\n        } catch (Failure failure) {\n            return 0;\n        }\n    }\n\n    public Report(public Box<int> box { get; }) { }\n\n    public Report.empty() : this(new Box()) { }\n\n    public static Box<int>? narrowed(Any? value) => value as Box;\n\n    public static Box<int> made() => new Box();\n}\n";
     let php_tests = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function held(mixed $value): bool\n    {\n        return $value instanceof Box;\n    }\n\n    public static function run(): int\n    {\n        try {\n            return 1;\n        } catch (Failure $failure) {\n            return 0;\n        }\n    }\n}\n";
     let note = "A type and `new` name the type arguments of a generic class.";
     let one = |class: &str| format!("`{class}` needs its type argument. | `{class}` has type parameters | {note}");
@@ -8479,6 +8486,9 @@ fn a_type_new_and_a_type_test_name_the_type_arguments_of_a_generic_class() {
             format!("7:53 missing-template-parameter {}", one("Box")),
             format!("9:62 missing-template-parameter {}", one("Box")),
             format!("17:18 missing-template-parameter {}", one("Failure")),
+            format!("24:38 missing-template-parameter {}", one("Box")),
+            format!("26:62 missing-template-parameter {}", one("Box")),
+            format!("28:42 missing-template-parameter {}", one("Box")),
         ]
     );
 }
@@ -8533,23 +8543,23 @@ fn a_generic_class_without_a_marker_takes_only_its_own_type_arguments() {
     }
 }
 
-/// Spec section 11.1's wording names the one type argument of an invariant type parameter that differs: `Pair<Order,
-/// int>` given for a `Pair<DatabaseEntity, int>` is worded so, also where the parameter's type is a union that names
-/// another class first. A value whose type arguments differ in more than one, as `Pair<Order, Order>` does, whose count
-/// differs, or that differs in none, as the `Self` parameter the checker refuses, keeps the invalid issue's own message.
+/// Spec section 11.1's wording, "`X` cannot be used as `Y`", is true of every invariant mismatch of the same class,
+/// however many type arguments differ and whether or not one holds the other: `Pair<Order, int>`, `Pair<Order, string>`
+/// and `Pair<Order, Order>` are each worded so, also where the parameter's type is a union that names another class
+/// first. A refused count compares only the type arguments the class declares, and the `Self` parameter the checker
+/// refuses takes any argument, so it adds nothing.
 #[test]
-fn only_one_differing_type_argument_is_worded_as_a_blocked_substitution() {
+fn every_invariant_mismatch_is_worded_as_a_blocked_substitution() {
     let sharp = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public TFirst? first() => null;\n\n    public TSecond? second() => null;\n}\n\npublic class Holder<TItem>\n{\n    public TItem? item() => null;\n\n    public bool same(Self other) => true;\n}\n\npublic class Report\n{\n    public static Any pair(Pair<DatabaseEntity, int> pair) => pair;\n\n    public static Any held(Holder<DatabaseEntity> holder) => holder;\n\n    public static Any one(Pair<Order, int> pair) => Report.pair(pair);\n\n    public static Any two(Pair<Order, string> pair) => Report.pair(pair);\n\n    public static Any counted(Holder<Order, int> holder) => Report.held(holder);\n\n    public static bool kept(Holder<Order> holder, Holder<Order> other) => holder.same(other);\n\n    public static Any paired(Pair<DatabaseEntity, DatabaseEntity> pair) => pair;\n\n    public static Any both(Pair<Order, Order> pair) => Report.paired(pair);\n\n    public static Any either(Holder<DatabaseEntity>|Pair<DatabaseEntity, int> value) => value;\n\n    public static Any chosen(Pair<Order, int> pair) => Report.either(pair);\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
         [
             "Pair<Order, int> cannot be used as Pair<DatabaseEntity, int>.",
-            "Argument type mismatch for argument #1 of `Report.pair`: expected `Pair<DatabaseEntity, int>`, but provided type `Pair<Order, string>` is less specific.",
+            "Pair<Order, string> cannot be used as Pair<DatabaseEntity, int>.",
             "Too many type arguments for `Holder`: expected 1, but found 2.",
-            "Argument type mismatch for argument #1 of `Report.held`: expected `Holder<DatabaseEntity>`, but provided type `Holder<Order, int>` is less specific.",
-            "Argument type mismatch for argument #1 of `Holder.same`: expected `Holder<Order>`, but provided type `Holder<Order>` is less specific.",
-            "Argument type mismatch for argument #1 of `Report.paired`: expected `Pair<DatabaseEntity, DatabaseEntity>`, but provided type `Pair<Order, Order>` is less specific.",
+            "Holder<Order, int> cannot be used as Holder<DatabaseEntity>.",
+            "Pair<Order, Order> cannot be used as Pair<DatabaseEntity, DatabaseEntity>.",
             "Pair<Order, int> cannot be used as Pair<DatabaseEntity, int>.",
         ]
     );
@@ -9240,7 +9250,7 @@ fn a_method_returning_self_returns_its_receivers_type_arguments() {
     assert_eq!(
         explained(("src/Demo/Box.sharp", sharp), &[]),
         [
-            "9:43 invalid-return-statement Invalid return type for method `Box.swap`: expected `Box<TItem>`, but found `Box<Order>`. Change the return value to match `Box<TItem>`, or update the method's return type declaration.",
+            "9:43 invalid-return-statement Box<Order> cannot be used as Box<TItem>.",
             "21:34 invalid-argument Invalid argument type for argument #1 of `Box.put`: expected `int`, but found `string`. Change the argument value to match `int`, or update the parameter's type declaration.",
         ]
     );
@@ -9919,17 +9929,33 @@ fn a_generic_call_nothing_fixes_is_refused() {
     );
 }
 
-/// The checker refuses a named constructor of a generic class, so a call of one adds no missing type argument, which
-/// `new Box.of(1)` has no place to write. The main constructor's `new Box(1)` still needs it.
+/// A call of a generic class's named constructor is refused, `new Box<int>.of(1)` and `new Box.of(1)` alike, and its
+/// object reports nothing again where a `Box<int>` goes. A non-generic class's named constructor takes no type
+/// argument, so `new Plain<int>.one(1)` gets the count error. The main constructor's `new Box(1)` still needs its type
+/// argument.
 #[test]
-fn a_named_constructor_call_of_a_generic_class_adds_no_missing_type_argument() {
-    let others = [(
-        "src/Demo/Box.sharp",
-        "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Box(public TItem item { get; }) { }\n\n    public Box.of(TItem item) : this(item) { }\n}\n",
-    )];
-    let shop = "namespace Demo;\n\npublic class Shop\n{\n    public Any named() => new Box.of(1);\n\n    public Any main() => new Box(1);\n}\n";
+fn a_named_constructor_call_of_a_generic_class_is_not_supported_yet() {
+    let others = [
+        (
+            "src/Demo/Box.sharp",
+            "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Box(public TItem item { get; }) { }\n\n    public Box.of(TItem item) : this(item) { }\n}\n",
+        ),
+        (
+            "src/Demo/Plain.sharp",
+            "namespace Demo;\n\npublic class Plain\n{\n    public Plain(public int count { get; }) { }\n\n    public Plain.one(int count) : this(count) { }\n}\n",
+        ),
+    ];
+    let shop = "namespace Demo;\n\npublic class Shop\n{\n    public Any named() => new Box.of(1);\n\n    public Any main() => new Box(1);\n\n    public Box<int> typed() => new Box<int>.of(1);\n\n    public Any plain() => new Plain<int>.one(1);\n}\n";
 
-    assert_eq!(issues(("src/Demo/Shop.sharp", shop), &others), ["7:30 missing-template-parameter"]);
+    assert_eq!(
+        messages(("src/Demo/Shop.sharp", shop), &others),
+        [
+            "A named constructor is not supported yet in a generic class, because it runs as a static method every `Box<…>` shares.",
+            "`Box` needs its type argument.",
+            "A named constructor is not supported yet in a generic class, because it runs as a static method every `Box<…>` shares.",
+            "Too many type arguments for `Plain`: expected 0, but found 1.",
+        ]
+    );
 }
 
 /// A type argument a plain PHP value fixes is refused when PHP# can't write it, since the engine carries a type
@@ -10075,9 +10101,7 @@ fn an_argument_wins_over_the_declared_type_and_the_conflict_reports_once() {
     );
     assert_eq!(
         explained(("src/Demo/Report.sharp", sharp), &[]),
-        [
-            "18:26 invalid-local-assignment-value Invalid assignment to `box`: it is declared as `Box<Order>`. Assign a `Box<Order>` value, or change the type `box` is declared with."
-        ]
+        ["18:26 invalid-local-assignment-value Box<int> cannot be used as Box<Order>."]
     );
 }
 
@@ -10332,7 +10356,7 @@ fn a_refused_value_names_its_types_as_sharp_writes_them() {
             "9:18 missing-return-statement Missing return statement in method `Box.first` | This method is declared to return 'TItem'... | ...but this path can exit without returning a value. | A method that does not explicitly return a value will implicitly return `null`. | Add a `return` statement that provides a value of type 'TItem' to all paths, or change the method's return type to 'TItem?' and return `null` explicitly.",
             "18:22 invalid-property-assignment-value Invalid type for property `Box.count`: expected `int`, but got `TItem`. | This expression has type `TItem` | This property `Box.count` is declared with type `int` | The type `TItem` is not compatible with and cannot be assigned to `int`. | Change the assigned value to match the property's type, or update the property's type declaration.",
             "19:21 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `int`. | This value has type `TItem`. | `local` is declared as `int` here. | Assign a `int` value, or change the type `local` is declared with.",
-            "23:46 invalid-return-statement Invalid return type for method `Box.boxed`: expected `Box<int>`, but found `Box<TItem>`. | This has type `Box<TItem>` | The type `Box<TItem>` returned here is not compatible with the declared return type `Box<int>`. | Change the return value to match `Box<int>`, or update the method's return type declaration.",
+            "23:46 invalid-return-statement Box<TItem> cannot be used as Box<int>. | This has type `Box<TItem>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
         ]
     );
 }

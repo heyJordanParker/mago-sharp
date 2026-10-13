@@ -309,27 +309,71 @@ fn a_named_constructor_is_its_class_a_dot_its_name_parameters_this_and_a_body() 
     }
 }
 
-/// Spec section 9.1: `new Report.fromJson(…)` creates an object with the named constructor `fromJson`. PHP reads
-/// `new Report . fromJson(…)` as the new object joined to a function's result.
+/// A named constructor takes its class's type arguments, as Dart's does, so type parameters after its name are one
+/// error at the `<`, whose help names the two ways to write it, and the class parses on.
+#[test]
+fn a_named_constructor_with_type_parameters_is_one_parse_error() {
+    for member in ["public Report.of<T>(T value) : this(0) {}", "public Report.pair<TFirst, TSecond>(TFirst first) { }"]
+    {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    {member}\n\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let [error] = program.errors else {
+            panic!("expected one error for `{member}`, got {:#?}", program.errors);
+        };
+        assert_eq!(
+            error.to_string(),
+            "A named constructor takes its class's type arguments and declares none of its own.",
+            "{member}"
+        );
+        assert!(source(code, error).starts_with('<') && source(code, error).ends_with('>'), "{member}");
+        assert_eq!(
+            Issue::from(error).help.as_deref(),
+            Some(
+                "Declare a generic static method, as in `public static Report of<T>(T value)`, or make the class generic, as in `class Report<T>`."
+            ),
+            "{member}"
+        );
+        let [ClassLikeMember::Method(run)] = class_members(program).as_slice() else {
+            panic!("expected only the method for `{member}`, got {:#?}", class_members(program));
+        };
+        assert_eq!(source(code, &run.name), "run", "{member}");
+    }
+}
+
+/// Spec section 9.1: `new Report.fromJson(…)` creates an object with the named constructor `fromJson`, and
+/// `new Box<int>.of(1)` one of a generic class with its type arguments. PHP reads `new Report . fromJson(…)` as the new
+/// object joined to a function's result.
 #[test]
 fn new_with_a_dot_names_a_named_constructor_and_php_keeps_its_concatenation() {
-    const SHARP: &str = "class Use\n{\n    public Report make() => new Report.fromJson(\"{}\");\n}\n";
+    const SHARP: &str = "class Use\n{\n    public Report make() => new Report.fromJson(\"{}\");\n\n    public Box<int> boxed() => new Box<int>.of(1);\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Use.sharp", SHARP);
 
     assert!(program.errors.is_empty(), "{:#?}", program.errors);
-    let Some(ClassLikeMember::Method(method)) = class_members(program).first() else {
-        panic!("expected a method, got {:#?}", class_members(program));
+    let instantiations: Vec<&Instantiation> = class_members(program)
+        .iter()
+        .map(|member| match member {
+            ClassLikeMember::Method(Method { body: MethodBody::Expression(body), .. }) => match body.expression {
+                Expression::Instantiation(instantiation) => instantiation,
+                expression => panic!("expected `new`, got {expression:#?}"),
+            },
+            member => panic!("expected a method with an expression body, got {member:#?}"),
+        })
+        .collect();
+    let [instantiation, boxed] = instantiations.as_slice() else {
+        panic!("expected two `new` expressions, got {instantiations:#?}");
     };
-    let MethodBody::Expression(body) = &method.body else {
-        panic!("expected an expression body, got {:#?}", method.body);
-    };
-    let Expression::Instantiation(instantiation) = body.expression else {
-        panic!("expected `new`, got {:#?}", body.expression);
-    };
-    assert_eq!(source(SHARP, instantiation), "new Report.fromJson(\"{}\")");
+    assert_eq!(source(SHARP, *instantiation), "new Report.fromJson(\"{}\")");
     assert_eq!(source(SHARP, instantiation.class), "Report");
     assert_eq!(instantiation.constructor.as_ref().map(|constructor| source(SHARP, constructor)), Some(".fromJson"));
+    assert_eq!(source(SHARP, *boxed), "new Box<int>.of(1)");
+    assert_eq!(source(SHARP, boxed.class), "Box");
+    assert_eq!(type_arguments(SHARP, boxed.type_arguments.as_ref()), ["int"]);
+    assert_eq!(boxed.constructor.as_ref().map(|constructor| source(SHARP, constructor)), Some(".of"));
 
     const PHP: &str = "<?php $made = new Report.fromJson('{}');";
     let program = parse(&arena, "src/use.php", PHP);
@@ -1298,10 +1342,11 @@ fn php_has_no_type_parameters_or_type_arguments() {
 }
 
 /// `Class<T>` is the type of a class value, as spec section 25 writes it. The lexer reads `Class` as PHP's `class`
-/// keyword, so it starts a type only before `<`, as `Function` does.
+/// keyword, so it starts a type only before `<`, as `Function` does, also as the first word of a member, where `class`
+/// alone starts a nested class.
 #[test]
 fn class_of_a_type_is_a_generic_type_wherever_a_type_goes() {
-    const CODE: &str = "public class FormBuilder\n{\n    Map<string, Class<Element>> elements = [:];\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n\n    public string run(Class<Element> type)\n    {\n        Class<Element> local = type;\n        return \"\";\n    }\n}\n";
+    const CODE: &str = "public class FormBuilder\n{\n    Map<string, Class<Element>> elements = [:];\n\n    public Model? load(Class<Model> type, int id) => type.find(id);\n\n    public string run(Class<Element> type)\n    {\n        Class<Element> local = type;\n        return \"\";\n    }\n\n    public Class<Element> kind() => typeof(Element);\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/FormBuilder.sharp", CODE);
 
@@ -1310,9 +1355,10 @@ fn class_of_a_type_is_a_generic_type_wherever_a_type_goes() {
         ClassLikeMember::Property(Property::Plain(elements)),
         ClassLikeMember::Method(load),
         ClassLikeMember::Method(run),
+        ClassLikeMember::Method(kind),
     ] = class_members(program).as_slice()
     else {
-        panic!("expected a field and two methods, got {:#?}", class_members(program));
+        panic!("expected a field and three methods, got {:#?}", class_members(program));
     };
     let Some(Hint::Generic(map)) = &elements.hint else {
         panic!("expected a generic type, got {:#?}", elements.hint);
@@ -1327,14 +1373,25 @@ fn class_of_a_type_is_a_generic_type_wherever_a_type_goes() {
     fn parameter_type<'ast, 'arena>(method: &'ast Method<'arena>) -> Option<&'ast Hint<'arena>> {
         method.parameter_list.parameters.first().and_then(|first| first.hint.as_ref())
     }
-    let class_types: Vec<(&str, Vec<&str>)> =
-        [map.type_arguments.arguments.get(1), parameter_type(load), parameter_type(run), local.hint]
-            .into_iter()
-            .map(|hint| generic_type(CODE, hint.expect("a type")))
-            .collect();
+    let class_types: Vec<(&str, Vec<&str>)> = [
+        map.type_arguments.arguments.get(1),
+        parameter_type(load),
+        parameter_type(run),
+        local.hint,
+        kind.return_type_hint.as_ref().map(|return_type| &return_type.hint),
+    ]
+    .into_iter()
+    .map(|hint| generic_type(CODE, hint.expect("a type")))
+    .collect();
     assert_eq!(
         class_types,
-        [("Class", vec!["Element"]), ("Class", vec!["Model"]), ("Class", vec!["Element"]), ("Class", vec!["Element"])]
+        [
+            ("Class", vec!["Element"]),
+            ("Class", vec!["Model"]),
+            ("Class", vec!["Element"]),
+            ("Class", vec!["Element"]),
+            ("Class", vec!["Element"])
+        ]
     );
     assert_eq!(source(CODE, &load.return_type_hint.as_ref().expect("a return type").hint), "Model?");
 }
@@ -4304,26 +4361,39 @@ fn an_event_declares_its_parameters_and_its_interfaces() {
     );
 }
 
-/// An event's parameters are its whole declaration, so a body after them is one error, and the file parses on.
+/// An event's parameters are its whole declaration, so a body after them is one error, and so are type parameters, not
+/// supported yet. The file parses on after either.
 #[test]
-fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
-    const CODE: &str =
-        "public event OrderPaid(int orderId) { }\n\npublic class Order\n{\n    public int run() { return 1; }\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/OrderPaid.sharp", CODE);
+fn an_event_with_a_body_or_type_parameters_is_one_parse_error_and_the_file_parses_on() {
+    for (event, message, start) in [
+        (
+            "public event OrderPaid(int orderId) { }",
+            "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`.",
+            "{ }",
+        ),
+        ("public event Moved<TItem>(TItem item);", "A generic event is not supported yet in PHP#.", "<TItem>"),
+        (
+            "event Moved<TItem : Order>(TItem item) : Shipped;",
+            "A generic event is not supported yet in PHP#.",
+            "<TItem : Order>",
+        ),
+    ] {
+        let arena = LocalArena::new();
+        let code: &'static str = Box::leak(
+            format!("{event}\n\npublic class Order\n{{\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
+        );
+        let program = parse(&arena, "src/OrderPaid.sharp", code);
 
-    let [error] = program.errors else {
-        panic!("expected one error, got {:#?}", program.errors);
-    };
-    assert_eq!(
-        error.to_string(),
-        "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`."
-    );
-    assert_eq!(source(CODE, error), "{ }");
-    let [.., Statement::Class(order)] = program.statements.as_slice() else {
-        panic!("expected the class `Order` last, got {:#?}", program.statements);
-    };
-    assert_eq!(order.name.value, b"Order");
+        let [error] = program.errors else {
+            panic!("expected one error for `{event}`, got {:#?}", program.errors);
+        };
+        assert_eq!(error.to_string(), message, "{event}");
+        assert_eq!(source(code, error), start, "{event}");
+        let [.., Statement::Class(order)] = program.statements.as_slice() else {
+            panic!("expected the class `Order` last for `{event}`, got {:#?}", program.statements);
+        };
+        assert_eq!(order.name.value, b"Order", "{event}");
+    }
 }
 
 /// `event` declares an event only before a name and `(`, so a parameter, a field, a local, a call such as Laravel's

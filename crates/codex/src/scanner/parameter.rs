@@ -3,6 +3,8 @@ use mago_names::binding::php_variable_name;
 use mago_names::scope::NamespaceScope;
 use mago_span::HasSpan;
 use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::Hint;
+use mago_syntax::cst::Node;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::word;
@@ -18,7 +20,9 @@ use crate::scanner::inference::infer_with_constants;
 use crate::scanner::ttype::get_type_metadata_from_hint;
 use crate::scanner::version_claim::TypeOverride;
 use crate::scanner::version_claim::evaluate_version_attributes;
+use crate::ttype::atomic::TAtomic;
 use crate::ttype::resolution::TypeResolutionContext;
+use crate::ttype::wrap_atomic;
 
 #[inline]
 pub fn scan_function_like_parameter<'arena, A>(
@@ -76,9 +80,17 @@ where
         FunctionLikeParameterMetadata::new(VariableIdentifier(name), parameter.span(), parameter.variable.span, flags)
             .with_attributes(scan_attribute_lists(&parameter.attribute_lists, context, scope, classname));
 
-    metadata.set_type_declaration_metadata(
-        parameter.hint.as_ref().map(|hint| get_type_metadata_from_hint(hint, classname, type_context, context)),
-    );
+    metadata.set_type_declaration_metadata(parameter.hint.as_ref().map(|hint| {
+        // PHP#'s `Self` is only a return type, so the checker refuses a parameter that writes it, which then takes
+        // any argument rather than report the refused type again at each call.
+        if context.program.dialect.is_sharp()
+            && !Node::Hint(hint).filter_map(|node| matches!(node, Node::Hint(Hint::Self_(_))).then_some(())).is_empty()
+        {
+            TypeMetadata::new(wrap_atomic(TAtomic::Error), hint.span())
+        } else {
+            get_type_metadata_from_hint(hint, classname, type_context, context)
+        }
+    }));
 
     if let Some(default_value) = &parameter.default_value {
         metadata.flags |= MetadataFlags::HAS_DEFAULT;

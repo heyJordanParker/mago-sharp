@@ -90,7 +90,8 @@ pub fn get_type_metadata_from_type(
 }
 
 /// The templates a PHP# type parameter list declares, in order, spec section 11: each is the template a `@template`
-/// tag declares for `defining_entity`, its bound the tag's `of`, or `mixed` without one. Every name of the list is a
+/// tag declares for `defining_entity`, its bound the tag's `of`, `mixed` without one, or the error type for a union
+/// bound, which the checker refuses. Every name of the list is a
 /// template while the bounds are read, so a bound names a type parameter of its own list, its own or a later one, as in
 /// `<TItem : Comparable<TItem>>`. The bounds are read once per type parameter, each time with the templates of the read
 /// before, so a bound sees the bound of every type parameter it names, directly or through another bound, as
@@ -120,9 +121,14 @@ where
             .parameters
             .iter()
             .map(|parameter| {
-                let constraint = parameter.bound.as_ref().map_or_else(get_mixed, |bound| {
-                    get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context).type_union
-                });
+                let constraint = match &parameter.bound {
+                    None => get_mixed(),
+                    // The checker refuses a union bound, so it bounds nothing a type argument could fail.
+                    Some(bound) if matches!(bound.hint, Hint::Union(_)) => wrap_atomic(TAtomic::Error),
+                    Some(bound) => {
+                        get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context).type_union
+                    }
+                };
 
                 (word(parameter.name.value), GenericTemplate::new(defining_entity, constraint))
             })

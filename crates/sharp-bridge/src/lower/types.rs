@@ -18,6 +18,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_sole_backed_enum;
 use mago_codex::ttype::union::TUnion;
+use mago_database::file::File;
 use mago_names::ResolvedNames;
 use mago_span::HasSpan;
 use mago_span::Span;
@@ -36,6 +37,8 @@ use super::inline::key;
 /// The checker's types for one file. The lowering reads a type only through these queries, so `--assert-types` can
 /// turn each answer it used into a runtime guard.
 pub struct Types<'analysis> {
+    /// The file, which names the lambdas it declares.
+    file: &'analysis File,
     /// The file's resolved names, which name the class of a `Class.m()` call.
     names: ResolvedNames<'analysis>,
     artifacts: &'analysis AnalysisArtifacts,
@@ -81,12 +84,13 @@ pub enum DeclarationKind {
 
 impl<'analysis> Types<'analysis> {
     pub(crate) fn new(
+        file: &'analysis File,
         names: ResolvedNames<'analysis>,
         artifacts: &'analysis AnalysisArtifacts,
         codebase: &'analysis CodebaseMetadata,
         inline_forms: &'analysis InlineForms,
     ) -> Self {
-        Self { names, artifacts, codebase, inline_forms }
+        Self { file, names, artifacts, codebase, inline_forms }
     }
 
     pub(crate) fn names(&self) -> &ResolvedNames<'analysis> {
@@ -211,10 +215,16 @@ impl<'analysis> Types<'analysis> {
     /// per parameter that a call from plain PHP checks its argument against, [`Self::checked_text`] or `Any?`. Each half
     /// is None when the method declares no type parameter, or no parameter needs a check.
     pub(crate) fn method_metadata(&self, class: &[u8], method: &[u8]) -> (Option<String>, Option<String>) {
-        let Some(metadata) = self.codebase.get_method(class, method) else {
-            return (None, None);
-        };
+        self.codebase.get_method(class, method).map_or((None, None), |metadata| self.function_metadata(metadata))
+    }
 
+    /// [`Self::method_metadata`] of the lambda at `span`, which plain PHP calls as a `Closure`. A lambda declares no
+    /// type parameter, so it has no bounds.
+    pub(crate) fn lambda_metadata(&self, span: Span) -> (Option<String>, Option<String>) {
+        self.codebase.get_closure_at(self.file, span).map_or((None, None), |metadata| self.function_metadata(metadata))
+    }
+
+    fn function_metadata(&self, metadata: &FunctionLikeMetadata) -> (Option<String>, Option<String>) {
         let bounds: Vec<String> = metadata
             .template_types
             .values()
@@ -239,7 +249,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The type text a call from PHP# into plain PHP checks its result against, as a parameter checks an argument from
-    /// plain PHP, and the call as the check names it, `the result of Lib\Pager::orders()`: [`Self::checked_text`] of
+    /// plain PHP, and the call as PHP's return check names it, `Lib\Pager::orders()`: [`Self::checked_text`] of
     /// the call's type, when the checker resolved `call` to a plain PHP function or method. The checker reads a plain
     /// PHP return type that names a PHP# generic class from a docblock it can't prove, so the engine tests the value
     /// spec section 12 lets in, wherever it goes next.
@@ -261,7 +271,7 @@ impl<'analysis> Types<'analysis> {
             _ => metadata.original_name.to_string(),
         };
 
-        Some((text, format!("the result of {name}()")))
+        Some((text, format!("{name}()")))
     }
 
     /// The type text the property `property` of the fully qualified class name `class` checks a value from plain PHP

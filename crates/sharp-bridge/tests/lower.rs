@@ -5874,6 +5874,8 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
             public void show(PaginatedList<Order> page, int count) { }
 
             public void keep(Holder<Order> holder) { }
+
+            public List<Any?> unbound() => Repository.repeat(new Holder().get(), 4);
         }
 
         public class PaginatedList<TItem : DatabaseEntity>
@@ -5892,7 +5894,10 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
                 "src/App/Entities.php",
                 "<?php namespace App; abstract class DatabaseEntity {} final class Order extends DatabaseEntity {}",
             ),
-            ("src/App/Holder.php", "<?php namespace App; /** @template T */ final class Holder {}"),
+            (
+                "src/App/Holder.php",
+                "<?php namespace App; /** @template T */ final class Holder { /** @return T */ public function get(): mixed { return null; } }",
+            ),
         ],
     );
 
@@ -5919,6 +5924,28 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
     };
     assert_eq!(lowered.body(), call(3, "App.Order"));
     assert_eq!(lowered.body_of("inferred"), call(2, "App.Order"));
+    // `new Holder()` binds no `T`, so `get()` gives a type argument nothing chose, which the engine takes as `Any?`.
+    assert_eq!(
+        lowered.body_of("unbound"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Repository"
+                  ZVAL "repeat"
+                  ARG_LIST
+                    METHOD_CALL
+                      NEW
+                        ZVAL "App\\Holder"
+                        ARG_LIST
+                      ZVAL "get"
+                      ARG_LIST
+                    ZVAL 4
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "Any?"
+        "#}
+    );
     assert_eq!(lowered.body_of("forward"), call(1, "#0"));
     assert_eq!(
         lowered.body_of("box"),
@@ -6145,7 +6172,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
             r#"    ZVAL "orders""#,
             "    ARG_LIST",
             r#"  ZVAL "App.Box<App.Order>""#,
-            r#"  ZVAL "the result of Lib\\Pager::orders()""#,
+            r#"  ZVAL "Lib\\Pager::orders()""#,
         ];
 
         lines.map(|line| format!("{}{line}\n", "  ".repeat(depth))).concat()
@@ -6201,7 +6228,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
                     ZVAL "orders"
                     ARG_LIST
                   ZVAL "App.Box<App.Order>"
-                  ZVAL "the result of orders()"
+                  ZVAL "orders()"
         "#}
     );
 
@@ -6244,6 +6271,106 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
         let element = format!("ZVAL \"{property}\"\n            {default}\n            null\n            null\n");
         assert!(tree.contains(&element), "{property}: {tree}");
     }
+}
+
+/// Every function a call from plain PHP reaches checks a parameter that names a PHP# class with type arguments, as a
+/// method does: an event's constructor, a named constructor, an operator and a lambda, with a block body or an
+/// expression body. Each one's parameter list ends with the metadata that holds the parameter's type text.
+#[test]
+fn every_function_plain_php_calls_checks_its_parameters_type_arguments() {
+    let lowered = Lowered::new(indoc! {"
+        namespace App;
+
+        public event Paged(PaginatedList<Order> page);
+
+        public class Order
+        {
+        }
+
+        public class PaginatedList<TItem>
+        {
+            public PaginatedList() { }
+        }
+
+        public class Shelf
+        {
+            public Shelf(public int count { get; }) { }
+
+            public Shelf.of(PaginatedList<Order> page) : this(1) { }
+
+            public static Shelf operator +(Shelf shelf, PaginatedList<Order> page) => shelf;
+
+            public Function<int(PaginatedList<Order>)> counted() => (PaginatedList<Order> page) => 1;
+
+            public Function<void(PaginatedList<Order>)> kept()
+            {
+                let seen = 0;
+                return (PaginatedList<Order> page) => {
+                    seen += 1;
+                };
+            }
+        }
+    "});
+    let metadata = |checks: &str| format!("  SHARP_TYPE_ARGS\n    null\n    ZVAL \"{checks}\"\n");
+
+    assert!(lowered.parameters_of("__construct").ends_with(&metadata("App.PaginatedList<App.Order>")));
+    assert!(lowered.parameters_of("of").ends_with(&metadata("App.PaginatedList<App.Order>")));
+    assert!(lowered.parameters_of("op_Addition").ends_with(&metadata("Any?, App.PaginatedList<App.Order>")));
+    assert_eq!(
+        lowered.body_of("counted"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ARROW_FUNC "" @22-22
+                  PARAM_LIST
+                    PARAM
+                      ZVAL "App\\PaginatedList"
+                      ZVAL "page"
+                      null
+                      null
+                      null
+                      null
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "App.PaginatedList<App.Order>"
+                  null
+                  ZVAL 1
+                  null
+                  null
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("kept"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "seen"
+                ZVAL 0
+              RETURN
+                CLOSURE "" @27-29
+                  PARAM_LIST
+                    PARAM
+                      ZVAL "App\\PaginatedList"
+                      ZVAL "page"
+                      null
+                      null
+                      null
+                      null
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "App.PaginatedList<App.Order>"
+                  CLOSURE_USES
+                    ZVAL [1] "seen"
+                  STMT_LIST
+                    ASSIGN_OP [1]
+                      VAR
+                        ZVAL "seen"
+                      ZVAL 1
+                  null
+                  null
+        "#}
+    );
 }
 
 /// A type argument a plain PHP value fixes as a refinement PHP# writes as a wider type carries that type's text:
@@ -7349,7 +7476,7 @@ const CALL_WITH_TYPE_ARGUMENTS: &str = indoc! {r#"
                 null
                 ZVAL "App.Order"
           ZVAL "App.Box<App.Order>"
-          ZVAL "the result of App\\Wrapper::wrap()"
+          ZVAL "App\\Wrapper::wrap()"
 "#};
 
 /// A generic call through a plain PHP `@template` interface carries the type arguments the checker found, since the

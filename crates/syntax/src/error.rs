@@ -96,6 +96,9 @@ pub enum ParseError {
     /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
     /// interfaces included, is declared in its own file.
     NestedTypeInSharp(&'static str, Box<str>, Span),
+    /// Type parameters written on a PHP# named constructor, as in `Plain.of<T>(T value)`, with its class's name, at the
+    /// type parameters. A named constructor takes its class's type arguments, as Dart's does, and declares none.
+    NamedConstructorTypeParametersInSharp(Box<str>, Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -134,7 +137,8 @@ impl HasFileId for ParseError {
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
-            | ParseError::NestedTypeInSharp(_, _, span) => span.file_id,
+            | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::NamedConstructorTypeParametersInSharp(_, span) => span.file_id,
         }
     }
 }
@@ -177,7 +181,8 @@ impl HasSpan for ParseError {
             | ParseError::ComputedParameterInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
-            | ParseError::NestedTypeInSharp(_, _, span) => *span,
+            | ParseError::NestedTypeInSharp(_, _, span)
+            | ParseError::NamedConstructorTypeParametersInSharp(_, span) => *span,
         }
     }
 }
@@ -302,6 +307,9 @@ impl std::fmt::Display for ParseError {
             ParseError::NestedTypeInSharp(owner, name, _) => {
                 format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
             }
+            ParseError::NamedConstructorTypeParametersInSharp(..) => {
+                "A named constructor takes its class's type arguments and declares none of its own.".to_string()
+            }
         };
 
         write!(f, "{message}")
@@ -359,6 +367,12 @@ impl From<&ParseError> for Issue {
             | ParseError::NestedTypeInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
+            ParseError::NamedConstructorTypeParametersInSharp(class, span) => Issue::error(error.to_string())
+                .with_code(PARSE_ERROR_CODE)
+                .with_annotation(Annotation::primary(*span).with_message("Written here."))
+                .with_help(format!(
+                    "Declare a generic static method, as in `public static {class} of<T>(T value)`, or make the class generic, as in `class {class}<T>`."
+                )),
             ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(*span).with_message("Not supported yet."))
