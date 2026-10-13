@@ -4918,11 +4918,11 @@ fn a_null_safe_extension_access_skips_a_null_receiver() {
     );
 }
 
-/// Spec section 26: an extension applies only in files that import its class, so a file without the import is told
-/// which import line to add, even a file in the class's own namespace. The file that declares the class has its
-/// extensions too, as it cannot import its own class.
+/// Spec section 26: an extension applies in the files that import its class and, as a class does, in the files of
+/// its class's own namespace, the declaring file among them. A file of another namespace without the import is told
+/// which import line to add.
 #[test]
-fn an_extension_applies_only_where_its_class_is_imported() {
+fn an_extension_applies_where_its_class_is_imported_or_in_its_namespace() {
     let sharp = "namespace Demo;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n}\n";
     let neighbor = "namespace App.Shared.Text;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n}\n";
     let own = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n        public string dashed() => value.slug(\"-\");\n    }\n}\n";
@@ -4937,13 +4937,7 @@ fn an_extension_applies_only_where_its_class_is_imported() {
             "6:46 non-existent-property: `isBlank` is an extension this file does not import. Add `import App.Shared.Text.TextExtensions;` to the file.",
         ],
     );
-    assert_messages(
-        neighbor,
-        &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)],
-        &[
-            "5:49 non-existent-method: `slug` is an extension this file does not import. Add `import App.Shared.Text.TextExtensions;` to the file.",
-        ],
-    );
+    assert_messages(neighbor, &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)], &[]);
 }
 
 /// Spec section 23: every file has the standard library's extensions on `string`, `int`, `float`, `List`, `Map` and

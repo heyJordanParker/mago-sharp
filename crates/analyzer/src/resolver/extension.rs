@@ -120,13 +120,9 @@ where
             Some(Extension::Refused)
         }
         ([], None, Some((method, _))) => {
-            let class = method.get_class_name();
-            // A class of the file's own namespace is named without an import, but its extensions still need one.
-            let import = display_missing_imports(context, [class]).unwrap_or_else(|| {
-                let name = codebase.get_class_like(class.as_bytes()).map_or(class, |class| class.original_name);
-
-                format!("Add `import {};` to the file.", String::from_utf8_lossy(name.as_bytes()).replace('\\', "."))
-            });
+            let Some(import) = display_missing_imports(context, [method.get_class_name()]) else {
+                unreachable!("a class the file binds has its extensions in scope");
+            };
             context.collector.report_with_code(
                 code,
                 Issue::error(format!(
@@ -158,13 +154,16 @@ fn fits(codebase: &CodebaseMetadata, receiver: &TUnion, metadata: &FunctionLikeM
 }
 
 /// Whether the extension member `metadata` of the static class `class` applies in this file: the file imports the
-/// class, declares it, as a file cannot import a class it declares, or every file has it.
+/// class, is in the class's namespace, as the declaring file is, or every file has it.
 fn is_in_scope<A>(context: &Context<'_, '_, A>, class: Word, metadata: &FunctionLikeMetadata) -> bool
 where
     A: Arena,
 {
-    metadata.span.file_id == context.source_file.id
-        || context.imported_names.contains_key(&ascii_lowercase_word(class.as_bytes()))
+    let name = class.as_bytes();
+    let namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&b""[..], |end| &name[..end]);
+
+    namespace.eq_ignore_ascii_case(context.scope.namespace_name().unwrap_or_default())
+        || context.imported_names.contains_key(&ascii_lowercase_word(name))
         || is_imported_by_default(context, class, metadata)
 }
 
