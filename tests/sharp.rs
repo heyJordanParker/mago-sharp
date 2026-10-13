@@ -1310,7 +1310,7 @@ fn compile_refuses_a_file_whose_getter_calls_plain_php_without_an_extern() {
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(
-        printed.contains("Getter `text` calls `trim`, which has no `extern` declaration. Getters must be pure."),
+        printed.contains("Getter `text` calls `global.trim`, which has no `extern` declaration. Getters must be pure."),
         "{printed}"
     );
     assert!(!directory.path().join(".sharp/app/Shop/Label.sharpc").exists());
@@ -1336,6 +1336,57 @@ fn compile_refuses_a_file_with_a_statement_that_never_runs() {
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(printed.contains("This statement never runs, because line 7 ends the block."), "{printed}");
     assert!(!root.join(".sharp/app/Shop/Stop.sharpc").exists());
+}
+
+/// A condition that never finishes is refused with the code to write in place of its `if` or `for … of`, and the file
+/// compiles once that code is written. An `else if` is an `else` that holds an `if`.
+#[test]
+fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
+    write(
+        root,
+        "app/Shop/Stop.sharp",
+        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void third()\n    {\n        for (const item of global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n}\n",
+    );
+
+    let output = run(root, "compile", &[]);
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    assert_eq!(printed.matches("This condition never finishes, so its block never runs.").count(), 3, "{printed}");
+    assert_eq!(
+        printed.matches("Write `global.exit(1);` as its own statement, and delete the `if`.").count(),
+        2,
+        "{printed}"
+    );
+    assert!(printed.contains("Write `global.exit(1);` as its own statement, and delete the `for`."), "{printed}");
+
+    write(
+        root,
+        "app/Shop/Stop.sharp",
+        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        global.exit(1);\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else global.exit(1);\n    }\n\n    public static void third()\n    {\n        global.exit(1);\n    }\n}\n",
+    );
+
+    // In an `else`, the statement the help names takes the braces PHP# writes around every body, as their help says.
+    let output = run(root, "compile", &[]);
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    assert!(printed.contains("Write `{ global.exit(1); }`."), "{printed}");
+
+    write(
+        root,
+        "app/Shop/Stop.sharp",
+        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        global.exit(1);\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else { global.exit(1); }\n    }\n\n    public static void third()\n    {\n        global.exit(1);\n    }\n}\n",
+    );
+
+    let output = run(root, "compile", &[]);
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    assert_eq!(output.status.code(), Some(0), "{printed}");
+    assert!(root.join(".sharp/app/Shop/Stop.sharpc").exists());
 }
 
 /// Spec section 28's `app/Shared/Money.sharp`, whose law holds over its pure `add`.

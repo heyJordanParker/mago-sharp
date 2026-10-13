@@ -723,8 +723,7 @@ where
 /// Refuses `statement`, the first statement of its block that never runs because the statement before it ends the
 /// block, as Java and Zig refuse an unreachable statement (spec section 7). The analysis reads no statement after it, so
 /// PHP# compiles none, and the rest of the block gets no refusal of its own, as in Java. `before` holds the statements
-/// before it in its block, and the last of them is the one that ends it. With none before
-/// it, the code before the block never finishes, as the condition `global.exit(1)` does, and `statement` is the block.
+/// before it in its block, and the last of them is the one that ends it.
 fn report_statement_that_never_runs<A>(
     context: &mut Context<'_, '_, A>,
     statement: &Statement<'_>,
@@ -732,21 +731,48 @@ fn report_statement_that_never_runs<A>(
 ) where
     A: Arena,
 {
-    let issue = match before.last() {
-        Some(end) => {
-            let line = context.source_file.line_number(end.span().start.offset) + 1;
-
-            Issue::error(format!("This statement never runs, because line {line} ends the block."))
-                .with_help(format!("Delete it, or move it above line {line}."))
-        }
-        None => {
-            Issue::error("This block never runs, because the code before it never finishes.").with_help("Delete it.")
-        }
+    let Some(end) = before.last() else {
+        unreachable!("a block whose code before it never finishes is refused at that code's condition");
     };
+    let line = context.source_file.line_number(end.span().start.offset) + 1;
 
-    context
-        .collector
-        .report_with_code(IssueCode::UnevaluatedCode, issue.with_annotation(Annotation::primary(statement.span())));
+    context.collector.report_with_code(
+        IssueCode::UnevaluatedCode,
+        Issue::error(format!("This statement never runs, because line {line} ends the block."))
+            .with_annotation(Annotation::primary(statement.span()))
+            .with_help(format!("Delete it, or move it above line {line}.")),
+    );
+}
+
+/// Refuses, in a `.sharp` file, the `condition` of an `if` or a `for … of` that never finishes, as `global.exit(1)`
+/// does, so the block it guards never runs (spec section 7). `block_context` is the context once the condition is
+/// analyzed. The help replaces the whole statement, which never gets past its condition, with the condition. Returns
+/// whether it refused, and the caller then reads no statement of the block, as `analyze_statements` reads none after a
+/// statement that ends its block.
+pub(crate) fn refuse_condition_that_never_finishes<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    condition: &Expression<'_>,
+    keyword: &str,
+) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() || !block_context.flags.has_returned() {
+        return false;
+    }
+
+    let span = condition.span();
+    let written =
+        String::from_utf8_lossy(&context.source_file.contents[span.start.offset as usize..span.end.offset as usize]);
+    context.collector.report_with_code(
+        IssueCode::UnevaluatedCode,
+        Issue::error("This condition never finishes, so its block never runs.")
+            .with_annotation(Annotation::primary(span))
+            .with_help(format!("Write `{written};` as its own statement, and delete the `{keyword}`.")),
+    );
+
+    true
 }
 
 /// Checks statement expressions for unused results or lack of side effects.

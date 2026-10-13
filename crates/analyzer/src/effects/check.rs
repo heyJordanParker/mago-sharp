@@ -22,6 +22,7 @@ use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
 use crate::effects::Runs;
+use crate::utils::names::is_imported_namespace;
 use crate::utils::names::namespace_function;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
@@ -158,8 +159,8 @@ fn impure(
 
     match impurity.effect {
         Some(Effect::Unknown(Some((class, member)))) => {
-            // A plain PHP function is declared through its namespace, spec section 23: `global.trim`, or `Pdf.render`
-            // after `import Vendor.Pdf;`.
+            // A plain PHP function is declared through its namespace, spec section 23: `global.trim`, which the cause
+            // already writes, or `Pdf.render` after `import Vendor.Pdf;`.
             let (target, import) = if class.is_empty() {
                 match member.as_bytes().iter().rposition(|byte| *byte == b'\\') {
                     Some(separator) => {
@@ -168,7 +169,7 @@ fn impure(
 
                         (format!("{}.{function}", code_class_name(namespace)), missing_import(namespace))
                     }
-                    None => (format!("global.{member}"), None),
+                    None => (member.to_string(), None),
                 }
             } else {
                 let name = code_class_name(class);
@@ -251,11 +252,12 @@ where
             return;
         }
 
-        context.collector.report_with_code(
-            IssueCode::NonExistentClassLike,
-            Issue::error(format!("Cannot find class, interface, enum, or type alias `{written}`."))
-                .with_annotation(Annotation::primary(target)),
-        );
+        let issue = if !member.is_empty() && is_imported_namespace(context, &r#extern.target, class) {
+            (IssueCode::NonExistentFunction, format!("Function `{written}` does not exist."))
+        } else {
+            (IssueCode::NonExistentClassLike, format!("Cannot find class, interface, enum, or type alias `{written}`."))
+        };
+        context.collector.report_with_code(issue.0, Issue::error(issue.1).with_annotation(Annotation::primary(target)));
 
         return;
     };

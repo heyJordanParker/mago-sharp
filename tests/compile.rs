@@ -972,7 +972,7 @@ fn a_law_that_calls_an_interface_method_is_refused() {
     for (file, source, law, calls) in [
         (
             "app/Shop/Card.sharp",
-            "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    public int amount() => random_int(1, 1000000);\n\n    public static bool same(Payment p) => p.amount() == p.amount();\n\n    law alwaysSame(Payment p) => Card.same(p);\n}\n",
+            "namespace App.Shop;\n\npublic class Card : Payment\n{\n    public Card(public int cents { get; }) { }\n\n    public int amount() => global.random_int(1, 1000000);\n\n    public static bool same(Payment p) => p.amount() == p.amount();\n\n    law alwaysSame(Payment p) => Card.same(p);\n}\n",
             "alwaysSame reaches the interface method Payment.amount in Card.same",
             ["9:43", "9:57"],
         ),

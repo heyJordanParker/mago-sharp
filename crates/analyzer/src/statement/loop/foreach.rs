@@ -13,6 +13,7 @@ use mago_span::HasSpan;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Foreach;
 use mago_syntax::cst::ForeachTarget;
+use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
@@ -32,6 +33,7 @@ use crate::error::AnalysisError;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::assign_to_expression;
 use crate::statement::r#loop;
+use crate::statement::refuse_condition_that_never_finishes;
 use crate::utils::expression::get_block_expression_id;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Foreach<'arena> {
@@ -54,6 +56,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Foreach<'arena> {
 
         let (always_enters_loop, mut key_type, mut value_type) =
             r#loop::analyze_iterator(context, block_context, artifacts, iterator, iterator_variable_id, self)?;
+        // A `for … of` is how a `.sharp` file writes a `foreach`.
+        let body: &[Statement<'arena>] =
+            if refuse_condition_that_never_finishes(context, block_context, iterator, "for") {
+                &[]
+            } else {
+                self.body.statements()
+            };
 
         if key_type.is_never() {
             key_type = get_mixed();
@@ -167,7 +176,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Foreach<'arena> {
 
         let (inner_loop_block_context, loop_scope) = r#loop::analyze(
             context,
-            self.body.statements(),
+            body,
             &[],
             vec![],
             loop_scope,

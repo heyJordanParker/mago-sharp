@@ -1815,6 +1815,35 @@ fn a_plain_php_function_is_called_through_its_namespace() {
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/Report.php", php), &others)));
 }
 
+/// A member written as an expression, `Pdf.{"render"}(html)`, names no function of the namespace, so the analysis,
+/// which still reads the file, reads it as a static call. The checker refuses the member, and `mago` prints only that.
+#[test]
+fn a_member_written_as_an_expression_after_a_namespace_calls_no_function() {
+    let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public static void draft(string html) { Pdf.{\"render\"}(html); }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Vendor/Pdf/functions.php", pdf)]),
+        ["7:49 non-existent-method"]
+    );
+}
+
+/// A message names a plain PHP function as the `.sharp` file calls it, through its namespace: `global.strlen`, and
+/// `Pdf.missing` for a function an imported namespace lacks, which is a missing function, not a missing method.
+#[test]
+fn a_message_names_a_plain_php_function_as_the_file_calls_it() {
+    let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public static void draft(string html) { Pdf.missing(html); }\n    public static int length() => global.strlen(5);\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[("src/Vendor/Pdf/functions.php", pdf)]),
+        [
+            "7:49 non-existent-function Function `Pdf.missing` does not exist. | Check the spelling of `Pdf.missing`, or declare `function missing()` in a `.php` file of the namespace `Vendor.Pdf`.",
+            "8:49 invalid-argument Invalid argument type for argument #1 of `global.strlen`: expected `string`, but found `int`. | Change the argument value to match `string`, or update the parameter's type declaration.",
+        ]
+    );
+}
+
 /// Spec section 23 refuses a bare call of a plain PHP function and names the call to write: the standard library
 /// member that wraps it, its PHP# syntax, or the call through its namespace, `global.strlen(…)` or, for a function an
 /// imported namespace declares, `Pdf.render(…)`. A function whose member the library lacks gets the call through
@@ -1864,6 +1893,12 @@ fn an_import_of_one_function_is_refused_with_the_namespace_to_import() {
         ]
     );
     assert_eq!(issues(("src/Demo/Draft.php", php), &others), Vec::<String>::new());
+
+    let root = "namespace Demo;\n\nimport strlen;\n\nclass Draft\n{\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Draft.sharp", root), &[]),
+        ["3:8 function-import An import names a class or a namespace, not a function: call `global.strlen(…)`. | "]
+    );
 }
 
 /// Spec section 31 makes an exception a bug and an expected failure a `Result`, so PHP# declares no thrown exceptions.
@@ -1877,12 +1912,14 @@ fn check_throws_skips_sharp_files_and_keeps_reporting_in_php() {
 }
 
 /// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`,
-/// `global.exit(…)`, `break` or `continue` in its block, one after an `if` whose every branch ends the block, and a block
-/// after a condition that never finishes. The first statement that never runs is refused once for its block, naming the
-/// line that ends the block, and a bare call that never runs is refused for that alone. A `.php` file keeps Mago's help.
+/// `global.exit(…)`, `break` or `continue` in its block, one after an `if` whose every branch ends the block, one after
+/// a loop that never ends, and a block after a condition that never finishes, which is refused at the condition. The
+/// first statement that never runs is refused once for its block, naming the line that ends the block, and a bare call
+/// that never runs is refused for that alone. `finally`, a `catch`, and code after a loop that breaks or an `if` with no
+/// `else` all run. A `.php` file keeps Mago's help.
 #[test]
 fn a_statement_that_can_never_run_is_refused() {
-    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterExit()\n    {\n        global.exit(1);\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            global.printf(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        global.printf(\"one\");\n        global.printf(\"two\");\n        global.printf(\"three\");\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterExit()\n    {\n        global.exit(1);\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            global.printf(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        global.printf(\"one\");\n        global.printf(\"two\");\n        global.printf(\"three\");\n    }\n\n    public static int doNeverEnds(bool again)\n    {\n        do {\n            return 9;\n        } while (again);\n        return 10;\n    }\n\n    public static int loopNeverEnds()\n    {\n        while (true) {\n            global.printf(\"again\");\n        }\n        return 11;\n    }\n\n    public static int finallyAfterReturn()\n    {\n        try {\n            return 12;\n        } finally {\n            global.printf(\"done\");\n        }\n    }\n\n    public static int afterLoopWithBreak()\n    {\n        while (true) {\n            break;\n        }\n        return 13;\n    }\n\n    public static int afterIfWithoutElse(bool up)\n    {\n        if (up) {\n            return 14;\n        }\n        return 15;\n    }\n\n    public static int catchAfterReturningTry()\n    {\n        try {\n            return 16;\n        } catch (RuntimeException failure) {\n            return 17;\n        }\n    }\n\n    public static int doThatBreaks(bool stop, bool again)\n    {\n        do {\n            if (stop) {\n                break;\n            }\n            return 18;\n        } while (again);\n        return 19;\n    }\n\n    public static void conditionNeverFinishesWithElse()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void iterableNeverFinishes()\n    {\n        for (const item of global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Flow\n{\n    public static function afterReturn(): int\n    {\n        return 1;\n        return 2;\n    }\n}\n";
 
     assert_eq!(
@@ -1895,11 +1932,18 @@ fn a_statement_that_can_never_run_is_refused() {
             "37:13 unevaluated-code This statement never runs, because line 36 ends the block. | Delete it, or move it above line 36.",
             "44:9 unevaluated-code This statement never runs, because line 43 ends the block. | Delete it, or move it above line 43.",
             "54:9 unevaluated-code This statement never runs, because line 49 ends the block. | Delete it, or move it above line 49.",
-            "59:29 unevaluated-code This block never runs, because the code before it never finishes. | Delete it.",
+            "59:13 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `if`.",
             "67:9 unevaluated-code This statement never runs, because line 66 ends the block. | Delete it, or move it above line 66.",
+            "77:9 unevaluated-code This statement never runs, because line 74 ends the block. | Delete it, or move it above line 74.",
+            "85:9 unevaluated-code This statement never runs, because line 82 ends the block. | Delete it, or move it above line 82.",
+            "135:13 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `if`.",
+            "144:28 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `for`.",
         ]
     );
-    assert_eq!(issues(("src/Demo/Flow.php", php), &[]), ["10:9 unevaluated-code"]);
+    assert_eq!(
+        refusals(("src/Demo/Flow.php", php), &[]),
+        ["10:9 unevaluated-code Unreachable code detected. | Consider removing this unreachable code."]
+    );
 }
 
 #[test]
@@ -1923,7 +1967,7 @@ fn calling_a_function_that_does_not_exist_is_reported_as_in_php() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[])[0],
-        "7:23 non-existent-function Function `missing` could not be found. | Check the spelling of `missing`, or declare `function missing()` in a `.php` file outside any namespace."
+        "7:23 non-existent-function Function `global.missing` does not exist. | Check the spelling of `global.missing`, or declare `function missing()` in a `.php` file outside any namespace."
     );
 
     let declared = ("src/helpers.php", "<?php\n\nfunction missing(int $value): int\n{\n    return $value;\n}\n");
@@ -2827,6 +2871,105 @@ fn exit_with_a_never_value_has_the_issues_of_its_php_twin() {
 
     assert_eq!(sharp_issues, ["9:21 no-value"]);
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
+}
+
+/// In a `.sharp` file, a `global.exit` argument that can hold a string gets the `die` message, because
+/// `global.exit("…")` prints the message and exits with status 0, which reports success (spec section 8). A `.php` file
+/// still takes it.
+#[test]
+fn exit_with_a_value_that_is_not_an_int_names_the_message_to_write_and_exit_1() {
+    let any = "<?php\n\nnamespace Lib;\n\nfinal class Any\n{\n    public static function value(): mixed\n    {\n        return 1;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Any;\n\nclass Shutdown\n{\n    public void reason(string reason)\n    {\n        global.exit(reason);\n    }\n\n    public void either(int|string status)\n    {\n        global.exit(status);\n    }\n\n    public void any()\n    {\n        global.exit(Any.value());\n    }\n\n    public void named(string reason)\n    {\n        global.exit(status: reason);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Shutdown\n{\n    public function reason(string $reason): void\n    {\n        exit($reason);\n    }\n\n    public function either(int|string $status): void\n    {\n        exit($status);\n    }\n}\n";
+    let others = [("src/Lib/Any.php", any)];
+
+    assert_eq!(
+        issues(("src/Demo/Shutdown.sharp", sharp), &others),
+        ["9:9 invalid-argument", "14:9 invalid-argument", "19:9 invalid-argument", "24:9 invalid-argument"]
+    );
+    let refusals = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &others);
+    for refusal in &refusals {
+        assert_eq!(refusal.message, "PHP# has no `die`: write the message to STDERR, then `global.exit(1)`.");
+        assert_eq!(
+            refusal.notes,
+            [
+                "`global.die(\"…\")` and `global.exit(\"…\")` print the message and exit with status 0, which reports success."
+            ]
+        );
+    }
+    let annotations: Vec<String> =
+        refusals.iter().filter_map(|issue| issue.primary_annotation()?.message.clone()).collect();
+    assert_eq!(
+        annotations,
+        [
+            "This is `string`, not an `int`.",
+            "This is `int|string`, not an `int`.",
+            "This is `Any?`, not an `int`.",
+            "This is `string`, not an `int`.",
+        ]
+    );
+    assert_eq!(issues(("src/Demo/Shutdown.php", php), &[]), Vec::<String>::new());
+}
+
+/// A `global.exit` argument that cannot hold a string is no message, so it names the `int` status `global.exit` takes.
+#[test]
+fn exit_with_a_value_that_cannot_be_a_message_names_the_int_status() {
+    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void maybe(int? code)\n    {\n        global.exit(code);\n    }\n\n    public void fraction(float code)\n    {\n        global.exit(code);\n    }\n\n    public void flag(bool done)\n    {\n        global.exit(done);\n    }\n\n    public void listed(List<int> codes)\n    {\n        global.exit(codes);\n    }\n}\n";
+
+    let refusals = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &[]);
+    assert_eq!(
+        refusals.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
+        ["7:9 invalid-argument", "12:9 invalid-argument", "17:9 invalid-argument", "22:9 invalid-argument"]
+    );
+    assert_eq!(
+        refusals.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
+        [
+            "`global.exit` takes an `int` status: this is `int?`.",
+            "`global.exit` takes an `int` status: this is `float`.",
+            "`global.exit` takes an `int` status: this is `bool`.",
+            "`global.exit` takes an `int` status: this is `List<int>`.",
+        ]
+    );
+    for refusal in &refusals {
+        assert_eq!(
+            refusal.primary_annotation().and_then(|annotation| annotation.message.as_deref()),
+            Some("This status is not an `int`.")
+        );
+        assert!(refusal.notes.is_empty(), "{:?}", refusal.notes);
+    }
+}
+
+/// `global.die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes
+/// `die` in every form.
+#[test]
+fn die_in_every_form_is_an_error_that_names_stderr_and_exit() {
+    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void stop()\n    {\n        global.die();\n    }\n\n    public void fail()\n    {\n        global.die(\"failed\");\n    }\n\n    public void code()\n    {\n        global.die(1);\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Shutdown.sharp", sharp), &[]),
+        [
+            "7:9 invalid-argument PHP# has no `die`: write the message to STDERR, then `global.exit(1)`. | ",
+            "12:9 invalid-argument PHP# has no `die`: write the message to STDERR, then `global.exit(1)`. | ",
+            "17:9 invalid-argument PHP# has no `die`: write the message to STDERR, then `global.exit(1)`. | ",
+        ]
+    );
+}
+
+/// `global.exit("…")` prints its message and exits with status 0, as `global.die("…")` does, in every way a string
+/// literal or a template reaches it.
+#[test]
+fn exit_with_a_string_literal_is_an_error_as_die_is() {
+    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void literal()\n    {\n        global.exit(\"failed\");\n    }\n\n    public void named()\n    {\n        global.exit(status: \"failed\");\n    }\n\n    public void template()\n    {\n        global.exit(`failed`);\n    }\n\n    public void parenthesized()\n    {\n        global.exit((\"failed\"));\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Shutdown.sharp", sharp), &[]),
+        [
+            "7:9 invalid-argument PHP# has no `die`: write the message to STDERR, then `global.exit(1)`. | ",
+            "12:9 invalid-argument PHP# has no `die`: write the message to STDERR, then `global.exit(1)`. | ",
+            "17:9 invalid-argument PHP# has no `die`: write the message to STDERR, then `global.exit(1)`. | ",
+            "22:9 invalid-argument PHP# has no `die`: write the message to STDERR, then `global.exit(1)`. | ",
+        ]
+    );
 }
 
 /// The standard library's `Int` and `Float`, with the library's signatures, which a project reads from `vendor/`.
@@ -7411,7 +7554,7 @@ fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_
         messages(("src/Demo/Caller.sharp", vendor), &[shelf]),
         [
             "Invalid argument type for argument #1 of `Shelf.take`: expected `Ghost`, but found `int`.",
-            "Invalid argument type for argument #1 of `strlen`: expected `string`, but found `Ghost`.",
+            "Invalid argument type for argument #1 of `global.strlen`: expected `string`, but found `Ghost`.",
         ]
     );
     assert_eq!(
@@ -7776,7 +7919,8 @@ fn the_engines_set_class_is_not_a_class_sharp_code_calls() {
     let sharp = "namespace Demo;\n\nimport Sharp.Set;\n\nclass Tags\n{\n    public int count(List<string> tags)\n    {\n        const made = Set.from(tags);\n        return global.count(made);\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param list<string> $tags */\n    public function count(array $tags): int\n    {\n        $made = \\Sharp\\Set::from($tags);\n        return count($made);\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["9:26 non-existent-method", "10:29 mixed-argument"]);
+    // `import Sharp.Set;` names no class, so `Set` is a namespace and `Set.from` a missing function of it.
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["9:26 non-existent-function", "10:29 mixed-argument"]);
     assert_eq!(
         issues(("src/Demo/Tags.php", php), &[]),
         ["10:29 non-existent-method", "10:9 mixed-assignment", "11:22 mixed-argument"]
@@ -10007,6 +10151,22 @@ fn an_extern_target_that_names_nothing_is_a_non_existent_class_method_or_functio
         ]
     );
     assert_eq!(messages(stub, &[STRIPE])[3], "Cannot find class, interface, enum, or type alias `Nowhere`.");
+
+    // An imported namespace that names no class holds functions, spec section 23, so its missing member is a missing
+    // function, as `global.nowhere` is.
+    let pdf = (
+        "src/Vendor/Pdf/functions.php",
+        "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n",
+    );
+    let functions = (
+        "app/Stubs/Pdf.sharp",
+        "namespace App.Stubs;\n\nimport Vendor.Pdf;\n\nextern Pdf.render;\nextern Pdf.no_such_function;\n",
+    );
+
+    assert_eq!(
+        refusals(functions, &[pdf]),
+        ["6:8 non-existent-function Function `Pdf.no_such_function` does not exist. | "]
+    );
 }
 
 /// PHP# infers the effects of PHP# code, so an `extern` names only plain PHP.
@@ -10275,7 +10435,7 @@ fn a_getter_calling_a_function_with_no_extern_is_refused_and_names_the_missing_d
     assert_eq!(
         effect_issues(&[LABEL]),
         [
-            "app/Shop/Label.sharp:7:27 impure-getter: Getter `text` calls `trim`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern global.trim;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Label.sharp:7:27 impure-getter: Getter `text` calls `global.trim`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern global.trim;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -10393,6 +10553,38 @@ fn a_getter_calling_a_function_value_with_an_effect_is_refused_naming_the_effect
     );
 }
 
+/// A call that runs a function value has that value's effects, whether a local holding a lambda runs it, or a plain
+/// PHP function or method runs a lambda, a method value or a function value it is given, even when its `extern`
+/// declares it pure.
+#[test]
+fn a_getter_running_a_function_value_through_plain_php_or_a_local_has_the_value_s_effects() {
+    let effects = (
+        "app/Shop/Effects.sharp",
+        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Effects\n{\n    public Effects(private Function<int() uses Clock> tick) { }\n\n    public int viaLocalLambda\n    {\n        get\n        {\n            const f = () => global.time();\n            return f();\n        }\n    }\n\n    public int viaArrayMap => global.count(global.array_map(x => global.time() + x, [1, 2]));\n\n    public int viaCallUserFunc => global.call_user_func(() => global.time());\n\n    public int viaUsort\n    {\n        get\n        {\n            List<int> xs = [2, 1];\n            global.usort(xs, (a, b) => global.time() + a - b);\n            return xs[0];\n        }\n    }\n\n    public int viaPlainMethod => Runner.run(() => global.time());\n\n    public int viaMethodValue => global.count(global.array_map(this.stamp, [1]));\n\n    public int viaFunctionValue => global.call_user_func(this.tick);\n\n    public int stamp(int x) => global.time() + x;\n}\n",
+    );
+    let runner = (
+        "app/Lib/Runner.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Runner\n{\n    public static function run(callable $f): int\n    {\n        return $f();\n    }\n}\n",
+    );
+    let stub = (
+        "app/Stubs/Builtins.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Runner;\n\nextern Runner;\nextern global.time uses Clock;\nextern global.array_map;\nextern global.count;\nextern global.call_user_func;\nextern global.usort;\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[effects, runner, stub]),
+        [
+            "app/Shop/Effects.sharp:13:29 impure-getter: Getter `viaLocalLambda` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
+            "app/Shop/Effects.sharp:18:66 impure-getter: Getter `viaArrayMap` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
+            "app/Shop/Effects.sharp:20:63 impure-getter: Getter `viaCallUserFunc` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
+            "app/Shop/Effects.sharp:27:40 impure-getter: Getter `viaUsort` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
+            "app/Shop/Effects.sharp:32:51 impure-getter: Getter `viaPlainMethod` calls `global.time`, which has the effect `Clock`. Getters must be pure.",
+            "app/Shop/Effects.sharp:34:64 impure-getter: Getter `viaMethodValue` reaches `Effects.stamp`, which calls `global.time` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Effects.sharp:36:58 impure-getter: Getter `viaFunctionValue` calls `this.tick`, which has the effect `Clock`. Getters must be pure.",
+        ]
+    );
+}
+
 /// A law takes a function value as any parameter, and calling it has the effects its function type lists.
 #[test]
 fn a_law_calling_a_function_value_with_the_effect_clock_is_refused() {
@@ -10423,7 +10615,7 @@ fn a_lambda_with_an_effect_stored_in_a_pure_function_type_is_refused() {
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:9:21 invalid-property-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:9:21 invalid-property-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
         ]
     );
 }
@@ -10441,8 +10633,8 @@ fn a_lambda_with_an_effect_returned_or_held_in_a_local_of_a_pure_function_type_i
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:5:41 invalid-return-statement: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
-            "app/Shop/Pricing.sharp:9:35 invalid-local-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:5:41 invalid-return-statement: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:9:35 invalid-local-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
         ]
     );
 }
@@ -10475,7 +10667,7 @@ fn a_method_value_with_an_effect_passed_where_a_pure_function_type_is_declared_i
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:11:39 invalid-argument: `Pricing.live` calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
         ]
     );
 }
@@ -10490,7 +10682,7 @@ fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
     );
 
     assert_eq!(issues(branch, &[FETCH, FETCH_STUB]), Vec::<String>::new());
-    let message = "invalid-property-assignment-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
+    let message = "invalid-property-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
     assert_eq!(
         effect_issues(&[branch, FETCH, FETCH_STUB]),
         [
@@ -10673,7 +10865,7 @@ fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refus
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:5:39 invalid-property-default-value: This lambda calls `fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:5:39 invalid-property-default-value: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
         ]
     );
     assert_eq!(effect_issues(&[listed, FETCH, FETCH_STUB]), Vec::<String>::new());
@@ -10752,7 +10944,7 @@ fn a_getter_reaching_a_method_that_calls_an_extern_with_an_effect_in_another_fil
     assert_eq!(
         effect_issues(&[cart, order, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Cart.sharp:7:25 impure-getter: Getter `total` reaches `Order.price`, which calls `now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Cart.sharp:7:25 impure-getter: Getter `total` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Getters must be pure."
         ]
     );
 }
@@ -10803,8 +10995,8 @@ fn a_getter_creating_an_object_whose_super_call_has_an_effect_is_refused() {
     assert_eq!(
         effect_issues(&[stamps, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Stamp.sharp:25:24 impure-getter: Getter `late` reaches `Late.Late`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Stamp.sharp:27:26 impure-getter: Getter `child` reaches `Timed.Timed`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:25:24 impure-getter: Getter `late` reaches `Late.Late`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:27:26 impure-getter: Getter `child` reaches `Timed.Timed`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
         ]
     );
 }
@@ -10820,8 +11012,8 @@ fn a_getter_creating_an_object_whose_named_constructor_has_an_effect_is_refused(
     assert_eq!(
         effect_issues(&[stamps, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Stamp.sharp:16:27 impure-getter: Getter `current` reaches `Stamp.current`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Stamp.sharp:18:26 impure-getter: Getter `logged` reaches `Stamp.logged`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:16:27 impure-getter: Getter `current` reaches `Stamp.current`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Stamp.sharp:18:26 impure-getter: Getter `logged` reaches `Stamp.logged`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
         ]
     );
 }
@@ -10861,7 +11053,7 @@ fn a_getter_calling_a_virtual_method_whose_override_has_an_effect_is_refused() {
     assert_eq!(
         effect_issues(&[quote, rates, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Quote.sharp:7:26 impure-getter: Getter `amount` reaches `LiveRate.value`, which calls `now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Quote.sharp:7:26 impure-getter: Getter `amount` reaches `LiveRate.value`, which calls `global.now` with the effect `Clock`. Getters must be pure."
         ]
     );
 }
@@ -10878,7 +11070,7 @@ fn a_getter_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {
     assert_eq!(
         effect_issues(&[names]),
         [
-            "app/Shop/Names.sharp:7:54 impure-getter: Getter `loud` calls `strtoupper`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern global.strtoupper;` when it has no effect, or name its effects after `uses`."
+            "app/Shop/Names.sharp:7:54 impure-getter: Getter `loud` calls `global.strtoupper`, which has no `extern` declaration. Getters must be pure. Help: Declare it in a .sharp file: `extern global.strtoupper;` when it has no effect, or name its effects after `uses`."
         ]
     );
 }
@@ -10911,7 +11103,7 @@ fn a_recursive_pair_of_methods_solves_without_looping() {
     assert_eq!(
         effect_issues(&files),
         [
-            "app/Shop/Tree.sharp:9:25 impure-getter: Getter `depth` reaches `Tree.odd`, which calls `now` with the effect `Clock`. Getters must be pure."
+            "app/Shop/Tree.sharp:9:25 impure-getter: Getter `depth` reaches `Tree.odd`, which calls `global.now` with the effect `Clock`. Getters must be pure."
         ]
     );
     let (codebase, summaries) = summarized(&files);
@@ -10919,7 +11111,7 @@ fn a_recursive_pair_of_methods_solves_without_looping() {
     let even = FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Tree"), ascii_lowercase_word(b"even"));
     assert_eq!(
         effects.impurity(&codebase, &even).as_deref(),
-        Some("reaches `Tree.odd`, which calls `now` with the effect `Clock`")
+        Some("reaches `Tree.odd`, which calls `global.now` with the effect `Clock`")
     );
 }
 
@@ -10939,11 +11131,11 @@ fn a_getter_applying_an_operator_whose_body_has_an_effect_is_refused() {
     assert_eq!(
         effect_issues(&[cart, money, CLOCK_STUB, NOW]),
         [
-            "app/Shop/Cart.sharp:7:27 impure-getter: Getter `total` reaches `Money.operator +`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:9:28 impure-getter: Getter `refund` reaches `Money.operator -`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:11:25 impure-getter: Getter `even` reaches `Money.operator ==`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:13:28 impure-getter: Getter `cheaper` reaches `Money.operator <=>`, which calls `now` with the effect `Clock`. Getters must be pure.",
-            "app/Shop/Cart.sharp:20:13 impure-getter: Getter `doubled` reaches `Money.operator +`, which calls `now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Cart.sharp:7:27 impure-getter: Getter `total` reaches `Money.operator +`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Cart.sharp:9:28 impure-getter: Getter `refund` reaches `Money.operator -`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Cart.sharp:11:25 impure-getter: Getter `even` reaches `Money.operator ==`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Cart.sharp:13:28 impure-getter: Getter `cheaper` reaches `Money.operator <=>`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
+            "app/Shop/Cart.sharp:20:13 impure-getter: Getter `doubled` reaches `Money.operator +`, which calls `global.now` with the effect `Clock`. Getters must be pure.",
         ]
     );
 }
@@ -11133,7 +11325,7 @@ fn a_getter_reaching_a_method_of_a_php_sharp_class_that_shares_its_short_name_na
     assert_eq!(
         effect_issues(&[cart, billing_order, shop_order, CLOCK_STUB, NOW]),
         [
-            "app/Billing/Cart.sharp:7:25 impure-getter: Getter `total` reaches `App.Billing.Order.price`, which calls `now` with the effect `Clock`. Getters must be pure."
+            "app/Billing/Cart.sharp:7:25 impure-getter: Getter `total` reaches `App.Billing.Order.price`, which calls `global.now` with the effect `Clock`. Getters must be pure."
         ]
     );
 }

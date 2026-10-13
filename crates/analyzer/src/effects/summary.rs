@@ -529,10 +529,12 @@ where
             return Some(lambda);
         }
 
-        let Expression::ConstantAccess(name) = callee.unparenthesized() else {
-            return None;
+        let name = match callee.unparenthesized() {
+            Expression::ConstantAccess(name) => &name.name,
+            Expression::Identifier(name) => name,
+            _ => return None,
         };
-        let Some(Binding::Local(local)) = self.context.resolved_names.binding(&name.name) else {
+        let Some(Binding::Local(local)) = self.context.resolved_names.binding(name) else {
             return None;
         };
 
@@ -637,13 +639,20 @@ where
         for target in targets {
             match *target {
                 CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function_name), .. } => {
-                    let cause = self
+                    let name = self
                         .codebase()
                         .get_function(function_name.as_bytes())
                         .map_or(function_name, |metadata| metadata.original_name);
+                    // A function of PHP's root namespace is named as the file calls it, `global.now`, spec section 23.
+                    let cause = if name.as_bytes().contains(&b'\\') {
+                        name
+                    } else {
+                        word([b"global.", name.as_bytes()].concat())
+                    };
                     let declaration =
                         extern_of(self.codebase(), empty_word(), ascii_lowercase_word(function_name.as_bytes()));
                     self.plain_php(declaration, span, (empty_word(), cause));
+                    self.callbacks(arguments);
                 }
                 CallTarget::FunctionLike {
                     callee: FunctionLikeIdentifier::Method(declaring_class, method_name),
@@ -754,6 +763,33 @@ where
         } else {
             let declaration = extern_of(codebase, class, ascii_lowercase_word(method_name.as_bytes()));
             self.plain_php(declaration, span, cause);
+        }
+        self.callbacks(arguments);
+    }
+
+    /// Records the function values plain PHP is given, as `global.array_map(x => …, list)` gives one, since plain PHP
+    /// may run each: a lambda runs here, a method value calls its method, and any other function value has the effects
+    /// its function type lists.
+    fn callbacks(&mut self, arguments: &'ast ArgumentList<'arena>) {
+        for argument in arguments.arguments.iter() {
+            let value = argument.value();
+            if let Some(lambda) = self.lambda(value) {
+                self.inline(lambda, |_| Roots::new());
+
+                continue;
+            }
+
+            let span = value.span();
+            if let Expression::Access(Access::Property(access)) = value.unparenthesized() {
+                self.method_value(access, span, &Roots::new());
+            }
+
+            if let Some(value_type) = self.artifacts.get_expression_type(value) {
+                let cause = (empty_word(), self.text(span));
+                for effect in declared_effects(value_type) {
+                    self.summary.effects.push((Effect::Foreign(effect), span, cause));
+                }
+            }
         }
     }
 

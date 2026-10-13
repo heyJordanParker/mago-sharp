@@ -16,6 +16,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::block::BreakContext;
+use crate::context::scope::control_action::ControlAction;
 use crate::context::scope::loop_scope::LoopScope;
 use crate::error::AnalysisError;
 use crate::formula::get_formula;
@@ -146,9 +147,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for DoWhile<'arena> {
             );
         }
 
-        let infinite_loop = artifacts
-            .get_expression_type(self.condition)
-            .is_some_and(mago_codex::ttype::union::TUnion::is_always_truthy);
+        // In a `.sharp` file, a body that ends the block on every path never reaches its condition, so the loop never
+        // ends either, and a statement after it never runs (spec section 7).
+        let body_ends_the_block = context.dialect.is_sharp() && {
+            let actions = ControlAction::from_statements(vec![self.statement], vec![], Some(artifacts), true);
+
+            [ControlAction::None, ControlAction::Break, ControlAction::Continue]
+                .into_iter()
+                .all(|action| !actions.contains(action))
+        };
+        let infinite_loop = body_ends_the_block
+            || artifacts
+                .get_expression_type(self.condition)
+                .is_some_and(mago_codex::ttype::union::TUnion::is_always_truthy);
 
         r#loop::inherit_loop_block_context(
             context,

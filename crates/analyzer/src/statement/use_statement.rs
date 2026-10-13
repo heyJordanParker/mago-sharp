@@ -88,19 +88,22 @@ where
     if context.codebase.class_like_exists(&fqn) || !context.codebase.function_exists(&fqn) {
         return;
     }
-    let Some(separator) = fqn.iter().rposition(|byte| *byte == b'\\') else {
-        return;
-    };
 
-    let namespace = String::from_utf8_lossy(&fqn[..separator]).replace('\\', ".");
-    let last = namespace.rsplit('.').next().unwrap_or(&namespace).to_owned();
-    let function = String::from_utf8_lossy(&fqn[separator + 1..]);
+    // A function of PHP's root namespace is called through `global`, which no file imports.
+    let message = match fqn.iter().rposition(|byte| *byte == b'\\') {
+        Some(separator) => {
+            let namespace = String::from_utf8_lossy(&fqn[..separator]).replace('\\', ".");
+            let last = namespace.rsplit('.').next().unwrap_or(&namespace).to_owned();
+            let function = String::from_utf8_lossy(&fqn[separator + 1..]);
+
+            format!("import `{namespace}`, and call `{last}.{function}(…)`")
+        }
+        None => format!("call `global.{}(…)`", String::from_utf8_lossy(&fqn)),
+    };
     context.collector.report_with_code(
         IssueCode::FunctionImport,
-        Issue::error(format!(
-            "An import names a class or a namespace, not a function: import `{namespace}`, and call `{last}.{function}(…)`."
-        ))
-        .with_annotation(Annotation::primary(name.span()).with_message("Imports one function.")),
+        Issue::error(format!("An import names a class or a namespace, not a function: {message}."))
+            .with_annotation(Annotation::primary(name.span()).with_message("Imports one function.")),
     );
 }
 

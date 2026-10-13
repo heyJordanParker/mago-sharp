@@ -22,6 +22,7 @@ use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
+use mago_span::HasPosition;
 use mago_syntax_core::utils::is_part_of_identifier;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -701,12 +702,14 @@ where
     match identifier {
         FunctionLikeIdentifier::Function(name) => {
             let name = display_function_name(context, *name);
+            // A `.sharp` file calls a plain PHP function through its namespace, spec section 23.
             match name.as_bytes().iter().rposition(|byte| *byte == b'\\') {
                 Some(separator) if context.dialect.is_sharp() => display_member(
                     context,
                     display_class_like_name(context, word(&name.as_bytes()[..separator])),
                     String::from_utf8_lossy(&name.as_bytes()[separator + 1..]),
                 ),
+                None if context.dialect.is_sharp() => format!("global.{name}"),
                 _ => name.to_string(),
             }
         }
@@ -719,21 +722,30 @@ where
     }
 }
 
-/// The plain PHP function `member` of the namespace `namespace`, empty for PHP's root namespace, as PHP# calls one:
-/// `Pdf.render(html)` after `import Vendor.Pdf;`, or `global.now()`, spec section 23. A namespace that is also a
-/// class's name holds the class's static methods instead.
+/// The plain PHP function `member` of the namespace `namespace`, as PHP# calls one: `Pdf.render(html)` after
+/// `import Vendor.Pdf;`, spec section 23. A namespace that is also a class's name holds the class's static methods
+/// instead.
 #[must_use]
 pub(crate) fn namespace_function(
     codebase: &CodebaseMetadata,
     namespace: Word,
     member: Word,
 ) -> Option<&FunctionLikeMetadata> {
-    if namespace.is_empty() {
-        return codebase.get_function(member.as_bytes());
-    }
     if codebase.get_class_like(namespace.as_bytes()).is_some() {
         return None;
     }
 
     codebase.get_function(&[namespace.as_bytes(), b"\\", member.as_bytes()].concat())
+}
+
+/// Whether `name`, which resolves to `full_name`, names a namespace a file imports, as `Pdf` does after
+/// `import Vendor.Pdf;` when no class is named `Vendor\Pdf`. Its member is then one of the namespace's functions,
+/// spec section 23, whether or not that function exists.
+#[must_use]
+pub(crate) fn is_imported_namespace<A, T>(context: &Context<'_, '_, A>, name: &T, full_name: Word) -> bool
+where
+    A: Arena,
+    T: HasPosition,
+{
+    context.resolved_names.is_imported(name) && !context.codebase.class_like_exists(full_name.as_bytes())
 }

@@ -44,6 +44,8 @@ use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
+use crate::utils::names::display_type;
+use crate::utils::names::is_imported_namespace;
 use crate::utils::names::namespace_function;
 use crate::utils::names::sharp_code_class_name;
 
@@ -121,21 +123,26 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
 
 /// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `global.now()` calls the function `now` of
 /// PHP's root namespace, and `Pdf.render(html)` after `import Vendor.Pdf;` the function `render` of that namespace,
-/// where no class is named `Vendor\Pdf`.
+/// where no class is named `Vendor\Pdf`. An imported namespace names its function whether or not the function exists,
+/// so the call of a missing one is refused as a missing function.
 pub(super) fn namespace_function_name<A>(context: &Context<'_, '_, A>, call: &MethodCall<'_>) -> Option<Word>
 where
     A: Arena,
 {
-    let namespace = context.resolved_names.static_call_class(call)?;
+    let name = context.resolved_names.static_call_class(call)?;
     let ClassLikeMemberSelector::Identifier(member) = &call.method else {
         return None;
     };
-    if namespace.name.value() == b"global" {
+    if name.name.value() == b"global" {
         return Some(word(member.value));
     }
 
-    let namespace = word(context.resolved_names.get(&namespace.name));
-    namespace_function(context.codebase, namespace, word(member.value))?;
+    let namespace = word(context.resolved_names.get(&name.name));
+    if !is_imported_namespace(context, &name.name, namespace)
+        && namespace_function(context.codebase, namespace, word(member.value)).is_none()
+    {
+        return None;
+    }
 
     Some(word([namespace.as_bytes(), b"\\", member.value].concat()))
 }
@@ -159,21 +166,80 @@ where
         None,
         false,
     );
+    let analyze = |context: &mut Context<'ctx, 'arena, A>| {
+        analyze_invocation_targets(
+            context,
+            block_context,
+            artifacts,
+            TemplateResult::default(),
+            target.into_iter().collect(),
+            InvocationArgumentsSource::ArgumentList(&call.argument_list),
+            call.span(),
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+    };
 
-    analyze_invocation_targets(
-        context,
-        block_context,
-        artifacts,
-        TemplateResult::default(),
-        target.into_iter().collect(),
-        InvocationArgumentsSource::ArgumentList(&call.argument_list),
-        call.span(),
-        None,
-        false,
-        false,
-        false,
-        false,
-    )
+    let name = function.as_bytes();
+    if !context.dialect.is_sharp() || !(name.eq_ignore_ascii_case(b"exit") || name.eq_ignore_ascii_case(b"die")) {
+        return analyze(context);
+    }
+
+    // Spec section 8: `global.exit` takes an `int` status, and `global.die` is removed. A refused status replaces the
+    // signature's report on the same argument, so the call gets one refusal.
+    let (result, recorded) = context.record(analyze);
+    result?;
+    let status = call.argument_list.arguments.first().map(|argument| argument.value());
+    match exit_status_refusal(context, artifacts, call, function, status) {
+        Some(refusal) => {
+            let status_span = status.map(HasSpan::span);
+            context.collector.extend(recorded.into_iter().filter(|issue| issue.primary_span() != status_span));
+            context.collector.report_with_code(IssueCode::InvalidArgument, refusal);
+        }
+        None => context.collector.extend(recorded),
+    }
+
+    Ok(())
+}
+
+/// The refusal of `global.exit(status)` or `global.die(…)` in a `.sharp` file: `die` in every form, and `exit` with a
+/// status that can hold a string, print their message and exit with status 0, which reports success. Any other status
+/// that is not an `int` is refused for the `int` it must be.
+fn exit_status_refusal<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    call: &MethodCall<'_>,
+    function: Word,
+    status: Option<&Expression<'_>>,
+) -> Option<Issue>
+where
+    A: Arena,
+{
+    let status_type = status.and_then(|status| artifacts.get_expression_type(status));
+    let message = || {
+        Issue::error("PHP# has no `die`: write the message to STDERR, then `global.exit(1)`.").with_note(
+            "`global.die(\"…\")` and `global.exit(\"…\")` print the message and exit with status 0, which reports success.",
+        )
+    };
+
+    if function.as_bytes().eq_ignore_ascii_case(b"die") {
+        return Some(message().with_annotation(Annotation::primary(call.span())));
+    }
+
+    let status_type = status_type.filter(|status_type| !status_type.is_int() && !status_type.is_never())?;
+    let status_type_str = display_type(context, status_type);
+
+    Some(if status_type.has_string() || status_type.has_mixed() {
+        message().with_annotation(
+            Annotation::primary(call.span()).with_message(format!("This is `{status_type_str}`, not an `int`.")),
+        )
+    } else {
+        Issue::error(format!("`global.exit` takes an `int` status: this is `{status_type_str}`."))
+            .with_annotation(Annotation::primary(call.span()).with_message("This status is not an `int`."))
+    })
 }
 
 pub(super) fn resolve_targets<'ctx, 'arena, A>(
@@ -667,8 +733,10 @@ mod tests {
 
     /// A bare call names the standard library members its row of [`REPLACEMENTS`] lists, and `member_form` drops a
     /// member the codebase lacks. So every listed member must be one the library declares, or the checker would name
-    /// less than its table says. The library is `sharp/composer/library`, beside this tree's `sharp/mago`.
+    /// less than its table says. The library is `sharp/composer/library`, beside this tree's `sharp/mago`. The test's
+    /// walk of the library and its failure message run only when the library changes shape, so coverage leaves it out.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn every_member_a_replacement_names_is_declared_by_the_standard_library() {
         let arena = LocalArena::new();
         let mut codebase = CodebaseMetadata::new();

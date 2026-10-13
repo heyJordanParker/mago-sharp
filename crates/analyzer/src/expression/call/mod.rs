@@ -521,20 +521,27 @@ where
         if !skip_error_on_not_found && context.dialect.is_sharp() {
             let title_str = function_like.title_kind_str();
             let kind_str = function_like.kind_str();
-            // A `.sharp` file calls a function by its bare name, the global name PHP's fallback tries.
-            let name_str = display_function_like_identifier(context, &alternative.unwrap_or(function_like));
+            let identifier = alternative.unwrap_or(function_like);
+            // A `.sharp` file calls a plain PHP function through its namespace, `global.now` or `Pdf.render`.
+            let name_str = display_function_like_identifier(context, &identifier);
+            let php_name = identifier.as_string();
+            let place = match php_name.rsplit_once('\\') {
+                Some((namespace, function)) => format!(
+                    "declare `function {function}()` in a `.php` file of the namespace `{}`",
+                    namespace.replace('\\', ".")
+                ),
+                None => format!("declare `function {php_name}()` in a `.php` file outside any namespace"),
+            };
 
             context.collector.report_with_code(
                 IssueCode::NonExistentFunction,
-                Issue::error(format!("{title_str} `{name_str}` could not be found."))
+                Issue::error(format!("{title_str} `{name_str}` does not exist."))
                     .with_annotation(
                         Annotation::primary(span)
                             .with_message(format!("Undefined {kind_str} `{name_str}` called here")),
                     )
                     .with_note(format!("This often means the {kind_str} is misspelled, or not defined or autoloaded."))
-                    .with_help(format!(
-                        "Check the spelling of `{name_str}`, or declare `function {name_str}()` in a `.php` file outside any namespace."
-                    )),
+                    .with_help(format!("Check the spelling of `{name_str}`, or {place}.")),
             );
         } else if !skip_error_on_not_found {
             let title_str = function_like.title_kind_str();
