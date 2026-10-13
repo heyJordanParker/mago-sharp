@@ -155,17 +155,30 @@ fn limit_processor_time(seconds: u64) -> io::Result<()> {
 }
 
 /// Whether a Lean process stopped at `processor_seconds()`: `SIGXCPU` ended it, or ended the program `lake env` ran,
-/// which `lake env` reports as the exit status 128 plus the signal.
+/// which `lake env` reports as a `stopped_code`.
 pub(crate) fn stopped(status: ExitStatus) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
 
-        status.signal() == Some(libc::SIGXCPU) || status.code() == Some(128 + libc::SIGXCPU)
+        status.signal() == Some(libc::SIGXCPU) || status.code().is_some_and(stopped_code)
     }
     #[cfg(not(unix))]
     {
         let _ = status;
+        false
+    }
+}
+
+/// Whether `code` is the exit status Lean reports for a process `SIGXCPU` ended: 128 plus the signal.
+pub(crate) fn stopped_code(code: i32) -> bool {
+    #[cfg(unix)]
+    {
+        code == 128 + libc::SIGXCPU
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = code;
         false
     }
 }

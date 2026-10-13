@@ -2042,15 +2042,20 @@ fn compile_checks_a_structure_rule_over_thousands_of_imports() {
 }
 
 /// `mago compile` with each issue on one line, as `compile_lines` runs it, under a processor-time limit of `seconds`,
-/// which each Lean process it starts inherits, so a row reaches the limit long before 120 seconds. Mago's own limit on
-/// each Lean process is `library.rs`'s `each_process_a_lake_starts_runs_under_the_processor_time_limit`'s to prove:
-/// Mago takes the lower of 120 seconds and this limit, so no compile can tell the two apart.
+/// which each Lean process it starts inherits, so a row reaches the limit long before 120 seconds, and the processor
+/// seconds it and every process it waited for used. Mago's own limit on each Lean process is `library.rs`'s
+/// `each_process_a_lake_starts_runs_under_the_processor_time_limit`'s to prove: Mago takes the lower of 120 seconds and
+/// this limit, so no compile can tell the two apart.
 #[cfg(unix)]
-fn compile_lines_within(root: &Path, seconds: u64) -> Output {
+fn compile_lines_within(root: &Path, seconds: u64) -> (Output, f64) {
+    use std::io::Read;
     use std::os::unix::process::CommandExt;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+    use std::process::Stdio;
 
     let mut command = command(root, "never");
-    command.env("MAGO_REPORTING_FORMAT", "emacs");
+    command.env("MAGO_REPORTING_FORMAT", "emacs").stdout(Stdio::piped()).stderr(Stdio::piped());
     // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
     unsafe {
         command.pre_exec(move || {
@@ -2066,7 +2071,28 @@ fn compile_lines_within(root: &Path, seconds: u64) -> Output {
         })
     };
 
-    command.output().unwrap()
+    let mut child = command.spawn().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let mut stdout = Vec::new();
+    child.stdout.take().unwrap().read_to_end(&mut stdout).unwrap();
+    // `wait4` reports what the compile used with every process it waited for, and no other test's processes.
+    let pid = i32::try_from(child.id()).unwrap();
+    let mut status = 0;
+    // SAFETY: `rusage` is plain data, which zeroes make valid.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `status` and `usage` are valid for `wait4` to fill, and `pid` is a child no one else waits for.
+    assert_eq!(unsafe { libc::wait4(pid, &raw mut status, 0, &raw mut usage) }, pid);
+    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1_000_000.0;
+
+    (
+        Output { status: ExitStatus::from_raw(status), stdout, stderr: stderr.join().unwrap() },
+        seconds(usage.ru_utime) + seconds(usage.ru_stime),
+    )
 }
 
 /// A loop over a trillion numbers, which no rule or proof ends in time.
@@ -2078,16 +2104,17 @@ fn slow(length: u64) -> String {
     ENDLESS.replace("1000000000000", &(30_000_000 + length).to_string())
 }
 
-/// Lean work that runs past the processor-time limit stops there instead of holding the compile, and is reported where
-/// it sits while every other rule runs. Each row runs under a limit of 10 seconds, after a compile that built the
-/// runtime library: a rule that never ends is refused at its name, and the
-/// other rule of its `Module.lean` still judges `StoreService.sharp`; a slow rule that ends within the limit runs; ten
-/// slow rules that together run past the limit all run, since each rule gets the limit of its own; a
-/// `#eval` that never ends refuses each file its `Module.lean` judges; and a proof that never ends under
-/// `set_option maxHeartbeats 0`, which lifts Lean's own limit, refuses its law's file.
+/// Lean work that runs past the processor-time limit stops there once instead of holding the compile, and is reported
+/// where it sits while every other rule runs. Each row runs under a limit of 10 seconds, after a compile that built the
+/// runtime library. Work that never ends costs the compile less than two limits: a rule that never ends is refused at
+/// its name, and the other rule of its `Module.lean` still judges `StoreService.sharp`; a `#eval` that never ends
+/// refuses each file its `Module.lean` judges; and a proof that never ends under `set_option maxHeartbeats 0`, which
+/// lifts Lean's own limit, refuses its law's file. Those rows run at once, each on its own thread. A slow rule that ends
+/// within the limit runs, and ten slow rules that together run past the limit all run, since each rule gets the limit
+/// of its own. Those rows run one at a time, since a loaded machine raises the processor time of each rule.
 #[cfg(unix)]
 #[test]
-fn lean_work_that_never_ends_stops_at_the_processor_time_limit_and_every_other_rule_runs() {
+fn lean_work_that_never_ends_stops_once_at_the_processor_time_limit_and_every_other_rule_runs() {
     compile_succeeds(lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]).path());
     let stopped = "it ran past 10 processor seconds, the limit Mago sets on each Lean process";
     let store_breaks = "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.";
@@ -2120,18 +2147,10 @@ fn lean_work_that_never_ends_stops_at_the_processor_time_limit_and_every_other_r
     let money_rejected = format!(
         "app/Shared/Money.sharp:3:14:error - unproven-law: Lean rejected app/Shared/Money.lean: {stopped}. Make its proofs and rules end sooner"
     );
-    for (files, expected) in [
+    let endless = [
         (
             vec![("app/Tenant/Store/Module.lean", endless_rule.as_str())],
             vec![LEDGER_BREAKS.to_owned(), refused("Receipts"), store_breaks.to_owned(), refused("StoreService")],
-        ),
-        (
-            vec![("app/Tenant/Store/Module.lean", slow_rule.as_str())],
-            vec![LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
-        ),
-        (
-            vec![("app/Tenant/Store/Module.lean", slow_rules.as_str())],
-            vec![LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
         ),
         (
             vec![("app/Tenant/Store/Module.lean", endless_eval.as_str())],
@@ -2141,13 +2160,42 @@ fn lean_work_that_never_ends_stops_at_the_processor_time_limit_and_every_other_r
             vec![("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Money.lean", endless_proof.as_str())],
             vec![LEDGER_BREAKS.to_owned(), money_rejected, store_breaks.to_owned()],
         ),
-    ] {
-        let directory = structured(&files);
+    ];
+    let slow = [
+        (
+            vec![("app/Tenant/Store/Module.lean", slow_rule.as_str())],
+            vec![LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
+        ),
+        (
+            vec![("app/Tenant/Store/Module.lean", slow_rules.as_str())],
+            vec![LEDGER_BREAKS.to_owned(), store_breaks.to_owned()],
+        ),
+    ];
+    std::thread::scope(|scope| {
+        let endless: Vec<_> = endless
+            .into_iter()
+            .map(|(files, expected)| {
+                scope.spawn(move || {
+                    let directory = structured(&files);
 
-        let output = compile_lines_within(directory.path(), 10);
+                    let (output, seconds) = compile_lines_within(directory.path(), 10);
 
-        assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
-    }
+                    assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
+                    assert!(seconds < 20.0, "{files:?} used {seconds} processor seconds: {}", printed(&output));
+                })
+            })
+            .collect();
+        for (files, expected) in slow {
+            let directory = structured(&files);
+
+            let (output, _) = compile_lines_within(directory.path(), 10);
+
+            assert_eq!(issue_lines(&output), expected, "{files:?}: {}", printed(&output));
+        }
+        for row in endless {
+            row.join().unwrap();
+        }
+    });
 }
 
 #[test]
