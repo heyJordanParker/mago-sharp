@@ -3,12 +3,19 @@ use crate::cst::cst::Modifier;
 use crate::cst::sequence::Sequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
+use crate::token::Token;
 use mago_allocator::prelude::*;
 
 impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// Whether `token` is spec section 5's `internal`, which starts a declaration's or a member's modifiers, as `public`
+    /// does.
+    pub(crate) fn is_internal(&self, token: Token<'_>) -> bool {
+        self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"internal"
+    }
+
     pub(crate) fn parse_modifier_sequence(&mut self) -> Result<Sequence<'arena, Modifier<'arena>>, ParseError> {
         let mut modifiers = self.new_vec();
         while let Some(modifier) = self.parse_optional_modifier()? {
@@ -41,6 +48,7 @@ where
                     Some(b"required") => Modifier::Required(self.expect_any_keyword()?),
                     Some(b"extern") => Modifier::Extern(self.expect_any_keyword()?),
                     Some(b"lazy") => Modifier::Lazy(self.expect_any_keyword()?),
+                    Some(b"internal") => Modifier::Internal(self.expect_any_keyword()?),
                     _ => return Ok(None),
                 }
             }

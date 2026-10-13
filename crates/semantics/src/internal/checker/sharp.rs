@@ -141,9 +141,11 @@ const ANY: &[u8] = b"Any";
 /// - A static class, `public static class Text`, as spec sections 26 and 29 write it: `static` and an optional
 ///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
 ///   PHP class.
-/// - An interface: an optional `public`, a name, an optional `: Interface` header and methods, with no attributes,
-///   other modifiers or `extends`. An interface method has parameters, a return type and no body, as spec section 29
-///   writes `Money quote(Cart cart);`. A modifier on it is an error, because every interface method is public.
+/// - An interface: an optional `public`, a name, an optional `: Interface` header, methods and get-only properties,
+///   with no attributes, other modifiers or `extends`. An interface method has parameters, a return type and no body,
+///   as spec section 29 writes `Money quote(Cart cart);`, and a property is written `int orderId { get; }`. Every
+///   interface member is public, written bare, so an access modifier on one is an error, and so is any other modifier
+///   on a method.
 /// - An enum: attributes, an optional `public`, a name, an optional `: string, Interface` header, constants, cases,
 ///   methods and laws, with no other modifiers or `implements`. A leading `int` or `string` in the header is the backing type,
 ///   and every class name is an interface. A constant follows a class constant's rules. A case has attributes as a
@@ -554,7 +556,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Enum(_), File) => Some(Enum),
         (Node::Event(_), File) => Some(Place::Event),
         (Node::Modifier(Modifier::Public(_)), Place::Event) => Some(Place::Event),
-        (Node::Modifier(modifier), Place::Event) => {
+        // Spec section 5's `internal` is not supported yet on any declaration.
+        (Node::Modifier(modifier), Place::Event) if !matches!(modifier, Modifier::Internal(_)) => {
             context.report(
                 Issue::error("An event takes only `public`.")
                     .with_annotation(Annotation::primary(modifier.span()).with_message("Remove this modifier."))
@@ -616,6 +619,21 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         {
             Some(FieldOrProperty)
         }
+        // An interface member is public, written bare. A method's modifiers are in its signature, and an interface
+        // property, which `is_interface_property` keeps whatever its access modifier, walks as a property.
+        (
+            Node::Modifier(
+                modifier @ (Modifier::Public(_)
+                | Modifier::Protected(_)
+                | Modifier::Private(_)
+                | Modifier::Internal(_)),
+            ),
+            Signature | FieldOrProperty,
+        ) if is_in_interface(context.program, modifier.span()) => {
+            report_interface_member_access(modifier, context);
+
+            None
+        }
         (Node::Modifier(modifier), Signature) => {
             context.report(
                 Issue::error("An interface method takes no modifier: every interface method is public.")
@@ -639,9 +657,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 context,
             ),
         },
-        // A body's block is not in the place, so `MethodBody` admits only `MethodAbstractBody`.
+        // A body's block is not in the place, so `MethodBody` admits only `MethodAbstractBody`. The analyzer's
+        // `check_listener` refuses an interface method that listens.
         (
-            Node::FunctionLikeReturnTypeHint(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
+            Node::FunctionLikeReturnTypeHint(_) | Node::On(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
             Signature,
         ) => Some(Signature),
         (Node::AttributeList(_), Class | Enum | Method | FieldOrProperty | Parameter) => Some(Attribute),
@@ -879,6 +898,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Modifier::Extern(_),
             )
             | Node::FunctionLikeReturnTypeHint(_)
+            // The analyzer's `check_listener` decides which methods listen.
+            | Node::On(_)
             | Node::MethodBody(_)
             // PHP's own check reports a method without a body that is not `abstract`, and one with a body that is.
             | Node::MethodAbstractBody(_),
@@ -1053,6 +1074,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Statement::Block(_)
                 | Statement::Expression(_)
                 | Statement::Return(_)
+                | Statement::Emit(_)
                 | Statement::LocalDeclaration(_)
                 | Statement::If(_)
                 | Statement::While(_)
@@ -1069,6 +1091,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::Continue(_)
             | Node::ExpressionStatement(_)
             | Node::Return(_)
+            | Node::Emit(_)
             | Node::LocalDeclaration(_)
             | Node::If(_)
             | Node::IfBody(IfBody::Statement(_))
@@ -1531,11 +1554,9 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), (&'static s
             "This method name is not supported yet in PHP#.",
             "PHP reserves method names that start with `__` for its magic methods.",
         )
-    } else if !method
-        .modifiers
-        .iter()
-        .any(|modifier| matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)))
-    {
+    } else if !method.modifiers.iter().any(|modifier| {
+        matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
+    }) {
         (
             "A method without `public`, `protected` or `private` is not supported yet in PHP#.",
             "A PHP# member without an access modifier is `private`, while PHP makes it `public`.",
@@ -1770,10 +1791,14 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
         Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
     };
     let issue = if let Some(modifier) = parameter.modifiers.first() {
-        remove(
+        // The issue covers the modifier, not the parameter, so the walk stops here: it would refuse `readonly` and
+        // `internal` again as not supported yet.
+        context.report(remove(
             modifier.span(),
             "An event's parameter takes no modifier: it is a public get-only property of the event.",
-        )
+        ));
+
+        return None;
     } else if let Some(accessors) = &parameter.hooks {
         remove(accessors.span(), "An event's parameter takes no accessors: it is a get-only property of the event.")
     } else if let Some(ellipsis) = parameter.ellipsis {
@@ -1792,13 +1817,18 @@ fn check_event_parameter(parameter: &FunctionLikeParameter, context: &mut Contex
     report_refusal(issue, parameter.span(), Place::Parameter, context)
 }
 
-/// Whether the slice has an interface property: `public`, a type, a name and `{ get; }`, which PHP runs as an
-/// interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15.
-/// PHP's own check reports one without `public`.
+/// Whether the slice has an interface property: a type, a name and `{ get; }`, which PHP runs as a public interface
+/// property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section 15. An access
+/// modifier keeps it in the slice, and `enter` reports the modifier where the walk reaches it.
 fn is_interface_property(property: &HookedProperty) -> bool {
     property.attribute_lists.is_empty()
         && property.var.is_none()
-        && property.modifiers.iter().all(|modifier| matches!(modifier, Modifier::Public(_)))
+        && property.modifiers.iter().all(|modifier| {
+            matches!(
+                modifier,
+                Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_)
+            )
+        })
         && property.hint.is_some()
         && matches!(property.item, PropertyItem::Abstract(_))
         && property.initial_value.is_none()
@@ -1806,6 +1836,16 @@ fn is_interface_property(property: &HookedProperty) -> bool {
             property.hook_list.hooks.as_slice(),
             [accessor] if accessor.name.value == b"get" && is_slice_accessor(accessor) && matches!(accessor.body, PropertyHookBody::Abstract(_))
         )
+}
+
+/// Reports an access modifier on an interface member. A member is public, written bare, as TypeScript and Swift
+/// write it.
+fn report_interface_member_access(modifier: &Modifier, context: &mut Context<'_, '_, '_>) {
+    context.report(
+        Issue::error("An interface member is always public, so it takes no access modifier.")
+            .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
+            .with_help(format!("Remove `{}`.", BytesDisplay(modifier.get_keyword().value))),
+    );
 }
 
 /// Reports each name in a `uses` that is no effect, spec section 29. A name is an effect when it resolves to one of the
@@ -2006,7 +2046,7 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
             }
         }
         Property::Hooked(auto_property) => {
-            if !auto_property.modifiers.contains_visibility() {
+            if !writes_access(&auto_property.modifiers) {
                 Err(Box::new(not_supported(
                     property.first_variable().span,
                     "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -2051,7 +2091,7 @@ fn is_slice_property(property: &Property, version: &PHPVersion, names: &Resolved
             }
         }
         Property::Computed(computed) => {
-            if !computed.modifiers.contains_visibility() {
+            if !writes_access(&computed.modifiers) {
                 Err(Box::new(not_supported(
                     computed.variable.span,
                     "A property without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -2112,6 +2152,12 @@ fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_
 }
 
 /// Whether the slice has a class constant, with the refusal when it does not: an access modifier and one name.
+/// Whether a member writes its access, spec section 5's `internal` included, which the walk refuses on its own as not
+/// supported yet.
+fn writes_access(modifiers: &Sequence<Modifier>) -> bool {
+    modifiers.contains_visibility() || modifiers.iter().any(|modifier| matches!(modifier, Modifier::Internal(_)))
+}
+
 fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
     let not_supported = |span: Span, message: &str, note: &str| {
         Box::new(
@@ -2127,7 +2173,7 @@ fn is_slice_constant(constant: &ClassLikeConstant) -> Result<(), Box<Issue>> {
             "A constant declaring several names is not supported yet in PHP#.",
             supported(Place::ClassConstant),
         ))
-    } else if !constant.modifiers.contains_visibility() {
+    } else if !writes_access(&constant.modifiers) {
         Err(not_supported(
             constant.first_item().name.span,
             "A constant without `public`, `protected` or `private` is not supported yet in PHP#.",
@@ -2958,20 +3004,20 @@ fn check_named_constructor(constructor: &NamedConstructor, class: &Class, contex
         );
     }
 
-    for modifier in &constructor.modifiers {
-        if !modifier.is_read_visibility() {
-            report(
-                format!(
-                    "A named constructor takes only `public`, `protected` or `private`: remove `{}`.",
-                    BytesDisplay(modifier.get_keyword().value)
-                ),
-                modifier.span(),
-                "Written here.",
-            );
-        }
+    // Spec section 5's `internal` is an access, which the walk refuses as not supported yet.
+    let is_access = |modifier: &Modifier| modifier.is_read_visibility() || matches!(modifier, Modifier::Internal(_));
+    for modifier in constructor.modifiers.iter().filter(|modifier| !is_access(modifier)) {
+        report(
+            format!(
+                "A named constructor takes only `public`, `protected` or `private`: remove `{}`.",
+                BytesDisplay(modifier.get_keyword().value)
+            ),
+            modifier.span(),
+            "Written here.",
+        );
     }
 
-    if !constructor.modifiers.iter().any(Modifier::is_read_visibility) {
+    if !constructor.modifiers.iter().any(is_access) {
         report(
             "A named constructor without `public`, `protected` or `private` is not supported yet in PHP#.".to_owned(),
             constructor.name.span,
@@ -3335,7 +3381,7 @@ const fn supported(place: Place) -> &'static str {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators and laws, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header, methods and `public` get-only properties, as in `public int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
+            "A PHP# interface has an optional `public`, a name, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
             "A PHP# interface method has no modifier, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body."
@@ -3354,7 +3400,7 @@ const fn supported(place: Place) -> &'static str {
             "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
-            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>`, `Function<R(P)>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`."
+            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>`, `Function<R(P)>` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
         }
         Place::Parameter => {
             "A PHP# parameter has a type of `int`, `float`, `bool`, `string`, `Any`, a class, `List<T>`, `Map<TKey, TValue>`, `Set<T>` or `Function<R(P)>`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional default. The last parameter can be variadic, as in `int ...values`."
@@ -4170,4 +4216,10 @@ fn enclosing_class_like_name<'arena>(program: &Program<'arena>, span: Span) -> O
         Statement::Enum(r#enum) if r#enum.span().contains(&span.start) => Some(r#enum.name.value),
         _ => None,
     })
+}
+
+/// Whether `span` is in an interface of a PHP# file, in any of the file's namespaces.
+fn is_in_interface(program: &Program, span: Span) -> bool {
+    file_statements(program)
+        .any(|statement| matches!(statement, Statement::Interface(interface) if interface.span().contains(&span.start)))
 }
