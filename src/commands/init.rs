@@ -1239,8 +1239,9 @@ mod tests {
 
         let content = generate_default_config_content(project_root.path());
 
-        let documentation_line =
-            format!("# For full documentation, see https://github.com/heyJordanParker/php-sharp/tree/v{VERSION}/sharp/mago/docs");
+        let documentation_line = format!(
+            "# For full documentation, see https://github.com/heyJordanParker/php-sharp/tree/v{VERSION}/sharp/mago/docs"
+        );
         assert!(
             content.lines().any(|line| line == documentation_line),
             "Expected `{documentation_line}` in:\n{content}"
